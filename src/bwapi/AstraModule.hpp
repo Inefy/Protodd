@@ -1,0 +1,58 @@
+#pragma once
+
+#include "BwapiBridge.hpp"
+
+#include "astra/Combat.hpp"
+#include "astra/CommandBus.hpp"
+#include "astra/InfluenceMap.hpp"
+#include "astra/Information.hpp"
+#include "astra/MacroPlanner.hpp"
+#include "astra/Scouting.hpp"
+#include "astra/Strategy.hpp"
+#include "astra/Workers.hpp"
+
+#include <BWAPI.h>
+
+#include <fstream>
+#include <vector>
+
+namespace astra::bwapi {
+
+class AstraModule final : public BWAPI::AIModule {
+public:
+    void onStart() override;
+    void onEnd(bool winner) override;
+    void onFrame() override;
+    void onUnitDiscover(BWAPI::Unit unit) override;
+    void onUnitShow(BWAPI::Unit unit) override;
+    void onUnitDestroy(BWAPI::Unit unit) override;
+    void onUnitMorph(BWAPI::Unit unit) override;
+    void onUnitRenegade(BWAPI::Unit unit) override;
+
+private:
+    BwapiBridge bridge_;
+    OpponentModel opponent_;
+    InfluenceMap influence_;
+    StrategyEngine strategy_;
+    MacroPlanner macro_;
+    WorkerManager workers_;
+    ScoutManager scouts_;
+    CombatEvaluator combat_;
+    TacticalController tactics_;
+    CommandBus commands_;
+    StrategicPlan plan_;
+    CombatEstimate fight_;
+    GameState state_;
+    std::ofstream log_;
+
+    void updateStrategy();
+    void updateMacro();
+    void updateWorkers();
+    void updateScouting();
+    void updateCombat();
+    [[nodiscard]] std::vector<UnitSnapshot> combatUnits(bool ours) const;
+    [[nodiscard]] Position retreatPoint() const;
+    void logDecision();
+};
+
+}  // namespace astra::bwapi

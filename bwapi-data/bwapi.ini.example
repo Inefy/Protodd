@@ -1,0 +1,35 @@
+[ai]
+ai     = bwapi-data/AI/AstraBot.dll
+ai_dbg = bwapi-data/AI/AstraBot.dll
+tournament =
+
+[auto_menu]
+auto_menu = SINGLE_PLAYER
+character_name = FIRST
+pause_dbg = OFF
+auto_restart = OFF
+map = maps/(?)*.sc?
+mapiteration = RANDOM
+race = Protoss
+enemy_count = 1
+enemy_race = Random
+game_type = MELEE
+save_replay = maps/replays/AstraBot/%MAP%_%ENEMYRACES%_$Y$b$d_$H$M$S.rep
+
+[config]
+shared_memory = ON
+console_attach_on_startup = FALSE
+console_alloc_on_startup = FALSE
+
+[window]
+windowed = ON
+left = 0
+top = 0
+width = 640
+height = 480
+
+[starcraft]
+sound = OFF
+speed_override = 0
+drop_players = ON
+

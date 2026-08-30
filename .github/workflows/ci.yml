@@ -1,0 +1,21 @@
+name: core-ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  portable-core:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build/ci -A x64 -DASTRA_BUILD_BWAPI_MODULE=OFF -DASTRA_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build build/ci --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build/ci -C Release --output-on-failure
+

@@ -7,11 +7,19 @@ opponent adaptation, deterministic behavior, and replay-driven testing.
 This repository starts from a clean-room architecture. It does not copy a
 tournament bot or depend on code whose license restricts competition entry.
 
-## Status
+## What is implemented
 
-The repository is under active construction. The portable game-state model,
-test harness, build contract, and BWAPI module boundary are established first;
-strategy, macro, scouting, combat evaluation, and micro are built on that core.
+- Matchup-specific PvT, PvZ, and PvP plans with reactive anti-rush, anti-air,
+  and anti-cloak transitions.
+- Bayesian opening recognition under fog of war and decaying enemy memory.
+- Economy saturation, gas policy, worker defense, evacuation, and transfers.
+- Resource-reserving macro planner with production, technology, expansion, and
+  supply goals.
+- Ground/air/detection influence maps, risk-aware scouting, combat evaluation,
+  deterministic focus fire, kiting, retreat, storm, and ammunition upkeep.
+- A legal-information-only BWAPI adapter with command deduplication and
+  staggered frame scheduling.
+- Portable deterministic regression scenarios and strict-warning compilation.
 
 ## Build the portable core
 
@@ -44,7 +52,9 @@ ctest --preset tournament-release
 
 Copy `AstraBot.dll` into `StarCraft/bwapi-data/AI/` and select it in
 `bwapi-data/bwapi.ini`. StarCraft 1.16.1 and the tournament's BWAPI injector are
-required to run matches.
+required to run matches. The official 4.4.0 source distribution does not ship
+a compiler-independent static library; see [the setup guide](docs/setup.md) for
+the exact `BWAPILIB` build and configuration flow.
 
 ## Competition principles
 

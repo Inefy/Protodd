@@ -41,7 +41,7 @@ const UnitSnapshot* CombatEvaluator::selectTarget(
     const UnitSnapshot* best = nullptr;
     auto bestScore = -std::numeric_limits<double>::infinity();
     for (const auto& target : candidates) {
-        if (!target.detected || !attacker.canAttack(target)) {
+        if (!target.visible || !target.detected || !attacker.canAttack(target)) {
             continue;
         }
         const auto range = distance(attacker.position, target.position);
