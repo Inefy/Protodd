@@ -1,0 +1,35 @@
+# Build output
+/build/
+/out/
+/.cache/
+/CMakeUserPresets.json
+
+# IDEs and compilers
+/.vs/
+/.vscode/
+/.idea/
+*.user
+*.suo
+*.obj
+*.pdb
+*.ilk
+*.dll
+*.exe
+*.lib
+*.exp
+
+# BWAPI runtime output
+/bwapi-data/logs/
+/bwapi-data/read/
+/bwapi-data/write/
+*.rep
+
+# Local game data and maps are not redistributable
+/StarCraft/
+/maps/
+*.mpq
+
+# Python helper caches
+__pycache__/
+*.py[cod]
+
