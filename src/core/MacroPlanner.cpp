@@ -3,6 +3,8 @@
 #include "astra/UnitCatalog.hpp"
 
 #include <algorithm>
+#include <limits>
+#include <unordered_map>
 
 namespace astra {
 
@@ -25,10 +27,30 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     ResourceLedger& ledger) const {
     std::vector<MacroAction> actions;
     actions.reserve(plan.goals.size());
+    std::unordered_map<UnitKind, int> planned;
 
     for (const auto& goal : plan.goals) {
-        const auto existing = countExisting(state, goal.target);
+        const auto existing = countExisting(state, goal.target) + planned[goal.target];
         if (existing >= goal.desiredCount) {
+            continue;
+        }
+        if (!prerequisitesMet(state, goal.target)) {
+            const auto prerequisite = nextMissingPrerequisite(state, goal.target);
+            if (prerequisite != UnitKind::unknown &&
+                countExisting(state, prerequisite) + planned[prerequisite] == 0) {
+                const auto& stats = unitStats(prerequisite);
+                MacroAction action{
+                    MacroActionKind::build, prerequisite, goal.priority,
+                    stats.minerals, stats.gas, false,
+                    "unlock " + std::string(unitStats(goal.target).name),
+                };
+                action.reserved = ledger.reserve(stats.minerals, stats.gas);
+                if (action.reserved || goal.blocking) {
+                    actions.push_back(std::move(action));
+                    if (actions.back().reserved) ++planned[prerequisite];
+                }
+                if (goal.blocking && !actions.back().reserved) break;
+            }
             continue;
         }
 
@@ -40,12 +62,49 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         action.reserved = ledger.reserve(stats.minerals, stats.gas);
         if (action.reserved || goal.blocking) {
             actions.push_back(std::move(action));
+            if (actions.back().reserved) ++planned[goal.target];
         }
         // A blocking goal owns the economy until it is affordable. Letting
         // cheaper goals spend around it can delay emergency supply or detection
         // forever under continuous production.
         if (goal.blocking && !actions.back().reserved) {
             break;
+        }
+    }
+
+    // Spend remaining resources toward the strategic composition rather than
+    // stopping at the opening's fixed unit counts. Select the most
+    // underrepresented currently-producible unit for one production cycle.
+    UnitKind compositionChoice = UnitKind::unknown;
+    auto largestDeficit = -std::numeric_limits<double>::infinity();
+    auto armyCount = 0;
+    for (const auto& target : plan.composition) {
+        armyCount += countExisting(state, target.kind) + planned[target.kind];
+    }
+    for (const auto& target : plan.composition) {
+        const auto& stats = unitStats(target.kind);
+        const auto directlyProducible = !stats.building && stats.minerals + stats.gas > 0;
+        if (!directlyProducible || !prerequisitesMet(state, target.kind) ||
+            std::ranges::any_of(actions, [&target](const MacroAction& action) {
+                return action.target == target.kind;
+            })) {
+            continue;
+        }
+        const auto count = countExisting(state, target.kind) + planned[target.kind];
+        const auto desired = target.weight * static_cast<double>(armyCount + 1);
+        const auto deficit = desired - static_cast<double>(count);
+        if (deficit > largestDeficit) {
+            largestDeficit = deficit;
+            compositionChoice = target.kind;
+        }
+    }
+    if (compositionChoice != UnitKind::unknown) {
+        const auto& stats = unitStats(compositionChoice);
+        const auto supplyAvailable = state.self.supplyUsed + stats.supply <= state.self.supplyTotal;
+        if (supplyAvailable && ledger.reserve(stats.minerals, stats.gas)) {
+            actions.push_back({MacroActionKind::train, compositionChoice, 58,
+                               stats.minerals, stats.gas, true,
+                               "maintain strategic army composition"});
         }
     }
 
@@ -59,7 +118,32 @@ std::vector<MacroAction> MacroPlanner::reconcile(
 }
 
 int MacroPlanner::countExisting(const GameState& state, const UnitKind kind) {
-    return static_cast<int>(std::ranges::count(state.self.units, kind, &UnitSnapshot::kind));
+    const auto units = std::ranges::count(state.self.units, kind, &UnitSnapshot::kind);
+    const auto queued = std::ranges::count(state.self.queuedUnits, kind);
+    return static_cast<int>(units) + static_cast<int>(queued);
+}
+
+int MacroPlanner::countCompleted(const GameState& state, const UnitKind kind) {
+    return static_cast<int>(std::ranges::count_if(
+        state.self.units,
+        [kind](const UnitSnapshot& unit) { return unit.kind == kind && unit.completed; }));
+}
+
+bool MacroPlanner::prerequisitesMet(const GameState& state, const UnitKind kind) {
+    return std::ranges::all_of(unitPrerequisites(kind), [&state](const UnitKind prerequisite) {
+        return countCompleted(state, prerequisite) > 0;
+    });
+}
+
+UnitKind MacroPlanner::nextMissingPrerequisite(
+    const GameState& state,
+    const UnitKind kind) {
+    for (const auto prerequisite : unitPrerequisites(kind)) {
+        if (countCompleted(state, prerequisite) > 0) continue;
+        const auto nested = nextMissingPrerequisite(state, prerequisite);
+        return nested != UnitKind::unknown ? nested : prerequisite;
+    }
+    return UnitKind::unknown;
 }
 
 MacroActionKind MacroPlanner::actionKind(const GoalKind goal) noexcept {

@@ -169,6 +169,8 @@ struct BaseSnapshot {
     Frame lastScouted{};
     bool startLocation{};
     bool island{};
+    int mineralPatches{};
+    int geysers{};
 };
 
 struct PlayerSnapshot {
@@ -181,6 +183,7 @@ struct PlayerSnapshot {
     int gatheredMinerals{};
     int gatheredGas{};
     std::vector<UnitSnapshot> units;
+    std::vector<UnitKind> queuedUnits;
 };
 
 struct GameState {

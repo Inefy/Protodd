@@ -41,8 +41,12 @@ public:
 
 private:
     [[nodiscard]] static int countExisting(const GameState& state, UnitKind kind);
+    [[nodiscard]] static int countCompleted(const GameState& state, UnitKind kind);
+    [[nodiscard]] static bool prerequisitesMet(const GameState& state, UnitKind kind);
+    [[nodiscard]] static UnitKind nextMissingPrerequisite(
+        const GameState& state,
+        UnitKind kind);
     [[nodiscard]] static MacroActionKind actionKind(GoalKind goal) noexcept;
 };
 
 }  // namespace astra
-

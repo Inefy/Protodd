@@ -127,4 +127,53 @@ bool isCombatUnit(const UnitKind kind) noexcept {
     return !stats.building && !isWorker(kind) && !supportOnly && stats.combatValue > 0.5;
 }
 
+std::span<const UnitKind> unitPrerequisites(const UnitKind kind) noexcept {
+    static constexpr UnitKind pylon[]{UnitKind::pylon};
+    static constexpr UnitKind forge[]{UnitKind::forge, UnitKind::pylon};
+    static constexpr UnitKind gateway[]{UnitKind::gateway};
+    static constexpr UnitKind core[]{UnitKind::cyberneticsCore};
+    static constexpr UnitKind gatewayCore[]{UnitKind::gateway, UnitKind::cyberneticsCore};
+    static constexpr UnitKind robotics[]{UnitKind::roboticsFacility};
+    static constexpr UnitKind observatory[]{UnitKind::roboticsFacility, UnitKind::observatory};
+    static constexpr UnitKind supportBay[]{UnitKind::roboticsFacility,
+                                            UnitKind::roboticsSupportBay};
+    static constexpr UnitKind stargate[]{UnitKind::stargate};
+    static constexpr UnitKind citadel[]{UnitKind::citadelOfAdun};
+    static constexpr UnitKind archives[]{UnitKind::gateway, UnitKind::templarArchives};
+    static constexpr UnitKind beacon[]{UnitKind::stargate, UnitKind::fleetBeacon};
+    static constexpr UnitKind archivesStargate[]{UnitKind::templarArchives,
+                                                  UnitKind::stargate};
+    static constexpr UnitKind tribunal[]{UnitKind::stargate, UnitKind::arbiterTribunal};
+    static constexpr UnitKind nexus[]{UnitKind::nexus};
+
+    switch (kind) {
+        case UnitKind::gateway:
+        case UnitKind::forge:
+        case UnitKind::shieldBattery: return pylon;
+        case UnitKind::photonCannon: return forge;
+        case UnitKind::cyberneticsCore: return gateway;
+        case UnitKind::roboticsFacility:
+        case UnitKind::stargate:
+        case UnitKind::citadelOfAdun: return core;
+        case UnitKind::observatory:
+        case UnitKind::roboticsSupportBay: return robotics;
+        case UnitKind::templarArchives: return citadel;
+        case UnitKind::fleetBeacon: return stargate;
+        case UnitKind::arbiterTribunal: return archivesStargate;
+        case UnitKind::probe: return nexus;
+        case UnitKind::zealot: return gateway;
+        case UnitKind::dragoon: return gatewayCore;
+        case UnitKind::highTemplar:
+        case UnitKind::darkTemplar: return archives;
+        case UnitKind::reaver: return supportBay;
+        case UnitKind::observer: return observatory;
+        case UnitKind::shuttle: return robotics;
+        case UnitKind::scout:
+        case UnitKind::corsair: return stargate;
+        case UnitKind::carrier: return beacon;
+        case UnitKind::arbiter: return tribunal;
+        default: return {};
+    }
+}
+
 }  // namespace astra

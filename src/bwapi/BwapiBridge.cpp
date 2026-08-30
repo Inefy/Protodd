@@ -174,17 +174,25 @@ void BwapiBridge::executeWorkers(const std::span<const WorkerAssignment> assignm
             }
             continue;
         }
+        const auto anchor = assignment.targetPosition.valid()
+                                ? toBwapiPosition(assignment.targetPosition)
+                                : worker->getPosition();
         Unit target = nullptr;
         if (assignment.job == WorkerJob::gas) {
             target = Broodwar->getClosestUnit(
-                worker->getPosition(),
+                anchor,
                 Filter::IsOwned && Filter::IsCompleted && Filter::IsRefinery);
-        } else if (assignment.job == WorkerJob::minerals) {
-            target = Broodwar->getClosestUnit(worker->getPosition(), Filter::IsMineralField);
+        } else if (assignment.job == WorkerJob::minerals ||
+                   assignment.job == WorkerJob::transfer) {
+            target = Broodwar->getClosestUnit(anchor, Filter::IsMineralField);
         }
+        const auto currentTarget = worker->getOrderTarget();
+        const auto atAssignedBase = currentTarget != nullptr &&
+                                    closeTo(fromBwapi(currentTarget->getPosition()),
+                                            assignment.targetPosition, 384);
         const auto wrongJob = assignment.job == WorkerJob::gas
-                                  ? !worker->isGatheringGas()
-                                  : !worker->isGatheringMinerals();
+                                  ? !worker->isGatheringGas() || !atAssignedBase
+                                  : !worker->isGatheringMinerals() || !atAssignedBase;
         if (target != nullptr && (worker->isIdle() || wrongJob) &&
             worker->getLastCommandFrame() + 12 < Broodwar->getFrameCount()) {
             worker->gather(target);
@@ -360,6 +368,12 @@ PlayerSnapshot BwapiBridge::snapshotPlayer(const BWAPI::Player player, const boo
         for (const auto unit : player->getUnits()) {
             if (unit != nullptr && unit->exists()) {
                 result.units.push_back(snapshotUnit(unit, true));
+                for (const auto queuedType : unit->getTrainingQueue()) {
+                    const auto queuedKind = toKind(queuedType);
+                    if (queuedKind != UnitKind::unknown) {
+                        result.queuedUnits.push_back(queuedKind);
+                    }
+                }
             }
         }
         std::ranges::sort(result.units, {}, &UnitSnapshot::id);
@@ -375,14 +389,18 @@ std::vector<BaseSnapshot> BwapiBridge::snapshotBases(const GameState& state) {
         ++id;
         auto minerals = 0;
         auto gas = 0;
+        auto mineralPatches = 0;
+        auto geysers = 0;
         for (const auto patch : Broodwar->getMinerals()) {
             if (closeTo(center, fromBwapi(patch->getInitialPosition()), 320)) {
                 minerals += patch->getResources();
+                ++mineralPatches;
             }
         }
         for (const auto geyser : Broodwar->getGeysers()) {
             if (closeTo(center, fromBwapi(geyser->getInitialPosition()), 320)) {
                 gas += geyser->getResources();
+                ++geysers;
             }
         }
 
@@ -407,7 +425,7 @@ std::vector<BaseSnapshot> BwapiBridge::snapshotBases(const GameState& state) {
                 return closeTo(center, fromBwapi(BWAPI::Position(startTile)), 256);
             });
         bases.push_back({id, center, center, minerals, gas, owner, baseLastScouted_[id],
-                         start, false});
+                         start, false, mineralPatches, geysers});
     }
     return bases;
 }

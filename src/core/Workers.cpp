@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace astra {
@@ -25,19 +26,16 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     std::vector<WorkerAssignment> result;
     result.reserve(workers.size());
 
+    std::vector<const BaseSnapshot*> ownedBases;
+    for (const auto& base : state.bases) {
+        if (base.ownerId == state.self.id && base.center.valid()) {
+            ownedBases.push_back(&base);
+        }
+    }
+    std::ranges::sort(ownedBases, {}, [](const BaseSnapshot* base) { return base->id; });
     const auto safeBase = safestOwnedBase(state, influence);
-    auto gasRemaining = std::min(plan.desiredGasWorkers, static_cast<int>(workers.size()));
-
-    // Pull only the minimum force required for immediate worker defense. This
-    // prevents economy-destroying all-worker chases.
-    const auto enemiesInMain = safeBase == nullptr ? 0 : std::ranges::count_if(
-        state.enemy.units,
-        [safeBase](const UnitSnapshot& enemy) {
-            return distanceSquared(enemy.position, safeBase->center) < 420 * 420;
-        });
-    auto defendersRemaining = plan.posture == Posture::defend
-                                  ? std::min(6, static_cast<int>(enemiesInMain) * 2)
-                                  : 0;
+    std::vector<const UnitSnapshot*> available;
+    available.reserve(workers.size());
 
     for (const auto* worker : workers) {
         if (builders.contains(worker->id)) {
@@ -51,29 +49,107 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                               safeBase->mineralLine, 98});
             continue;
         }
-        if (defendersRemaining > 0 && !worker->carryingResources) {
-            const auto target = std::ranges::min_element(
-                state.enemy.units,
-                {},
-                [worker](const UnitSnapshot& enemy) {
-                    return distanceSquared(worker->position, enemy.position);
-                });
-            if (target != state.enemy.units.end()) {
-                result.push_back({worker->id, WorkerJob::defend, -1, target->id,
-                                  target->position, 90});
-                --defendersRemaining;
-                continue;
-            }
-        }
-        if (gasRemaining > 0) {
-            result.push_back({worker->id, WorkerJob::gas, safeBase ? safeBase->id : -1,
-                              -1, {-1, -1}, 55});
-            --gasRemaining;
-        } else {
-            result.push_back({worker->id, WorkerJob::minerals, safeBase ? safeBase->id : -1,
-                              -1, safeBase ? safeBase->mineralLine : Position{-1, -1}, 50});
+        available.push_back(worker);
+    }
+
+    // Pull a bounded local militia whenever a visible enemy reaches an owned
+    // mineral line. Hidden memory must never send probes chasing ghosts.
+    std::vector<const UnitSnapshot*> baseThreats;
+    for (const auto& enemy : state.enemy.units) {
+        if (!enemy.visible || enemy.flying || !enemy.position.valid()) continue;
+        if (std::ranges::any_of(ownedBases, [&enemy](const BaseSnapshot* base) {
+                return distanceSquared(enemy.position, base->center) < 420 * 420;
+            })) {
+            baseThreats.push_back(&enemy);
         }
     }
+    auto defendersRemaining = std::min(
+        {6, static_cast<int>(baseThreats.size()) * 2,
+         static_cast<int>(available.size())});
+    while (defendersRemaining > 0 && !available.empty()) {
+        auto bestWorker = available.end();
+        const UnitSnapshot* bestTarget = nullptr;
+        auto bestDistance = std::numeric_limits<int>::max();
+        for (auto worker = available.begin(); worker != available.end(); ++worker) {
+            if ((*worker)->carryingResources) continue;
+            for (const auto* enemy : baseThreats) {
+                const auto candidate = distanceSquared((*worker)->position, enemy->position);
+                if (candidate < bestDistance) {
+                    bestDistance = candidate;
+                    bestWorker = worker;
+                    bestTarget = enemy;
+                }
+            }
+        }
+        if (bestWorker == available.end() || bestTarget == nullptr) break;
+        result.push_back({(*bestWorker)->id, WorkerJob::defend, -1, bestTarget->id,
+                          bestTarget->position, 90});
+        available.erase(bestWorker);
+        --defendersRemaining;
+    }
+
+    // Each completed assimilator has exactly three efficient worker slots.
+    // Pair gas workers with a concrete base so multi-base economies do not
+    // repeatedly drag probes across the map.
+    std::vector<const BaseSnapshot*> gasSlots;
+    for (const auto& building : state.self.units) {
+        if (building.kind != UnitKind::assimilator || !building.completed) continue;
+        const auto base = std::ranges::min_element(
+            ownedBases, {}, [&building](const BaseSnapshot* candidate) {
+                return distanceSquared(building.position, candidate->center);
+            });
+        if (base != ownedBases.end()) {
+            for (auto slot = 0; slot < 3; ++slot) gasSlots.push_back(*base);
+        }
+    }
+    const auto desiredGas = std::min(
+        {plan.desiredGasWorkers, static_cast<int>(gasSlots.size()),
+         static_cast<int>(available.size())});
+    for (auto slot = 0; slot < desiredGas; ++slot) {
+        const auto* base = gasSlots[static_cast<std::size_t>(slot)];
+        const auto worker = std::ranges::min_element(
+            available, {}, [base](const UnitSnapshot* candidate) {
+                return distanceSquared(candidate->position, base->center);
+            });
+        if (worker == available.end()) break;
+        result.push_back({(*worker)->id, WorkerJob::gas, base->id, -1, base->center, 55});
+        available.erase(worker);
+    }
+
+    // Greedily equalize mineral saturation while retaining a small distance
+    // bias. A transfer order is explicit so the adapter retargets workers that
+    // are already gathering at an oversaturated base.
+    std::unordered_map<int, int> assignedPerBase;
+    for (const auto* worker : available) {
+        const BaseSnapshot* bestBase = nullptr;
+        auto bestScore = std::numeric_limits<double>::infinity();
+        for (const auto* base : ownedBases) {
+            const auto patches = base->mineralPatches > 0 ? base->mineralPatches : 8;
+            const auto capacity = std::clamp(patches * 2, 4, 16);
+            const auto saturation = static_cast<double>(assignedPerBase[base->id] + 1) /
+                                    static_cast<double>(capacity);
+            const auto travel = distance(worker->position, base->center) / 2048.0;
+            const auto local = influence.at(base->center);
+            const auto depletion = base->mineralsRemaining > 0 ? 0.0 : 100.0;
+            const auto score = saturation + travel * 0.18 +
+                               static_cast<double>(local.groundThreat) * 1.5 + depletion;
+            if (score < bestScore) {
+                bestScore = score;
+                bestBase = base;
+            }
+        }
+        if (bestBase == nullptr) {
+            result.push_back({worker->id, WorkerJob::idle, -1, -1, {-1, -1}, 0});
+            continue;
+        }
+        ++assignedPerBase[bestBase->id];
+        const auto transfer = distanceSquared(worker->position, bestBase->center) > 640 * 640;
+        result.push_back({worker->id,
+                          transfer ? WorkerJob::transfer : WorkerJob::minerals,
+                          bestBase->id, -1, bestBase->mineralLine, 50});
+    }
+
+    std::ranges::sort(result, {}, &WorkerAssignment::worker);
     return result;
 }
 

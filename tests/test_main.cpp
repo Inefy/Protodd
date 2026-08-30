@@ -87,6 +87,13 @@ void testCatalog() {
     expect(!astra::isCombatUnit(astra::UnitKind::pylon), "Pylon combat classification");
     expect(!astra::isCombatUnit(astra::UnitKind::observer),
            "Observer remains support rather than attack army");
+    const auto tribunalRequirements = astra::unitPrerequisites(
+        astra::UnitKind::arbiterTribunal);
+    expect(std::ranges::find(tribunalRequirements, astra::UnitKind::stargate) !=
+               tribunalRequirements.end() &&
+               std::ranges::find(tribunalRequirements, astra::UnitKind::templarArchives) !=
+                   tribunalRequirements.end(),
+           "Arbiter Tribunal requires both branches of its tech tree");
 }
 
 void testOpponentInferenceAndStrategy() {
@@ -144,6 +151,7 @@ void testMacroReservations() {
            "higher-priority pylon reserves first");
     expect(ledger.freeMinerals() == 100, "resource reservation is explicit");
 
+    state.self.units.push_back(unit(1, astra::UnitKind::pylon, true));
     astra::StrategicPlan emergency;
     emergency.goals = {
         {astra::GoalKind::build, astra::UnitKind::gateway, 1, 100, true, "emergency"},
@@ -154,6 +162,59 @@ void testMacroReservations() {
     expect(waiting.size() == 1 && !waiting.front().reserved,
            "unaffordable blocking goal prevents lower-priority spending");
     expect(poor.freeMinerals() == 100, "blocking reservation preserves current bank");
+
+    astra::GameState queuedState;
+    queuedState.self.minerals = 50;
+    queuedState.self.units.push_back(unit(2, astra::UnitKind::nexus, true));
+    queuedState.self.queuedUnits.push_back(astra::UnitKind::probe);
+    astra::StrategicPlan queuedPlan;
+    queuedPlan.goals = {
+        {astra::GoalKind::train, astra::UnitKind::probe, 1, 80, false, "worker"},
+    };
+    astra::ResourceLedger queuedLedger{50, 0};
+    expect(planner.reconcile(queuedState, queuedPlan, queuedLedger).empty(),
+           "queued production counts toward macro targets");
+
+    astra::GameState duplicateState;
+    duplicateState.self.minerals = 800;
+    duplicateState.self.units.push_back(unit(3, astra::UnitKind::nexus, true));
+    astra::StrategicPlan duplicatePlan;
+    duplicatePlan.goals = {
+        {astra::GoalKind::expand, astra::UnitKind::nexus, 2, 90, false, "expand"},
+        {astra::GoalKind::expand, astra::UnitKind::nexus, 2, 70, false, "economic style"},
+    };
+    astra::ResourceLedger duplicateLedger{800, 0};
+    const auto expansions = planner.reconcile(duplicateState, duplicatePlan, duplicateLedger);
+    expect(expansions.size() == 1 && expansions.front().target == astra::UnitKind::nexus,
+           "overlapping strategic goals reserve only one missing structure");
+
+    astra::GameState techState;
+    techState.self.minerals = 100;
+    astra::StrategicPlan techPlan;
+    techPlan.goals = {
+        {astra::GoalKind::train, astra::UnitKind::dragoon, 1, 90, false, "tech unit"},
+    };
+    astra::ResourceLedger techLedger{100, 0};
+    const auto techActions = planner.reconcile(techState, techPlan, techLedger);
+    expect(techActions.size() == 1 && techActions.front().target == astra::UnitKind::pylon,
+           "unreachable unit goals build the next missing prerequisite first");
+
+    astra::GameState compositionState;
+    compositionState.self.minerals = 125;
+    compositionState.self.gas = 50;
+    compositionState.self.supplyTotal = 20;
+    compositionState.self.units = {
+        unit(4, astra::UnitKind::gateway, true),
+        unit(5, astra::UnitKind::cyberneticsCore, true),
+    };
+    astra::StrategicPlan compositionPlan;
+    compositionPlan.composition = {{astra::UnitKind::dragoon, 1.0}};
+    astra::ResourceLedger compositionLedger{125, 50};
+    const auto compositionActions = planner.reconcile(
+        compositionState, compositionPlan, compositionLedger);
+    expect(compositionActions.size() == 1 &&
+               compositionActions.front().target == astra::UnitKind::dragoon,
+           "remaining resources continuously reinforce the planned composition");
 }
 
 void testOpponentLearning() {
@@ -234,7 +295,8 @@ void testWorkersAndScouts() {
     state.mapHeightPixels = 2048;
     state.self.id = 1;
     state.enemy.id = 2;
-    state.bases.push_back({1, {256, 256}, {300, 260}, 8000, 5000, 1, 4000, true, false});
+    state.bases.push_back({1, {256, 256}, {300, 260}, 8000, 5000, 1, 4000,
+                           true, false, 8, 1});
     state.bases.push_back({2, {1700, 1700}, {1680, 1700}, 8000, 5000, -1, 0, true, false});
     auto probe = unit(5, astra::UnitKind::probe, true, {260, 260});
     probe.role = astra::UnitRole::worker;
@@ -243,6 +305,7 @@ void testWorkersAndScouts() {
     observer.flying = true;
     observer.role = astra::UnitRole::detector;
     state.self.units.push_back(observer);
+    state.self.units.push_back(unit(7, astra::UnitKind::assimilator, true, {320, 256}));
 
     astra::InfluenceMap influence;
     influence.update(state);
@@ -253,9 +316,24 @@ void testWorkersAndScouts() {
     expect(assignments.size() == 1 && assignments.front().job == astra::WorkerJob::gas,
            "gas policy assigns requested worker count");
 
+    const auto scoutState = state;
+    state.bases[1].ownerId = 1;
+    state.bases[1].mineralPatches = 8;
+    for (int i = 0; i < 16; ++i) {
+        auto extra = unit(20 + i, astra::UnitKind::probe, true, {260 + i, 270});
+        extra.role = astra::UnitRole::worker;
+        state.self.units.push_back(extra);
+    }
+    plan.desiredGasWorkers = 0;
+    const auto balanced = workers.assign(state, plan, influence);
+    expect(std::ranges::any_of(balanced, [](const astra::WorkerAssignment& assignment) {
+               return assignment.job == astra::WorkerJob::transfer && assignment.baseId == 2;
+           }),
+           "oversaturated mineral lines transfer workers to an owned expansion");
+
     const astra::UnitId scouts[]{6};
     astra::ScoutManager scouting;
-    const auto orders = scouting.assign(state, scouts, influence);
+    const auto orders = scouting.assign(scoutState, scouts, influence);
     expect(orders.size() == 1 && orders.front().target == astra::Position{1700, 1700},
            "scout prioritizes stale unexplored start location");
 }

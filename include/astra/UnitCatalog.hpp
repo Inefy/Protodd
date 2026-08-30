@@ -2,6 +2,7 @@
 
 #include "astra/GameState.hpp"
 
+#include <span>
 #include <string_view>
 
 namespace astra {
@@ -23,6 +24,6 @@ struct UnitStats {
 [[nodiscard]] bool isWorker(UnitKind kind) noexcept;
 [[nodiscard]] bool isCombatUnit(UnitKind kind) noexcept;
 [[nodiscard]] bool isStaticDefense(UnitKind kind) noexcept;
+[[nodiscard]] std::span<const UnitKind> unitPrerequisites(UnitKind kind) noexcept;
 
 }  // namespace astra
-
