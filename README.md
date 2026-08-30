@@ -19,6 +19,8 @@ tournament bot or depend on code whose license restricts competition entry.
   deterministic focus fire, kiting, retreat, storm, and ammunition upkeep.
 - A legal-information-only BWAPI adapter with command deduplication and
   staggered frame scheduling.
+- UCB-based opponent/map learning across games, using tournament-safe read and
+  write directories to explore and exploit four opening styles.
 - Portable deterministic regression scenarios and strict-warning compilation.
 
 ## Build the portable core
@@ -65,6 +67,8 @@ the exact `BWAPILIB` build and configuration flow.
 - Persistent opponent learning only where tournament rules permit writes.
 
 See [the architecture](docs/architecture.md) for the complete system design.
+Use [the competition workflow](docs/competition.md) to benchmark changes and
+the included log analyzer to compare batches rather than individual games.
 
 ## License
 

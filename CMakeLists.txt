@@ -21,6 +21,7 @@ add_library(astra_core STATIC
     src/core/CommandBus.cpp
     src/core/Workers.cpp
     src/core/Scouting.cpp
+    src/core/Learning.cpp
 )
 add_library(Astra::Core ALIAS astra_core)
 
@@ -88,4 +89,11 @@ endif()
 if(ASTRA_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(
+            NAME astra_log_analyzer_tests
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/log_analyzer.py" --self-test
+        )
+    endif()
 endif()

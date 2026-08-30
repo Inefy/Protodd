@@ -10,6 +10,8 @@ namespace astra {
 
 enum class Posture : std::uint8_t { hold, defend, pressure, attack, harass, recover };
 
+enum class OpeningStyle : std::uint8_t { standard, aggressive, economic, deceptive, count };
+
 enum class GoalKind : std::uint8_t { build, train, expand, detect, research, upgrade };
 
 struct ProductionGoal {
@@ -43,7 +45,8 @@ class StrategyEngine {
 public:
     [[nodiscard]] StrategicPlan plan(
         const GameState& state,
-        const ThreatAssessment& threat) const;
+        const ThreatAssessment& threat,
+        OpeningStyle style = OpeningStyle::standard) const;
 
 private:
     [[nodiscard]] StrategicPlan planPvT(
@@ -57,9 +60,13 @@ private:
         const ThreatAssessment& threat) const;
     static void addInfrastructure(StrategicPlan& plan, const GameState& state);
     static void addSafetyReactions(StrategicPlan& plan, const ThreatAssessment& threat);
+    static void applyOpeningStyle(
+        StrategicPlan& plan,
+        const GameState& state,
+        OpeningStyle style);
 };
 
 [[nodiscard]] std::string_view postureName(Posture posture) noexcept;
+[[nodiscard]] std::string_view openingStyleName(OpeningStyle style) noexcept;
 
 }  // namespace astra
-

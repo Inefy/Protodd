@@ -50,16 +50,23 @@ GameState BwapiBridge::observe() {
     }
     state.enemy.units.clear();
     state.enemy.units.reserve(enemyMemory_.size());
-    for (auto& [id, memory] : enemyMemory_) {
-        (void)id;
+    for (auto iterator = enemyMemory_.begin(); iterator != enemyMemory_.end();) {
+        auto& memory = iterator->second;
         const auto live = Broodwar->getUnit(memory.id);
         if (live != nullptr && live->exists() && live->isVisible()) {
             memory = snapshotUnit(live, false);
         } else {
+            const auto tile = BWAPI::TilePosition(memory.position.x / 32,
+                                                  memory.position.y / 32);
+            if (isBuilding(memory.kind) && tile.isValid() && Broodwar->isVisible(tile)) {
+                iterator = enemyMemory_.erase(iterator);
+                continue;
+            }
             memory.visible = false;
             memory.underAttack = false;
         }
         state.enemy.units.push_back(memory);
+        ++iterator;
     }
     std::ranges::sort(state.enemy.units, {}, &UnitSnapshot::id);
     state.bases = snapshotBases(state);
@@ -233,6 +240,7 @@ void BwapiBridge::runMaintenance() {
     if (!self->hasResearched(TechTypes::Psionic_Storm)) {
         return;
     }
+    auto stormIssued = false;
     for (const auto templar : self->getUnits()) {
         if (templar == nullptr || templar->getType() != UnitTypes::Protoss_High_Templar ||
             templar->getEnergy() < 75 || !templar->isCompleted()) {
@@ -257,6 +265,10 @@ void BwapiBridge::runMaintenance() {
         }
         if (best != nullptr && templar->canUseTech(TechTypes::Psionic_Storm, best->getPosition())) {
             templar->useTech(TechTypes::Psionic_Storm, best->getPosition());
+            stormIssued = true;
+        }
+        if (stormIssued) {
+            break;
         }
     }
 }

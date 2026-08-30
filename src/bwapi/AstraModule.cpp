@@ -3,7 +3,30 @@
 #include "astra/UnitCatalog.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+
+namespace {
+
+std::uint64_t stableSeed(const std::string_view value) {
+    std::uint64_t result = 1469598103934665603ULL;
+    for (const auto character : value) {
+        result ^= static_cast<unsigned char>(character);
+        result *= 1099511628211ULL;
+    }
+    return result;
+}
+
+std::string readFile(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return input ? std::string(std::istreambuf_iterator<char>(input),
+                               std::istreambuf_iterator<char>())
+                 : std::string{};
+}
+
+}  // namespace
 
 namespace astra::bwapi {
 
@@ -11,21 +34,32 @@ void AstraModule::onStart() {
     BWAPI::Broodwar->setCommandOptimizationLevel(2);
     BWAPI::Broodwar->setLatCom(true);
     bridge_.onStart();
-    opponent_.reset(bridge_.observe().enemy.race);
+    state_ = bridge_.observe();
+    opponent_.reset(state_.enemy.race);
     influence_ = InfluenceMap(64);
     commands_.clear();
 
     std::error_code error;
     std::filesystem::create_directories("bwapi-data/write", error);
+    opponentName_ = BWAPI::Broodwar->enemy() ? BWAPI::Broodwar->enemy()->getName() : "unknown";
+    mapName_ = BWAPI::Broodwar->mapName();
+    auto historyCsv = readFile("bwapi-data/read/AstraBot.csv");
+    if (historyCsv.empty()) historyCsv = readFile("bwapi-data/write/AstraBot.csv");
+    history_.parse(historyCsv);
+    openingStyle_ = history_.choose(opponentName_, mapName_,
+                                    stableSeed(opponentName_ + "|" + mapName_));
     log_.open("bwapi-data/write/AstraBot.log", std::ios::app);
     if (log_) {
         log_ << "START," << BWAPI::Broodwar->mapName() << ','
-             << (BWAPI::Broodwar->enemy() ? BWAPI::Broodwar->enemy()->getName() : "unknown")
-             << '\n';
+             << opponentName_ << ',' << openingStyleName(openingStyle_) << '\n';
     }
 }
 
 void AstraModule::onEnd(const bool winner) {
+    history_.record(opponentName_, mapName_, openingStyle_, winner);
+    std::ofstream historyOutput("bwapi-data/write/AstraBot.csv",
+                                std::ios::binary | std::ios::trunc);
+    if (historyOutput) historyOutput << history_.serialize();
     if (log_) {
         log_ << "END," << (winner ? "win" : "loss") << ',' << state_.frame << '\n';
         log_.flush();
@@ -67,7 +101,7 @@ void AstraModule::onUnitRenegade(const BWAPI::Unit unit) {
 }
 
 void AstraModule::updateStrategy() {
-    plan_ = strategy_.plan(state_, opponent_.assessment());
+    plan_ = strategy_.plan(state_, opponent_.assessment(), openingStyle_);
 }
 
 void AstraModule::updateMacro() {
@@ -83,8 +117,14 @@ void AstraModule::updateWorkers() {
 
 void AstraModule::updateScouting() {
     std::vector<UnitId> available;
+    auto observersSeen = 0;
     for (const auto& unit : state_.self.units) {
-        if (unit.kind == UnitKind::observer || unit.kind == UnitKind::corsair) {
+        if (unit.kind == UnitKind::observer) {
+            // Keep the first observer attached to the main army. Additional
+            // observers perform high-value scouting passes.
+            if (++observersSeen == 1) continue;
+            available.push_back(unit.id);
+        } else if (unit.kind == UnitKind::corsair && available.empty()) {
             available.push_back(unit.id);
         }
     }
@@ -100,10 +140,25 @@ void AstraModule::updateScouting() {
 
 void AstraModule::updateCombat() {
     const auto friendly = combatUnits(true);
-    const auto enemy = combatUnits(false);
-    fight_ = combat_.evaluate(friendly, enemy, plan_.attackThreshold,
+    auto enemy = combatUnits(false);
+    const auto aggressive = plan_.posture == Posture::pressure ||
+                            plan_.posture == Posture::attack ||
+                            plan_.posture == Posture::harass;
+    if (!aggressive) {
+        std::erase_if(enemy, [&friendly](const UnitSnapshot& target) {
+            return !target.visible || std::ranges::none_of(
+                friendly,
+                [&target](const UnitSnapshot& unit) {
+                    return distanceSquared(unit.position, target.position) <= 800 * 800;
+                });
+        });
+    }
+    const auto requiredRatio = aggressive ? plan_.attackThreshold : 0.88;
+    fight_ = combat_.evaluate(friendly, enemy, requiredRatio,
                               opponent_.assessment().uncertainty);
-    const auto objective = plan_.attackTarget.valid() ? plan_.attackTarget : plan_.rallyPoint;
+    const auto objective = aggressive && friendly.size() >= 4 && plan_.attackTarget.valid()
+                               ? plan_.attackTarget
+                               : plan_.rallyPoint;
     const auto orders = tactics_.control(friendly, enemy, fight_, objective,
                                          retreatPoint(), influence_);
     commands_.beginFrame(state_.frame, state_.latencyFrames);

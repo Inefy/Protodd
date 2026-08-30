@@ -18,6 +18,11 @@ logic can be replayed and regression-tested without running StarCraft.
    and rejects invalid or redundant actions.
 6. **Measure** records decisions and outcomes for replay-driven tuning.
 
+Between games, Astra stores only aggregate win/loss counts by opponent, map,
+and opening style. A deterministic UCB selector tries untested styles and then
+balances observed win rate against uncertainty. It never reads a replay or
+opponent file during a live game.
+
 ## Design rules
 
 - No perfect-information flags or tournament-hostile behavior.
@@ -41,10 +46,10 @@ logic can be replayed and regression-tested without running StarCraft.
 | `CombatEvaluator` | Fast local fight estimate with uncertainty penalties |
 | `MicroController` | Targeting, kiting, formations, spells, transport and detection |
 | `CommandBus` | Legal command validation, deduplication, arbitration and throttling |
+| `OpponentHistory` | Tournament-safe cross-game opening exploration and exploitation |
 
 ## Runtime constraints
 
 The tournament DLL targets 32-bit StarCraft 1.16.1 and BWAPI 4.4.0. The core is
 portable C++20. In a release build, expensive work is amortized and a frame
 budget governor degrades gracefully from full search to cached decisions.
-

@@ -1,6 +1,7 @@
 # Build output
 /build/
 /out/
+/dist/
 /.cache/
 /CMakeUserPresets.json
 
@@ -32,4 +33,3 @@
 # Python helper caches
 __pycache__/
 *.py[cod]
-

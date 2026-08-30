@@ -56,7 +56,8 @@ Position enemyMain(const GameState& state) {
 
 StrategicPlan StrategyEngine::plan(
     const GameState& state,
-    const ThreatAssessment& threat) const {
+    const ThreatAssessment& threat,
+    const OpeningStyle style) const {
     StrategicPlan result;
     switch (state.enemy.race) {
         case Race::terran: result = planPvT(state, threat); break;
@@ -73,6 +74,7 @@ StrategicPlan StrategyEngine::plan(
     result.attackTarget = enemyMain(state);
     addInfrastructure(result, state);
     addSafetyReactions(result, threat);
+    applyOpeningStyle(result, state, style);
 
     std::ranges::stable_sort(result.goals, std::greater{}, &ProductionGoal::priority);
     return result;
@@ -132,7 +134,7 @@ StrategicPlan StrategyEngine::planPvZ(
     StrategicPlan result;
     result.name = "PvZ forge expansion into corsair-templar";
     result.desiredWorkers = std::min(70, 20 + minute(state) * 4);
-    result.desiredBases = minute(state) < 6 ? 1 : (minute(state) < 11 ? 2 : 3);
+    result.desiredBases = minute(state) < 3 ? 1 : (minute(state) < 11 ? 2 : 3);
     result.desiredGasWorkers = minute(state) < 6 ? 0 : (minute(state) < 10 ? 3 : 6);
     result.posture = minute(state) < 8 ? Posture::hold : Posture::harass;
     result.attackThreshold = 1.2;
@@ -164,6 +166,9 @@ StrategicPlan StrategyEngine::planPvZ(
         goal(result, GoalKind::build, UnitKind::gateway, 2, 99, "anti-rush production", true);
         goal(result, GoalKind::train, UnitKind::zealot, 6, 98, "hold early ground rush", true);
         goal(result, GoalKind::build, UnitKind::photonCannon, 3, 97, "seal mineral line", true);
+    } else if (minute(state) >= 3) {
+        goal(result, GoalKind::expand, UnitKind::nexus, 2, 91,
+             "forge-fast-expand timing");
     }
     return result;
 }
@@ -240,6 +245,56 @@ void StrategyEngine::addSafetyReactions(
     }
 }
 
+void StrategyEngine::applyOpeningStyle(
+    StrategicPlan& plan,
+    const GameState& state,
+    const OpeningStyle style) {
+    switch (style) {
+        case OpeningStyle::standard: return;
+        case OpeningStyle::aggressive:
+            plan.name += " [pressure]";
+            plan.posture = minute(state) < 5 ? Posture::hold : Posture::pressure;
+            plan.desiredBases = std::max(1, plan.desiredBases - 1);
+            plan.attackThreshold = std::max(1.05, plan.attackThreshold - 0.10);
+            goal(plan, GoalKind::build, UnitKind::gateway, minute(state) < 8 ? 2 : 5, 91,
+                 "opponent-specific pressure production");
+            goal(plan, GoalKind::train, UnitKind::dragoon, std::max(5, minute(state) * 2), 87,
+                 "opponent-specific pressure army");
+            return;
+        case OpeningStyle::economic:
+            plan.name += " [economic]";
+            plan.posture = minute(state) < 9 ? Posture::hold : plan.posture;
+            plan.desiredBases = std::min(4, plan.desiredBases + (minute(state) >= 5 ? 1 : 0));
+            plan.desiredWorkers = std::min(76, plan.desiredWorkers + 6);
+            plan.attackThreshold += 0.12;
+            goal(plan, GoalKind::expand, UnitKind::nexus, plan.desiredBases, 72,
+                 "opponent-specific economic edge");
+            return;
+        case OpeningStyle::deceptive:
+            plan.name += " [tech switch]";
+            plan.attackThreshold += 0.05;
+            if (state.enemy.race == Race::zerg) {
+                goal(plan, GoalKind::build, UnitKind::roboticsFacility, 1, 79,
+                     "reaver tech switch");
+                goal(plan, GoalKind::build, UnitKind::roboticsSupportBay, 1, 78,
+                     "reaver tech switch");
+                goal(plan, GoalKind::train, UnitKind::reaver, 2, 77,
+                     "punish static anti-air");
+                goal(plan, GoalKind::train, UnitKind::shuttle, 1, 76,
+                     "deliver tech switch");
+            } else {
+                goal(plan, GoalKind::build, UnitKind::citadelOfAdun, 1, 82,
+                     "dark templar tech switch");
+                goal(plan, GoalKind::build, UnitKind::templarArchives, 1, 81,
+                     "dark templar tech switch");
+                goal(plan, GoalKind::train, UnitKind::darkTemplar, 3, 80,
+                     "punish weak detection");
+            }
+            return;
+        case OpeningStyle::count: return;
+    }
+}
+
 std::string_view postureName(const Posture posture) noexcept {
     switch (posture) {
         case Posture::hold: return "Hold";
@@ -252,5 +307,15 @@ std::string_view postureName(const Posture posture) noexcept {
     return "Invalid";
 }
 
-}  // namespace astra
+std::string_view openingStyleName(const OpeningStyle style) noexcept {
+    switch (style) {
+        case OpeningStyle::standard: return "standard";
+        case OpeningStyle::aggressive: return "aggressive";
+        case OpeningStyle::economic: return "economic";
+        case OpeningStyle::deceptive: return "deceptive";
+        case OpeningStyle::count: break;
+    }
+    return "invalid";
+}
 
+}  // namespace astra

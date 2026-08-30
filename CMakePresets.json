@@ -28,6 +28,17 @@
         "ASTRA_BUILD_TESTS": "ON",
         "ASTRA_BUILD_BWAPI_MODULE": "ON"
       }
+    },
+    {
+      "name": "dev-msvc",
+      "displayName": "Core development (Visual Studio 2022)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/dev-msvc",
+      "cacheVariables": {
+        "ASTRA_BUILD_TESTS": "ON",
+        "ASTRA_BUILD_BWAPI_MODULE": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -39,6 +50,11 @@
       "name": "tournament-release",
       "configurePreset": "tournament",
       "configuration": "Release"
+    },
+    {
+      "name": "dev-msvc",
+      "configurePreset": "dev-msvc",
+      "configuration": "Debug"
     }
   ],
   "testPresets": [
@@ -52,7 +68,12 @@
       "configurePreset": "tournament",
       "configuration": "Release",
       "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "dev-msvc",
+      "configurePreset": "dev-msvc",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true }
     }
   ]
 }
-

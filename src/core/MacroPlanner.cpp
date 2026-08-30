@@ -41,6 +41,12 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         if (action.reserved || goal.blocking) {
             actions.push_back(std::move(action));
         }
+        // A blocking goal owns the economy until it is affordable. Letting
+        // cheaper goals spend around it can delay emergency supply or detection
+        // forever under continuous production.
+        if (goal.blocking && !actions.back().reserved) {
+            break;
+        }
     }
 
     std::ranges::stable_sort(actions, [](const MacroAction& left, const MacroAction& right) {
@@ -69,4 +75,3 @@ MacroActionKind MacroPlanner::actionKind(const GoalKind goal) noexcept {
 }
 
 }  // namespace astra
-

@@ -4,6 +4,7 @@
 #include "astra/Geometry.hpp"
 #include "astra/InfluenceMap.hpp"
 #include "astra/Information.hpp"
+#include "astra/Learning.hpp"
 #include "astra/MacroPlanner.hpp"
 #include "astra/Scouting.hpp"
 #include "astra/Strategy.hpp"
@@ -83,6 +84,8 @@ void testCatalog() {
            "catalog enum and table remain aligned");
     expect(astra::isCombatUnit(astra::UnitKind::dragoon), "Dragoon combat classification");
     expect(!astra::isCombatUnit(astra::UnitKind::pylon), "Pylon combat classification");
+    expect(!astra::isCombatUnit(astra::UnitKind::observer),
+           "Observer remains support rather than attack army");
 }
 
 void testOpponentInferenceAndStrategy() {
@@ -139,6 +142,39 @@ void testMacroReservations() {
     expect(actions.front().target == astra::UnitKind::pylon && actions.front().reserved,
            "higher-priority pylon reserves first");
     expect(ledger.freeMinerals() == 100, "resource reservation is explicit");
+
+    astra::StrategicPlan emergency;
+    emergency.goals = {
+        {astra::GoalKind::build, astra::UnitKind::gateway, 1, 100, true, "emergency"},
+        {astra::GoalKind::train, astra::UnitKind::probe, 1, 50, false, "worker"},
+    };
+    astra::ResourceLedger poor{100, 0};
+    const auto waiting = planner.reconcile(state, emergency, poor);
+    expect(waiting.size() == 1 && !waiting.front().reserved,
+           "unaffordable blocking goal prevents lower-priority spending");
+    expect(poor.freeMinerals() == 100, "blocking reservation preserves current bank");
+}
+
+void testOpponentLearning() {
+    astra::OpponentHistory history;
+    history.parse(
+        "Bot,Map,standard,8,2\n"
+        "Bot,Map,aggressive,2,8\n"
+        "Bot,Map,economic,3,7\n"
+        "Bot,Map,deceptive,1,9\n");
+    expect(history.choose("Bot", "Map", 7) == astra::OpeningStyle::standard,
+           "UCB learning exploits clearly successful opening");
+    history.record("Bot", "Map", astra::OpeningStyle::standard, true);
+    const auto encoded = history.serialize();
+    astra::OpponentHistory restored;
+    restored.parse(encoded);
+    expect(restored.lookup("Bot", "Map", astra::OpeningStyle::standard).wins == 9,
+           "opponent history round-trips through tournament CSV");
+
+    astra::OpponentHistory fresh;
+    const auto exploration = fresh.choose("NewBot", "Map", 3);
+    expect(exploration != astra::OpeningStyle::count,
+           "fresh opponent selects a valid deterministic exploration arm");
 }
 
 void testInfluenceAndCombat() {
@@ -231,6 +267,7 @@ int main() {
     testCatalog();
     testOpponentInferenceAndStrategy();
     testMacroReservations();
+    testOpponentLearning();
     testInfluenceAndCombat();
     testCommandArbitration();
     testWorkersAndScouts();

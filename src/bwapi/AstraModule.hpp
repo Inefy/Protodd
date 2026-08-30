@@ -6,6 +6,7 @@
 #include "astra/CommandBus.hpp"
 #include "astra/InfluenceMap.hpp"
 #include "astra/Information.hpp"
+#include "astra/Learning.hpp"
 #include "astra/MacroPlanner.hpp"
 #include "astra/Scouting.hpp"
 #include "astra/Strategy.hpp"
@@ -43,6 +44,10 @@ private:
     StrategicPlan plan_;
     CombatEstimate fight_;
     GameState state_;
+    OpponentHistory history_;
+    OpeningStyle openingStyle_{OpeningStyle::standard};
+    std::string opponentName_;
+    std::string mapName_;
     std::ofstream log_;
 
     void updateStrategy();

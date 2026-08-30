@@ -121,8 +121,10 @@ bool isStaticDefense(const UnitKind kind) noexcept {
 
 bool isCombatUnit(const UnitKind kind) noexcept {
     const auto& stats = unitStats(kind);
-    return !stats.building && !isWorker(kind) && stats.combatValue > 0.5;
+    const auto supportOnly = kind == UnitKind::observer || kind == UnitKind::shuttle ||
+                             kind == UnitKind::dropship || kind == UnitKind::overlord ||
+                             kind == UnitKind::transport || kind == UnitKind::detector;
+    return !stats.building && !isWorker(kind) && !supportOnly && stats.combatValue > 0.5;
 }
 
 }  // namespace astra
-
