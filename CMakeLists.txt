@@ -11,6 +11,15 @@ include(AstraWarnings)
 
 add_library(astra_core STATIC
     src/core/GameState.cpp
+    src/core/UnitCatalog.cpp
+    src/core/Information.cpp
+    src/core/InfluenceMap.cpp
+    src/core/Strategy.cpp
+    src/core/MacroPlanner.cpp
+    src/core/Combat.cpp
+    src/core/CommandBus.cpp
+    src/core/Workers.cpp
+    src/core/Scouting.cpp
 )
 add_library(Astra::Core ALIAS astra_core)
 
@@ -60,4 +69,3 @@ if(ASTRA_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
-

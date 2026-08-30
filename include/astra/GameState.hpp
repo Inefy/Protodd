@@ -15,6 +15,85 @@ using UnitId = std::int32_t;
 
 enum class Race : std::uint8_t { unknown, protoss, terran, zerg, random };
 
+enum class UnitKind : std::uint16_t {
+    unknown,
+    // Shared semantic kinds.
+    worker,
+    resourceDepot,
+    supplyProvider,
+    refinery,
+    transport,
+    detector,
+    // Protoss economy, technology, and army.
+    probe,
+    nexus,
+    pylon,
+    assimilator,
+    gateway,
+    forge,
+    photonCannon,
+    cyberneticsCore,
+    shieldBattery,
+    roboticsFacility,
+    observatory,
+    roboticsSupportBay,
+    stargate,
+    citadelOfAdun,
+    templarArchives,
+    fleetBeacon,
+    arbiterTribunal,
+    zealot,
+    dragoon,
+    highTemplar,
+    darkTemplar,
+    archon,
+    darkArchon,
+    reaver,
+    observer,
+    shuttle,
+    scout,
+    corsair,
+    carrier,
+    arbiter,
+    // Terran units and strategic structures.
+    scv,
+    commandCenter,
+    barracks,
+    factory,
+    starport,
+    bunker,
+    missileTurret,
+    marine,
+    medic,
+    firebat,
+    vulture,
+    siegeTank,
+    goliath,
+    wraith,
+    scienceVessel,
+    dropship,
+    battlecruiser,
+    // Zerg units and strategic structures.
+    drone,
+    hatchery,
+    lair,
+    hive,
+    spawningPool,
+    hydraliskDen,
+    spire,
+    greaterSpire,
+    sunkenColony,
+    sporeColony,
+    zergling,
+    hydralisk,
+    lurker,
+    mutalisk,
+    scourge,
+    ultralisk,
+    defiler,
+    overlord,
+};
+
 enum class UnitRole : std::uint8_t {
     worker,
     resourceDepot,
@@ -44,6 +123,7 @@ struct WeaponSnapshot {
 struct UnitSnapshot {
     UnitId id{};
     int typeId{};
+    UnitKind kind{UnitKind::unknown};
     Race race{Race::unknown};
     UnitRole role{UnitRole::other};
     Position position{-1, -1};
@@ -55,6 +135,8 @@ struct UnitSnapshot {
     int maxShields{};
     int energy{};
     int armor{};
+    int buildProgress{100};
+    int weaponCooldown{};
     double topSpeed{};
     WeaponSnapshot groundWeapon{};
     WeaponSnapshot airWeapon{};
@@ -67,6 +149,7 @@ struct UnitSnapshot {
     bool cloaked{};
     bool carryingResources{};
     bool underAttack{};
+    bool hallucination{};
 
     [[nodiscard]] int durability() const noexcept {
         return hitPoints + shields;
@@ -122,4 +205,3 @@ struct GameState {
 };
 
 }  // namespace astra
-

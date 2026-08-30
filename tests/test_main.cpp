@@ -1,6 +1,16 @@
+#include "astra/Combat.hpp"
+#include "astra/CommandBus.hpp"
 #include "astra/GameState.hpp"
 #include "astra/Geometry.hpp"
+#include "astra/InfluenceMap.hpp"
+#include "astra/Information.hpp"
+#include "astra/MacroPlanner.hpp"
+#include "astra/Scouting.hpp"
+#include "astra/Strategy.hpp"
+#include "astra/UnitCatalog.hpp"
+#include "astra/Workers.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -47,11 +57,183 @@ void testSnapshots() {
     expect(!state.findUnit(42).has_value(), "missing unit lookup");
 }
 
+astra::UnitSnapshot unit(
+    const astra::UnitId id,
+    const astra::UnitKind kind,
+    const bool ours,
+    const astra::Position position = {128, 128}) {
+    astra::UnitSnapshot result;
+    result.id = id;
+    result.kind = kind;
+    result.ours = ours;
+    result.position = position;
+    result.lastPosition = position;
+    result.visible = true;
+    result.completed = true;
+    result.hitPoints = 100;
+    result.maxHitPoints = 100;
+    result.topSpeed = 4.0;
+    return result;
+}
+
+void testCatalog() {
+    expect(astra::unitStats(astra::UnitKind::probe).minerals == 50,
+           "Probe catalog cost");
+    expect(astra::unitStats(astra::UnitKind::overlord).name == "Overlord",
+           "catalog enum and table remain aligned");
+    expect(astra::isCombatUnit(astra::UnitKind::dragoon), "Dragoon combat classification");
+    expect(!astra::isCombatUnit(astra::UnitKind::pylon), "Pylon combat classification");
+}
+
+void testOpponentInferenceAndStrategy() {
+    astra::GameState state;
+    state.frame = 3 * 60 * 24;
+    state.mapWidthPixels = 4096;
+    state.mapHeightPixels = 4096;
+    state.self.id = 1;
+    state.self.race = astra::Race::protoss;
+    state.enemy.id = 2;
+    state.enemy.race = astra::Race::zerg;
+    auto nexus = unit(1, astra::UnitKind::nexus, true, {256, 256});
+    nexus.role = astra::UnitRole::resourceDepot;
+    state.self.units.push_back(nexus);
+    for (int i = 0; i < 8; ++i) {
+        auto zergling = unit(100 + i, astra::UnitKind::zergling, false,
+                            {300 + i * 4, 300});
+        zergling.role = astra::UnitRole::groundArmy;
+        zergling.groundWeapon = {.damage = 5, .cooldown = 8, .maxRange = 32,
+                                .targetsGround = true};
+        state.enemy.units.push_back(zergling);
+    }
+
+    astra::OpponentModel model;
+    model.update(state);
+    expect(model.mostLikelyPlan() == astra::EnemyPlan::fastRush,
+           "early zerglings classify as fast rush");
+    expect(model.assessment().immediateGround > 0.3,
+           "rush produces immediate-ground warning");
+
+    astra::StrategyEngine strategy;
+    const auto plan = strategy.plan(state, model.assessment());
+    expect(plan.posture == astra::Posture::defend, "PvZ rush switches to defense");
+    const auto emergencyZealots = std::ranges::find_if(
+        plan.goals,
+        [](const astra::ProductionGoal& goal) {
+            return goal.target == astra::UnitKind::zealot && goal.blocking;
+        });
+    expect(emergencyZealots != plan.goals.end(), "rush plan contains blocking zealots");
+}
+
+void testMacroReservations() {
+    astra::GameState state;
+    state.self.minerals = 200;
+    astra::StrategicPlan plan;
+    plan.goals = {
+        {astra::GoalKind::build, astra::UnitKind::pylon, 1, 100, true, "supply"},
+        {astra::GoalKind::build, astra::UnitKind::gateway, 1, 90, false, "production"},
+    };
+    astra::ResourceLedger ledger{state.self.minerals, 0};
+    astra::MacroPlanner planner;
+    const auto actions = planner.reconcile(state, plan, ledger);
+    expect(actions.size() == 1, "only affordable macro goal is emitted");
+    expect(actions.front().target == astra::UnitKind::pylon && actions.front().reserved,
+           "higher-priority pylon reserves first");
+    expect(ledger.freeMinerals() == 100, "resource reservation is explicit");
+}
+
+void testInfluenceAndCombat() {
+    astra::GameState state;
+    state.mapWidthPixels = 1024;
+    state.mapHeightPixels = 1024;
+    auto enemy = unit(20, astra::UnitKind::hydralisk, false, {512, 512});
+    enemy.role = astra::UnitRole::groundArmy;
+    enemy.groundWeapon = {.damage = 10, .cooldown = 15, .maxRange = 128,
+                          .targetsGround = true};
+    state.enemy.units.push_back(enemy);
+    astra::InfluenceMap influence;
+    influence.update(state);
+    expect(influence.at({512, 512}).groundThreat > 0.0F,
+           "enemy weapon contributes local ground threat");
+
+    std::vector<astra::UnitSnapshot> friendly;
+    for (int i = 0; i < 4; ++i) {
+        auto dragoon = unit(30 + i, astra::UnitKind::dragoon, true, {400, 400 + i * 8});
+        dragoon.role = astra::UnitRole::groundArmy;
+        dragoon.shields = 80;
+        dragoon.maxShields = 80;
+        dragoon.groundWeapon = {.damage = 20, .cooldown = 30, .maxRange = 192,
+                                .targetsGround = true};
+        friendly.push_back(dragoon);
+    }
+    astra::CombatEvaluator evaluator;
+    const auto estimate = evaluator.evaluate(friendly, state.enemy.units, 1.1, 0.1);
+    expect(estimate.decision == astra::FightDecision::engage,
+           "overwhelming dragoon force elects to engage");
+    expect(evaluator.selectTarget(friendly.front(), state.enemy.units) != nullptr,
+           "combat target selection finds compatible target");
+}
+
+void testCommandArbitration() {
+    astra::CommandBus bus;
+    bus.beginFrame(100, 2);
+    bus.submit({7, astra::CommandType::move, -1, {400, 400},
+                astra::UnitKind::unknown, 20, 0, "patrol"});
+    bus.submit({7, astra::CommandType::attackUnit, 9, {-1, -1},
+                astra::UnitKind::unknown, 80, 0, "combat"});
+    auto selected = bus.finalize();
+    expect(selected.size() == 1 && selected.front().type == astra::CommandType::attackUnit,
+           "higher-priority command wins per-unit arbitration");
+    bus.markIssued(selected.front());
+
+    bus.beginFrame(101, 2);
+    bus.submit(selected.front());
+    expect(bus.finalize().empty(), "latency-window duplicate is suppressed");
+}
+
+void testWorkersAndScouts() {
+    astra::GameState state;
+    state.frame = 5000;
+    state.mapWidthPixels = 2048;
+    state.mapHeightPixels = 2048;
+    state.self.id = 1;
+    state.enemy.id = 2;
+    state.bases.push_back({1, {256, 256}, {300, 260}, 8000, 5000, 1, 4000, true, false});
+    state.bases.push_back({2, {1700, 1700}, {1680, 1700}, 8000, 5000, -1, 0, true, false});
+    auto probe = unit(5, astra::UnitKind::probe, true, {260, 260});
+    probe.role = astra::UnitRole::worker;
+    state.self.units.push_back(probe);
+    auto observer = unit(6, astra::UnitKind::observer, true, {300, 300});
+    observer.flying = true;
+    observer.role = astra::UnitRole::detector;
+    state.self.units.push_back(observer);
+
+    astra::InfluenceMap influence;
+    influence.update(state);
+    astra::StrategicPlan plan;
+    plan.desiredGasWorkers = 1;
+    astra::WorkerManager workers;
+    const auto assignments = workers.assign(state, plan, influence);
+    expect(assignments.size() == 1 && assignments.front().job == astra::WorkerJob::gas,
+           "gas policy assigns requested worker count");
+
+    const astra::UnitId scouts[]{6};
+    astra::ScoutManager scouting;
+    const auto orders = scouting.assign(state, scouts, influence);
+    expect(orders.size() == 1 && orders.front().target == astra::Position{1700, 1700},
+           "scout prioritizes stale unexplored start location");
+}
+
 }  // namespace
 
 int main() {
     testGeometry();
     testSnapshots();
+    testCatalog();
+    testOpponentInferenceAndStrategy();
+    testMacroReservations();
+    testInfluenceAndCombat();
+    testCommandArbitration();
+    testWorkersAndScouts();
 
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
@@ -60,4 +242,3 @@ int main() {
     std::cout << "All Astra core tests passed\n";
     return EXIT_SUCCESS;
 }
-
