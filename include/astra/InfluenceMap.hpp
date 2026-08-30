@@ -21,7 +21,11 @@ public:
     void update(const GameState& state);
 
     [[nodiscard]] InfluenceCell at(Position position) const noexcept;
-    [[nodiscard]] Position safestStep(Position from, Position toward, bool flying) const noexcept;
+    [[nodiscard]] Position safestStep(
+        Position from,
+        Position toward,
+        bool flying,
+        bool avoidDetection = false) const noexcept;
     [[nodiscard]] int width() const noexcept { return width_; }
     [[nodiscard]] int height() const noexcept { return height_; }
 
@@ -36,4 +40,3 @@ private:
 };
 
 }  // namespace astra
-

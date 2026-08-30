@@ -176,7 +176,9 @@ void AstraModule::updateCombat() {
         detectorEscorts_.push_back(order.actor);
         commands_.submit(order);
     }
-    for (const auto& command : commands_.finalize()) {
+    // BWAPI calls are capped per combat tick. Priority-aware rotation keeps
+    // retreat and detector orders immediate while bounding large-army spikes.
+    for (const auto& command : commands_.finalize(96)) {
         if (bridge_.execute(command)) commands_.markIssued(command);
     }
 }
@@ -185,7 +187,7 @@ std::vector<UnitSnapshot> AstraModule::combatUnits(const bool ours) const {
     const auto& source = ours ? state_.self.units : state_.enemy.units;
     std::vector<UnitSnapshot> result;
     for (const auto& unit : source) {
-        if (!isCombatUnit(unit.kind) || !unit.completed) continue;
+        if ((!isCombatUnit(unit.kind) && !isStaticDefense(unit.kind)) || !unit.completed) continue;
         if (!ours && !unit.visible && state_.frame - unit.lastSeen > 24 * 45) continue;
         result.push_back(unit);
     }

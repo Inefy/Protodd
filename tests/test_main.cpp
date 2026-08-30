@@ -269,6 +269,43 @@ void testInfluenceAndCombat() {
            "overwhelming dragoon force elects to engage");
     expect(evaluator.selectTarget(friendly.front(), state.enemy.units) != nullptr,
            "combat target selection finds compatible target");
+
+    auto wounded = enemy;
+    wounded.id = 21;
+    wounded.hitPoints = 10;
+    const std::vector<astra::UnitSnapshot> targetChoices{wounded, enemy};
+    const astra::TargetAllocation lethalVolley[]{
+        {wounded.id, 20},
+    };
+    expect(evaluator.selectTarget(friendly.front(), targetChoices, lethalVolley)->id == enemy.id,
+           "focus fire redirects once a target has lethal committed damage");
+
+    auto kiter = friendly.front();
+    kiter.position = {200, 200};
+    kiter.weaponCooldown = 10;
+    auto melee = unit(50, astra::UnitKind::zergling, false, {250, 200});
+    melee.role = astra::UnitRole::groundArmy;
+    melee.groundWeapon = {.damage = 5, .cooldown = 8, .maxRange = 32,
+                          .targetsGround = true};
+    astra::CombatEstimate kiteEstimate;
+    kiteEstimate.decision = astra::FightDecision::kite;
+    astra::InfluenceMap emptyInfluence;
+    astra::TacticalController tactics;
+    const std::vector<astra::UnitSnapshot> kitingForce{kiter};
+    const std::vector<astra::UnitSnapshot> meleeForce{melee};
+    const auto kiteOrders = tactics.control(
+        kitingForce, meleeForce, kiteEstimate, {900, 900}, {100, 200}, emptyInfluence);
+    expect(kiteOrders.size() == 1 && kiteOrders.front().type == astra::CommandType::move &&
+               kiteOrders.front().targetPosition.x < kiter.position.x,
+           "ranged cooldown micro steps directly away from a nearby melee threat");
+
+    auto templar = unit(60, astra::UnitKind::highTemplar, true, {600, 500});
+    templar.role = astra::UnitRole::spellcaster;
+    const std::vector<astra::UnitSnapshot> casters{templar};
+    const auto casterOrders = tactics.control(
+        casters, meleeForce, estimate, {900, 900}, {100, 100}, emptyInfluence, {400, 400});
+    expect(casterOrders.size() == 1 && casterOrders.front().source == "spellcaster-screen",
+           "high-value spellcasters stay behind the formation screen");
 }
 
 void testCommandArbitration() {
@@ -286,6 +323,24 @@ void testCommandArbitration() {
     bus.beginFrame(101, 2);
     bus.submit(selected.front());
     expect(bus.finalize().empty(), "latency-window duplicate is suppressed");
+
+    bus.clear();
+    for (int cycle = 0; cycle < 2; ++cycle) {
+        bus.beginFrame(200 + cycle, 0);
+        for (int actor = 1; actor <= 4; ++actor) {
+            bus.submit({actor, astra::CommandType::move, -1, {actor * 32, 100},
+                        astra::UnitKind::unknown, 50, 0, "budget"});
+        }
+        const auto budgeted = bus.finalize(2);
+        expect(budgeted.size() == 2, "combat command budget is enforced");
+        if (cycle == 0) {
+            expect(budgeted.front().actor == 1 && budgeted.back().actor == 2,
+                   "first command-budget slice is deterministic");
+        } else {
+            expect(budgeted.front().actor == 3 && budgeted.back().actor == 4,
+                   "equal-priority commands rotate fairly across ticks");
+        }
+    }
 }
 
 void testWorkersAndScouts() {

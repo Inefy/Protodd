@@ -19,6 +19,11 @@ struct CombatEstimate {
     FightDecision decision{FightDecision::retreat};
 };
 
+struct TargetAllocation {
+    UnitId target{-1};
+    int committedDamage{};
+};
+
 class CombatEvaluator {
 public:
     [[nodiscard]] CombatEstimate evaluate(
@@ -29,7 +34,8 @@ public:
 
     [[nodiscard]] const UnitSnapshot* selectTarget(
         const UnitSnapshot& attacker,
-        std::span<const UnitSnapshot> candidates) const;
+        std::span<const UnitSnapshot> candidates,
+        std::span<const TargetAllocation> allocations = {}) const;
 
 private:
     [[nodiscard]] static double unitPower(

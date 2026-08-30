@@ -19,7 +19,7 @@ void CommandBus::submit(Command command) {
     pending_.push_back(std::move(command));
 }
 
-std::vector<Command> CommandBus::finalize() {
+std::vector<Command> CommandBus::finalize(const std::size_t maximumCommands) {
     std::ranges::stable_sort(pending_, [](const Command& left, const Command& right) {
         if (left.actor != right.actor) {
             return left.actor < right.actor;
@@ -37,7 +37,35 @@ std::vector<Command> CommandBus::finalize() {
         selected.push_back(command);
         actor = command.actor;
     }
-    return selected;
+    if (selected.size() <= maximumCommands) return selected;
+    if (maximumCommands == 0) return {};
+
+    // Preserve every command above the cutoff priority, then rotate fairly
+    // within the tied cutoff group. Large max-supply battles therefore have a
+    // hard command budget without permanently starving high unit IDs.
+    std::ranges::stable_sort(selected, [](const Command& left, const Command& right) {
+        if (left.priority != right.priority) return left.priority > right.priority;
+        return left.actor < right.actor;
+    });
+    const auto cutoffPriority = selected[maximumCommands - 1].priority;
+    const auto firstTie = std::ranges::find(selected, cutoffPriority, &Command::priority);
+    const auto lastTie = std::ranges::find_if(
+        firstTie, selected.end(), [cutoffPriority](const Command& command) {
+            return command.priority != cutoffPriority;
+        });
+    const auto higherCount = static_cast<std::size_t>(firstTie - selected.begin());
+    const auto tieCount = static_cast<std::size_t>(lastTie - firstTie);
+    const auto tieSlots = maximumCommands - higherCount;
+    const auto start = fairnessCursor_ % tieCount;
+
+    std::vector<Command> budgeted(selected.begin(), firstTie);
+    budgeted.reserve(maximumCommands);
+    for (std::size_t i = 0; i < tieSlots; ++i) {
+        budgeted.push_back(*(firstTie + static_cast<std::ptrdiff_t>((start + i) % tieCount)));
+    }
+    fairnessCursor_ = (start + tieSlots) % tieCount;
+    std::ranges::sort(budgeted, {}, &Command::actor);
+    return budgeted;
 }
 
 void CommandBus::markIssued(const Command& command) {
@@ -47,6 +75,7 @@ void CommandBus::markIssued(const Command& command) {
 void CommandBus::clear() {
     pending_.clear();
     lastIssued_.clear();
+    fairnessCursor_ = 0;
 }
 
 bool CommandBus::redundant(const Command& command) const {
@@ -68,4 +97,3 @@ bool CommandBus::redundant(const Command& command) const {
 }
 
 }  // namespace astra
-

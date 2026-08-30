@@ -41,10 +41,16 @@ public:
     [[nodiscard]] static BWAPI::UnitType toBwapi(UnitKind kind) noexcept;
 
 private:
+    struct SpellZone {
+        Position center{-1, -1};
+        Frame expires{};
+    };
+
     std::unordered_map<UnitId, UnitSnapshot> enemyMemory_;
     std::unordered_map<int, Frame> baseLastScouted_;
     std::unordered_map<UnitKind, Frame> pendingBuilds_;
     std::vector<Position> resourceClusters_;
+    std::vector<SpellZone> recentAreaSpells_;
 
     [[nodiscard]] static Race toRace(BWAPI::Race race) noexcept;
     [[nodiscard]] static DamageType toDamageType(BWAPI::DamageType type) noexcept;

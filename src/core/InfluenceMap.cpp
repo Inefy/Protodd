@@ -54,7 +54,8 @@ InfluenceCell InfluenceMap::at(const Position position) const noexcept {
 Position InfluenceMap::safestStep(
     const Position from,
     const Position toward,
-    const bool flying) const noexcept {
+    const bool flying,
+    const bool avoidDetection) const noexcept {
     if (cells_.empty()) {
         return toward;
     }
@@ -74,7 +75,10 @@ Position InfluenceMap::safestStep(
         const auto influence = at(candidate);
         const auto threat = flying ? influence.airThreat : influence.groundThreat;
         const auto progress = distance(candidate, toward) / std::max(1.0, distance(from, toward));
-        const auto score = static_cast<double>(threat) * 5.0 + progress -
+        const auto detectionPenalty = avoidDetection
+                                          ? static_cast<double>(influence.detection) * 6.0
+                                          : 0.0;
+        const auto score = static_cast<double>(threat) * 5.0 + detectionPenalty + progress -
                            static_cast<double>(influence.strategicValue) * 0.05;
         if (score < bestScore) {
             bestScore = score;

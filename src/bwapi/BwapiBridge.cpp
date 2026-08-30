@@ -28,6 +28,7 @@ void BwapiBridge::onStart() {
     enemyMemory_.clear();
     baseLastScouted_.clear();
     pendingBuilds_.clear();
+    recentAreaSpells_.clear();
     discoverResourceClusters();
 }
 
@@ -219,6 +220,11 @@ void BwapiBridge::runMaintenance() {
     if (self == nullptr) {
         return;
     }
+    const auto frame = Broodwar->getFrameCount();
+    std::erase_if(recentAreaSpells_, [frame](const SpellZone& zone) {
+        return zone.expires <= frame;
+    });
+
     for (const auto unit : self->getUnits()) {
         if (unit == nullptr || !unit->exists() || !unit->isCompleted()) {
             continue;
@@ -239,44 +245,134 @@ void BwapiBridge::runMaintenance() {
         } else if (type == UnitTypes::Protoss_Templar_Archives &&
                    unit->canResearch(TechTypes::Psionic_Storm)) {
             unit->research(TechTypes::Psionic_Storm);
+        } else if (type == UnitTypes::Protoss_Arbiter_Tribunal &&
+                   unit->canResearch(TechTypes::Stasis_Field)) {
+            unit->research(TechTypes::Stasis_Field);
+        } else if (type == UnitTypes::Protoss_Robotics_Support_Bay &&
+                   unit->canUpgrade(UpgradeTypes::Reaver_Capacity)) {
+            unit->upgrade(UpgradeTypes::Reaver_Capacity);
+        } else if (type == UnitTypes::Protoss_Fleet_Beacon &&
+                   unit->canUpgrade(UpgradeTypes::Carrier_Capacity)) {
+            unit->upgrade(UpgradeTypes::Carrier_Capacity);
         } else if (type == UnitTypes::Protoss_Forge &&
                    unit->canUpgrade(UpgradeTypes::Protoss_Ground_Weapons)) {
             unit->upgrade(UpgradeTypes::Protoss_Ground_Weapons);
         }
     }
 
-    if (!self->hasResearched(TechTypes::Psionic_Storm)) {
-        return;
-    }
-    auto stormIssued = false;
-    for (const auto templar : self->getUnits()) {
-        if (templar == nullptr || templar->getType() != UnitTypes::Protoss_High_Templar ||
-            templar->getEnergy() < 75 || !templar->isCompleted()) {
-            continue;
-        }
-        Unit best = nullptr;
-        auto bestScore = 2;
-        for (const auto enemy : Broodwar->enemy()->getUnits()) {
-            if (enemy == nullptr || !enemy->exists() || !enemy->isVisible() || enemy->isFlying()) {
+    if (self->hasResearched(TechTypes::Psionic_Storm)) {
+        auto stormIssued = false;
+        for (const auto templar : self->getUnits()) {
+            if (templar == nullptr || templar->getType() != UnitTypes::Protoss_High_Templar ||
+                templar->getEnergy() < 75 || !templar->isCompleted()) {
                 continue;
             }
-            const auto clustered = static_cast<int>(Broodwar->getUnitsInRadius(
-                enemy->getPosition(), 80,
-                !Filter::IsOwned && !Filter::IsNeutral && !Filter::IsFlying).size());
-            const auto friendly = static_cast<int>(Broodwar->getUnitsInRadius(
-                enemy->getPosition(), 80, Filter::IsOwned).size());
-            const auto score = clustered * 2 - friendly * 3;
-            if (score > bestScore) {
+            Unit best = nullptr;
+            auto bestScore = 2;
+            for (const auto enemy : Broodwar->enemy()->getUnits()) {
+                if (enemy == nullptr || !enemy->exists() || !enemy->isVisible() ||
+                    enemy->isFlying() || enemy->isUnderStorm()) {
+                    continue;
+                }
+                const auto recentlyCovered = std::ranges::any_of(
+                    recentAreaSpells_, [enemy](const SpellZone& zone) {
+                        return closeTo(zone.center, fromBwapi(enemy->getPosition()), 112);
+                    });
+                if (recentlyCovered) continue;
+                const auto clustered = static_cast<int>(Broodwar->getUnitsInRadius(
+                    enemy->getPosition(), 80,
+                    !Filter::IsOwned && !Filter::IsNeutral && !Filter::IsFlying).size());
+                const auto friendly = static_cast<int>(Broodwar->getUnitsInRadius(
+                    enemy->getPosition(), 80, Filter::IsOwned).size());
+                const auto score = clustered * 2 - friendly * 3;
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = enemy;
+                }
+            }
+            if (best != nullptr &&
+                templar->canUseTech(TechTypes::Psionic_Storm, best->getPosition()) &&
+                templar->useTech(TechTypes::Psionic_Storm, best->getPosition())) {
+                recentAreaSpells_.push_back(
+                    {fromBwapi(best->getPosition()), frame + 72});
+                stormIssued = true;
+            }
+            if (stormIssued) break;
+        }
+    }
+
+    if (self->hasResearched(TechTypes::Stasis_Field)) {
+        for (const auto arbiter : self->getUnits()) {
+            if (arbiter == nullptr || arbiter->getType() != UnitTypes::Protoss_Arbiter ||
+                arbiter->getEnergy() < 100 || !arbiter->isCompleted()) continue;
+            Unit best = nullptr;
+            auto bestScore = 5;
+            for (const auto enemy : Broodwar->enemy()->getUnits()) {
+                if (enemy == nullptr || !enemy->exists() || !enemy->isVisible() ||
+                    enemy->isStasised()) continue;
+                if (std::ranges::any_of(recentAreaSpells_, [enemy](const SpellZone& zone) {
+                        return closeTo(zone.center, fromBwapi(enemy->getPosition()), 112);
+                    })) continue;
+                const auto clustered = static_cast<int>(Broodwar->getUnitsInRadius(
+                    enemy->getPosition(), 96, !Filter::IsOwned && !Filter::IsNeutral).size());
+                const auto friendly = static_cast<int>(Broodwar->getUnitsInRadius(
+                    enemy->getPosition(), 96, Filter::IsOwned).size());
+                const auto score = clustered * 2 - friendly * 4;
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = enemy;
+                }
+            }
+            if (best != nullptr &&
+                arbiter->canUseTech(TechTypes::Stasis_Field, best->getPosition()) &&
+                arbiter->useTech(TechTypes::Stasis_Field, best->getPosition())) {
+                recentAreaSpells_.push_back(
+                    {fromBwapi(best->getPosition()), frame + 100});
+                break;
+            }
+        }
+    }
+
+    // Feedback converts enemy caster energy directly into damage and is most
+    // valuable before those units can cast. Prefer lethal, high-energy hits.
+    for (const auto darkArchon : self->getUnits()) {
+        if (darkArchon == nullptr || !darkArchon->isCompleted() ||
+            darkArchon->getType() != UnitTypes::Protoss_Dark_Archon ||
+            darkArchon->getEnergy() < 50) continue;
+        Unit best = nullptr;
+        auto bestScore = 49;
+        for (const auto enemy : Broodwar->enemy()->getUnits()) {
+            if (enemy == nullptr || !enemy->exists() || !enemy->isVisible() ||
+                !enemy->getType().isSpellcaster() || enemy->getEnergy() <= 0) continue;
+            const auto lethalBonus = enemy->getEnergy() >= enemy->getHitPoints() ? 200 : 0;
+            const auto score = enemy->getEnergy() + lethalBonus;
+            if (score > bestScore &&
+                darkArchon->canUseTech(TechTypes::Feedback, enemy)) {
                 bestScore = score;
                 best = enemy;
             }
         }
-        if (best != nullptr && templar->canUseTech(TechTypes::Psionic_Storm, best->getPosition())) {
-            templar->useTech(TechTypes::Psionic_Storm, best->getPosition());
-            stormIssued = true;
+        if (best != nullptr && darkArchon->useTech(TechTypes::Feedback, best)) break;
+    }
+
+    // Convert pairs of spent templar into durable splash units while retaining
+    // at least two casters for the next energy cycle.
+    std::vector<Unit> spentTemplar;
+    for (const auto unit : self->getUnits()) {
+        if (unit != nullptr && unit->exists() && unit->isCompleted() &&
+            unit->getType() == UnitTypes::Protoss_High_Templar && unit->getEnergy() < 50) {
+            spentTemplar.push_back(unit);
         }
-        if (stormIssued) {
-            break;
+    }
+    std::ranges::sort(spentTemplar, {}, [](const Unit unit) { return unit->getID(); });
+    if (spentTemplar.size() >= 4) {
+        const auto first = spentTemplar[0];
+        const auto second = *std::ranges::min_element(
+            spentTemplar.begin() + 1, spentTemplar.end(), {}, [first](const Unit unit) {
+                return first->getDistance(unit);
+            });
+        if (first->canUseTech(TechTypes::Archon_Warp, second)) {
+            first->useTech(TechTypes::Archon_Warp, second);
         }
     }
 }
