@@ -143,7 +143,9 @@ StrategicPlan StrategyEngine::planPvZ(
                           {UnitKind::archon, 0.10}};
 
     goal(result, GoalKind::build, UnitKind::forge, 1, 93, "safe natural and upgrades");
-    goal(result, GoalKind::build, UnitKind::photonCannon, minute(state) < 7 ? 2 : 4, 89,
+    const auto defensiveBases = std::max(1, count(state, UnitKind::nexus));
+    goal(result, GoalKind::build, UnitKind::photonCannon,
+         std::min(6, defensiveBases * 2), 89,
          "ling and mutalisk coverage");
     goal(result, GoalKind::build, UnitKind::gateway, minute(state) < 8 ? 1 : 4, 84,
          "ground production");
@@ -213,7 +215,15 @@ StrategicPlan StrategyEngine::planPvP(
 void StrategyEngine::addInfrastructure(StrategicPlan& plan, const GameState& state) {
     const auto bases = std::max(1, count(state, UnitKind::nexus));
     const auto workers = countRole(state, UnitRole::worker);
-    const auto desiredPylons = std::max(1, state.self.supplyUsed / 16 + 1);
+    const auto pylons = count(state, UnitKind::pylon);
+    const auto pendingPylons = static_cast<int>(std::ranges::count_if(
+        state.self.units, [](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::pylon && !unit.completed;
+        }));
+    const auto projectedSupply = state.self.supplyTotal + pendingPylons * 16;
+    const auto supplyNeeded = projectedSupply < 400 &&
+                              projectedSupply - state.self.supplyUsed <= 8;
+    const auto desiredPylons = std::max(bases, pylons + (supplyNeeded ? 1 : 0));
     goal(plan, GoalKind::build, UnitKind::pylon, desiredPylons, 100,
          "maintain a supply buffer", state.self.supplyTotal - state.self.supplyUsed <= 4);
     goal(plan, GoalKind::train, UnitKind::probe, std::max(workers, plan.desiredWorkers), 74,

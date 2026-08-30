@@ -502,7 +502,8 @@ std::vector<BaseSnapshot> BwapiBridge::snapshotBases(const GameState& state) {
 
         auto owner = -1;
         for (const auto& depot : state.self.units) {
-            if (depot.role == UnitRole::resourceDepot && closeTo(center, depot.position, 320)) {
+            if (depot.role == UnitRole::resourceDepot && depot.completed &&
+                closeTo(center, depot.position, 320)) {
                 owner = state.self.id;
             }
         }
@@ -520,8 +521,10 @@ std::vector<BaseSnapshot> BwapiBridge::snapshotBases(const GameState& state) {
             [center](const TilePosition startTile) {
                 return closeTo(center, fromBwapi(BWAPI::Position(startTile)), 256);
             });
+        const auto startPosition = BWAPI::Position(Broodwar->self()->getStartLocation());
+        const auto island = !Broodwar->hasPath(startPosition, toBwapiPosition(center));
         bases.push_back({id, center, center, minerals, gas, owner, baseLastScouted_[id],
-                         start, false, mineralPatches, geysers});
+                         start, island, mineralPatches, geysers});
     }
     return bases;
 }
@@ -599,6 +602,7 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         Position best{-1, -1};
         auto bestScore = std::numeric_limits<double>::infinity();
         for (const auto center : resourceClusters_) {
+            if (!builder->hasPath(toBwapiPosition(center))) continue;
             const auto occupied = std::ranges::any_of(
                 Broodwar->getAllUnits(),
                 [center](const Unit unit) {
@@ -606,26 +610,111 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
                            unit->getType().isResourceDepot() &&
                            closeTo(center, fromBwapi(unit->getPosition()), 320);
                 });
-            if (occupied) continue;
-            const auto riskBias = plan.posture == Posture::defend ? 1.4 : 1.0;
-            const auto score = distance(fromBwapi(builder->getPosition()), center) * riskBias;
+            const auto rememberedDepot = std::ranges::any_of(
+                enemyMemory_, [center](const auto& entry) {
+                    const auto& unit = entry.second;
+                    return unit.role == UnitRole::resourceDepot &&
+                           closeTo(center, unit.position, 320);
+                });
+            if (occupied || rememberedDepot) continue;
+
+            auto resources = 0;
+            for (const auto patch : Broodwar->getMinerals()) {
+                if (closeTo(center, fromBwapi(patch->getInitialPosition()), 320))
+                    resources += patch->getResources();
+            }
+            auto nearestEnemy = std::numeric_limits<double>::infinity();
+            for (const auto& [id, enemy] : enemyMemory_) {
+                static_cast<void>(id);
+                if (enemy.position.valid())
+                    nearestEnemy = std::min(nearestEnemy, distance(center, enemy.position));
+            }
+            const auto danger = std::max(0.0, 1200.0 - nearestEnemy) *
+                                (plan.posture == Posture::defend ? 1.8 : 0.8);
+            const auto travel = distance(fromBwapi(builder->getPosition()), center);
+            const auto score = travel + danger - static_cast<double>(resources) / 40.0;
             if (score < bestScore) {
                 bestScore = score;
                 best = center;
             }
         }
         if (best.valid()) {
-            return Broodwar->getBuildLocation(type, TilePosition(best.x / 32, best.y / 32), 10);
+            return Broodwar->getBuildLocation(type, TilePosition(best.x / 32, best.y / 32), 12);
         }
     }
 
-    auto anchor = Broodwar->self()->getStartLocation();
-    if (plan.rallyPoint.valid()) {
-        anchor = TilePosition(plan.rallyPoint.x / 32, plan.rallyPoint.y / 32);
+    auto anchorPosition = plan.rallyPoint.valid()
+                              ? toBwapiPosition(plan.rallyPoint)
+                              : BWAPI::Position(Broodwar->self()->getStartLocation());
+    if (kind == UnitKind::pylon) {
+        Unit leastPoweredBase = nullptr;
+        auto fewestNearbyPylons = std::numeric_limits<int>::max();
+        for (const auto nexus : Broodwar->self()->getUnits()) {
+            if (nexus == nullptr || !nexus->exists() ||
+                nexus->getType() != UnitTypes::Protoss_Nexus) continue;
+            const auto nearby = static_cast<int>(Broodwar->getUnitsInRadius(
+                nexus->getPosition(), 384,
+                Filter::IsOwned && Filter::GetType == UnitTypes::Protoss_Pylon).size());
+            if (nearby < fewestNearbyPylons) {
+                fewestNearbyPylons = nearby;
+                leastPoweredBase = nexus;
+            }
+        }
+        if (leastPoweredBase != nullptr) anchorPosition = leastPoweredBase->getPosition();
     }
-    const auto offset = kind == UnitKind::photonCannon ? TilePosition(5, 2)
-                                                       : TilePosition(3, 5);
-    return Broodwar->getBuildLocation(type, anchor + offset, 18);
+    if (type.requiresPsi()) {
+        const auto pylon = Broodwar->getClosestUnit(
+            anchorPosition,
+            Filter::GetType == UnitTypes::Protoss_Pylon && Filter::IsCompleted &&
+                Filter::IsOwned);
+        if (pylon != nullptr) anchorPosition = pylon->getPosition();
+    }
+    if (kind == UnitKind::photonCannon || kind == UnitKind::shieldBattery) {
+        Unit forwardNexus = nullptr;
+        auto fewestNearbyDefenses = std::numeric_limits<int>::max();
+        auto bestDistance = std::numeric_limits<double>::infinity();
+        for (const auto unit : Broodwar->self()->getUnits()) {
+            if (unit == nullptr || !unit->exists() ||
+                unit->getType() != UnitTypes::Protoss_Nexus) continue;
+            const auto nearby = static_cast<int>(Broodwar->getUnitsInRadius(
+                unit->getPosition(), 416,
+                Filter::IsOwned && Filter::GetType == type).size());
+            const auto candidate = plan.attackTarget.valid()
+                                       ? distance(fromBwapi(unit->getPosition()),
+                                                  plan.attackTarget)
+                                       : distance(fromBwapi(unit->getPosition()),
+                                                  fromBwapi(anchorPosition));
+            if (nearby < fewestNearbyDefenses ||
+                (nearby == fewestNearbyDefenses && candidate < bestDistance)) {
+                fewestNearbyDefenses = nearby;
+                bestDistance = candidate;
+                forwardNexus = unit;
+            }
+        }
+        if (forwardNexus != nullptr) {
+            const auto localPylon = Broodwar->getClosestUnit(
+                forwardNexus->getPosition(),
+                Filter::GetType == UnitTypes::Protoss_Pylon && Filter::IsCompleted &&
+                    Filter::IsOwned);
+            if (localPylon == nullptr || localPylon->getDistance(forwardNexus) > 384)
+                return TilePositions::None;
+            anchorPosition = localPylon->getPosition();
+        }
+    }
+
+    static const std::array layout{
+        TilePosition{4, 2}, TilePosition{-4, 2}, TilePosition{4, -3},
+        TilePosition{-4, -3}, TilePosition{7, 1}, TilePosition{-7, 1},
+        TilePosition{2, 6}, TilePosition{-2, 6}, TilePosition{2, -6},
+        TilePosition{-2, -6},
+    };
+    const auto existing = static_cast<std::size_t>(std::ranges::count_if(
+        Broodwar->self()->getUnits(), [type](const Unit unit) {
+            return unit != nullptr && unit->exists() && unit->getType() == type;
+        }));
+    const auto anchor = TilePosition(anchorPosition);
+    const auto offset = layout[existing % layout.size()];
+    return Broodwar->getBuildLocation(type, anchor + offset, 20);
 }
 
 bool BwapiBridge::build(const MacroAction& action, const StrategicPlan& plan) {

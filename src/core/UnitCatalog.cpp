@@ -148,8 +148,8 @@ std::span<const UnitKind> unitPrerequisites(const UnitKind kind) noexcept {
 
     switch (kind) {
         case UnitKind::gateway:
-        case UnitKind::forge:
-        case UnitKind::shieldBattery: return pylon;
+        case UnitKind::forge: return pylon;
+        case UnitKind::shieldBattery: return gateway;
         case UnitKind::photonCannon: return forge;
         case UnitKind::cyberneticsCore: return gateway;
         case UnitKind::roboticsFacility:

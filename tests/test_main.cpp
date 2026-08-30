@@ -94,6 +94,11 @@ void testCatalog() {
                std::ranges::find(tribunalRequirements, astra::UnitKind::templarArchives) !=
                    tribunalRequirements.end(),
            "Arbiter Tribunal requires both branches of its tech tree");
+    const auto batteryRequirements = astra::unitPrerequisites(
+        astra::UnitKind::shieldBattery);
+    expect(batteryRequirements.size() == 1 &&
+               batteryRequirements.front() == astra::UnitKind::gateway,
+           "Shield Battery follows the actual Gateway prerequisite");
 }
 
 void testOpponentInferenceAndStrategy() {
@@ -133,6 +138,36 @@ void testOpponentInferenceAndStrategy() {
             return goal.target == astra::UnitKind::zealot && goal.blocking;
         });
     expect(emergencyZealots != plan.goals.end(), "rush plan contains blocking zealots");
+}
+
+void testSupplyPlanning() {
+    astra::GameState state;
+    state.self.id = 1;
+    state.self.race = astra::Race::protoss;
+    state.enemy.race = astra::Race::terran;
+    state.self.supplyUsed = 16;
+    state.self.supplyTotal = 18;
+    auto nexus = unit(1, astra::UnitKind::nexus, true);
+    nexus.role = astra::UnitRole::resourceDepot;
+    state.self.units.push_back(nexus);
+
+    astra::StrategyEngine strategy;
+    const auto opening = strategy.plan(state, {});
+    const auto pylonGoal = std::ranges::find(
+        opening.goals, astra::UnitKind::pylon, &astra::ProductionGoal::target);
+    expect(pylonGoal != opening.goals.end() && pylonGoal->desiredCount == 1,
+           "opening supply logic requests one pylon rather than overbuilding two");
+
+    auto pendingPylon = unit(2, astra::UnitKind::pylon, true);
+    pendingPylon.completed = false;
+    pendingPylon.buildProgress = 20;
+    state.self.units.push_back(pendingPylon);
+    const auto constructing = strategy.plan(state, {});
+    const auto constructingGoal = std::ranges::find(
+        constructing.goals, astra::UnitKind::pylon, &astra::ProductionGoal::target);
+    expect(constructingGoal != constructing.goals.end() &&
+               constructingGoal->desiredCount == 1,
+           "pending pylon supply prevents a duplicate construction order");
 }
 
 void testMacroReservations() {
@@ -454,6 +489,7 @@ int main() {
     testSnapshots();
     testCatalog();
     testOpponentInferenceAndStrategy();
+    testSupplyPlanning();
     testMacroReservations();
     testOpponentLearning();
     testInfluenceAndCombat();
