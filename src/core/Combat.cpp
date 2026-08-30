@@ -97,7 +97,8 @@ std::vector<Command> TacticalController::control(
     const CombatEstimate& estimate,
     const Position objective,
     const Position retreatPoint,
-    const InfluenceMap& influence) const {
+    const InfluenceMap& influence,
+    const Position formationCenter) const {
     std::vector<Command> commands;
     commands.reserve(friendly.size());
     CombatEvaluator evaluator;
@@ -136,6 +137,10 @@ std::vector<Command> TacticalController::control(
                 commands.push_back({unit.id, CommandType::attackUnit, target->id, {-1, -1},
                                     UnitKind::unknown, 80, 0, "focus-fire"});
             }
+        } else if (formationCenter.valid() && friendly.size() >= 4 &&
+                   distanceSquared(unit.position, formationCenter) > 448 * 448) {
+            commands.push_back({unit.id, CommandType::move, -1, formationCenter,
+                                UnitKind::unknown, 62, 0, "regroup-formation"});
         } else if (objective.valid()) {
             commands.push_back({unit.id, CommandType::attackMove, -1, objective,
                                 UnitKind::unknown, 50, 0, "squad-objective"});

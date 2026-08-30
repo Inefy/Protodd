@@ -8,6 +8,7 @@
 #include "astra/MacroPlanner.hpp"
 #include "astra/Scouting.hpp"
 #include "astra/Strategy.hpp"
+#include "astra/Squads.hpp"
 #include "astra/UnitCatalog.hpp"
 #include "astra/Workers.hpp"
 
@@ -259,6 +260,60 @@ void testWorkersAndScouts() {
            "scout prioritizes stale unexplored start location");
 }
 
+void testLocalSquadsAndDetection() {
+    astra::GameState state;
+    state.mapWidthPixels = 2048;
+    state.mapHeightPixels = 2048;
+    state.self.id = 1;
+    state.enemy.id = 2;
+    state.bases.push_back({1, {256, 256}, {300, 260}, 8000, 5000, 1, 0, true, false});
+
+    std::vector<astra::UnitSnapshot> friendly;
+    for (int i = 0; i < 6; ++i) {
+        auto dragoon = unit(10 + i, astra::UnitKind::dragoon, true,
+                            i < 3 ? astra::Position{300 + i * 24, 300}
+                                  : astra::Position{1500 + i * 24, 1500});
+        dragoon.role = astra::UnitRole::groundArmy;
+        dragoon.groundWeapon = {.damage = 20, .cooldown = 30, .maxRange = 192,
+                                .targetsGround = true};
+        friendly.push_back(dragoon);
+    }
+    auto lurker = unit(90, astra::UnitKind::lurker, false, {380, 320});
+    lurker.role = astra::UnitRole::groundArmy;
+    lurker.burrowed = true;
+    lurker.detected = false;
+    lurker.groundWeapon = {.damage = 20, .cooldown = 37, .maxRange = 192,
+                           .targetsGround = true};
+    const std::vector<astra::UnitSnapshot> enemy{lurker};
+
+    astra::StrategicPlan plan;
+    plan.rallyPoint = {256, 256};
+    plan.attackTarget = {1800, 1800};
+    astra::SquadPlanner planner;
+    auto squads = planner.form(state, friendly, enemy, plan, {256, 256});
+    const auto defense = std::ranges::find_if(squads, [](const astra::Squad& squad) {
+        return squad.role == astra::SquadRole::baseDefense;
+    });
+    expect(defense != squads.end() && defense->needsDetection,
+           "cloaked base threat creates detection-aware defense squad");
+
+    auto observer = unit(100, astra::UnitKind::observer, true, {200, 200});
+    observer.flying = true;
+    observer.role = astra::UnitRole::detector;
+    state.self.units.push_back(observer);
+    astra::InfluenceMap influence;
+    influence.update(state);
+    const auto escorts = planner.detectorEscorts(state, squads, influence);
+    expect(!escorts.empty() && escorts.front().actor == observer.id,
+           "observer is assigned to highest-priority detection squad");
+
+    squads = planner.form(state, friendly, {}, plan, {256, 256});
+    const auto mainGroups = std::ranges::count_if(squads, [](const astra::Squad& squad) {
+        return squad.role == astra::SquadRole::mainArmy;
+    });
+    expect(mainGroups == 2, "disconnected armies receive independent local decisions");
+}
+
 }  // namespace
 
 int main() {
@@ -271,6 +326,7 @@ int main() {
     testInfluenceAndCombat();
     testCommandArbitration();
     testWorkersAndScouts();
+    testLocalSquadsAndDetection();
 
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";

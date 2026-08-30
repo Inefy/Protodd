@@ -9,6 +9,7 @@
 #include "astra/Learning.hpp"
 #include "astra/MacroPlanner.hpp"
 #include "astra/Scouting.hpp"
+#include "astra/Squads.hpp"
 #include "astra/Strategy.hpp"
 #include "astra/Workers.hpp"
 
@@ -40,6 +41,7 @@ private:
     ScoutManager scouts_;
     CombatEvaluator combat_;
     TacticalController tactics_;
+    SquadPlanner squads_;
     CommandBus commands_;
     StrategicPlan plan_;
     CombatEstimate fight_;
@@ -48,6 +50,7 @@ private:
     OpeningStyle openingStyle_{OpeningStyle::standard};
     std::string opponentName_;
     std::string mapName_;
+    std::vector<UnitId> detectorEscorts_;
     std::ofstream log_;
 
     void updateStrategy();

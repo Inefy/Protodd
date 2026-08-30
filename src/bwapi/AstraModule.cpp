@@ -120,6 +120,7 @@ void AstraModule::updateScouting() {
     auto observersSeen = 0;
     for (const auto& unit : state_.self.units) {
         if (unit.kind == UnitKind::observer) {
+            if (std::ranges::find(detectorEscorts_, unit.id) != detectorEscorts_.end()) continue;
             // Keep the first observer attached to the main army. Additional
             // observers perform high-value scouting passes.
             if (++observersSeen == 1) continue;
@@ -140,29 +141,41 @@ void AstraModule::updateScouting() {
 
 void AstraModule::updateCombat() {
     const auto friendly = combatUnits(true);
-    auto enemy = combatUnits(false);
+    const auto enemy = combatUnits(false);
     const auto aggressive = plan_.posture == Posture::pressure ||
                             plan_.posture == Posture::attack ||
                             plan_.posture == Posture::harass;
-    if (!aggressive) {
-        std::erase_if(enemy, [&friendly](const UnitSnapshot& target) {
-            return !target.visible || std::ranges::none_of(
-                friendly,
-                [&target](const UnitSnapshot& unit) {
-                    return distanceSquared(unit.position, target.position) <= 800 * 800;
-                });
-        });
-    }
-    const auto requiredRatio = aggressive ? plan_.attackThreshold : 0.88;
-    fight_ = combat_.evaluate(friendly, enemy, requiredRatio,
-                              opponent_.assessment().uncertainty);
-    const auto objective = aggressive && friendly.size() >= 4 && plan_.attackTarget.valid()
-                               ? plan_.attackTarget
-                               : plan_.rallyPoint;
-    const auto orders = tactics_.control(friendly, enemy, fight_, objective,
-                                         retreatPoint(), influence_);
+    const auto formed = squads_.form(state_, friendly, enemy, plan_, retreatPoint());
     commands_.beginFrame(state_.frame, state_.latencyFrames);
-    for (const auto& order : orders) commands_.submit(order);
+    fight_ = {};
+    auto debugSquadSize = std::size_t{0};
+    for (const auto& squad : formed) {
+        auto requiredRatio = squad.requiredRatio;
+        auto objective = squad.objective;
+        if (squad.role == SquadRole::mainArmy && (!aggressive || squad.units.size() < 4)) {
+            requiredRatio = 0.88;
+            objective = plan_.rallyPoint;
+        }
+        const auto estimate = combat_.evaluate(
+            squad.units, squad.enemies, requiredRatio,
+            squad.enemies.empty() ? opponent_.assessment().uncertainty * 0.25
+                                  : opponent_.assessment().uncertainty);
+        if (squad.role == SquadRole::mainArmy && squad.units.size() >= debugSquadSize) {
+            debugSquadSize = squad.units.size();
+            fight_ = estimate;
+        }
+        for (const auto& order : tactics_.control(
+                 squad.units, squad.enemies, estimate, objective,
+                 squad.retreat, influence_, squad.center)) {
+            commands_.submit(order);
+        }
+    }
+
+    detectorEscorts_.clear();
+    for (const auto& order : squads_.detectorEscorts(state_, formed, influence_)) {
+        detectorEscorts_.push_back(order.actor);
+        commands_.submit(order);
+    }
     for (const auto& command : commands_.finalize()) {
         if (bridge_.execute(command)) commands_.markIssued(command);
     }

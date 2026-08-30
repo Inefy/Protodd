@@ -45,8 +45,8 @@ public:
         const CombatEstimate& estimate,
         Position objective,
         Position retreatPoint,
-        const InfluenceMap& influence) const;
+        const InfluenceMap& influence,
+        Position formationCenter = {-1, -1}) const;
 };
 
 }  // namespace astra
-
