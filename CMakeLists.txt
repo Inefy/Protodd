@@ -10,7 +10,7 @@ set(BWAPI_LIBRARY "" CACHE FILEPATH "Path to a 32-bit BWAPILIB.lib")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(AstraWarnings)
 
-add_library(astra_core STATIC
+add_library(astra_core OBJECT
     src/core/GameState.cpp
     src/core/UnitCatalog.cpp
     src/core/Information.cpp
