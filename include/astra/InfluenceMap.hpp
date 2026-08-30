@@ -36,7 +36,7 @@ private:
     std::vector<InfluenceCell> cells_;
 
     [[nodiscard]] std::size_t offset(int x, int y) const noexcept;
-    void addThreat(const UnitSnapshot& unit);
+    void addThreat(const UnitSnapshot& unit, Frame currentFrame);
 };
 
 }  // namespace astra

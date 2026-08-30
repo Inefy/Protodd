@@ -14,8 +14,9 @@ logic can be replayed and regression-tested without running StarCraft.
    defense, and expansion goals. Goals reserve resources rather than issuing
    commands directly.
 4. **Allocate** assigns workers, scouts, defenders, combat squads, and detectors.
-5. **Act** produces deduplicated commands. The BWAPI bridge rate-limits commands
-   and rejects invalid or redundant actions.
+5. **Act** produces deduplicated commands. The command bus arbitrates by urgency,
+   applies a fair hard budget in very large battles, and the BWAPI bridge rejects
+   invalid actions.
 6. **Measure** records decisions and outcomes for replay-driven tuning.
 
 Between games, Astra stores only aggregate win/loss counts by opponent, map,
@@ -30,10 +31,11 @@ opponent file during a live game.
 - Every behavior has deterministic tie-breaking and a CPU budget.
 - Urgent reactions run every frame; macro work is staggered across frames.
 - Resource commitments include queued units and buildings under construction.
-- Enemy memory decays by mobility and visibility, not by a fixed timeout.
+- Mobile enemy influence decays continuously after vision is lost; remembered
+  buildings remain authoritative until their tile is seen empty.
 - A safe fallback remains playable if terrain analysis or a subsystem fails.
 
-## Planned modules
+## Implemented modules
 
 | Module | Responsibility |
 |---|---|
@@ -42,14 +44,15 @@ opponent file during a live game.
 | `StrategyEngine` | Matchup plans, transitions, counter production, attack timing |
 | `MacroPlanner` | Goal reconciliation, reservations, production and expansion |
 | `WorkerManager` | Saturation, gas policy, transfer, construction, worker defense |
-| `SquadManager` | Role assignment, clustering, objectives and reinforcement |
+| `SquadPlanner` | Local connected armies, base defense, harassment, objectives and detector escorts |
 | `CombatEvaluator` | Fast local fight estimate with uncertainty penalties |
-| `MicroController` | Targeting, kiting, formations, spells, transport and detection |
+| `TacticalController` | Volley allocation, kiting, surrounds, caster screening and cloak preservation |
+| `BwapiBridge` | Legal observations, production/build execution, upgrades and area-spell coordination |
 | `CommandBus` | Legal command validation, deduplication, arbitration and throttling |
 | `OpponentHistory` | Tournament-safe cross-game opening exploration and exploitation |
 
 ## Runtime constraints
 
 The tournament DLL targets 32-bit StarCraft 1.16.1 and BWAPI 4.4.0. The core is
-portable C++20. In a release build, expensive work is amortized and a frame
-budget governor degrades gracefully from full search to cached decisions.
+portable C++20. Expensive managers run on staggered cadences; combat commands
+are capped at 96 per update and rotate fairly among equal-priority units.

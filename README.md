@@ -14,11 +14,14 @@ tournament bot or depend on code whose license restricts competition entry.
 - Bayesian opening recognition under fog of war and decaying enemy memory.
 - Economy saturation, gas policy, worker defense, evacuation, and transfers.
 - Resource-reserving macro planner with production, technology, expansion, and
-  supply goals.
+  supply goals, queued-production accounting, and automatic prerequisite repair.
+- Base-aware construction, safe reachable expansions, projected-supply timing,
+  and mineral-line saturation transfers across completed bases.
 - Ground/air/detection influence maps, risk-aware scouting, combat evaluation,
-  deterministic focus fire, kiting, retreat, storm, and ammunition upkeep.
+  local squads, detector escorts, coordinated focus fire, unit-specific kiting,
+  surrounds, cloak preservation, Storm, Stasis, Feedback, and ammunition upkeep.
 - A legal-information-only BWAPI adapter with command deduplication and
-  staggered frame scheduling.
+  staggered frame scheduling plus a fair per-tick command budget.
 - UCB-based opponent/map learning across games, using tournament-safe read and
   write directories to explore and exploit four opening styles.
 - Portable deterministic regression scenarios and strict-warning compilation.
@@ -31,6 +34,13 @@ Requirements: CMake 3.24+ and a C++20 compiler.
 cmake --preset dev
 cmake --build --preset dev
 ctest --preset dev
+```
+
+For the same strict, portable gate used during development (core tests, log
+tests, adapter translation-unit checks, and whitespace validation), run:
+
+```powershell
+./scripts/verify.ps1
 ```
 
 The `dev` preset uses Ninja. Any generator works if configured manually:

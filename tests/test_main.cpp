@@ -288,6 +288,21 @@ void testInfluenceAndCombat() {
     expect(influence.at({512, 512}).groundThreat > 0.0F,
            "enemy weapon contributes local ground threat");
 
+    auto staleState = state;
+    staleState.frame = 24 * 60;
+    staleState.enemy.units.front().visible = false;
+    staleState.enemy.units.front().lastSeen = 0;
+    influence.update(staleState);
+    expect(influence.at({512, 512}).groundThreat < 0.01F,
+           "stale mobile enemies decay out of the fog-of-war threat field");
+    auto cannon = staleState.enemy.units.front();
+    cannon.kind = astra::UnitKind::photonCannon;
+    cannon.role = astra::UnitRole::staticDefense;
+    staleState.enemy.units = {cannon};
+    influence.update(staleState);
+    expect(influence.at({512, 512}).groundThreat > 0.0F,
+           "remembered static defenses persist until their tile is cleared");
+
     std::vector<astra::UnitSnapshot> friendly;
     for (int i = 0; i < 4; ++i) {
         auto dragoon = unit(30 + i, astra::UnitKind::dragoon, true, {400, 400 + i * 8});

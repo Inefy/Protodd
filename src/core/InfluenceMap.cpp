@@ -29,7 +29,7 @@ void InfluenceMap::update(const GameState& state) {
         if (unit.hallucination || !unit.position.valid()) {
             continue;
         }
-        addThreat(unit);
+        addThreat(unit, state.frame);
     }
     for (const auto& base : state.bases) {
         if (!base.center.valid()) {
@@ -92,8 +92,16 @@ std::size_t InfluenceMap::offset(const int x, const int y) const noexcept {
     return static_cast<std::size_t>(y * width_ + x);
 }
 
-void InfluenceMap::addThreat(const UnitSnapshot& unit) {
-    const auto addWeapon = [this, &unit](const WeaponSnapshot& weapon, const bool air) {
+void InfluenceMap::addThreat(const UnitSnapshot& unit, const Frame currentFrame) {
+    const auto age = std::max(0, currentFrame - unit.lastSeen);
+    const auto memoryConfidence = unit.visible || isBuilding(unit.kind)
+                                      ? 1.0
+                                      : std::exp(-static_cast<double>(age) / (24.0 * 12.0));
+    if (memoryConfidence < 0.02) return;
+
+    const auto addWeapon = [this, &unit, memoryConfidence](
+                               const WeaponSnapshot& weapon,
+                               const bool air) {
         if (weapon.damage <= 0 || (!weapon.targetsAir && !weapon.targetsGround)) {
             return;
         }
@@ -115,7 +123,8 @@ void InfluenceMap::addThreat(const UnitSnapshot& unit) {
                 const auto falloff = std::max(0.05, 1.0 - range / static_cast<double>(radius));
                 auto& cell = cells_[offset(x, y)];
                 auto& field = air ? cell.airThreat : cell.groundThreat;
-                field += static_cast<float>(dps * falloff * unit.healthFraction());
+                field += static_cast<float>(
+                    dps * falloff * unit.healthFraction() * memoryConfidence);
             }
         }
     };
@@ -132,7 +141,9 @@ void InfluenceMap::addThreat(const UnitSnapshot& unit) {
         const auto maxY = std::min(height_ - 1, (unit.position.y + radius) / cellSize_);
         for (auto y = minY; y <= maxY; ++y) {
             for (auto x = minX; x <= maxX; ++x) {
-                cells_[offset(x, y)].detection = 1.0F;
+                auto& detection = cells_[offset(x, y)].detection;
+                detection = std::max(
+                    detection, static_cast<float>(memoryConfidence));
             }
         }
     }

@@ -15,6 +15,9 @@ an experiment over a map and opponent matrix, not as a verdict from one replay.
 5. Inspect replays for correlated failure modes: supply blocks, unspent bank,
    missing detection, worker collapse, bad fight entry, stalled production,
    and pathing traps.
+6. Keep matchup, map, opponent version, starting location, and commit hash in
+   every batch record. Never merge a tuning change on aggregate win rate alone
+   when one matchup or crash rate regresses materially.
 
 ## Metrics
 
@@ -42,4 +45,3 @@ next game Astra first looks for `bwapi-data/read/AstraBot.csv`, matching common
 tournament read/write isolation, then falls back to the local write copy. If a
 tournament forbids persistent learning, omit the CSV from the package; Astra
 will deterministically explore as if facing a new opponent.
-
