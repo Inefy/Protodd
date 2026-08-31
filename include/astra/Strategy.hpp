@@ -21,6 +21,7 @@ struct ProductionGoal {
     int priority{};
     bool blocking{};
     std::string reason;
+    TechnologyKind technology{TechnologyKind::none};
 };
 
 struct CompositionTarget {

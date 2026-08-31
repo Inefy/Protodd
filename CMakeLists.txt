@@ -13,6 +13,7 @@ include(AstraWarnings)
 add_library(astra_core OBJECT
     src/core/GameState.cpp
     src/core/UnitCatalog.cpp
+    src/core/Technology.cpp
     src/core/Information.cpp
     src/core/InfluenceMap.cpp
     src/core/Strategy.cpp

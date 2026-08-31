@@ -85,7 +85,9 @@ void AstraModule::onFrame() {
     if (state_.frame % 12 == 2) updateWorkers();
     if (state_.frame % 24 == 3) updateScouting();
     if (state_.frame % std::max(1, state_.latencyFrames) == 0) updateCombat();
-    if (state_.frame % 24 == 5) bridge_.runMaintenance();
+    if (state_.frame % 24 == 5) {
+        bridge_.runMaintenance(maintenanceMineralReserve_, maintenanceGasReserve_);
+    }
     if (state_.frame % (24 * 15) == 0) logDecision();
 
     bridge_.drawDebug(plan_, opponent_.assessment(), fight_);
@@ -107,6 +109,14 @@ void AstraModule::updateStrategy() {
 void AstraModule::updateMacro() {
     ResourceLedger ledger{state_.self.minerals, state_.self.gas};
     const auto actions = macro_.reconcile(state_, plan_, ledger);
+    maintenanceMineralReserve_ = 0;
+    maintenanceGasReserve_ = 0;
+    for (const auto& action : actions) {
+        if (!action.blocksLowerPriority) continue;
+        maintenanceMineralReserve_ = std::max(maintenanceMineralReserve_, action.minerals);
+        maintenanceGasReserve_ = std::max(maintenanceGasReserve_, action.gas);
+        break;
+    }
     bridge_.executeMacro(actions, plan_);
 }
 

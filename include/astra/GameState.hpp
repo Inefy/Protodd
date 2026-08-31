@@ -15,6 +15,31 @@ using UnitId = std::int32_t;
 
 enum class Race : std::uint8_t { unknown, protoss, terran, zerg, random };
 
+// Research and upgrades are deliberately separate from UnitKind. Treating a
+// technology as a unit made strategic goals impossible to price, observe, or
+// execute consistently through BWAPI.
+enum class TechnologyKind : std::uint8_t {
+    none,
+    singularityCharge,
+    legEnhancements,
+    psionicStorm,
+    stasisField,
+    recall,
+    khaydarinAmulet,
+    graviticDrive,
+    graviticBoosters,
+    sensorArray,
+    reaverCapacity,
+    scarabDamage,
+    carrierCapacity,
+    protossGroundWeapons,
+    protossGroundArmor,
+    protossPlasmaShields,
+    protossAirWeapons,
+    protossAirArmor,
+    count,
+};
+
 enum class UnitKind : std::uint16_t {
     unknown,
     // Shared semantic kinds.
@@ -173,6 +198,12 @@ struct BaseSnapshot {
     int geysers{};
 };
 
+struct TechnologySnapshot {
+    TechnologyKind kind{TechnologyKind::none};
+    int level{};
+    bool inProgress{};
+};
+
 struct PlayerSnapshot {
     int id{-1};
     Race race{Race::unknown};
@@ -184,6 +215,7 @@ struct PlayerSnapshot {
     int gatheredGas{};
     std::vector<UnitSnapshot> units;
     std::vector<UnitKind> queuedUnits;
+    std::vector<TechnologySnapshot> technologies;
 };
 
 struct GameState {

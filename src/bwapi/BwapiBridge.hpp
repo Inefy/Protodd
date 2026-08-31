@@ -31,7 +31,7 @@ public:
         int maximumCommands = 2);
     void executeWorkers(std::span<const WorkerAssignment> assignments);
     void executeScouts(std::span<const ScoutOrder> orders);
-    void runMaintenance();
+    void runMaintenance(int mineralReserve = 0, int gasReserve = 0);
     void drawDebug(
         const StrategicPlan& plan,
         const ThreatAssessment& threat,
@@ -39,6 +39,8 @@ public:
 
     [[nodiscard]] static UnitKind toKind(BWAPI::UnitType type) noexcept;
     [[nodiscard]] static BWAPI::UnitType toBwapi(UnitKind kind) noexcept;
+    [[nodiscard]] static BWAPI::TechType toBwapiTech(TechnologyKind kind) noexcept;
+    [[nodiscard]] static BWAPI::UpgradeType toBwapiUpgrade(TechnologyKind kind) noexcept;
 
 private:
     struct SpellZone {
@@ -69,6 +71,7 @@ private:
         const StrategicPlan& plan) const;
     [[nodiscard]] bool build(const MacroAction& action, const StrategicPlan& plan);
     [[nodiscard]] bool train(const MacroAction& action);
+    [[nodiscard]] bool executeTechnology(const MacroAction& action);
     [[nodiscard]] static BWAPI::Position toBwapiPosition(Position position) noexcept;
 };
 

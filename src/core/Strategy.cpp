@@ -34,6 +34,22 @@ void goal(
     plan.goals.push_back({kind, target, desired, priority, blocking, std::string(reason)});
 }
 
+void technologyGoal(
+    StrategicPlan& plan,
+    const TechnologyKind technology,
+    const int desiredLevel,
+    const int priority,
+    const std::string_view reason,
+    const bool blocking = false) {
+    const auto kind = technology == TechnologyKind::psionicStorm ||
+                              technology == TechnologyKind::stasisField ||
+                              technology == TechnologyKind::recall
+                          ? GoalKind::research
+                          : GoalKind::upgrade;
+    plan.goals.push_back({kind, UnitKind::unknown, desiredLevel, priority, blocking,
+                          std::string(reason), technology});
+}
+
 Position ourMain(const GameState& state) {
     const auto nexus = std::ranges::find(state.self.units, UnitKind::nexus, &UnitSnapshot::kind);
     return nexus != state.self.units.end() ? nexus->position : Position{-1, -1};
@@ -87,7 +103,8 @@ StrategicPlan StrategyEngine::planPvT(
     result.name = "PvT one-gate observer expansion";
     result.desiredWorkers = std::min(72, 22 + minute(state) * 4);
     result.desiredBases = minute(state) < 7 ? 1 : (minute(state) < 13 ? 2 : 3);
-    result.desiredGasWorkers = minute(state) < 4 ? 0 : (minute(state) < 9 ? 3 : 6);
+    result.desiredGasWorkers = minute(state) < 2 ? 0 : (minute(state) < 7 ? 3 :
+                                                       (minute(state) < 12 ? 6 : 9));
     result.posture = minute(state) < 6 ? Posture::hold : Posture::pressure;
     result.attackThreshold = 1.32;
     result.composition = {{UnitKind::dragoon, 0.55}, {UnitKind::zealot, 0.22},
@@ -97,6 +114,8 @@ StrategicPlan StrategyEngine::planPvT(
          "baseline production");
     goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 92,
          "unlock dragoons and range");
+    technologyGoal(result, TechnologyKind::singularityCharge, 1, 91,
+                   "range is mandatory for dragoon control", true);
     goal(result, GoalKind::train, UnitKind::dragoon, std::max(3, minute(state) * 2), 82,
          "range control against Terran");
     goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 78,
@@ -111,11 +130,31 @@ StrategicPlan StrategyEngine::planPvT(
              "storm and late-game composition");
         goal(result, GoalKind::train, UnitKind::highTemplar, 4, 60,
              "storm clustered bio and support tanks");
+        technologyGoal(result, TechnologyKind::legEnhancements, 1, 69,
+                       "speed closes on siege lines");
+        technologyGoal(result, TechnologyKind::psionicStorm, 1, 67,
+                       "enable templar before mass production", true);
     }
     if (minute(state) >= 15 && threat.air < 0.35) {
         goal(result, GoalKind::build, UnitKind::arbiterTribunal, 1, 52,
              "stasis and recall transition");
         goal(result, GoalKind::train, UnitKind::arbiter, 2, 50, "late-game control");
+        technologyGoal(result, TechnologyKind::stasisField, 1, 56,
+                       "neutralize clustered siege armies");
+        technologyGoal(result, TechnologyKind::recall, 1, 48,
+                       "create a late-game positional threat");
+    }
+    if (minute(state) >= 7) {
+        const auto weaponLevel = minute(state) >= 18 ? 3 : (minute(state) >= 12 ? 2 : 1);
+        technologyGoal(result, TechnologyKind::protossGroundWeapons, weaponLevel, 63,
+                       "scale the core ground army");
+    }
+    if (minute(state) >= 13) {
+        technologyGoal(result, TechnologyKind::khaydarinAmulet, 1, 54,
+                       "increase storm availability");
+        technologyGoal(result, TechnologyKind::protossGroundArmor,
+                       minute(state) >= 19 ? 2 : 1, 51,
+                       "improve zealot durability");
     }
     if (threat.aggression > 0.62) {
         result.name = "PvT anti-pressure hold";
@@ -135,7 +174,8 @@ StrategicPlan StrategyEngine::planPvZ(
     result.name = "PvZ forge expansion into corsair-templar";
     result.desiredWorkers = std::min(70, 20 + minute(state) * 4);
     result.desiredBases = minute(state) < 3 ? 1 : (minute(state) < 11 ? 2 : 3);
-    result.desiredGasWorkers = minute(state) < 6 ? 0 : (minute(state) < 10 ? 3 : 6);
+    result.desiredGasWorkers = minute(state) < 4 ? 0 : (minute(state) < 8 ? 3 :
+                                                       (minute(state) < 12 ? 6 : 9));
     result.posture = minute(state) < 8 ? Posture::hold : Posture::harass;
     result.attackThreshold = 1.2;
     result.composition = {{UnitKind::zealot, 0.35}, {UnitKind::dragoon, 0.12},
@@ -143,6 +183,10 @@ StrategicPlan StrategyEngine::planPvZ(
                           {UnitKind::archon, 0.10}};
 
     goal(result, GoalKind::build, UnitKind::forge, 1, 93, "safe natural and upgrades");
+    if (minute(state) >= 4 && threat.immediateGround <= 0.45) {
+        technologyGoal(result, TechnologyKind::protossGroundWeapons, 1, 87,
+                       "zealot attack timing");
+    }
     const auto defensiveBases = std::max(1, count(state, UnitKind::nexus));
     goal(result, GoalKind::build, UnitKind::photonCannon,
          std::min(6, defensiveBases * 2), 89,
@@ -159,6 +203,19 @@ StrategicPlan StrategyEngine::planPvZ(
     goal(result, GoalKind::build, UnitKind::templarArchives, 1, 71, "storm versus Zerg mass");
     goal(result, GoalKind::train, UnitKind::highTemplar, std::max(2, minute(state) / 3), 72,
          "storm support");
+
+    if (minute(state) >= 8) {
+        technologyGoal(result, TechnologyKind::legEnhancements, 1, 78,
+                       "speed for surrounds and reinforcement");
+        technologyGoal(result, TechnologyKind::psionicStorm, 1, 77,
+                       "storm is the core anti-swarm tool", true);
+    }
+    if (minute(state) >= 11) {
+        technologyGoal(result, TechnologyKind::khaydarinAmulet, 1, 65,
+                       "sustain repeated storms");
+        technologyGoal(result, TechnologyKind::protossAirWeapons, 1, 58,
+                       "keep corsairs ahead of mutalisks");
+    }
 
     if (threat.immediateGround > 0.45) {
         result.name = "PvZ emergency gateway hold";
@@ -182,7 +239,8 @@ StrategicPlan StrategyEngine::planPvP(
     result.name = "PvP two-gate robotics control";
     result.desiredWorkers = std::min(66, 18 + minute(state) * 4);
     result.desiredBases = minute(state) < 9 ? 1 : (minute(state) < 15 ? 2 : 3);
-    result.desiredGasWorkers = minute(state) < 4 ? 0 : 6;
+    result.desiredGasWorkers = minute(state) < 2 ? 0 : (minute(state) < 8 ? 3 :
+                                                       (minute(state) < 12 ? 6 : 9));
     result.posture = minute(state) < 6 ? Posture::hold : Posture::pressure;
     result.attackThreshold = 1.18;
     result.composition = {{UnitKind::dragoon, 0.58}, {UnitKind::zealot, 0.14},
@@ -191,6 +249,8 @@ StrategicPlan StrategyEngine::planPvP(
     goal(result, GoalKind::build, UnitKind::gateway, minute(state) < 9 ? 2 : 4, 90,
          "tempo and map control");
     goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 94, "dragoon access");
+    technologyGoal(result, TechnologyKind::singularityCharge, 1, 93,
+                   "range wins dragoon contact", true);
     goal(result, GoalKind::train, UnitKind::dragoon, std::max(4, minute(state) * 2), 86,
          "core PvP army");
     goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 85,
@@ -200,6 +260,18 @@ StrategicPlan StrategyEngine::planPvP(
     goal(result, GoalKind::build, UnitKind::roboticsSupportBay, 1, 69, "reaver access");
     goal(result, GoalKind::train, UnitKind::reaver, 2, 70, "area control");
     goal(result, GoalKind::train, UnitKind::shuttle, 1, 67, "reaver mobility");
+
+    if (minute(state) >= 8) {
+        technologyGoal(result, TechnologyKind::protossGroundWeapons,
+                       minute(state) >= 15 ? 2 : 1, 66,
+                       "scale dragoon volleys");
+    }
+    if (minute(state) >= 10) {
+        technologyGoal(result, TechnologyKind::reaverCapacity, 1, 64,
+                       "increase reaver combat endurance");
+        technologyGoal(result, TechnologyKind::scarabDamage, 1, 61,
+                       "improve reaver breakpoints");
+    }
 
     if (threat.aggression > 0.6) {
         result.name = "PvP two-gate emergency defense";

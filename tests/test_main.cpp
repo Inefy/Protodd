@@ -10,6 +10,7 @@
 #include "astra/Strategy.hpp"
 #include "astra/Squads.hpp"
 #include "astra/UnitCatalog.hpp"
+#include "astra/Technology.hpp"
 #include "astra/Workers.hpp"
 
 #include <algorithm>
@@ -99,6 +100,9 @@ void testCatalog() {
     expect(batteryRequirements.size() == 1 &&
                batteryRequirements.front() == astra::UnitKind::gateway,
            "Shield Battery follows the actual Gateway prerequisite");
+    expect(astra::technologyStats(astra::TechnologyKind::protossGroundWeapons)
+                       .mineralCost(2) == 150,
+           "repeatable upgrades use next-level pricing");
 }
 
 void testOpponentInferenceAndStrategy() {
@@ -250,6 +254,41 @@ void testMacroReservations() {
     expect(compositionActions.size() == 1 &&
                compositionActions.front().target == astra::UnitKind::dragoon,
            "remaining resources continuously reinforce the planned composition");
+
+    astra::GameState upgradeState;
+    upgradeState.self.minerals = 150;
+    upgradeState.self.gas = 150;
+    upgradeState.self.units.push_back(unit(8, astra::UnitKind::cyberneticsCore, true));
+    astra::StrategicPlan upgradePlan;
+    upgradePlan.goals = {
+        {astra::GoalKind::upgrade, astra::UnitKind::unknown, 1, 95, true,
+         "dragoon range", astra::TechnologyKind::singularityCharge},
+    };
+    astra::ResourceLedger upgradeLedger{150, 150};
+    const auto upgradeActions = planner.reconcile(upgradeState, upgradePlan, upgradeLedger);
+    expect(upgradeActions.size() == 1 && upgradeActions.front().reserved &&
+               upgradeActions.front().action == astra::MacroActionKind::upgrade &&
+               upgradeActions.front().technology ==
+                   astra::TechnologyKind::singularityCharge,
+           "strategic upgrades reserve resources as executable macro actions");
+
+    upgradeState.self.technologies.push_back(
+        {astra::TechnologyKind::singularityCharge, 0, true});
+    astra::ResourceLedger duplicateUpgradeLedger{150, 150};
+    expect(planner.reconcile(upgradeState, upgradePlan, duplicateUpgradeLedger).empty(),
+           "in-progress technology is never issued twice");
+
+    upgradeState.self.technologies.clear();
+    upgradeState.self.minerals = 100;
+    upgradeState.self.gas = 0;
+    upgradePlan.goals.push_back(
+        {astra::GoalKind::train, astra::UnitKind::probe, 1, 30, false, "worker"});
+    astra::ResourceLedger savingLedger{100, 0};
+    const auto savingActions = planner.reconcile(upgradeState, upgradePlan, savingLedger);
+    expect(savingActions.size() == 1 && !savingActions.front().reserved &&
+               savingActions.front().technology ==
+                   astra::TechnologyKind::singularityCharge,
+           "mandatory technology preserves its bank instead of leaking to cheap production");
 }
 
 void testOpponentLearning() {

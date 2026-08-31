@@ -18,6 +18,8 @@ struct MacroAction {
     int gas{};
     bool reserved{};
     std::string reason;
+    TechnologyKind technology{TechnologyKind::none};
+    bool blocksLowerPriority{};
 };
 
 struct ResourceLedger {

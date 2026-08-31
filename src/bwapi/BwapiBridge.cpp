@@ -142,7 +142,7 @@ int BwapiBridge::executeMacro(
             case MacroActionKind::expand: success = build(action, plan); break;
             case MacroActionKind::train: success = train(action); break;
             case MacroActionKind::research:
-            case MacroActionKind::upgrade: break;
+            case MacroActionKind::upgrade: success = executeTechnology(action); break;
         }
         if (success) {
             ++issued;
@@ -215,7 +215,7 @@ void BwapiBridge::executeScouts(const std::span<const ScoutOrder> orders) {
     }
 }
 
-void BwapiBridge::runMaintenance() {
+void BwapiBridge::runMaintenance(const int mineralReserve, const int gasReserve) {
     const auto self = Broodwar->self();
     if (self == nullptr) {
         return;
@@ -225,38 +225,28 @@ void BwapiBridge::runMaintenance() {
         return zone.expires <= frame;
     });
 
+    auto freeMinerals = std::max(0, self->minerals() - mineralReserve);
+    auto freeGas = std::max(0, self->gas() - gasReserve);
+
     for (const auto unit : self->getUnits()) {
         if (unit == nullptr || !unit->exists() || !unit->isCompleted()) {
             continue;
         }
         const auto type = unit->getType();
-        if (type == UnitTypes::Protoss_Reaver && unit->getScarabCount() < 5 &&
-            unit->canTrain(UnitTypes::Protoss_Scarab)) {
-            unit->train(UnitTypes::Protoss_Scarab);
+        if (type == UnitTypes::Protoss_Reaver && unit->getScarabCount() < 5) {
+            const auto ammo = UnitTypes::Protoss_Scarab;
+            if (freeMinerals >= ammo.mineralPrice() && freeGas >= ammo.gasPrice() &&
+                unit->canTrain(ammo) && unit->train(ammo)) {
+                freeMinerals -= ammo.mineralPrice();
+                freeGas -= ammo.gasPrice();
+            }
         } else if (type == UnitTypes::Protoss_Carrier && unit->getInterceptorCount() < 8 &&
-                   unit->canTrain(UnitTypes::Protoss_Interceptor)) {
-            unit->train(UnitTypes::Protoss_Interceptor);
-        } else if (type == UnitTypes::Protoss_Cybernetics_Core &&
-                   unit->canUpgrade(UpgradeTypes::Singularity_Charge)) {
-            unit->upgrade(UpgradeTypes::Singularity_Charge);
-        } else if (type == UnitTypes::Protoss_Citadel_of_Adun &&
-                   unit->canUpgrade(UpgradeTypes::Leg_Enhancements)) {
-            unit->upgrade(UpgradeTypes::Leg_Enhancements);
-        } else if (type == UnitTypes::Protoss_Templar_Archives &&
-                   unit->canResearch(TechTypes::Psionic_Storm)) {
-            unit->research(TechTypes::Psionic_Storm);
-        } else if (type == UnitTypes::Protoss_Arbiter_Tribunal &&
-                   unit->canResearch(TechTypes::Stasis_Field)) {
-            unit->research(TechTypes::Stasis_Field);
-        } else if (type == UnitTypes::Protoss_Robotics_Support_Bay &&
-                   unit->canUpgrade(UpgradeTypes::Reaver_Capacity)) {
-            unit->upgrade(UpgradeTypes::Reaver_Capacity);
-        } else if (type == UnitTypes::Protoss_Fleet_Beacon &&
-                   unit->canUpgrade(UpgradeTypes::Carrier_Capacity)) {
-            unit->upgrade(UpgradeTypes::Carrier_Capacity);
-        } else if (type == UnitTypes::Protoss_Forge &&
-                   unit->canUpgrade(UpgradeTypes::Protoss_Ground_Weapons)) {
-            unit->upgrade(UpgradeTypes::Protoss_Ground_Weapons);
+                   freeMinerals >= UnitTypes::Protoss_Interceptor.mineralPrice() &&
+                   freeGas >= UnitTypes::Protoss_Interceptor.gasPrice() &&
+                   unit->canTrain(UnitTypes::Protoss_Interceptor) &&
+                   unit->train(UnitTypes::Protoss_Interceptor)) {
+            freeMinerals -= UnitTypes::Protoss_Interceptor.mineralPrice();
+            freeGas -= UnitTypes::Protoss_Interceptor.gasPrice();
         }
     }
 
@@ -460,6 +450,23 @@ PlayerSnapshot BwapiBridge::snapshotPlayer(const BWAPI::Player player, const boo
     result.gatheredMinerals = ours ? player->gatheredMinerals() : 0;
     result.gatheredGas = ours ? player->gatheredGas() : 0;
     if (ours) {
+        result.technologies.reserve(
+            static_cast<std::size_t>(TechnologyKind::count) - 1U);
+        for (auto value = static_cast<int>(TechnologyKind::none) + 1;
+             value < static_cast<int>(TechnologyKind::count); ++value) {
+            const auto kind = static_cast<TechnologyKind>(value);
+            const auto tech = toBwapiTech(kind);
+            const auto upgrade = toBwapiUpgrade(kind);
+            if (tech != TechTypes::None) {
+                result.technologies.push_back(
+                    {kind, player->hasResearched(tech) ? 1 : 0,
+                     player->isResearching(tech)});
+            } else if (upgrade != UpgradeTypes::None) {
+                result.technologies.push_back(
+                    {kind, player->getUpgradeLevel(upgrade),
+                     player->isUpgrading(upgrade)});
+            }
+        }
         result.units.reserve(player->getUnits().size());
         for (const auto unit : player->getUnits()) {
             if (unit != nullptr && unit->exists()) {
@@ -759,6 +766,44 @@ bool BwapiBridge::train(const MacroAction& action) {
     return false;
 }
 
+bool BwapiBridge::executeTechnology(const MacroAction& action) {
+    const auto self = Broodwar->self();
+    if (self == nullptr || action.technology == TechnologyKind::none) return false;
+
+    const auto tech = toBwapiTech(action.technology);
+    if (tech != TechTypes::None) {
+        if (self->hasResearched(tech) || self->isResearching(tech)) return false;
+        Unit producer = nullptr;
+        for (const auto candidate : self->getUnits()) {
+            if (candidate == nullptr || !candidate->exists() || !candidate->isCompleted() ||
+                candidate->getType() != tech.whatResearches() || candidate->isResearching()) {
+                continue;
+            }
+            if (producer == nullptr || candidate->getID() < producer->getID()) {
+                producer = candidate;
+            }
+        }
+        return producer != nullptr && producer->canResearch(tech) && producer->research(tech);
+    }
+
+    const auto upgrade = toBwapiUpgrade(action.technology);
+    if (upgrade == UpgradeTypes::None || self->isUpgrading(upgrade) ||
+        self->getUpgradeLevel(upgrade) >= upgrade.maxRepeats()) {
+        return false;
+    }
+    Unit producer = nullptr;
+    for (const auto candidate : self->getUnits()) {
+        if (candidate == nullptr || !candidate->exists() || !candidate->isCompleted() ||
+            candidate->getType() != upgrade.whatUpgrades() || candidate->isUpgrading()) {
+            continue;
+        }
+        if (producer == nullptr || candidate->getID() < producer->getID()) {
+            producer = candidate;
+        }
+    }
+    return producer != nullptr && producer->canUpgrade(upgrade) && producer->upgrade(upgrade);
+}
+
 BWAPI::Position BwapiBridge::toBwapiPosition(const Position position) noexcept {
     return {position.x, position.y};
 }
@@ -867,6 +912,37 @@ BWAPI::UnitType BwapiBridge::toBwapi(const UnitKind kind) noexcept {
         case UnitKind::corsair: return Protoss_Corsair;
         case UnitKind::carrier: return Protoss_Carrier;
         case UnitKind::arbiter: return Protoss_Arbiter;
+        default: return None;
+    }
+}
+
+BWAPI::TechType BwapiBridge::toBwapiTech(const TechnologyKind kind) noexcept {
+    using namespace TechTypes;
+    switch (kind) {
+        case TechnologyKind::psionicStorm: return Psionic_Storm;
+        case TechnologyKind::stasisField: return Stasis_Field;
+        case TechnologyKind::recall: return Recall;
+        default: return None;
+    }
+}
+
+BWAPI::UpgradeType BwapiBridge::toBwapiUpgrade(const TechnologyKind kind) noexcept {
+    using namespace UpgradeTypes;
+    switch (kind) {
+        case TechnologyKind::singularityCharge: return Singularity_Charge;
+        case TechnologyKind::legEnhancements: return Leg_Enhancements;
+        case TechnologyKind::khaydarinAmulet: return Khaydarin_Amulet;
+        case TechnologyKind::graviticDrive: return Gravitic_Drive;
+        case TechnologyKind::graviticBoosters: return Gravitic_Boosters;
+        case TechnologyKind::sensorArray: return Sensor_Array;
+        case TechnologyKind::reaverCapacity: return Reaver_Capacity;
+        case TechnologyKind::scarabDamage: return Scarab_Damage;
+        case TechnologyKind::carrierCapacity: return Carrier_Capacity;
+        case TechnologyKind::protossGroundWeapons: return Protoss_Ground_Weapons;
+        case TechnologyKind::protossGroundArmor: return Protoss_Ground_Armor;
+        case TechnologyKind::protossPlasmaShields: return Protoss_Plasma_Shields;
+        case TechnologyKind::protossAirWeapons: return Protoss_Air_Weapons;
+        case TechnologyKind::protossAirArmor: return Protoss_Air_Armor;
         default: return None;
     }
 }

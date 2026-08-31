@@ -1,5 +1,6 @@
 #include "astra/MacroPlanner.hpp"
 
+#include "astra/Technology.hpp"
 #include "astra/UnitCatalog.hpp"
 
 #include <algorithm>
@@ -30,6 +31,58 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     std::unordered_map<UnitKind, int> planned;
 
     for (const auto& goal : plan.goals) {
+        if (goal.technology != TechnologyKind::none) {
+            const auto& stats = technologyStats(goal.technology);
+            const auto currentLevel = technologyLevel(state.self, goal.technology);
+            const auto desiredLevel = std::clamp(goal.desiredCount, 1, stats.maximumLevel);
+            if (currentLevel >= desiredLevel ||
+                technologyInProgress(state.self, goal.technology)) {
+                continue;
+            }
+
+            const auto nextLevel = currentLevel + 1;
+            const auto minerals = stats.mineralCost(nextLevel);
+            const auto gas = stats.gasCost(nextLevel);
+            if (countCompleted(state, stats.producer) == 0) {
+                const auto nested = nextMissingPrerequisite(state, stats.producer);
+                const auto prerequisite = nested != UnitKind::unknown ? nested : stats.producer;
+                if (countExisting(state, prerequisite) + planned[prerequisite] == 0) {
+                    const auto& unit = unitStats(prerequisite);
+                    MacroAction action{
+                        MacroActionKind::build, prerequisite, goal.priority,
+                        unit.minerals, unit.gas, false,
+                        "unlock " + std::string(stats.name), TechnologyKind::none,
+                        goal.blocking,
+                    };
+                    action.reserved = ledger.reserve(unit.minerals, unit.gas);
+                    actions.push_back(std::move(action));
+                    if (actions.back().reserved) ++planned[prerequisite];
+                    if (goal.blocking && !actions.back().reserved) break;
+                } else if (goal.blocking) {
+                    MacroAction waiting{
+                        stats.research ? MacroActionKind::research
+                                       : MacroActionKind::upgrade,
+                        UnitKind::unknown, goal.priority, minerals, gas, false,
+                        goal.reason, goal.technology, true,
+                    };
+                    waiting.reserved = ledger.reserve(minerals, gas);
+                    actions.push_back(std::move(waiting));
+                    break;
+                }
+                continue;
+            }
+
+            MacroAction action{
+                stats.research ? MacroActionKind::research : MacroActionKind::upgrade,
+                UnitKind::unknown, goal.priority, minerals, gas, false,
+                goal.reason, goal.technology, goal.blocking,
+            };
+            action.reserved = ledger.reserve(minerals, gas);
+            if (action.reserved || goal.blocking) actions.push_back(std::move(action));
+            if (goal.blocking && !actions.back().reserved) break;
+            continue;
+        }
+
         const auto existing = countExisting(state, goal.target) + planned[goal.target];
         if (existing >= goal.desiredCount) {
             continue;
@@ -43,6 +96,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                     MacroActionKind::build, prerequisite, goal.priority,
                     stats.minerals, stats.gas, false,
                     "unlock " + std::string(unitStats(goal.target).name),
+                    TechnologyKind::none, goal.blocking,
                 };
                 action.reserved = ledger.reserve(stats.minerals, stats.gas);
                 if (action.reserved || goal.blocking) {
@@ -50,6 +104,19 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                     if (actions.back().reserved) ++planned[prerequisite];
                 }
                 if (goal.blocking && !actions.back().reserved) break;
+            } else if (goal.blocking) {
+                // The prerequisite already exists but is incomplete. Reserve
+                // the target now so routine production cannot drain its bank
+                // before the structure finishes.
+                const auto& target = unitStats(goal.target);
+                MacroAction waiting{
+                    actionKind(goal.goal), goal.target, goal.priority,
+                    target.minerals, target.gas, false, goal.reason,
+                    TechnologyKind::none, true,
+                };
+                waiting.reserved = ledger.reserve(target.minerals, target.gas);
+                actions.push_back(std::move(waiting));
+                break;
             }
             continue;
         }
@@ -58,6 +125,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         MacroAction action{
             actionKind(goal.goal), goal.target, goal.priority,
             stats.minerals, stats.gas, false, goal.reason,
+            TechnologyKind::none, goal.blocking,
         };
         action.reserved = ledger.reserve(stats.minerals, stats.gas);
         if (action.reserved || goal.blocking) {

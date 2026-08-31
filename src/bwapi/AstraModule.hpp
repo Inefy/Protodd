@@ -51,6 +51,8 @@ private:
     std::string opponentName_;
     std::string mapName_;
     std::vector<UnitId> detectorEscorts_;
+    int maintenanceMineralReserve_{};
+    int maintenanceGasReserve_{};
     std::ofstream log_;
 
     void updateStrategy();
