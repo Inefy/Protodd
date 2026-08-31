@@ -43,6 +43,10 @@ double OpeningRecord::winRate() const noexcept {
 
 void OpponentHistory::parse(const std::string_view csv) {
     records_.clear();
+    merge(csv);
+}
+
+void OpponentHistory::merge(const std::string_view csv) {
     std::istringstream input{std::string(csv)};
     std::string line;
     while (std::getline(input, line)) {
@@ -63,7 +67,12 @@ void OpponentHistory::parse(const std::string_view csv) {
         int losses = 0;
         if (!valid || !parseInt(fields[3], wins) || !parseInt(fields[4], losses)) continue;
         const auto style = parseStyle(fields[2]);
-        records_[key(fields[0], fields[1], style)] = {wins, losses};
+        auto& record = records_[key(fields[0], fields[1], style)];
+        // Each file is a cumulative snapshot. Component-wise maxima merge an
+        // immutable tournament read baseline with a newer local write snapshot
+        // without double-counting the common history.
+        record.wins = std::max(record.wins, wins);
+        record.losses = std::max(record.losses, losses);
     }
 }
 

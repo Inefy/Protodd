@@ -174,6 +174,33 @@ void testSupplyPlanning() {
            "pending pylon supply prevents a duplicate construction order");
 }
 
+void testStrategicTargeting() {
+    astra::GameState state;
+    state.self.id = 1;
+    state.self.race = astra::Race::protoss;
+    state.enemy.id = 2;
+    state.enemy.race = astra::Race::terran;
+    state.bases = {
+        {1, {256, 256}, {280, 256}, 8000, 5000, 1, 100, true, false},
+        {2, {1800, 1800}, {1760, 1800}, 8000, 5000, -1, 0, true, false},
+    };
+    auto nexus = unit(1, astra::UnitKind::nexus, true, {256, 256});
+    nexus.role = astra::UnitRole::resourceDepot;
+    state.self.units.push_back(nexus);
+
+    astra::StrategyEngine strategy;
+    const auto search = strategy.plan(state, {});
+    expect(search.attackTarget == astra::Position{1800, 1800},
+           "unknown enemy search excludes our owned start location");
+
+    auto hiddenTech = unit(20, astra::UnitKind::factory, false, {1500, 1400});
+    hiddenTech.visible = false;
+    state.enemy.units.push_back(hiddenTech);
+    const auto cleanup = strategy.plan(state, {});
+    expect(cleanup.attackTarget == hiddenTech.position,
+           "cleanup objective retains a remembered enemy structure");
+}
+
 void testMacroReservations() {
     astra::GameState state;
     state.self.minerals = 200;
@@ -306,6 +333,12 @@ void testOpponentLearning() {
     restored.parse(encoded);
     expect(restored.lookup("Bot", "Map", astra::OpeningStyle::standard).wins == 9,
            "opponent history round-trips through tournament CSV");
+
+    restored.merge("Bot,Map,standard,11,2\nBot,Map,aggressive,1,4\n");
+    expect(restored.lookup("Bot", "Map", astra::OpeningStyle::standard).wins == 11 &&
+               restored.lookup("Bot", "Map", astra::OpeningStyle::standard).losses == 2 &&
+               restored.lookup("Bot", "Map", astra::OpeningStyle::aggressive).losses == 8,
+           "read and write learning snapshots merge without losing cumulative results");
 
     astra::OpponentHistory fresh;
     const auto exploration = fresh.choose("NewBot", "Map", 3);
@@ -460,6 +493,11 @@ void testWorkersAndScouts() {
     expect(assignments.size() == 1 && assignments.front().job == astra::WorkerJob::gas,
            "gas policy assigns requested worker count");
 
+    const astra::UnitId reservedProbe[]{probe.id};
+    const auto leased = workers.assign(state, plan, influence, reservedProbe);
+    expect(leased.size() == 1 && leased.front().job == astra::WorkerJob::build,
+           "leased scout or builder probe cannot be reclaimed by mining");
+
     const auto scoutState = state;
     state.bases[1].ownerId = 1;
     state.bases[1].mineralPatches = 8;
@@ -544,6 +582,7 @@ int main() {
     testCatalog();
     testOpponentInferenceAndStrategy();
     testSupplyPlanning();
+    testStrategicTargeting();
     testMacroReservations();
     testOpponentLearning();
     testInfluenceAndCombat();

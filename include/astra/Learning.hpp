@@ -21,6 +21,7 @@ struct OpeningRecord {
 class OpponentHistory {
 public:
     void parse(std::string_view csv);
+    void merge(std::string_view csv);
     [[nodiscard]] std::string serialize() const;
 
     [[nodiscard]] OpeningStyle choose(
@@ -47,4 +48,3 @@ private:
 };
 
 }  // namespace astra
-

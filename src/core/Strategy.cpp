@@ -3,6 +3,7 @@
 #include "astra/UnitCatalog.hpp"
 
 #include <algorithm>
+#include <limits>
 
 namespace astra {
 namespace {
@@ -62,10 +63,46 @@ Position enemyMain(const GameState& state) {
     if (depot != state.enemy.units.end()) {
         return depot->position;
     }
-    const auto start = std::ranges::find_if(state.bases, [](const BaseSnapshot& base) {
-        return base.startLocation && base.ownerId != -1;
+
+    // Keep attacking known structures after the last depot falls. This avoids
+    // the common cleanup failure where an army returns home while a tech
+    // building survives elsewhere on the map.
+    const auto building = std::ranges::find_if(state.enemy.units, [](const UnitSnapshot& unit) {
+        return isBuilding(unit.kind) && unit.position.valid();
     });
-    return start != state.bases.end() ? start->center : Position{-1, -1};
+    if (building != state.enemy.units.end()) return building->position;
+
+    // Before the enemy start is confirmed, search the stalest plausible start.
+    // Explicitly exclude our own start; the previous ownerId != -1 fallback
+    // selected Astra's main as soon as its Nexus was observed.
+    const BaseSnapshot* candidate = nullptr;
+    auto oldest = std::numeric_limits<Frame>::max();
+    for (const auto& base : state.bases) {
+        if (!base.startLocation || !base.center.valid() || base.ownerId == state.self.id) continue;
+        if (base.ownerId == state.enemy.id) return base.center;
+        if (base.ownerId == -1 && base.lastScouted < oldest) {
+            oldest = base.lastScouted;
+            candidate = &base;
+        }
+    }
+    if (candidate != nullptr) return candidate->center;
+
+    const auto visibleTarget = std::ranges::find_if(
+        state.enemy.units, [](const UnitSnapshot& unit) {
+            return unit.visible && unit.position.valid();
+        });
+    if (visibleTarget != state.enemy.units.end()) return visibleTarget->position;
+
+    // Finally sweep stale non-owned expansions to reveal hidden buildings.
+    oldest = std::numeric_limits<Frame>::max();
+    for (const auto& base : state.bases) {
+        if (!base.center.valid() || base.ownerId == state.self.id) continue;
+        if (base.lastScouted < oldest) {
+            oldest = base.lastScouted;
+            candidate = &base;
+        }
+    }
+    return candidate != nullptr ? candidate->center : Position{-1, -1};
 }
 
 }  // namespace

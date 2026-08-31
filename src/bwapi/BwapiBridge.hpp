@@ -23,6 +23,7 @@ public:
     [[nodiscard]] GameState observe();
     void remember(BWAPI::Unit unit);
     void forget(BWAPI::Unit unit);
+    [[nodiscard]] std::vector<UnitId> reservedBuilders() const;
 
     [[nodiscard]] bool execute(const Command& command);
     int executeMacro(
@@ -48,9 +49,15 @@ private:
         Frame expires{};
     };
 
+    struct PendingBuild {
+        UnitId builder{-1};
+        Frame issued{};
+        Position target{-1, -1};
+    };
+
     std::unordered_map<UnitId, UnitSnapshot> enemyMemory_;
     std::unordered_map<int, Frame> baseLastScouted_;
-    std::unordered_map<UnitKind, Frame> pendingBuilds_;
+    std::unordered_map<UnitKind, PendingBuild> pendingBuilds_;
     std::vector<Position> resourceClusters_;
     std::vector<SpellZone> recentAreaSpells_;
 

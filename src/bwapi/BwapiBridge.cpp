@@ -70,6 +70,19 @@ GameState BwapiBridge::observe() {
         ++iterator;
     }
     std::ranges::sort(state.enemy.units, {}, &UnitSnapshot::id);
+
+    const auto frame = state.frame;
+    std::erase_if(pendingBuilds_, [frame](const auto& entry) {
+        const auto kind = entry.first;
+        const auto& pending = entry.second;
+        if (pending.issued + 144 <= frame) return true;
+        const auto builder = Broodwar->getUnit(pending.builder);
+        if (builder == nullptr || !builder->exists()) return true;
+        return std::ranges::any_of(Broodwar->self()->getUnits(), [kind, &pending](const Unit unit) {
+            return unit != nullptr && unit->exists() && toKind(unit->getType()) == kind &&
+                   closeTo(fromBwapi(unit->getPosition()), pending.target, 96);
+        });
+    });
     state.bases = snapshotBases(state);
     return state;
 }
@@ -86,6 +99,17 @@ void BwapiBridge::forget(const BWAPI::Unit unit) {
     if (unit != nullptr) {
         enemyMemory_.erase(unit->getID());
     }
+}
+
+std::vector<UnitId> BwapiBridge::reservedBuilders() const {
+    std::vector<UnitId> result;
+    result.reserve(pendingBuilds_.size());
+    for (const auto& [kind, pending] : pendingBuilds_) {
+        static_cast<void>(kind);
+        if (pending.builder >= 0) result.push_back(pending.builder);
+    }
+    std::ranges::sort(result);
+    return result;
 }
 
 bool BwapiBridge::execute(const Command& command) {
@@ -730,7 +754,8 @@ bool BwapiBridge::build(const MacroAction& action, const StrategicPlan& plan) {
         return false;
     }
     const auto pending = pendingBuilds_.find(action.target);
-    if (pending != pendingBuilds_.end() && pending->second + 96 > Broodwar->getFrameCount()) {
+    if (pending != pendingBuilds_.end() &&
+        pending->second.issued + 144 > Broodwar->getFrameCount()) {
         return false;
     }
     const auto near = plan.rallyPoint.valid() ? toBwapiPosition(plan.rallyPoint)
@@ -744,7 +769,9 @@ bool BwapiBridge::build(const MacroAction& action, const StrategicPlan& plan) {
         return false;
     }
     if (builder->build(type, location)) {
-        pendingBuilds_[action.target] = Broodwar->getFrameCount();
+        pendingBuilds_[action.target] = {
+            builder->getID(), Broodwar->getFrameCount(), fromBwapi(BWAPI::Position(location)),
+        };
         return true;
     }
     return false;

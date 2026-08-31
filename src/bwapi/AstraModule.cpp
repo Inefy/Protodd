@@ -43,9 +43,8 @@ void AstraModule::onStart() {
     std::filesystem::create_directories("bwapi-data/write", error);
     opponentName_ = BWAPI::Broodwar->enemy() ? BWAPI::Broodwar->enemy()->getName() : "unknown";
     mapName_ = BWAPI::Broodwar->mapName();
-    auto historyCsv = readFile("bwapi-data/read/AstraBot.csv");
-    if (historyCsv.empty()) historyCsv = readFile("bwapi-data/write/AstraBot.csv");
-    history_.parse(historyCsv);
+    history_.parse(readFile("bwapi-data/read/AstraBot.csv"));
+    history_.merge(readFile("bwapi-data/write/AstraBot.csv"));
     openingStyle_ = history_.choose(opponentName_, mapName_,
                                     stableSeed(opponentName_ + "|" + mapName_));
     log_.open("bwapi-data/write/AstraBot.log", std::ios::app);
@@ -121,11 +120,16 @@ void AstraModule::updateMacro() {
 }
 
 void AstraModule::updateWorkers() {
-    const auto assignments = workers_.assign(state_, plan_, influence_);
+    auto reserved = bridge_.reservedBuilders();
+    reserved.insert(reserved.end(), leasedScouts_.begin(), leasedScouts_.end());
+    std::ranges::sort(reserved);
+    reserved.erase(std::unique(reserved.begin(), reserved.end()), reserved.end());
+    const auto assignments = workers_.assign(state_, plan_, influence_, reserved);
     bridge_.executeWorkers(assignments);
 }
 
 void AstraModule::updateScouting() {
+    leasedScouts_.clear();
     std::vector<UnitId> available;
     auto observersSeen = 0;
     for (const auto& unit : state_.self.units) {
@@ -146,6 +150,7 @@ void AstraModule::updateScouting() {
         if (probe != state_.self.units.end()) available.push_back(probe->id);
     }
     const auto orders = scouts_.assign(state_, available, influence_);
+    for (const auto& order : orders) leasedScouts_.push_back(order.scout);
     bridge_.executeScouts(orders);
 }
 
