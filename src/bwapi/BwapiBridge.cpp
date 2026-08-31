@@ -87,6 +87,33 @@ GameState BwapiBridge::observe() {
     return state;
 }
 
+NavigationGrid BwapiBridge::navigationGrid() const {
+    const auto width = Broodwar->mapWidth();
+    const auto height = Broodwar->mapHeight();
+    std::vector<std::uint8_t> cells(
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0U);
+    for (auto tileY = 0; tileY < height; ++tileY) {
+        for (auto tileX = 0; tileX < width; ++tileX) {
+            auto passable = 0;
+            auto centerPassable = 0;
+            for (auto walkY = 0; walkY < 4; ++walkY) {
+                for (auto walkX = 0; walkX < 4; ++walkX) {
+                    if (!Broodwar->isWalkable(tileX * 4 + walkX, tileY * 4 + walkY)) continue;
+                    ++passable;
+                    if (walkX >= 1 && walkX <= 2 && walkY >= 1 && walkY <= 2) {
+                        ++centerPassable;
+                    }
+                }
+            }
+            const auto index = static_cast<std::size_t>(tileY) *
+                                   static_cast<std::size_t>(width) +
+                               static_cast<std::size_t>(tileX);
+            cells[index] = passable >= 10 && centerPassable >= 3 ? 1U : 0U;
+        }
+    }
+    return {width, height, 32, std::move(cells)};
+}
+
 void BwapiBridge::remember(const BWAPI::Unit unit) {
     if (unit == nullptr || !unit->exists() || unit->getPlayer() != Broodwar->enemy() ||
         !unit->isVisible()) {

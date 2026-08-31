@@ -6,6 +6,7 @@
 #include "astra/Information.hpp"
 #include "astra/Learning.hpp"
 #include "astra/MacroPlanner.hpp"
+#include "astra/Navigation.hpp"
 #include "astra/Scouting.hpp"
 #include "astra/Strategy.hpp"
 #include "astra/Squads.hpp"
@@ -58,6 +59,33 @@ void testSnapshots() {
     state.enemy.units.push_back(enemy);
     expect(state.findUnit(9).has_value(), "unit lookup across both players");
     expect(!state.findUnit(42).has_value(), "missing unit lookup");
+}
+
+void testNavigation() {
+    constexpr auto width = 7;
+    constexpr auto height = 5;
+    std::vector<std::uint8_t> walkable(static_cast<std::size_t>(width * height), 1U);
+    for (auto y = 0; y < height; ++y) {
+        if (y != 2) walkable[static_cast<std::size_t>(y * width + 3)] = 0U;
+    }
+    astra::NavigationGrid navigation(width, height, 32, walkable);
+    expect(!navigation.lineWalkable({16, 16}, {208, 16}),
+           "terrain line test detects a blocking cliff");
+    const auto path = navigation.findPath({16, 16}, {208, 16});
+    expect(!path.empty() && std::ranges::any_of(path, [](const astra::Position point) {
+               return point.y == 80;
+           }),
+           "A* routes a ground army through the available choke");
+    const auto waypoint = navigation.nextWaypoint({16, 16}, {208, 16}, 3);
+    expect(waypoint.valid() && waypoint != astra::Position{208, 16},
+           "long blocked route yields an intermediate waypoint");
+
+    for (auto y = 0; y < height; ++y) {
+        walkable[static_cast<std::size_t>(y * width + 3)] = 0U;
+    }
+    astra::NavigationGrid disconnected(width, height, 32, walkable);
+    expect(disconnected.findPath({16, 16}, {208, 16}).empty(),
+           "disconnected terrain fails safely without inventing a route");
 }
 
 astra::UnitSnapshot unit(
@@ -579,6 +607,7 @@ void testLocalSquadsAndDetection() {
 int main() {
     testGeometry();
     testSnapshots();
+    testNavigation();
     testCatalog();
     testOpponentInferenceAndStrategy();
     testSupplyPlanning();

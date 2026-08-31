@@ -35,6 +35,7 @@ void AstraModule::onStart() {
     BWAPI::Broodwar->setLatCom(true);
     bridge_.onStart();
     state_ = bridge_.observe();
+    navigation_ = bridge_.navigationGrid();
     opponent_.reset(state_.enemy.race);
     influence_ = InfluenceMap(64);
     commands_.clear();
@@ -161,15 +162,41 @@ void AstraModule::updateCombat() {
                             plan_.posture == Posture::attack ||
                             plan_.posture == Posture::harass;
     const auto formed = squads_.form(state_, friendly, enemy, plan_, retreatPoint());
+    const auto refreshNavigation = navigationRefresh_ < 0 ||
+                                   state_.frame - navigationRefresh_ >= 24 ||
+                                   advanceWaypoints_.size() != formed.size();
+    if (refreshNavigation) {
+        navigationRefresh_ = state_.frame;
+        advanceWaypoints_.assign(formed.size(), {-1, -1});
+        retreatWaypoints_.assign(formed.size(), {-1, -1});
+    }
     commands_.beginFrame(state_.frame, state_.latencyFrames);
     fight_ = {};
     auto debugSquadSize = std::size_t{0};
-    for (const auto& squad : formed) {
+    for (std::size_t squadIndex = 0; squadIndex < formed.size(); ++squadIndex) {
+        const auto& squad = formed[squadIndex];
         auto requiredRatio = squad.requiredRatio;
         auto objective = squad.objective;
         if (squad.role == SquadRole::mainArmy && (!aggressive || squad.units.size() < 4)) {
             requiredRatio = 0.88;
             objective = plan_.rallyPoint;
+        }
+        auto routedRetreat = squad.retreat;
+        const auto hasGroundUnit = std::ranges::any_of(
+            squad.units, [](const UnitSnapshot& unit) { return !unit.flying; });
+        if (refreshNavigation && hasGroundUnit) {
+            advanceWaypoints_[squadIndex] =
+                navigation_.nextWaypoint(squad.center, objective);
+            retreatWaypoints_[squadIndex] =
+                navigation_.nextWaypoint(squad.center, squad.retreat);
+        }
+        if (hasGroundUnit) {
+            if (advanceWaypoints_[squadIndex].valid()) {
+                objective = advanceWaypoints_[squadIndex];
+            }
+            if (retreatWaypoints_[squadIndex].valid()) {
+                routedRetreat = retreatWaypoints_[squadIndex];
+            }
         }
         const auto estimate = combat_.evaluate(
             squad.units, squad.enemies, requiredRatio,
@@ -181,7 +208,7 @@ void AstraModule::updateCombat() {
         }
         for (const auto& order : tactics_.control(
                  squad.units, squad.enemies, estimate, objective,
-                 squad.retreat, influence_, squad.center)) {
+                 routedRetreat, influence_, squad.center)) {
             commands_.submit(order);
         }
     }

@@ -4,6 +4,7 @@
 #include "astra/CommandBus.hpp"
 #include "astra/GameState.hpp"
 #include "astra/MacroPlanner.hpp"
+#include "astra/Navigation.hpp"
 #include "astra/Scouting.hpp"
 #include "astra/Strategy.hpp"
 #include "astra/Workers.hpp"
@@ -21,6 +22,7 @@ public:
 
     void onStart();
     [[nodiscard]] GameState observe();
+    [[nodiscard]] NavigationGrid navigationGrid() const;
     void remember(BWAPI::Unit unit);
     void forget(BWAPI::Unit unit);
     [[nodiscard]] std::vector<UnitId> reservedBuilders() const;

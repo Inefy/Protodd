@@ -8,6 +8,7 @@
 #include "astra/Information.hpp"
 #include "astra/Learning.hpp"
 #include "astra/MacroPlanner.hpp"
+#include "astra/Navigation.hpp"
 #include "astra/Scouting.hpp"
 #include "astra/Squads.hpp"
 #include "astra/Strategy.hpp"
@@ -35,6 +36,7 @@ private:
     BwapiBridge bridge_;
     OpponentModel opponent_;
     InfluenceMap influence_;
+    NavigationGrid navigation_;
     StrategyEngine strategy_;
     MacroPlanner macro_;
     WorkerManager workers_;
@@ -52,6 +54,9 @@ private:
     std::string mapName_;
     std::vector<UnitId> detectorEscorts_;
     std::vector<UnitId> leasedScouts_;
+    std::vector<Position> advanceWaypoints_;
+    std::vector<Position> retreatWaypoints_;
+    Frame navigationRefresh_{-1};
     int maintenanceMineralReserve_{};
     int maintenanceGasReserve_{};
     std::ofstream log_;

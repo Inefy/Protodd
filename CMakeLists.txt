@@ -16,6 +16,7 @@ add_library(astra_core OBJECT
     src/core/Technology.cpp
     src/core/Information.cpp
     src/core/InfluenceMap.cpp
+    src/core/Navigation.cpp
     src/core/Strategy.cpp
     src/core/MacroPlanner.cpp
     src/core/Combat.cpp
