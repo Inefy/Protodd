@@ -562,22 +562,23 @@ PlayerSnapshot BwapiBridge::snapshotPlayer(const BWAPI::Player player, const boo
 
 std::vector<BaseSnapshot> BwapiBridge::snapshotBases(const GameState& state) {
     std::vector<BaseSnapshot> bases;
-    bases.reserve(resourceClusters_.size());
+    bases.reserve(resourceSites_.size());
     auto id = 0;
-    for (const auto center : resourceClusters_) {
+    for (const auto& site : resourceSites_) {
         ++id;
+        const auto center = site.depotCenter;
         auto minerals = 0;
         auto gas = 0;
         auto mineralPatches = 0;
         auto geysers = 0;
         for (const auto patch : Broodwar->getMinerals()) {
-            if (closeTo(center, fromBwapi(patch->getInitialPosition()), 320)) {
+            if (closeTo(site.resourceCenter, fromBwapi(patch->getInitialPosition()), 352)) {
                 minerals += patch->getResources();
                 ++mineralPatches;
             }
         }
         for (const auto geyser : Broodwar->getGeysers()) {
-            if (closeTo(center, fromBwapi(geyser->getInitialPosition()), 320)) {
+            if (closeTo(site.resourceCenter, fromBwapi(geyser->getInitialPosition()), 352)) {
                 gas += geyser->getResources();
                 ++geysers;
             }
@@ -606,47 +607,92 @@ std::vector<BaseSnapshot> BwapiBridge::snapshotBases(const GameState& state) {
             });
         const auto startPosition = BWAPI::Position(Broodwar->self()->getStartLocation());
         const auto island = !Broodwar->hasPath(startPosition, toBwapiPosition(center));
-        bases.push_back({id, center, center, minerals, gas, owner, baseLastScouted_[id],
+        bases.push_back({id, center, site.mineralLine, minerals, gas, owner,
+                         baseLastScouted_[id],
                          start, island, mineralPatches, geysers});
     }
     return bases;
 }
 
 void BwapiBridge::discoverResourceClusters() {
-    resourceClusters_.clear();
-    std::vector<Position> resources;
-    for (const auto mineral : Broodwar->getMinerals()) {
-        resources.push_back(fromBwapi(mineral->getInitialPosition()));
+    resourceSites_.clear();
+    struct ResourceEntry {
+        Position position{-1, -1};
+        bool mineral{};
+    };
+    std::vector<ResourceEntry> resources;
+    for (const auto mineral : Broodwar->getStaticMinerals()) {
+        resources.push_back({fromBwapi(mineral->getInitialPosition()), true});
     }
-    for (const auto geyser : Broodwar->getGeysers()) {
-        resources.push_back(fromBwapi(geyser->getInitialPosition()));
+    for (const auto geyser : Broodwar->getStaticGeysers()) {
+        resources.push_back({fromBwapi(geyser->getInitialPosition()), false});
     }
-    std::ranges::sort(resources, {}, &Position::x);
+    std::ranges::sort(resources, [](const ResourceEntry& left, const ResourceEntry& right) {
+        if (left.position.x != right.position.x) return left.position.x < right.position.x;
+        return left.position.y < right.position.y;
+    });
     std::vector<bool> claimed(resources.size(), false);
     for (std::size_t seed = 0; seed < resources.size(); ++seed) {
         if (claimed[seed]) continue;
-        long long sumX = 0;
-        long long sumY = 0;
-        auto count = 0;
-        for (std::size_t i = 0; i < resources.size(); ++i) {
-            if (!claimed[i] && closeTo(resources[seed], resources[i], 320)) {
-                claimed[i] = true;
-                sumX += resources[i].x;
-                sumY += resources[i].y;
-                ++count;
+        claimed[seed] = true;
+        std::vector<std::size_t> members{seed};
+        for (std::size_t cursor = 0; cursor < members.size(); ++cursor) {
+            for (std::size_t candidate = 0; candidate < resources.size(); ++candidate) {
+                if (!claimed[candidate] &&
+                    closeTo(resources[members[cursor]].position,
+                            resources[candidate].position, 320)) {
+                    claimed[candidate] = true;
+                    members.push_back(candidate);
+                }
             }
         }
-        if (count >= 4) {
-            resourceClusters_.push_back({static_cast<int>(sumX / count),
-                                         static_cast<int>(sumY / count)});
+        long long sumX = 0;
+        long long sumY = 0;
+        long long mineralX = 0;
+        long long mineralY = 0;
+        auto mineralCount = 0;
+        for (const auto member : members) {
+            const auto& resource = resources[member];
+            sumX += resource.position.x;
+            sumY += resource.position.y;
+            if (resource.mineral) {
+                mineralX += resource.position.x;
+                mineralY += resource.position.y;
+                ++mineralCount;
+            }
         }
+        if (members.size() < 4U) continue;
+        const auto divisor = static_cast<long long>(members.size());
+        const Position resourceCenter{static_cast<int>(sumX / divisor),
+                                      static_cast<int>(sumY / divisor)};
+        const Position mineralLine = mineralCount > 0
+                                         ? Position{static_cast<int>(mineralX / mineralCount),
+                                                    static_cast<int>(mineralY / mineralCount)}
+                                         : resourceCenter;
+        auto depotTile = TilePositions::None;
+        for (const auto start : Broodwar->getStartLocations()) {
+            if (closeTo(resourceCenter, fromBwapi(BWAPI::Position(start)), 384)) {
+                depotTile = start;
+                break;
+            }
+        }
+        if (!depotTile.isValid()) {
+            depotTile = Broodwar->getBuildLocation(
+                UnitTypes::Protoss_Nexus,
+                TilePosition(resourceCenter.x / 32, resourceCenter.y / 32), 12);
+        }
+        const auto depotCenter = depotTile.isValid()
+                                     ? Position{depotTile.x * 32 + 64,
+                                                depotTile.y * 32 + 48}
+                                     : resourceCenter;
+        resourceSites_.push_back({resourceCenter, depotCenter, mineralLine, depotTile});
     }
     for (const auto start : Broodwar->getStartLocations()) {
-        const auto center = fromBwapi(BWAPI::Position(start));
-        if (std::ranges::none_of(resourceClusters_, [center](const Position candidate) {
-                return closeTo(center, candidate, 320);
+        const Position center{start.x * 32 + 64, start.y * 32 + 48};
+        if (std::ranges::none_of(resourceSites_, [center](const ResourceSite& site) {
+                return closeTo(center, site.depotCenter, 320);
             })) {
-            resourceClusters_.push_back(center);
+            resourceSites_.push_back({center, center, center, start});
         }
     }
 }
@@ -682,9 +728,10 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         return geyser != nullptr ? geyser->getTilePosition() : TilePositions::None;
     }
     if (kind == UnitKind::nexus) {
-        Position best{-1, -1};
+        const ResourceSite* best = nullptr;
         auto bestScore = std::numeric_limits<double>::infinity();
-        for (const auto center : resourceClusters_) {
+        for (const auto& site : resourceSites_) {
+            const auto center = site.depotCenter;
             if (!builder->hasPath(toBwapiPosition(center))) continue;
             const auto occupied = std::ranges::any_of(
                 Broodwar->getAllUnits(),
@@ -703,7 +750,7 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
 
             auto resources = 0;
             for (const auto patch : Broodwar->getMinerals()) {
-                if (closeTo(center, fromBwapi(patch->getInitialPosition()), 320))
+                if (closeTo(site.resourceCenter, fromBwapi(patch->getInitialPosition()), 352))
                     resources += patch->getResources();
             }
             auto nearestEnemy = std::numeric_limits<double>::infinity();
@@ -718,11 +765,13 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
             const auto score = travel + danger - static_cast<double>(resources) / 40.0;
             if (score < bestScore) {
                 bestScore = score;
-                best = center;
+                best = &site;
             }
         }
-        if (best.valid()) {
-            return Broodwar->getBuildLocation(type, TilePosition(best.x / 32, best.y / 32), 12);
+        if (best != nullptr) {
+            if (best->depotTile.isValid()) return best->depotTile;
+            return Broodwar->getBuildLocation(
+                type, TilePosition(best->depotCenter.x / 32, best->depotCenter.y / 32), 12);
         }
     }
 
@@ -812,8 +861,47 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
             return unit != nullptr && unit->exists() && unit->getType() == type;
         }));
     const auto anchor = TilePosition(anchorPosition);
-    const auto offset = layout[existing % layout.size()];
-    return Broodwar->getBuildLocation(type, anchor + offset, 20);
+    for (std::size_t attempt = 0; attempt < layout.size(); ++attempt) {
+        const auto offset = layout[(existing + attempt) % layout.size()];
+        const auto location = Broodwar->getBuildLocation(type, anchor + offset, 8);
+        if (location.isValid() && !blocksMiningLane(location, type)) return location;
+    }
+    return TilePositions::None;
+}
+
+bool BwapiBridge::blocksMiningLane(
+    const BWAPI::TilePosition tile,
+    const BWAPI::UnitType type) const {
+    if (!tile.isValid()) return true;
+    const Position buildingCenter{
+        tile.x * 32 + type.tileWidth() * 16,
+        tile.y * 32 + type.tileHeight() * 16,
+    };
+    const auto clearance = std::max(type.tileWidth(), type.tileHeight()) * 16 + 40;
+    for (const auto& site : resourceSites_) {
+        if (!closeTo(site.depotCenter, buildingCenter, 640)) continue;
+        for (const auto mineral : Broodwar->getStaticMinerals()) {
+            const auto resource = fromBwapi(mineral->getInitialPosition());
+            if (!closeTo(resource, site.resourceCenter, 352)) continue;
+            if (closeTo(buildingCenter, resource, clearance)) return true;
+
+            const auto segmentX = resource.x - site.depotCenter.x;
+            const auto segmentY = resource.y - site.depotCenter.y;
+            const auto lengthSquared = segmentX * segmentX + segmentY * segmentY;
+            if (lengthSquared <= 0) continue;
+            const auto projection = std::clamp(
+                static_cast<double>((buildingCenter.x - site.depotCenter.x) * segmentX +
+                                    (buildingCenter.y - site.depotCenter.y) * segmentY) /
+                    static_cast<double>(lengthSquared),
+                0.0, 1.0);
+            const Position closest{
+                site.depotCenter.x + static_cast<int>(std::lround(segmentX * projection)),
+                site.depotCenter.y + static_cast<int>(std::lround(segmentY * projection)),
+            };
+            if (distanceSquared(buildingCenter, closest) <= clearance * clearance) return true;
+        }
+    }
+    return false;
 }
 
 bool BwapiBridge::build(const MacroAction& action, const StrategicPlan& plan) {

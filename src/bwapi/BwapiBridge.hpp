@@ -57,10 +57,17 @@ private:
         Position target{-1, -1};
     };
 
+    struct ResourceSite {
+        Position resourceCenter{-1, -1};
+        Position depotCenter{-1, -1};
+        Position mineralLine{-1, -1};
+        BWAPI::TilePosition depotTile{BWAPI::TilePositions::None};
+    };
+
     std::unordered_map<UnitId, UnitSnapshot> enemyMemory_;
     std::unordered_map<int, Frame> baseLastScouted_;
     std::unordered_map<UnitKind, PendingBuild> pendingBuilds_;
-    std::vector<Position> resourceClusters_;
+    std::vector<ResourceSite> resourceSites_;
     std::vector<SpellZone> recentAreaSpells_;
 
     [[nodiscard]] static Race toRace(BWAPI::Race race) noexcept;
@@ -79,6 +86,9 @@ private:
         BWAPI::UnitType type,
         BWAPI::Unit builder,
         const StrategicPlan& plan) const;
+    [[nodiscard]] bool blocksMiningLane(
+        BWAPI::TilePosition tile,
+        BWAPI::UnitType type) const;
     [[nodiscard]] bool build(const MacroAction& action, const StrategicPlan& plan);
     [[nodiscard]] bool train(const MacroAction& action);
     [[nodiscard]] bool executeTechnology(const MacroAction& action);

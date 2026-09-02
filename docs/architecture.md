@@ -33,6 +33,8 @@ opponent file during a live game.
 - Resource commitments include queued units and buildings under construction.
 - Mobile enemy influence decays continuously after vision is lost; remembered
   buildings remain authoritative until their tile is seen empty.
+- Resource bases use canonical depot tiles and distinct mineral-line centroids;
+  ordinary construction is rejected when it would obstruct worker travel lanes.
 - A safe fallback remains playable if terrain analysis or a subsystem fails.
 
 ## Implemented modules
@@ -47,7 +49,7 @@ opponent file during a live game.
 | `SquadPlanner` | Local connected armies, base defense, harassment, objectives and detector escorts |
 | `CombatEvaluator` | Fast local fight estimate with uncertainty penalties |
 | `TacticalController` | Volley allocation, kiting, surrounds, caster screening and cloak preservation |
-| `BwapiBridge` | Legal observations, production/build execution, upgrades and area-spell coordination |
+| `BwapiBridge` | Legal observations, canonical base geometry, safe construction, upgrades and area-spell coordination |
 | `CommandBus` | Legal command validation, deduplication, arbitration and throttling |
 | `OpponentHistory` | Tournament-safe cross-game opening exploration and exploitation |
 

@@ -15,8 +15,8 @@ tournament bot or depend on code whose license restricts competition entry.
 - Economy saturation, gas policy, worker defense, evacuation, and transfers.
 - Resource-reserving macro planner with production, technology, expansion, and
   supply goals, queued-production accounting, and automatic prerequisite repair.
-- Base-aware construction, safe reachable expansions, projected-supply timing,
-  and mineral-line saturation transfers across completed bases.
+- Canonical depot-site discovery, mining-lane-safe construction, reachable
+  expansions, projected-supply timing, and saturation transfers across bases.
 - Ground/air/detection influence maps, risk-aware scouting, combat evaluation,
   local squads, detector escorts, coordinated focus fire, unit-specific kiting,
   surrounds, cloak preservation, Storm, Stasis, Feedback, and ammunition upkeep.
