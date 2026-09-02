@@ -41,9 +41,14 @@ foreach ($directory in @("cmake", "include", "src", "tests", "tools", "docs", "b
     Copy-Item -LiteralPath (Join-Path $repoPath $directory) -Destination $sourceRoot -Recurse
 }
 New-Item -ItemType Directory -Path (Join-Path $sourceRoot "scripts") -Force | Out-Null
-foreach ($script in @("build-tournament.ps1", "verify.ps1")) {
+foreach ($script in @("build-tournament.ps1", "verify.ps1", "ladder.ps1")) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) `
         -Destination (Join-Path $sourceRoot "scripts/$script")
+}
+New-Item -ItemType Directory -Path (Join-Path $sourceRoot "ladder") -Force | Out-Null
+foreach ($file in @("README.md", "ladder.example.json")) {
+    Copy-Item -LiteralPath (Join-Path $repoPath "ladder/$file") `
+        -Destination (Join-Path $sourceRoot "ladder/$file")
 }
 Copy-Item -LiteralPath (Join-Path $repoPath "SUBMISSION.md") -Destination $stagingRoot
 

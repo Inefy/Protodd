@@ -87,6 +87,25 @@ See [the architecture](docs/architecture.md) for the complete system design.
 Use [the competition workflow](docs/competition.md) to benchmark changes and
 the included log analyzer to compare batches rather than individual games.
 
+## Local opponent ladder
+
+The repository includes a reproducible wrapper around Starcraft AI Tournament
+Manager for testing AstraBot against locally imported open-source bots. It
+creates balanced schedules, snapshots every participating binary, produces
+per-opponent/per-map reports with confidence intervals, preserves per-game
+diagnostics, and compares candidate builds with a baseline.
+
+```powershell
+./scripts/ladder.ps1 init
+./scripts/ladder.ps1 add-bot --help
+./scripts/ladder.ps1 prepare --label baseline-main
+./scripts/ladder.ps1 report --help
+```
+
+Opponent code and binaries, maps, runner files, replays, results, and local
+configuration are stored only under Git-ignored ladder paths. See the
+[ladder guide](ladder/README.md) before importing a bot.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

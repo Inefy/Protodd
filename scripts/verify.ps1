@@ -27,6 +27,12 @@ try {
     python tools/log_analyzer.py --self-test
     if ($LASTEXITCODE -ne 0) { throw "Log analyzer tests failed" }
 
+    python tests/test_ladder.py
+    if ($LASTEXITCODE -ne 0) { throw "Ladder tests failed" }
+
+    python tools/ladder.py audit
+    if ($LASTEXITCODE -ne 0) { throw "Ladder privacy audit failed" }
+
     if (-not $SkipAdapter) {
         $candidateA = Join-Path $BwapiRoot "bwapi/include/BWAPI.h"
         $candidateB = Join-Path $BwapiRoot "include/BWAPI.h"
@@ -60,4 +66,3 @@ try {
 finally {
     Pop-Location
 }
-

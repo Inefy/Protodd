@@ -116,6 +116,70 @@ def analyze(lines: Iterable[str]) -> dict[str, object]:
     performance = [game.get("performance", {}) for game in games]
     slow_frames = [sample for game in games for sample in game["slow_frames"]]
 
+    def game_average(game: dict[str, object], field: str) -> float:
+        states = game["states"]
+        return statistics.fmean(float(state[field]) for state in states) if states else 0.0
+
+    game_details: list[dict[str, object]] = []
+    for index, game in enumerate(games):
+        states = game["states"]
+        performance_summary = game.get("performance", {})
+        game_details.append(
+            {
+                "game": index + 1,
+                "map": game["map"],
+                "opponent": game["opponent"],
+                "opening": game["opening"],
+                "won": game["won"],
+                "frames": game["frames"],
+                "minutes": float(game["frames"]) / 1440.0,
+                "snapshots": len(states),
+                "average_minerals": game_average(game, "minerals"),
+                "average_gas": game_average(game, "gas"),
+                "average_fight_ratio": game_average(game, "fight_ratio"),
+                "average_uncertainty": game_average(game, "uncertainty"),
+                "supply_block_snapshots": sum(
+                    int(state["supply_total"]) > 0
+                    and int(state["supply_used"]) >= int(state["supply_total"])
+                    for state in states
+                ),
+                "late_high_bank_snapshots": sum(
+                    int(state["frame"]) >= 7200 and int(state["minerals"]) >= 800
+                    for state in states
+                ),
+                "dangerous_fight_snapshots": sum(
+                    str(state["posture"]).lower() in {"pressure", "attack", "harass"}
+                    and 0.0 < float(state["fight_ratio"]) < 0.85
+                    for state in states
+                ),
+                "late_high_uncertainty_snapshots": sum(
+                    int(state["frame"]) >= 5760 and float(state["uncertainty"]) >= 0.65
+                    for state in states
+                ),
+                "caught_errors": int(game["errors"]),
+                "peak_frame_ms": float(performance_summary.get("peak_ms", 0.0)),
+                "over_55ms": int(performance_summary.get("over_55ms", 0)),
+                "over_1s": int(performance_summary.get("over_1s", 0)),
+                "over_10s": int(performance_summary.get("over_10s", 0)),
+            }
+        )
+
+    def grouped(field: str) -> dict[str, dict[str, object]]:
+        groups: dict[str, list[dict[str, object]]] = defaultdict(list)
+        for detail in game_details:
+            groups[str(detail[field])].append(detail)
+        return {
+            name: {
+                "games": len(items),
+                "wins": sum(bool(item["won"]) for item in items),
+                "win_rate": sum(bool(item["won"]) for item in items) / len(items),
+                "wilson_95": wilson_interval(
+                    sum(bool(item["won"]) for item in items), len(items)
+                ),
+            }
+            for name, items in sorted(groups.items())
+        }
+
     def performance_sum(field: str) -> int:
         return sum(int(item.get(field, 0)) for item in performance)
 
@@ -127,6 +191,8 @@ def analyze(lines: Iterable[str]) -> dict[str, object]:
         "win_rate_wilson_95": wilson_interval(wins, len(games)),
         "average_game_minutes": average_minutes,
         "openings": {name: dict(counts) for name, counts in sorted(by_opening.items())},
+        "by_opponent": grouped("opponent"),
+        "by_map": grouped("map"),
         "snapshots": len(snapshots),
         "average_minerals": average("minerals"),
         "average_gas": average("gas"),
@@ -144,6 +210,15 @@ def analyze(lines: Iterable[str]) -> dict[str, object]:
             "over_10s": performance_sum("over_10s"),
             "caught_errors": sum(int(game["errors"]) for game in games),
         },
+        "diagnostics": {
+            "supply_block_snapshots": sum(int(game["supply_block_snapshots"]) for game in game_details),
+            "late_high_bank_snapshots": sum(int(game["late_high_bank_snapshots"]) for game in game_details),
+            "dangerous_fight_snapshots": sum(int(game["dangerous_fight_snapshots"]) for game in game_details),
+            "late_high_uncertainty_snapshots": sum(
+                int(game["late_high_uncertainty_snapshots"]) for game in game_details
+            ),
+        },
+        "game_details": game_details,
     }
 
 
@@ -166,6 +241,8 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(result["snapshots"], 1)
         self.assertEqual(result["runtime"]["over_42ms"], 1)
         self.assertEqual(result["runtime"]["caught_errors"], 1)
+        self.assertEqual(result["by_opponent"]["Iron"]["wins"], 1)
+        self.assertEqual(len(result["game_details"]), 2)
 
     def test_empty_interval(self) -> None:
         self.assertEqual(wilson_interval(0, 0), [0.0, 1.0])

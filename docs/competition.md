@@ -40,6 +40,21 @@ The interval is intentionally shown alongside raw win rate. Prefer a candidate
 only when it improves the intended matchup without materially increasing
 crashes or causing a clear regression elsewhere.
 
+## Automated local ladder
+
+For repeated games against open-source opponents, use the repository's
+[local ladder](../ladder/README.md). It prepares a deterministic 1-vs-all
+Tournament Manager batch and records the commit and hashes of every binary.
+Its report adds opponent, enemy-race, and map splits; first-half/second-half
+trend; Wilson intervals; incomplete-game accounting; runtime failures; and a
+per-game CSV suitable for replay triage.
+
+Always compare a candidate to a baseline made with the same opponent binaries,
+maps, rounds, host ordering, and tournament settings. The `compare` command's
+95% interval must exclude zero before it labels the candidate a likely
+improvement or regression. Segment-level data still matters: an aggregate gain
+can hide a PvT, PvZ, PvP, opponent, or map regression.
+
 ## Runtime budget
 
 Astra measures every callback. A frame at 28 ms temporarily disables local

@@ -31,6 +31,17 @@
 /maps/
 *.mpq
 
+# Local ladder vault. Third-party bots, tournament-manager binaries, maps,
+# match results, replays, and machine-specific configuration must never ship.
+/ladder/bots/
+/ladder/manager/
+/ladder/maps/
+/ladder/runs/
+/ladder/reports/
+/ladder/ladder.local.json
+/ladder/*.db
+/ladder/*.sqlite*
+
 # Python helper caches
 __pycache__/
 *.py[cod]

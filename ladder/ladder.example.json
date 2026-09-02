@@ -1,0 +1,27 @@
+{
+  "our_bot": {
+    "name": "AstraBot",
+    "race": "Protoss",
+    "type": "dll",
+    "bwapi_version": "BWAPI_440",
+    "artifact": "../build/tournament/Release/AstraBot.dll"
+  },
+  "opponents": [],
+  "maps": [
+    "maps/aiide/(2)Benzene.scx",
+    "maps/aiide/(2)Destination.scx",
+    "maps/aiide/(3)TauCross.scx",
+    "maps/aiide/(4)CircuitBreaker.scx",
+    "maps/aiide/(4)Python.scx"
+  ],
+  "rounds": 20,
+  "tournament_manager": "manager",
+  "maps_archive": "maps/maps.zip",
+  "server_port": 1337,
+  "frame_limit": 86400,
+  "timeout_limits": [
+    { "time_ms": 55, "frame_count": 320 },
+    { "time_ms": 1000, "frame_count": 10 },
+    { "time_ms": 10000, "frame_count": 1 }
+  ]
+}
