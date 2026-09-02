@@ -46,7 +46,7 @@ opponent file during a live game.
 | `ScoutManager` | Route-risk sampling, search/tech/expansion deadlines and assignment hysteresis |
 | `StrategyEngine` | Matchup plans, transitions, counter production, attack timing |
 | `MacroPlanner` | Goal reconciliation, reservations, production and expansion |
-| `WorkerManager` | Saturation, gas, transfer, construction and bounded threat-specific militia |
+| `WorkerManager` | Per-patch saturation, gas, transfer, construction and threat-specific militia |
 | `SquadPlanner` | Local connected armies, base defense, harassment, objectives and detector escorts |
 | `CombatEvaluator` | Fast local fight estimate with uncertainty penalties |
 | `TacticalController` | Volley allocation, kiting, surrounds, caster screening and cloak preservation |

@@ -28,6 +28,18 @@ struct WorkerAssignment {
     int priority{};
 };
 
+struct MineralPatchCandidate {
+    UnitId id{-1};
+    Position position{-1, -1};
+    int assignedWorkers{};
+};
+
+[[nodiscard]] UnitId selectMineralPatch(
+    std::span<const MineralPatchCandidate> candidates,
+    Position mineralLine,
+    Position workerPosition,
+    UnitId currentTarget = -1) noexcept;
+
 class WorkerManager {
 public:
     [[nodiscard]] std::vector<WorkerAssignment> assign(
@@ -43,4 +55,3 @@ private:
 };
 
 }  // namespace astra
-

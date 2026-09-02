@@ -707,6 +707,17 @@ void testFrameBudget() {
 }
 
 void testWorkersAndScouts() {
+    const std::vector<astra::MineralPatchCandidate> unbalancedPatches{
+        {10, {300, 256}, 2}, {11, {340, 256}, 0}, {12, {380, 256}, 1},
+    };
+    expect(astra::selectMineralPatch(unbalancedPatches, {340, 256}, {256, 256}, 10) == 11,
+           "mineral assignment fills the least-saturated patch first");
+    const std::vector<astra::MineralPatchCandidate> balancedPatches{
+        {10, {300, 256}, 1}, {11, {340, 256}, 1}, {12, {380, 256}, 1},
+    };
+    expect(astra::selectMineralPatch(balancedPatches, {340, 256}, {256, 256}, 12) == 12,
+           "balanced mineral assignment retains its current patch");
+
     astra::GameState state;
     state.frame = 5000;
     state.mapWidthPixels = 2048;

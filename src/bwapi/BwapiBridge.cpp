@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace astra::bwapi {
@@ -203,6 +204,17 @@ int BwapiBridge::executeMacro(
 }
 
 void BwapiBridge::executeWorkers(const std::span<const WorkerAssignment> assignments) {
+    std::unordered_map<UnitId, int> mineralLoad;
+    for (const auto candidate : Broodwar->self()->getUnits()) {
+        if (candidate == nullptr || !candidate->exists() || !candidate->getType().isWorker()) {
+            continue;
+        }
+        const auto target = candidate->getOrderTarget();
+        if (target != nullptr && target->exists() && target->getType().isMineralField()) {
+            ++mineralLoad[target->getID()];
+        }
+    }
+
     for (const auto& assignment : assignments) {
         const auto worker = Broodwar->getUnit(assignment.worker);
         if (worker == nullptr || !worker->exists() || !worker->isCompleted() ||
@@ -229,6 +241,7 @@ void BwapiBridge::executeWorkers(const std::span<const WorkerAssignment> assignm
         const auto anchor = assignment.targetPosition.valid()
                                 ? toBwapiPosition(assignment.targetPosition)
                                 : worker->getPosition();
+        const auto currentTarget = worker->getOrderTarget();
         Unit target = nullptr;
         if (assignment.job == WorkerJob::gas) {
             target = Broodwar->getClosestUnit(
@@ -236,15 +249,40 @@ void BwapiBridge::executeWorkers(const std::span<const WorkerAssignment> assignm
                 Filter::IsOwned && Filter::IsCompleted && Filter::IsRefinery);
         } else if (assignment.job == WorkerJob::minerals ||
                    assignment.job == WorkerJob::transfer) {
-            target = Broodwar->getClosestUnit(anchor, Filter::IsMineralField);
+            const auto currentMineral = currentTarget != nullptr && currentTarget->exists() &&
+                                        currentTarget->getType().isMineralField()
+                                            ? currentTarget->getID()
+                                            : -1;
+            if (currentMineral >= 0 && mineralLoad[currentMineral] > 0) {
+                --mineralLoad[currentMineral];
+            }
+            std::vector<MineralPatchCandidate> candidates;
+            for (const auto mineral : Broodwar->getMinerals()) {
+                if (mineral == nullptr || !mineral->exists() || mineral->getResources() <= 0 ||
+                    !closeTo(fromBwapi(mineral->getInitialPosition()),
+                             assignment.targetPosition, 480)) {
+                    continue;
+                }
+                candidates.push_back({mineral->getID(), fromBwapi(mineral->getPosition()),
+                                      mineralLoad[mineral->getID()]});
+            }
+            const auto targetId = selectMineralPatch(
+                candidates, assignment.targetPosition,
+                fromBwapi(worker->getPosition()), currentMineral);
+            if (targetId >= 0) {
+                target = Broodwar->getUnit(targetId);
+                ++mineralLoad[targetId];
+            } else {
+                target = Broodwar->getClosestUnit(anchor, Filter::IsMineralField);
+            }
         }
-        const auto currentTarget = worker->getOrderTarget();
         const auto atAssignedBase = currentTarget != nullptr &&
                                     closeTo(fromBwapi(currentTarget->getPosition()),
                                             assignment.targetPosition, 384);
         const auto wrongJob = assignment.job == WorkerJob::gas
                                   ? !worker->isGatheringGas() || !atAssignedBase
-                                  : !worker->isGatheringMinerals() || !atAssignedBase;
+                                  : !worker->isGatheringMinerals() ||
+                                        currentTarget != target;
         if (target != nullptr && (worker->isIdle() || wrongJob) &&
             worker->getLastCommandFrame() + 12 < Broodwar->getFrameCount()) {
             worker->gather(target);

@@ -49,6 +49,31 @@ int targetPriority(const UnitSnapshot& enemy) {
 
 }  // namespace
 
+UnitId selectMineralPatch(
+    const std::span<const MineralPatchCandidate> candidates,
+    const Position mineralLine,
+    const Position workerPosition,
+    const UnitId currentTarget) noexcept {
+    auto selected = UnitId{-1};
+    auto bestScore = std::numeric_limits<long long>::max();
+    for (const auto& patch : candidates) {
+        if (patch.id < 0 || !patch.position.valid()) continue;
+        const auto load = std::max(0, patch.assignedWorkers);
+        const auto anchorDistance = distanceSquared(patch.position, mineralLine);
+        const auto workerDistance = distanceSquared(patch.position, workerPosition);
+        const auto stabilityBonus = patch.id == currentTarget ? 5'000'000LL : 0LL;
+        const auto score = static_cast<long long>(load) * 1'000'000'000LL +
+                           static_cast<long long>(anchorDistance) * 4LL +
+                           static_cast<long long>(workerDistance) - stabilityBonus;
+        if (score < bestScore || (score == bestScore &&
+                                  (selected < 0 || patch.id < selected))) {
+            bestScore = score;
+            selected = patch.id;
+        }
+    }
+    return selected;
+}
+
 std::vector<WorkerAssignment> WorkerManager::assign(
     const GameState& state,
     const StrategicPlan& plan,
