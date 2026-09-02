@@ -4,7 +4,6 @@
 #include "astra/UnitCatalog.hpp"
 
 #include <algorithm>
-#include <limits>
 #include <unordered_map>
 
 namespace astra {
@@ -143,8 +142,11 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     // Spend remaining resources toward the strategic composition rather than
     // stopping at the opening's fixed unit counts. Select the most
     // underrepresented currently-producible unit for one production cycle.
-    UnitKind compositionChoice = UnitKind::unknown;
-    auto largestDeficit = -std::numeric_limits<double>::infinity();
+    struct CompositionCandidate {
+        UnitKind kind{UnitKind::unknown};
+        double deficit{};
+    };
+    std::vector<CompositionCandidate> compositionCandidates;
     auto armyCount = 0;
     for (const auto& target : plan.composition) {
         armyCount += countExisting(state, target.kind) + planned[target.kind];
@@ -161,18 +163,19 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         const auto count = countExisting(state, target.kind) + planned[target.kind];
         const auto desired = target.weight * static_cast<double>(armyCount + 1);
         const auto deficit = desired - static_cast<double>(count);
-        if (deficit > largestDeficit) {
-            largestDeficit = deficit;
-            compositionChoice = target.kind;
-        }
+        compositionCandidates.push_back({target.kind, deficit});
     }
-    if (compositionChoice != UnitKind::unknown) {
-        const auto& stats = unitStats(compositionChoice);
+    std::ranges::stable_sort(compositionCandidates, [](const auto& left, const auto& right) {
+        return left.deficit > right.deficit;
+    });
+    for (const auto& candidate : compositionCandidates) {
+        const auto& stats = unitStats(candidate.kind);
         const auto supplyAvailable = state.self.supplyUsed + stats.supply <= state.self.supplyTotal;
         if (supplyAvailable && ledger.reserve(stats.minerals, stats.gas)) {
-            actions.push_back({MacroActionKind::train, compositionChoice, 58,
+            actions.push_back({MacroActionKind::train, candidate.kind, 58,
                                stats.minerals, stats.gas, true,
                                "maintain strategic army composition"});
+            break;
         }
     }
 

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <numeric>
 
 namespace astra {
 namespace {
@@ -22,6 +23,10 @@ int countRole(const GameState& state, const UnitRole role) {
 
 int minute(const GameState& state) {
     return state.frame / (24 * 60);
+}
+
+bool supplyAtLeast(const GameState& state, const int displayedSupply) {
+    return state.self.supplyUsed >= displayedSupply * 2;
 }
 
 void goal(
@@ -140,26 +145,35 @@ StrategicPlan StrategyEngine::planPvT(
     result.name = "PvT one-gate observer expansion";
     result.desiredWorkers = std::min(72, 22 + minute(state) * 4);
     result.desiredBases = minute(state) < 7 ? 1 : (minute(state) < 13 ? 2 : 3);
-    result.desiredGasWorkers = minute(state) < 2 ? 0 : (minute(state) < 7 ? 3 :
-                                                       (minute(state) < 12 ? 6 : 9));
+    result.desiredGasWorkers = !supplyAtLeast(state, 11) ? 0 :
+                               (minute(state) < 7 ? 3 :
+                                (minute(state) < 12 ? 6 : 9));
     result.posture = minute(state) < 6 ? Posture::hold : Posture::pressure;
     result.attackThreshold = 1.32;
     result.composition = {{UnitKind::dragoon, 0.55}, {UnitKind::zealot, 0.22},
                           {UnitKind::highTemplar, 0.13}, {UnitKind::arbiter, 0.10}};
 
-    goal(result, GoalKind::build, UnitKind::gateway, minute(state) < 7 ? 1 : 3, 88,
-         "baseline production");
-    goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 92,
-         "unlock dragoons and range");
-    technologyGoal(result, TechnologyKind::singularityCharge, 1, 91,
-                   "range is mandatory for dragoon control", true);
-    goal(result, GoalKind::train, UnitKind::dragoon, std::max(3, minute(state) * 2), 82,
-         "range control against Terran");
-    goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 78,
-         "observers against mines and tech scouting");
-    goal(result, GoalKind::build, UnitKind::observatory, 1, 77, "observer access");
-    goal(result, GoalKind::train, UnitKind::observer, minute(state) < 12 ? 2 : 4, 84,
-         "mine detection and army tracking");
+    if (supplyAtLeast(state, 10)) {
+        goal(result, GoalKind::build, UnitKind::gateway, minute(state) < 7 ? 1 : 3, 88,
+             "ten-supply gateway", count(state, UnitKind::gateway) == 0);
+    }
+    if (supplyAtLeast(state, 13)) {
+        goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 92,
+             "thirteen-supply cybernetics core", true);
+    }
+    if (supplyAtLeast(state, 14)) {
+        technologyGoal(result, TechnologyKind::singularityCharge, 1, 91,
+                       "range is mandatory for dragoon control", true);
+        goal(result, GoalKind::train, UnitKind::dragoon, std::max(3, minute(state) * 2), 82,
+             "range control against Terran");
+    }
+    if (count(state, UnitKind::dragoon) >= 3 || supplyAtLeast(state, 24)) {
+        goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 78,
+             "observers against mines and tech scouting");
+        goal(result, GoalKind::build, UnitKind::observatory, 1, 77, "observer access");
+        goal(result, GoalKind::train, UnitKind::observer, minute(state) < 12 ? 2 : 4, 84,
+             "mine detection and army tracking");
+    }
 
     if (minute(state) >= 10) {
         goal(result, GoalKind::build, UnitKind::citadelOfAdun, 1, 68, "zealot speed path");
@@ -211,35 +225,54 @@ StrategicPlan StrategyEngine::planPvZ(
     result.name = "PvZ forge expansion into corsair-templar";
     result.desiredWorkers = std::min(70, 20 + minute(state) * 4);
     result.desiredBases = minute(state) < 3 ? 1 : (minute(state) < 11 ? 2 : 3);
-    result.desiredGasWorkers = minute(state) < 4 ? 0 : (minute(state) < 8 ? 3 :
-                                                       (minute(state) < 12 ? 6 : 9));
+    result.desiredGasWorkers = !supplyAtLeast(state, 14) ? 0 :
+                               (minute(state) < 8 ? 3 :
+                                (minute(state) < 12 ? 6 : 9));
     result.posture = minute(state) < 8 ? Posture::hold : Posture::harass;
     result.attackThreshold = 1.2;
     result.composition = {{UnitKind::zealot, 0.35}, {UnitKind::dragoon, 0.12},
                           {UnitKind::highTemplar, 0.25}, {UnitKind::corsair, 0.18},
                           {UnitKind::archon, 0.10}};
 
-    goal(result, GoalKind::build, UnitKind::forge, 1, 93, "safe natural and upgrades");
-    if (minute(state) >= 4 && threat.immediateGround <= 0.45) {
+    if (supplyAtLeast(state, 10)) {
+        goal(result, GoalKind::build, UnitKind::forge, 1, 93,
+             "ten-supply forge timing", true);
+    }
+    if (minute(state) >= 4 && threat.immediateGround <= 0.45 &&
+        count(state, UnitKind::forge) > 0) {
         technologyGoal(result, TechnologyKind::protossGroundWeapons, 1, 87,
                        "zealot attack timing");
     }
     const auto defensiveBases = std::max(1, count(state, UnitKind::nexus));
-    goal(result, GoalKind::build, UnitKind::photonCannon,
-         std::min(6, defensiveBases * 2), 89,
-         "ling and mutalisk coverage");
-    goal(result, GoalKind::build, UnitKind::gateway, minute(state) < 8 ? 1 : 4, 84,
-         "ground production");
-    goal(result, GoalKind::train, UnitKind::zealot, std::max(4, minute(state)), 79,
-         "mineral-efficient front line");
-    goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 82, "air and dragoon access");
-    goal(result, GoalKind::build, UnitKind::stargate, 1, 76, "overlord denial and scouting");
-    goal(result, GoalKind::train, UnitKind::corsair, threat.air > 0.45 ? 7 : 4, 75,
-         "air superiority");
-    goal(result, GoalKind::build, UnitKind::citadelOfAdun, 1, 73, "speed and templar path");
-    goal(result, GoalKind::build, UnitKind::templarArchives, 1, 71, "storm versus Zerg mass");
-    goal(result, GoalKind::train, UnitKind::highTemplar, std::max(2, minute(state) / 3), 72,
-         "storm support");
+    if (defensiveBases >= 2 || threat.immediateGround > 0.25 || threat.air > 0.35) {
+        const auto safetyCannons = defensiveBases + (threat.air > 0.45 ? 2 : 0);
+        goal(result, GoalKind::build, UnitKind::photonCannon,
+             std::min(6, safetyCannons), 89, "ling and mutalisk coverage");
+    }
+    if (supplyAtLeast(state, 11)) {
+        goal(result, GoalKind::build, UnitKind::gateway, minute(state) < 8 ? 1 : 4, 84,
+             "eleven-supply gateway", count(state, UnitKind::gateway) == 0);
+        goal(result, GoalKind::train, UnitKind::zealot, std::max(4, minute(state)), 79,
+             "mineral-efficient front line");
+    }
+    if (supplyAtLeast(state, 15)) {
+        goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 82,
+             "air and dragoon access");
+    }
+    if (supplyAtLeast(state, 22)) {
+        goal(result, GoalKind::build, UnitKind::stargate, 1, 76,
+             "overlord denial and scouting");
+        goal(result, GoalKind::train, UnitKind::corsair, threat.air > 0.45 ? 7 : 4, 75,
+             "air superiority");
+    }
+    if (supplyAtLeast(state, 28)) {
+        goal(result, GoalKind::build, UnitKind::citadelOfAdun, 1, 73,
+             "speed and templar path");
+        goal(result, GoalKind::build, UnitKind::templarArchives, 1, 71,
+             "storm versus Zerg mass");
+        goal(result, GoalKind::train, UnitKind::highTemplar,
+             std::max(2, minute(state) / 3), 72, "storm support");
+    }
 
     if (minute(state) >= 8) {
         technologyGoal(result, TechnologyKind::legEnhancements, 1, 78,
@@ -262,7 +295,9 @@ StrategicPlan StrategyEngine::planPvZ(
         goal(result, GoalKind::build, UnitKind::gateway, 2, 99, "anti-rush production", true);
         goal(result, GoalKind::train, UnitKind::zealot, 6, 98, "hold early ground rush", true);
         goal(result, GoalKind::build, UnitKind::photonCannon, 3, 97, "seal mineral line", true);
-    } else if (minute(state) >= 3) {
+    } else if (minute(state) >= 3 &&
+               (count(state, UnitKind::zealot) >= 2 ||
+                count(state, UnitKind::photonCannon) >= 1)) {
         goal(result, GoalKind::expand, UnitKind::nexus, 2, 91,
              "forge-fast-expand timing");
     }
@@ -276,27 +311,43 @@ StrategicPlan StrategyEngine::planPvP(
     result.name = "PvP two-gate robotics control";
     result.desiredWorkers = std::min(66, 18 + minute(state) * 4);
     result.desiredBases = minute(state) < 9 ? 1 : (minute(state) < 15 ? 2 : 3);
-    result.desiredGasWorkers = minute(state) < 2 ? 0 : (minute(state) < 8 ? 3 :
-                                                       (minute(state) < 12 ? 6 : 9));
+    result.desiredGasWorkers = !supplyAtLeast(state, 11) ? 0 :
+                               (minute(state) < 8 ? 3 :
+                                (minute(state) < 12 ? 6 : 9));
     result.posture = minute(state) < 6 ? Posture::hold : Posture::pressure;
     result.attackThreshold = 1.18;
     result.composition = {{UnitKind::dragoon, 0.58}, {UnitKind::zealot, 0.14},
                           {UnitKind::reaver, 0.18}, {UnitKind::highTemplar, 0.10}};
 
-    goal(result, GoalKind::build, UnitKind::gateway, minute(state) < 9 ? 2 : 4, 90,
-         "tempo and map control");
-    goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 94, "dragoon access");
-    technologyGoal(result, TechnologyKind::singularityCharge, 1, 93,
-                   "range wins dragoon contact", true);
-    goal(result, GoalKind::train, UnitKind::dragoon, std::max(4, minute(state) * 2), 86,
-         "core PvP army");
-    goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 85,
-         "reaver pressure and detection");
-    goal(result, GoalKind::build, UnitKind::observatory, 1, 83, "DT safety");
-    goal(result, GoalKind::train, UnitKind::observer, 2, 88, "DT detection", true);
-    goal(result, GoalKind::build, UnitKind::roboticsSupportBay, 1, 69, "reaver access");
-    goal(result, GoalKind::train, UnitKind::reaver, 2, 70, "area control");
-    goal(result, GoalKind::train, UnitKind::shuttle, 1, 67, "reaver mobility");
+    if (supplyAtLeast(state, 10)) {
+        const auto gatewayTarget = supplyAtLeast(state, 15) ?
+                                       (minute(state) < 9 ? 2 : 4) : 1;
+        goal(result, GoalKind::build, UnitKind::gateway, gatewayTarget, 90,
+             "ten-supply gateway into two-gate control",
+             count(state, UnitKind::gateway) == 0);
+    }
+    if (supplyAtLeast(state, 13)) {
+        goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 94,
+             "thirteen-supply dragoon access", true);
+    }
+    if (supplyAtLeast(state, 14)) {
+        technologyGoal(result, TechnologyKind::singularityCharge, 1, 93,
+                       "range wins dragoon contact", true);
+        goal(result, GoalKind::train, UnitKind::dragoon, std::max(4, minute(state) * 2), 86,
+             "core PvP army");
+    }
+    if (count(state, UnitKind::dragoon) >= 3 || supplyAtLeast(state, 24)) {
+        goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 85,
+             "reaver pressure and detection");
+        goal(result, GoalKind::build, UnitKind::observatory, 1, 83, "DT safety");
+        goal(result, GoalKind::train, UnitKind::observer, 2, 88, "DT detection", true);
+    }
+    if (supplyAtLeast(state, 32)) {
+        goal(result, GoalKind::build, UnitKind::roboticsSupportBay, 1, 69,
+             "reaver access");
+        goal(result, GoalKind::train, UnitKind::reaver, 2, 70, "area control");
+        goal(result, GoalKind::train, UnitKind::shuttle, 1, 67, "reaver mobility");
+    }
 
     if (minute(state) >= 8) {
         technologyGoal(result, TechnologyKind::protossGroundWeapons,
@@ -329,9 +380,19 @@ void StrategyEngine::addInfrastructure(StrategicPlan& plan, const GameState& sta
         state.self.units, [](const UnitSnapshot& unit) {
             return unit.kind == UnitKind::pylon && !unit.completed;
         }));
+    const auto queuedSupply = std::accumulate(
+        state.self.queuedUnits.begin(), state.self.queuedUnits.end(), 0,
+        [](const int total, const UnitKind kind) { return total + unitStats(kind).supply; });
+    const auto activeProduction = count(state, UnitKind::gateway, true) +
+                                  count(state, UnitKind::roboticsFacility, true) +
+                                  count(state, UnitKind::stargate, true);
+    const auto desiredBuffer = state.self.supplyTotal <= 18
+                                   ? 2
+                                   : std::clamp(4 + activeProduction * 2, 6, 18);
     const auto projectedSupply = state.self.supplyTotal + pendingPylons * 16;
+    const auto projectedUsed = state.self.supplyUsed + queuedSupply;
     const auto supplyNeeded = projectedSupply < 400 &&
-                              projectedSupply - state.self.supplyUsed <= 8;
+                              projectedSupply - projectedUsed <= desiredBuffer;
     const auto desiredPylons = std::max(bases, pylons + (supplyNeeded ? 1 : 0));
     goal(plan, GoalKind::build, UnitKind::pylon, desiredPylons, 100,
          "maintain a supply buffer", state.self.supplyTotal - state.self.supplyUsed <= 4);
@@ -375,10 +436,16 @@ void StrategyEngine::applyOpeningStyle(
             plan.posture = minute(state) < 5 ? Posture::hold : Posture::pressure;
             plan.desiredBases = std::max(1, plan.desiredBases - 1);
             plan.attackThreshold = std::max(1.05, plan.attackThreshold - 0.10);
-            goal(plan, GoalKind::build, UnitKind::gateway, minute(state) < 8 ? 2 : 5, 91,
-                 "opponent-specific pressure production");
-            goal(plan, GoalKind::train, UnitKind::dragoon, std::max(5, minute(state) * 2), 87,
-                 "opponent-specific pressure army");
+            if (supplyAtLeast(state, 10)) {
+                goal(plan, GoalKind::build, UnitKind::gateway,
+                     minute(state) < 8 ? 2 : 5, 91,
+                     "opponent-specific pressure production");
+            }
+            if (supplyAtLeast(state, 14)) {
+                goal(plan, GoalKind::train, UnitKind::dragoon,
+                     std::max(5, minute(state) * 2), 87,
+                     "opponent-specific pressure army");
+            }
             return;
         case OpeningStyle::economic:
             plan.name += " [economic]";
@@ -392,6 +459,7 @@ void StrategyEngine::applyOpeningStyle(
         case OpeningStyle::deceptive:
             plan.name += " [tech switch]";
             plan.attackThreshold += 0.05;
+            if (minute(state) < 5 && !supplyAtLeast(state, 24)) return;
             if (state.enemy.race == Race::zerg) {
                 goal(plan, GoalKind::build, UnitKind::roboticsFacility, 1, 79,
                      "reaver tech switch");

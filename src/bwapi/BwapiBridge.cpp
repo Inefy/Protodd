@@ -777,7 +777,7 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
 
 bool BwapiBridge::build(const MacroAction& action, const StrategicPlan& plan) {
     const auto type = toBwapi(action.target);
-    if (type == UnitTypes::None || !type.isBuilding() || !Broodwar->canMake(type)) {
+    if (type == UnitTypes::None || !type.isBuilding()) {
         return false;
     }
     const auto pending = pendingBuilds_.find(action.target);
@@ -788,11 +788,13 @@ bool BwapiBridge::build(const MacroAction& action, const StrategicPlan& plan) {
     const auto near = plan.rallyPoint.valid() ? toBwapiPosition(plan.rallyPoint)
                                               : BWAPI::Position(Broodwar->self()->getStartLocation());
     const auto builder = findBuilder(type, near);
-    if (builder == nullptr) {
+    if (builder == nullptr || !Broodwar->canMake(type, builder)) {
         return false;
     }
     const auto location = buildLocation(action.target, type, builder, plan);
-    if (!location.isValid() || !Broodwar->canBuildHere(location, type, builder, false)) {
+    if (!location.isValid() ||
+        (type.requiresPsi() && !Broodwar->hasPower(location, type)) ||
+        !Broodwar->canBuildHere(location, type, builder, false)) {
         return false;
     }
     if (builder->build(type, location)) {
@@ -810,14 +812,18 @@ bool BwapiBridge::train(const MacroAction& action) {
         return false;
     }
     const auto producerType = type.whatBuilds().first;
+    Unit selected = nullptr;
     for (const auto producer : Broodwar->self()->getUnits()) {
-        if (producer != nullptr && producer->exists() && producer->isCompleted() &&
-            producer->getType() == producerType && producer->getTrainingQueue().size() < 2 &&
-            producer->canTrain(type) && producer->train(type)) {
-            return true;
+        if (producer == nullptr || !producer->exists() || !producer->isCompleted() ||
+            producer->getType() != producerType || producer->isTraining() ||
+            !producer->isPowered() || !producer->canTrain(type)) {
+            continue;
+        }
+        if (selected == nullptr || producer->getID() < selected->getID()) {
+            selected = producer;
         }
     }
-    return false;
+    return selected != nullptr && Broodwar->canMake(type, selected) && selected->train(type);
 }
 
 bool BwapiBridge::executeTechnology(const MacroAction& action) {

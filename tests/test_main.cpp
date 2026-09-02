@@ -200,6 +200,65 @@ void testSupplyPlanning() {
     expect(constructingGoal != constructing.goals.end() &&
                constructingGoal->desiredCount == 1,
            "pending pylon supply prevents a duplicate construction order");
+
+    state.self.supplyUsed = 40;
+    state.self.supplyTotal = 60;
+    state.self.units.pop_back();
+    for (int id = 10; id < 14; ++id) {
+        state.self.units.push_back(unit(id, astra::UnitKind::gateway, true));
+        state.self.queuedUnits.push_back(astra::UnitKind::dragoon);
+    }
+    const auto productionForecast = strategy.plan(state, {});
+    const auto forecastPylon = std::ranges::find(
+        productionForecast.goals, astra::UnitKind::pylon,
+        &astra::ProductionGoal::target);
+    expect(forecastPylon != productionForecast.goals.end() &&
+               forecastPylon->desiredCount == 1,
+           "supply forecast accounts for queued units and active production");
+}
+
+void testOpeningMilestones() {
+    astra::GameState state;
+    state.self.id = 1;
+    state.self.race = astra::Race::protoss;
+    state.enemy.id = 2;
+    state.enemy.race = astra::Race::terran;
+    state.self.supplyTotal = 34;
+    auto nexus = unit(1, astra::UnitKind::nexus, true);
+    nexus.role = astra::UnitRole::resourceDepot;
+    state.self.units.push_back(nexus);
+    astra::StrategyEngine strategy;
+
+    state.self.supplyUsed = 18;
+    const auto beforeGateway = strategy.plan(state, {});
+    expect(std::ranges::none_of(beforeGateway.goals, [](const astra::ProductionGoal& goal) {
+               return goal.target == astra::UnitKind::gateway;
+           }),
+           "opening does not spend on a Gateway before its supply milestone");
+
+    state.self.supplyUsed = 20;
+    const auto gatewayTiming = strategy.plan(state, {});
+    expect(std::ranges::any_of(gatewayTiming.goals, [](const astra::ProductionGoal& goal) {
+               return goal.target == astra::UnitKind::gateway && goal.blocking;
+           }),
+           "ten-supply Gateway becomes a mandatory opening milestone");
+
+    state.self.supplyUsed = 26;
+    const auto coreTiming = strategy.plan(state, {});
+    expect(std::ranges::any_of(coreTiming.goals, [](const astra::ProductionGoal& goal) {
+               return goal.target == astra::UnitKind::cyberneticsCore && goal.blocking;
+           }),
+           "thirteen-supply Core becomes a mandatory opening milestone");
+    expect(coreTiming.desiredGasWorkers == 3,
+           "gas mining starts before gas-dependent Dragoon technology");
+
+    state.enemy.race = astra::Race::zerg;
+    state.self.supplyUsed = 24;
+    const auto safePvZ = strategy.plan(state, {});
+    expect(std::ranges::none_of(safePvZ.goals, [](const astra::ProductionGoal& goal) {
+               return goal.target == astra::UnitKind::photonCannon;
+           }),
+           "peaceful one-base PvZ does not sink its opening into arbitrary Cannons");
 }
 
 void testStrategicTargeting() {
@@ -309,6 +368,18 @@ void testMacroReservations() {
     expect(compositionActions.size() == 1 &&
                compositionActions.front().target == astra::UnitKind::dragoon,
            "remaining resources continuously reinforce the planned composition");
+
+    compositionState.self.minerals = 100;
+    compositionState.self.gas = 0;
+    compositionPlan.composition = {
+        {astra::UnitKind::dragoon, 0.9}, {astra::UnitKind::zealot, 0.1},
+    };
+    astra::ResourceLedger fallbackLedger{100, 0};
+    const auto fallbackActions = planner.reconcile(
+        compositionState, compositionPlan, fallbackLedger);
+    expect(fallbackActions.size() == 1 &&
+               fallbackActions.front().target == astra::UnitKind::zealot,
+           "composition production falls back instead of idling on an unaffordable unit");
 
     astra::GameState upgradeState;
     upgradeState.self.minerals = 150;
@@ -611,6 +682,7 @@ int main() {
     testCatalog();
     testOpponentInferenceAndStrategy();
     testSupplyPlanning();
+    testOpeningMilestones();
     testStrategicTargeting();
     testMacroReservations();
     testOpponentLearning();
