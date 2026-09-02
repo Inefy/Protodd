@@ -54,20 +54,21 @@ ctest --test-dir build/dev --output-on-failure
 
 ## Build the tournament DLL
 
-Install Visual Studio with the C++ workload, unpack BWAPI 4.4.0, then configure
-the 32-bit preset with the local dependency path:
+Install Visual Studio with the C++ workload and unpack the official BWAPI 4.4.0
+source tree. The reproducible builder generates BWAPI's revision header,
+retargets its interface library to the installed toolset, builds Release/Win32,
+links AstraBot, and runs the release tests:
 
 ```powershell
-cmake --preset tournament -DBWAPI_ROOT=C:/deps/BWAPI
-cmake --build --preset tournament-release
-ctest --preset tournament-release
+./scripts/build-tournament.ps1 -BwapiRoot C:/deps/BWAPI
+./scripts/package-tournament.ps1
 ```
 
 Copy `AstraBot.dll` into `StarCraft/bwapi-data/AI/` and select it in
 `bwapi-data/bwapi.ini`. StarCraft 1.16.1 and the tournament's BWAPI injector are
-required to run matches. The official 4.4.0 source distribution does not ship
-a compiler-independent static library; see [the setup guide](docs/setup.md) for
-the exact `BWAPILIB` build and configuration flow.
+required to run matches. The package script emits an AIIDE-ready archive with
+the DLL, full source, manifest, exact build instructions, and no bundled BWAPI
+or game assets. See [the setup guide](docs/setup.md) for local match setup.
 
 ## Competition principles
 
