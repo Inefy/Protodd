@@ -32,7 +32,8 @@ public:
         std::span<const UnitSnapshot> friendly,
         std::span<const UnitSnapshot> enemy,
         double requiredRatio,
-        double uncertainty) const;
+        double uncertainty,
+        bool runSimulation = true) const;
 
     [[nodiscard]] const UnitSnapshot* selectTarget(
         const UnitSnapshot& attacker,

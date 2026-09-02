@@ -39,6 +39,8 @@ def analyze(lines: Iterable[str]) -> dict[str, object]:
                 "opponent": fields[2],
                 "opening": fields[3],
                 "states": [],
+                "slow_frames": [],
+                "errors": 0,
             }
         elif fields[0] == "STATE" and len(fields) >= 11 and current is not None:
             try:
@@ -54,10 +56,38 @@ def analyze(lines: Iterable[str]) -> dict[str, object]:
                         "gas": int(fields[8]),
                         "supply_used": int(fields[9]),
                         "supply_total": int(fields[10]),
+                        "frame_ms": float(fields[11]) if len(fields) >= 12 else 0.0,
+                        "runtime_load": fields[12] if len(fields) >= 13 else "unknown",
                     }
                 )
             except (TypeError, ValueError):
                 continue
+        elif fields[0] == "PERF" and len(fields) >= 4 and current is not None:
+            try:
+                current["slow_frames"].append(
+                    {
+                        "frame": int(fields[1]),
+                        "milliseconds": int(fields[2]) / 1000.0,
+                        "load": fields[3],
+                    }
+                )
+            except (TypeError, ValueError):
+                continue
+        elif fields[0] == "PERF_SUMMARY" and len(fields) >= 8 and current is not None:
+            try:
+                current["performance"] = {
+                    "samples": int(fields[1]),
+                    "moving_average_ms": float(fields[2]),
+                    "peak_ms": float(fields[3]),
+                    "over_42ms": int(fields[4]),
+                    "over_55ms": int(fields[5]),
+                    "over_1s": int(fields[6]),
+                    "over_10s": int(fields[7]),
+                }
+            except (TypeError, ValueError):
+                continue
+        elif fields[0] == "ERROR" and current is not None:
+            current["errors"] = int(current["errors"]) + 1
         elif fields[0] == "END" and len(fields) >= 3 and current is not None:
             try:
                 current["won"] = fields[1] == "win"
@@ -83,6 +113,12 @@ def analyze(lines: Iterable[str]) -> dict[str, object]:
         if games
         else 0.0
     )
+    performance = [game.get("performance", {}) for game in games]
+    slow_frames = [sample for game in games for sample in game["slow_frames"]]
+
+    def performance_sum(field: str) -> int:
+        return sum(int(item.get(field, 0)) for item in performance)
+
     return {
         "games": len(games),
         "wins": wins,
@@ -96,6 +132,18 @@ def analyze(lines: Iterable[str]) -> dict[str, object]:
         "average_gas": average("gas"),
         "average_fight_ratio": average("fight_ratio"),
         "average_uncertainty": average("uncertainty"),
+        "runtime": {
+            "peak_frame_ms": max(
+                (float(item.get("peak_ms", 0.0)) for item in performance),
+                default=0.0,
+            ),
+            "slow_frame_records": len(slow_frames),
+            "over_42ms": performance_sum("over_42ms"),
+            "over_55ms": performance_sum("over_55ms"),
+            "over_1s": performance_sum("over_1s"),
+            "over_10s": performance_sum("over_10s"),
+            "caught_errors": sum(int(game["errors"]) for game in games),
+        },
     }
 
 
@@ -104,6 +152,9 @@ class AnalyzerTests(unittest.TestCase):
         sample = [
             "START,Fighting Spirit,Iron,standard\n",
             "STATE,3600,PvT plan,Pressure,FastExpand,0.4,1.3,200,100,50,66\n",
+            "PERF,3601,43000,emergency\n",
+            "ERROR,3602,recovered exception\n",
+            "PERF_SUMMARY,7200,0.8,43.0,1,0,0,0\n",
             "END,win,7200\n",
             "START,Python,Steamhammer,economic\n",
             "END,loss,6000\n",
@@ -113,6 +164,8 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(result["wins"], 1)
         self.assertAlmostEqual(result["win_rate"], 0.5)
         self.assertEqual(result["snapshots"], 1)
+        self.assertEqual(result["runtime"]["over_42ms"], 1)
+        self.assertEqual(result["runtime"]["caught_errors"], 1)
 
     def test_empty_interval(self) -> None:
         self.assertEqual(wilson_interval(0, 0), [0.0, 1.0])

@@ -3,7 +3,9 @@
 #include "astra/UnitCatalog.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -40,6 +42,7 @@ void AstraModule::onStart() {
     influence_ = InfluenceMap(64);
     commands_.clear();
     transports_.reset();
+    frameBudget_.reset();
 
     std::error_code error;
     std::filesystem::create_directories("bwapi-data/write", error);
@@ -62,12 +65,45 @@ void AstraModule::onEnd(const bool winner) {
                                 std::ios::binary | std::ios::trunc);
     if (historyOutput) historyOutput << history_.serialize();
     if (log_) {
+        const auto& runtime = frameBudget_.stats();
+        log_ << "PERF_SUMMARY," << runtime.samples << ',' << runtime.movingAverageMs << ','
+             << runtime.peakMs << ',' << runtime.over42ms << ',' << runtime.over55ms << ','
+             << runtime.overOneSecond << ',' << runtime.overTenSeconds << '\n';
         log_ << "END," << (winner ? "win" : "loss") << ',' << state_.frame << '\n';
         log_.flush();
     }
 }
 
 void AstraModule::onFrame() {
+    const auto started = std::chrono::steady_clock::now();
+    try {
+        runFrame();
+    } catch (const std::exception& error) {
+        const auto frame = BWAPI::Broodwar->getFrameCount();
+        if (log_ && frame - lastErrorFrame_ >= 24) {
+            log_ << "ERROR," << frame << ',' << error.what() << '\n';
+            log_.flush();
+            lastErrorFrame_ = frame;
+        }
+    } catch (...) {
+        const auto frame = BWAPI::Broodwar->getFrameCount();
+        if (log_ && frame - lastErrorFrame_ >= 24) {
+            log_ << "ERROR," << frame << ",unknown\n";
+            log_.flush();
+            lastErrorFrame_ = frame;
+        }
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    const auto frame = BWAPI::Broodwar->getFrameCount();
+    frameBudget_.record(frame, elapsed);
+    if (log_ && elapsed >= 28000) {
+        log_ << "PERF," << frame << ',' << elapsed << ','
+             << runtimeLoadName(frameBudget_.load(frame)) << '\n';
+    }
+}
+
+void AstraModule::runFrame() {
     if (BWAPI::Broodwar->isReplay() || BWAPI::Broodwar->isPaused() ||
         BWAPI::Broodwar->self() == nullptr || BWAPI::Broodwar->enemy() == nullptr) {
         return;
@@ -78,20 +114,29 @@ void AstraModule::onFrame() {
         return;
     }
 
+    const auto cadence = frameBudget_.expensiveCadenceMultiplier(state_.frame);
     // Work is staggered to keep frame time predictable under tournament load.
-    if (state_.frame % 8 == 0) influence_.update(state_);
-    if (state_.frame % 12 == 0) opponent_.update(state_);
+    if (state_.frame % (8 * cadence) == 0) influence_.update(state_);
+    if (state_.frame % (12 * cadence) == 0) opponent_.update(state_);
     if (state_.frame % 24 == 0 || plan_.goals.empty()) updateStrategy();
     if (state_.frame % 6 == 1) updateMacro();
     if (state_.frame % 12 == 2) updateWorkers();
-    if (state_.frame % 24 == 3) updateScouting();
-    if (state_.frame % std::max(1, state_.latencyFrames) == 0) updateCombat();
+    if (state_.frame % (24 * cadence) == 3) updateScouting();
+    const auto combatCadence = std::max(1, state_.latencyFrames) *
+                               (frameBudget_.load(state_.frame) == RuntimeLoad::emergency ? 2 : 1);
+    if (state_.frame % combatCadence == 0) {
+        updateCombat(frameBudget_.allowSimulation(state_.frame),
+                     frameBudget_.navigationInterval(state_.frame),
+                     frameBudget_.combatCommandLimit(state_.frame));
+    }
     if (state_.frame % 24 == 5) {
         bridge_.runMaintenance(maintenanceMineralReserve_, maintenanceGasReserve_);
     }
     if (state_.frame % (24 * 15) == 0) logDecision();
 
-    bridge_.drawDebug(plan_, opponent_.assessment(), fight_);
+    if (frameBudget_.load(state_.frame) == RuntimeLoad::normal) {
+        bridge_.drawDebug(plan_, opponent_.assessment(), fight_);
+    }
 }
 
 void AstraModule::onUnitDiscover(const BWAPI::Unit unit) { bridge_.remember(unit); }
@@ -156,7 +201,10 @@ void AstraModule::updateScouting() {
     bridge_.executeScouts(orders);
 }
 
-void AstraModule::updateCombat() {
+void AstraModule::updateCombat(
+    const bool runSimulation,
+    const int navigationInterval,
+    const std::size_t commandLimit) {
     const auto friendly = combatUnits(true);
     const auto enemy = combatUnits(false);
     const auto aggressive = plan_.posture == Posture::pressure ||
@@ -164,7 +212,7 @@ void AstraModule::updateCombat() {
                             plan_.posture == Posture::harass;
     const auto formed = squads_.form(state_, friendly, enemy, plan_, retreatPoint());
     const auto refreshNavigation = navigationRefresh_ < 0 ||
-                                   state_.frame - navigationRefresh_ >= 24 ||
+                                   state_.frame - navigationRefresh_ >= navigationInterval ||
                                    advanceWaypoints_.size() != formed.size();
     if (refreshNavigation) {
         navigationRefresh_ = state_.frame;
@@ -202,7 +250,8 @@ void AstraModule::updateCombat() {
         const auto estimate = combat_.evaluate(
             squad.units, squad.enemies, requiredRatio,
             squad.enemies.empty() ? opponent_.assessment().uncertainty * 0.25
-                                  : opponent_.assessment().uncertainty);
+                                  : opponent_.assessment().uncertainty,
+            runSimulation);
         if (squad.role == SquadRole::mainArmy && squad.units.size() >= debugSquadSize) {
             debugSquadSize = squad.units.size();
             fight_ = estimate;
@@ -225,7 +274,7 @@ void AstraModule::updateCombat() {
     }
     // BWAPI calls are capped per combat tick. Priority-aware rotation keeps
     // retreat and detector orders immediate while bounding large-army spikes.
-    for (const auto& command : commands_.finalize(96)) {
+    for (const auto& command : commands_.finalize(commandLimit)) {
         if (bridge_.execute(command)) commands_.markIssued(command);
     }
 }
@@ -253,7 +302,9 @@ void AstraModule::logDecision() {
          << enemyPlanName(opponent_.assessment().mostLikely) << ','
          << opponent_.assessment().uncertainty << ',' << fight_.ratio << ','
          << state_.self.minerals << ',' << state_.self.gas << ','
-         << state_.self.supplyUsed << ',' << state_.self.supplyTotal << '\n';
+         << state_.self.supplyUsed << ',' << state_.self.supplyTotal << ','
+         << frameBudget_.stats().movingAverageMs << ','
+         << runtimeLoadName(frameBudget_.load(state_.frame)) << '\n';
     log_.flush();
 }
 

@@ -8,6 +8,7 @@
 #include "astra/MacroPlanner.hpp"
 #include "astra/Navigation.hpp"
 #include "astra/Scouting.hpp"
+#include "astra/Runtime.hpp"
 #include "astra/Strategy.hpp"
 #include "astra/Squads.hpp"
 #include "astra/UnitCatalog.hpp"
@@ -645,6 +646,26 @@ void testCommandArbitration() {
     }
 }
 
+void testFrameBudget() {
+    astra::FrameBudget budget;
+    expect(budget.load(100) == astra::RuntimeLoad::normal,
+           "frame budget begins at full quality");
+    budget.record(100, 30000);
+    expect(budget.load(101) == astra::RuntimeLoad::reduced &&
+               !budget.allowSimulation(101) &&
+               budget.expensiveCadenceMultiplier(101) == 2,
+           "slow frame temporarily sheds expensive optional work");
+    expect(budget.load(400) == astra::RuntimeLoad::normal,
+           "quality automatically recovers after the cooldown window");
+    budget.record(500, 56000);
+    expect(budget.load(501) == astra::RuntimeLoad::emergency &&
+               budget.combatCommandLimit(501) == 40U &&
+               budget.navigationInterval(501) == 96,
+           "dangerous frame time enters the emergency budget");
+    expect(budget.stats().over42ms == 1U && budget.stats().over55ms == 1U,
+           "AIIDE frame-time thresholds are counted explicitly");
+}
+
 void testWorkersAndScouts() {
     astra::GameState state;
     state.frame = 5000;
@@ -850,6 +871,7 @@ int main() {
     testOpponentLearning();
     testInfluenceAndCombat();
     testCommandArbitration();
+    testFrameBudget();
     testWorkersAndScouts();
     testLocalSquadsAndDetection();
     testTransportMissions();

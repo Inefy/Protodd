@@ -21,7 +21,8 @@ tournament bot or depend on code whose license restricts competition entry.
   local squads, detector escorts, coordinated focus fire, unit-specific kiting,
   surrounds, cloak preservation, Storm, Stasis, Feedback, and ammunition upkeep.
 - A legal-information-only BWAPI adapter with command deduplication and
-  staggered frame scheduling plus a fair per-tick command budget.
+  staggered frame scheduling, a fair per-tick command budget, measured
+  frame-time load shedding, and callback exception containment.
 - UCB-based opponent/map learning across games, using tournament-safe read and
   write directories to explore and exploit four opening styles.
 - Portable deterministic regression scenarios and strict-warning compilation.

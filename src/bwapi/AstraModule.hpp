@@ -10,6 +10,7 @@
 #include "astra/MacroPlanner.hpp"
 #include "astra/Navigation.hpp"
 #include "astra/Scouting.hpp"
+#include "astra/Runtime.hpp"
 #include "astra/Squads.hpp"
 #include "astra/Strategy.hpp"
 #include "astra/Transport.hpp"
@@ -46,6 +47,7 @@ private:
     TacticalController tactics_;
     SquadPlanner squads_;
     TransportController transports_;
+    FrameBudget frameBudget_;
     CommandBus commands_;
     StrategicPlan plan_;
     CombatEstimate fight_;
@@ -61,13 +63,16 @@ private:
     Frame navigationRefresh_{-1};
     int maintenanceMineralReserve_{};
     int maintenanceGasReserve_{};
+    Frame lastErrorFrame_{-1000};
     std::ofstream log_;
 
+    void runFrame();
     void updateStrategy();
     void updateMacro();
     void updateWorkers();
     void updateScouting();
-    void updateCombat();
+    void updateCombat(bool runSimulation, int navigationInterval,
+                      std::size_t commandLimit);
     [[nodiscard]] std::vector<UnitSnapshot> combatUnits(bool ours) const;
     [[nodiscard]] Position retreatPoint() const;
     void logDecision();

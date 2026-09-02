@@ -27,6 +27,8 @@ an experiment over a map and opponent matrix, not as a verdict from one replay.
 - game length distribution;
 - opening-style results;
 - average bank, fight ratio, and uncertainty from periodic snapshots.
+- peak frame time, AIIDE 42/55 ms threshold counts, caught errors, and
+  automatic load-shedding incidents.
 
 Example:
 
@@ -37,6 +39,18 @@ python tools/log_analyzer.py bwapi-data/write/AstraBot.log --pretty
 The interval is intentionally shown alongside raw win rate. Prefer a candidate
 only when it improves the intended matchup without materially increasing
 crashes or causing a clear regression elsewhere.
+
+## Runtime budget
+
+Astra measures every callback. A frame at 28 ms temporarily disables local
+combat simulation and reduces navigation/scouting cadence; a frame at 40 ms
+enters an emergency tier with a smaller command budget. Macro, workers,
+detection, and retreat control continue. The bot returns to full quality after
+the cooldown window rather than permanently degrading after a transient spike.
+
+`PERF_SUMMARY` is written before each `END` record. Any nonzero `over_55ms`,
+`over_1s`, `over_10s`, or caught-error count is a release blocker even when the
+batch win rate rises.
 
 ## Persistent learning
 

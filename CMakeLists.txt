@@ -24,6 +24,7 @@ add_library(astra_core OBJECT
     src/core/Workers.cpp
     src/core/Scouting.cpp
     src/core/Learning.cpp
+    src/core/Runtime.cpp
     src/core/Squads.cpp
     src/core/Transport.cpp
 )

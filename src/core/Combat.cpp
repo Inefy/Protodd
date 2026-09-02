@@ -183,7 +183,8 @@ CombatEstimate CombatEvaluator::evaluate(
     const std::span<const UnitSnapshot> friendly,
     const std::span<const UnitSnapshot> enemy,
     const double requiredRatio,
-    const double uncertainty) const {
+    const double uncertainty,
+    const bool runSimulation) const {
     CombatEstimate result;
     for (const auto& unit : friendly) {
         result.friendlyPower += unitPower(unit, enemy);
@@ -194,7 +195,15 @@ CombatEstimate CombatEvaluator::evaluate(
 
     const auto rawFriendlyPower = result.friendlyPower;
     const auto rawEnemyPower = result.enemyPower;
-    const auto simulation = simulateEngagement(friendly, enemy);
+    auto simulation = SimulationOutcome{};
+    if (runSimulation) {
+        simulation = simulateEngagement(friendly, enemy);
+    } else {
+        simulation.friendlyInitial = rawFriendlyPower;
+        simulation.enemyInitial = rawEnemyPower;
+        simulation.friendlyRemaining = rawFriendlyPower;
+        simulation.enemyRemaining = rawEnemyPower;
+    }
     result.simulatedFriendlyRemaining = simulation.friendlyRemaining;
     result.simulatedEnemyRemaining = simulation.enemyRemaining;
 
