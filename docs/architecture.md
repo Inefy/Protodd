@@ -49,8 +49,8 @@ opponent file during a live game.
 | `WorkerManager` | Per-patch saturation, gas, transfer, construction and threat-specific militia |
 | `SquadPlanner` | Local connected armies, base defense, harassment, objectives and detector escorts |
 | `CombatEvaluator` | Fast local fight estimate with uncertainty penalties |
-| `TacticalController` | Volley allocation, kiting, surrounds, caster screening and cloak preservation |
-| `BwapiBridge` | Legal observations, canonical base geometry, safe construction, upgrades and area-spell coordination |
+| `TacticalController` | Exact volley allocation, kiting, surrounds, caster screening and cloak preservation |
+| `BwapiBridge` | Legal observations, base geometry, safe construction, upgrades and value-aware spell coordination |
 | `CommandBus` | Legal command validation, deduplication, arbitration and throttling |
 | `OpponentHistory` | Tournament-safe cross-game opening exploration and exploitation |
 

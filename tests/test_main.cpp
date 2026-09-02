@@ -604,6 +604,33 @@ void testInfluenceAndCombat() {
     expect(evaluator.selectTarget(friendly.front(), targetChoices, lethalVolley)->id == enemy.id,
            "focus fire redirects once a target has lethal committed damage");
 
+    auto firstCorsair = unit(70, astra::UnitKind::corsair, true, {400, 400});
+    firstCorsair.role = astra::UnitRole::airArmy;
+    firstCorsair.flying = true;
+    firstCorsair.airWeapon = {.damage = 5, .cooldown = 8, .maxRange = 160,
+                              .targetsAir = true, .hits = 2};
+    auto secondCorsair = firstCorsair;
+    secondCorsair.id = 71;
+    auto firstScourge = unit(72, astra::UnitKind::scourge, false, {450, 400});
+    firstScourge.role = astra::UnitRole::airArmy;
+    firstScourge.flying = true;
+    firstScourge.hitPoints = 8;
+    firstScourge.maxHitPoints = 25;
+    auto secondScourge = firstScourge;
+    secondScourge.id = 73;
+    secondScourge.position = {455, 405};
+    const std::vector<astra::UnitSnapshot> corsairs{firstCorsair, secondCorsair};
+    const std::vector<astra::UnitSnapshot> scourge{firstScourge, secondScourge};
+    astra::CombatEstimate volleyEstimate;
+    volleyEstimate.decision = astra::FightDecision::engage;
+    astra::InfluenceMap volleyInfluence;
+    astra::TacticalController volleyTactics;
+    const auto volleyOrders = volleyTactics.control(
+        corsairs, scourge, volleyEstimate, {900, 900}, {100, 100}, volleyInfluence);
+    expect(volleyOrders.size() == 2 &&
+               volleyOrders[0].targetUnit != volleyOrders[1].targetUnit,
+           "multi-hit volleys reserve exact lethal damage and avoid overkill");
+
     auto explosiveAttacker = friendly.front();
     explosiveAttacker.groundWeapon = {
         .damage = 100, .cooldown = 1000, .maxRange = 192,

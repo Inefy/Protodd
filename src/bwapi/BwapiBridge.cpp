@@ -316,6 +316,7 @@ void BwapiBridge::runMaintenance(const int mineralReserve, const int gasReserve)
 
     auto freeMinerals = std::max(0, self->minerals() - mineralReserve);
     auto freeGas = std::max(0, self->gas() - gasReserve);
+    std::unordered_set<UnitId> spellcastersCommitted;
 
     for (const auto unit : self->getUnits()) {
         if (unit == nullptr || !unit->exists() || !unit->isCompleted()) {
@@ -347,10 +348,11 @@ void BwapiBridge::runMaintenance(const int mineralReserve, const int gasReserve)
                 continue;
             }
             Unit best = nullptr;
-            auto bestScore = 2;
+            auto bestScore = 1.8;
             for (const auto enemy : Broodwar->enemy()->getUnits()) {
                 if (enemy == nullptr || !enemy->exists() || !enemy->isVisible() ||
-                    enemy->isFlying() || enemy->isUnderStorm()) {
+                    enemy->isFlying() || enemy->isUnderStorm() ||
+                    enemy->getType().isBuilding()) {
                     continue;
                 }
                 const auto recentlyCovered = std::ranges::any_of(
@@ -358,12 +360,24 @@ void BwapiBridge::runMaintenance(const int mineralReserve, const int gasReserve)
                         return closeTo(zone.center, fromBwapi(enemy->getPosition()), 112);
                     });
                 if (recentlyCovered) continue;
-                const auto clustered = static_cast<int>(Broodwar->getUnitsInRadius(
-                    enemy->getPosition(), 80,
-                    !Filter::IsOwned && !Filter::IsNeutral && !Filter::IsFlying).size());
-                const auto friendly = static_cast<int>(Broodwar->getUnitsInRadius(
-                    enemy->getPosition(), 80, Filter::IsOwned).size());
-                const auto score = clustered * 2 - friendly * 3;
+                auto enemyValue = 0.0;
+                auto friendlyValue = 0.0;
+                for (const auto nearby : Broodwar->getUnitsInRadius(enemy->getPosition(), 80)) {
+                    if (nearby == nullptr || !nearby->exists() || nearby->isFlying() ||
+                        nearby->getType().isBuilding()) {
+                        continue;
+                    }
+                    const auto value = unitStats(toKind(nearby->getType())).combatValue *
+                                       std::clamp(static_cast<double>(nearby->getHitPoints() +
+                                                                      nearby->getShields()) /
+                                                      static_cast<double>(std::max(
+                                                          1, nearby->getType().maxHitPoints() +
+                                                                 nearby->getType().maxShields())),
+                                                  0.2, 1.0);
+                    if (nearby->getPlayer() == Broodwar->enemy()) enemyValue += value;
+                    if (nearby->getPlayer() == self) friendlyValue += value;
+                }
+                const auto score = enemyValue - friendlyValue * 1.5;
                 if (score > bestScore) {
                     bestScore = score;
                     best = enemy;
@@ -374,6 +388,7 @@ void BwapiBridge::runMaintenance(const int mineralReserve, const int gasReserve)
                 templar->useTech(TechTypes::Psionic_Storm, best->getPosition())) {
                 recentAreaSpells_.push_back(
                     {fromBwapi(best->getPosition()), frame + 72});
+                spellcastersCommitted.insert(templar->getID());
                 stormIssued = true;
             }
             if (stormIssued) break;
@@ -385,18 +400,23 @@ void BwapiBridge::runMaintenance(const int mineralReserve, const int gasReserve)
             if (arbiter == nullptr || arbiter->getType() != UnitTypes::Protoss_Arbiter ||
                 arbiter->getEnergy() < 100 || !arbiter->isCompleted()) continue;
             Unit best = nullptr;
-            auto bestScore = 5;
+            auto bestScore = 4.0;
             for (const auto enemy : Broodwar->enemy()->getUnits()) {
                 if (enemy == nullptr || !enemy->exists() || !enemy->isVisible() ||
-                    enemy->isStasised()) continue;
+                    enemy->isStasised() || enemy->getType().isBuilding()) continue;
                 if (std::ranges::any_of(recentAreaSpells_, [enemy](const SpellZone& zone) {
                         return closeTo(zone.center, fromBwapi(enemy->getPosition()), 112);
                     })) continue;
-                const auto clustered = static_cast<int>(Broodwar->getUnitsInRadius(
-                    enemy->getPosition(), 96, !Filter::IsOwned && !Filter::IsNeutral).size());
-                const auto friendly = static_cast<int>(Broodwar->getUnitsInRadius(
-                    enemy->getPosition(), 96, Filter::IsOwned).size());
-                const auto score = clustered * 2 - friendly * 4;
+                auto enemyValue = 0.0;
+                auto friendlyValue = 0.0;
+                for (const auto nearby : Broodwar->getUnitsInRadius(enemy->getPosition(), 96)) {
+                    if (nearby == nullptr || !nearby->exists() ||
+                        nearby->getType().isBuilding()) continue;
+                    const auto value = unitStats(toKind(nearby->getType())).combatValue;
+                    if (nearby->getPlayer() == Broodwar->enemy()) enemyValue += value;
+                    if (nearby->getPlayer() == self) friendlyValue += value;
+                }
+                const auto score = enemyValue - friendlyValue * 2.0;
                 if (score > bestScore) {
                     bestScore = score;
                     best = enemy;
@@ -407,7 +427,65 @@ void BwapiBridge::runMaintenance(const int mineralReserve, const int gasReserve)
                 arbiter->useTech(TechTypes::Stasis_Field, best->getPosition())) {
                 recentAreaSpells_.push_back(
                     {fromBwapi(best->getPosition()), frame + 100});
+                spellcastersCommitted.insert(arbiter->getID());
                 break;
+            }
+        }
+    }
+
+    // Recall a remote reinforcement ball onto an Arbiter that has established
+    // a live position near valuable enemy units or structures. This is bounded
+    // to one cast and requires enough recalled army value to justify 150 energy.
+    if (self->hasResearched(TechTypes::Recall)) {
+        auto recallIssued = false;
+        for (const auto arbiter : self->getUnits()) {
+            if (recallIssued || arbiter == nullptr || !arbiter->exists() ||
+                !arbiter->isCompleted() ||
+                arbiter->getType() != UnitTypes::Protoss_Arbiter ||
+                arbiter->getEnergy() < 150 || arbiter->isUnderAttack() ||
+                spellcastersCommitted.contains(arbiter->getID())) {
+                continue;
+            }
+            auto destinationValue = 0.0;
+            for (const auto enemy : Broodwar->getUnitsInRadius(arbiter->getPosition(), 640)) {
+                if (enemy == nullptr || !enemy->exists() ||
+                    enemy->getPlayer() != Broodwar->enemy()) continue;
+                const auto kind = toKind(enemy->getType());
+                destinationValue += enemy->getType().isBuilding()
+                                        ? (enemy->getType().isResourceDepot() ? 2.0 : 0.35)
+                                        : unitStats(kind).combatValue;
+            }
+            if (destinationValue < 2.0) continue;
+
+            Unit bestCenter = nullptr;
+            auto bestValue = 6.0;
+            for (const auto candidate : self->getUnits()) {
+                if (candidate == nullptr || !candidate->exists() ||
+                    !candidate->isCompleted() || candidate->isFlying() ||
+                    !isCombatUnit(toKind(candidate->getType())) ||
+                    candidate->getDistance(arbiter) < 900) {
+                    continue;
+                }
+                auto clusterValue = 0.0;
+                for (const auto nearby : Broodwar->getUnitsInRadius(
+                         candidate->getPosition(), 128, Filter::IsOwned)) {
+                    if (nearby != nullptr && nearby->exists() && nearby->isCompleted() &&
+                        !nearby->isFlying() && isCombatUnit(toKind(nearby->getType()))) {
+                        clusterValue += unitStats(toKind(nearby->getType())).combatValue;
+                    }
+                }
+                if (clusterValue > bestValue ||
+                    (std::abs(clusterValue - bestValue) < 0.001 &&
+                     (bestCenter == nullptr || candidate->getID() < bestCenter->getID()))) {
+                    bestValue = clusterValue;
+                    bestCenter = candidate;
+                }
+            }
+            if (bestCenter != nullptr &&
+                arbiter->canUseTech(TechTypes::Recall, bestCenter->getPosition()) &&
+                arbiter->useTech(TechTypes::Recall, bestCenter->getPosition())) {
+                spellcastersCommitted.insert(arbiter->getID());
+                recallIssued = true;
             }
         }
     }

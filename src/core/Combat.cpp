@@ -276,7 +276,7 @@ const UnitSnapshot* CombatEvaluator::selectTarget(
                                    : 0.0) +
                               static_cast<double>(splashTargets) * 0.9;
         const auto effectiveHealth = std::max(1, remainingHealth);
-        const auto killEfficiency = static_cast<double>(weapon.damage) / effectiveHealth;
+        const auto killEfficiency = volleyDamage(attacker, target) / effectiveHealth;
         const auto inRange = range <= weapon.maxRange + 16 ? 2.0 : 0.0;
         const auto score = priority + killEfficiency * 4.0 + inRange - range / 320.0;
         if (score > bestScore || (std::abs(score - bestScore) < 0.001 &&
@@ -424,7 +424,8 @@ std::vector<Command> TacticalController::control(
                 commands.push_back({unit.id, CommandType::attackUnit, target->id, {-1, -1},
                                     UnitKind::unknown, 80, 0, "focus-fire"});
                 if (canFire) {
-                    const auto damage = std::max(1, weapon.damage - target->armor);
+                    const auto damage = std::max(
+                        1, static_cast<int>(std::lround(volleyDamage(unit, *target))));
                     const auto allocation = std::ranges::find(
                         allocations, target->id, &TargetAllocation::target);
                     if (allocation == allocations.end()) {

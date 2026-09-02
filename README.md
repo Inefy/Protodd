@@ -22,8 +22,9 @@ tournament bot or depend on code whose license restricts competition entry.
   saturation transfers across bases.
 - Ground/air/detection influence maps, risk-aware scouting, combat evaluation,
   threat-deadline scout priorities, persistent scout assignments, local squads,
-  detector escorts, coordinated focus fire, unit-specific kiting, surrounds,
-  cloak preservation, Storm, Stasis, Feedback, and ammunition upkeep.
+  detector escorts, exact multi-hit focus-fire reservations, unit-specific
+  kiting, surrounds, cloak preservation, value-weighted Storm/Stasis, Feedback,
+  reinforcement Recall, and ammunition upkeep.
 - A legal-information-only BWAPI adapter with command deduplication and
   staggered frame scheduling, a fair per-tick command budget, measured
   frame-time load shedding, and callback exception containment.
