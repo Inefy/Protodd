@@ -813,9 +813,47 @@ void testWorkersAndScouts() {
 
     const astra::UnitId scouts[]{6};
     astra::ScoutManager scouting;
-    const auto orders = scouting.assign(scoutState, scouts, influence);
+    const auto orders = scouting.assign(scoutState, scouts, influence, {});
     expect(orders.size() == 1 && orders.front().target == astra::Position{1700, 1700},
            "scout prioritizes stale unexplored start location");
+
+    astra::GameState riskState;
+    riskState.mapWidthPixels = 2048;
+    riskState.mapHeightPixels = 2048;
+    riskState.self.id = 1;
+    riskState.enemy.id = 2;
+    auto riskProbe = unit(300, astra::UnitKind::probe, true, {128, 128});
+    riskProbe.role = astra::UnitRole::worker;
+    riskState.self.units.push_back(riskProbe);
+    riskState.bases.push_back(
+        {3, {900, 128}, {900, 128}, 8000, 0, -1, 0, false, false, 8, 0});
+    riskState.bases.push_back(
+        {4, {128, 1800}, {128, 1800}, 8000, 0, -1, 0, false, false, 8, 0});
+    auto corridorTank = unit(301, astra::UnitKind::siegeTank, false, {520, 128});
+    corridorTank.role = astra::UnitRole::groundArmy;
+    corridorTank.groundWeapon = {.damage = 70, .cooldown = 75, .maxRange = 384,
+                                 .targetsGround = true};
+    riskState.enemy.units.push_back(corridorTank);
+    astra::InfluenceMap riskInfluence;
+    riskInfluence.update(riskState);
+    astra::ScoutManager riskScouting;
+    const astra::UnitId riskScoutIds[]{300};
+    const auto safeProbeOrder = riskScouting.assign(riskState, riskScoutIds,
+                                                    riskInfluence, {});
+    expect(safeProbeOrder.size() == 1 &&
+               safeProbeOrder.front().target == astra::Position{128, 1800},
+           "ground scout rejects a shorter route through siege-tank influence");
+
+    riskState.self.units.front().kind = astra::UnitKind::observer;
+    riskState.self.units.front().role = astra::UnitRole::detector;
+    riskState.self.units.front().flying = true;
+    riskScouting.reset();
+    const auto flyingOrder = riskScouting.assign(riskState, riskScoutIds,
+                                                 riskInfluence, {});
+    expect(flyingOrder.size() == 1 &&
+               flyingOrder.front().target == astra::Position{520, 128} &&
+               flyingOrder.front().purpose == astra::ScoutPurpose::watchArmy,
+           "flying scout ignores ground-only danger and shadows the army");
 }
 
 void testLocalSquadsAndDetection() {

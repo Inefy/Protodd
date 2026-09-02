@@ -20,8 +20,9 @@ tournament bot or depend on code whose license restricts competition entry.
 - Canonical depot-site discovery, mining-lane-safe construction, reachable
   expansions, projected-supply timing, and saturation transfers across bases.
 - Ground/air/detection influence maps, risk-aware scouting, combat evaluation,
-  local squads, detector escorts, coordinated focus fire, unit-specific kiting,
-  surrounds, cloak preservation, Storm, Stasis, Feedback, and ammunition upkeep.
+  threat-deadline scout priorities, persistent scout assignments, local squads,
+  detector escorts, coordinated focus fire, unit-specific kiting, surrounds,
+  cloak preservation, Storm, Stasis, Feedback, and ammunition upkeep.
 - A legal-information-only BWAPI adapter with command deduplication and
   staggered frame scheduling, a fair per-tick command budget, measured
   frame-time load shedding, and callback exception containment.

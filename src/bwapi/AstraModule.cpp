@@ -42,6 +42,7 @@ void AstraModule::onStart() {
     influence_ = InfluenceMap(64);
     commands_.clear();
     transports_.reset();
+    scouts_.reset();
     frameBudget_.reset();
 
     std::error_code error;
@@ -196,7 +197,8 @@ void AstraModule::updateScouting() {
         });
         if (probe != state_.self.units.end()) available.push_back(probe->id);
     }
-    const auto orders = scouts_.assign(state_, available, influence_);
+    const auto orders = scouts_.assign(state_, available, influence_,
+                                       opponent_.assessment());
     for (const auto& order : orders) leasedScouts_.push_back(order.scout);
     bridge_.executeScouts(orders);
 }

@@ -43,6 +43,7 @@ opponent file during a live game.
 |---|---|
 | `OpponentModel` | Base-anchored Bayesian opening, rush, proxy and capability inference |
 | `InfluenceMap` | Ground/air threat, detection, mobility, and strategic value |
+| `ScoutManager` | Route-risk sampling, search/tech/expansion deadlines and assignment hysteresis |
 | `StrategyEngine` | Matchup plans, transitions, counter production, attack timing |
 | `MacroPlanner` | Goal reconciliation, reservations, production and expansion |
 | `WorkerManager` | Saturation, gas, transfer, construction and bounded threat-specific militia |
