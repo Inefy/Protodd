@@ -180,6 +180,10 @@ struct UnitSnapshot {
     bool hallucination{};
     UnitSize size{UnitSize::unknown};
     bool powered{true};
+    bool loaded{};
+    UnitId transportId{-1};
+    int cargoSpace{};
+    int ammo{};
 
     [[nodiscard]] int durability() const noexcept {
         return hitPoints + shields;

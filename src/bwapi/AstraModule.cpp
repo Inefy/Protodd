@@ -39,6 +39,7 @@ void AstraModule::onStart() {
     opponent_.reset(state_.enemy.race);
     influence_ = InfluenceMap(64);
     commands_.clear();
+    transports_.reset();
 
     std::error_code error;
     std::filesystem::create_directories("bwapi-data/write", error);
@@ -216,6 +217,10 @@ void AstraModule::updateCombat() {
     detectorEscorts_.clear();
     for (const auto& order : squads_.detectorEscorts(state_, formed, influence_)) {
         detectorEscorts_.push_back(order.actor);
+        commands_.submit(order);
+    }
+    for (const auto& order : transports_.control(
+             state_, plan_.attackTarget, retreatPoint(), influence_)) {
         commands_.submit(order);
     }
     // BWAPI calls are capped per combat tick. Priority-aware rotation keeps

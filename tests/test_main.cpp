@@ -12,6 +12,7 @@
 #include "astra/Squads.hpp"
 #include "astra/UnitCatalog.hpp"
 #include "astra/Technology.hpp"
+#include "astra/Transport.hpp"
 #include "astra/Workers.hpp"
 
 #include <algorithm>
@@ -769,6 +770,70 @@ void testLocalSquadsAndDetection() {
     expect(mainGroups == 2, "disconnected armies receive independent local decisions");
 }
 
+void testTransportMissions() {
+    astra::GameState state;
+    state.mapWidthPixels = 2048;
+    state.mapHeightPixels = 2048;
+    auto shuttle = unit(200, astra::UnitKind::shuttle, true, {100, 100});
+    shuttle.flying = true;
+    shuttle.role = astra::UnitRole::transport;
+    shuttle.cargoSpace = 8;
+    auto reaver = unit(201, astra::UnitKind::reaver, true, {300, 100});
+    reaver.role = astra::UnitRole::groundArmy;
+    state.self.units = {shuttle, reaver};
+    astra::InfluenceMap influence;
+    influence.update(state);
+    astra::TransportController transports;
+
+    auto orders = transports.control(state, {1000, 100}, {100, 100}, influence);
+    expect(std::ranges::any_of(orders, [](const astra::Command& command) {
+               return command.actor == 200 && command.source == "shuttle-rendezvous";
+           }) && std::ranges::any_of(orders, [](const astra::Command& command) {
+               return command.actor == 201 && command.source == "reaver-rendezvous";
+           }),
+           "shuttle and reaver rendezvous under persistent mission ownership");
+
+    state.frame = 1;
+    state.self.units[1].position = {150, 100};
+    orders = transports.control(state, {1000, 100}, {100, 100}, influence);
+    expect(std::ranges::any_of(orders, [](const astra::Command& command) {
+               return command.type == astra::CommandType::load && command.targetUnit == 201;
+           }),
+           "nearby reaver receives a transport load command");
+
+    state.frame = 2;
+    state.self.units[1].loaded = true;
+    state.self.units[1].transportId = 200;
+    state.self.units[1].position = state.self.units[0].position;
+    orders = transports.control(state, {1000, 100}, {100, 100}, influence);
+    expect(std::ranges::any_of(orders, [](const astra::Command& command) {
+               return command.source == "shuttle-attack-route";
+           }),
+           "loaded shuttle begins its threat-aware attack transit");
+
+    state.frame = 3;
+    state.self.units[0].position = {900, 100};
+    state.self.units[1].position = {900, 100};
+    orders = transports.control(state, {1000, 100}, {100, 100}, influence);
+    expect(std::ranges::any_of(orders, [](const astra::Command& command) {
+               return command.type == astra::CommandType::unload &&
+                      command.source == "reaver-drop";
+           }),
+           "shuttle unloads the reaver at the mission objective");
+
+    state.frame = 4;
+    state.self.units[1].loaded = false;
+    state.self.units[1].transportId = -1;
+    static_cast<void>(transports.control(state, {1000, 100}, {100, 100}, influence));
+    state.frame = 4 + 7 * 24;
+    orders = transports.control(state, {1000, 100}, {100, 100}, influence);
+    expect(std::ranges::any_of(orders, [](const astra::Command& command) {
+               return command.type == astra::CommandType::load &&
+                      command.source == "reaver-extract";
+           }),
+           "drop mission extracts its reaver after the bounded firing window");
+}
+
 }  // namespace
 
 int main() {
@@ -787,6 +852,7 @@ int main() {
     testCommandArbitration();
     testWorkersAndScouts();
     testLocalSquadsAndDetection();
+    testTransportMissions();
 
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";

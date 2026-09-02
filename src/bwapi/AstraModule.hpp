@@ -12,6 +12,7 @@
 #include "astra/Scouting.hpp"
 #include "astra/Squads.hpp"
 #include "astra/Strategy.hpp"
+#include "astra/Transport.hpp"
 #include "astra/Workers.hpp"
 
 #include <BWAPI.h>
@@ -44,6 +45,7 @@ private:
     CombatEvaluator combat_;
     TacticalController tactics_;
     SquadPlanner squads_;
+    TransportController transports_;
     CommandBus commands_;
     StrategicPlan plan_;
     CombatEstimate fight_;

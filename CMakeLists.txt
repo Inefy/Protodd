@@ -25,6 +25,7 @@ add_library(astra_core OBJECT
     src/core/Scouting.cpp
     src/core/Learning.cpp
     src/core/Squads.cpp
+    src/core/Transport.cpp
 )
 add_library(Astra::Core ALIAS astra_core)
 

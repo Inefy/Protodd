@@ -495,6 +495,12 @@ UnitSnapshot BwapiBridge::snapshotUnit(const BWAPI::Unit unit, const bool ours) 
     };
     result.size = toUnitSize(type.size());
     result.powered = unit->isPowered();
+    result.loaded = unit->isLoaded();
+    const auto transport = unit->getTransport();
+    result.transportId = transport != nullptr ? transport->getID() : -1;
+    result.cargoSpace = type.spaceProvided() > 0 ? unit->getSpaceRemaining() : 0;
+    if (kind == UnitKind::reaver) result.ammo = unit->getScarabCount();
+    if (kind == UnitKind::carrier) result.ammo = unit->getInterceptorCount();
     if (ours && unit->getPlayer() != nullptr) {
         if (type.groundWeapon() != WeaponTypes::None) {
             result.groundWeapon.damage = unit->getPlayer()->damage(type.groundWeapon());
