@@ -32,6 +32,22 @@ std::vector<WorkerAssignment> WorkerManager::assign(
             ownedBases.push_back(&base);
         }
     }
+    if (ownedBases.empty() && !workers.empty()) {
+        // After the last Nexus is destroyed, surviving Probes must keep mining
+        // while the recovery Nexus is constructed. Use the nearest safe-ish
+        // resource cluster as a temporary economy anchor.
+        const BaseSnapshot* fallback = nullptr;
+        auto bestDistance = std::numeric_limits<int>::max();
+        for (const auto& base : state.bases) {
+            if (!base.center.valid() || base.mineralsRemaining <= 0) continue;
+            const auto candidate = distanceSquared(workers.front()->position, base.center);
+            if (candidate < bestDistance) {
+                bestDistance = candidate;
+                fallback = &base;
+            }
+        }
+        if (fallback != nullptr) ownedBases.push_back(fallback);
+    }
     std::ranges::sort(ownedBases, {}, [](const BaseSnapshot* base) { return base->id; });
     const auto safeBase = safestOwnedBase(state, influence);
     std::vector<const UnitSnapshot*> available;

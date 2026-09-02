@@ -494,6 +494,7 @@ UnitSnapshot BwapiBridge::snapshotUnit(const BWAPI::Unit unit, const bool ours) 
         unit->isHallucination(),
     };
     result.size = toUnitSize(type.size());
+    result.powered = unit->isPowered();
     if (ours && unit->getPlayer() != nullptr) {
         if (type.groundWeapon() != WeaponTypes::None) {
             result.groundWeapon.damage = unit->getPlayer()->damage(type.groundWeapon());
@@ -723,6 +724,20 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
                               ? toBwapiPosition(plan.rallyPoint)
                               : BWAPI::Position(Broodwar->self()->getStartLocation());
     if (kind == UnitKind::pylon) {
+        Unit disabledProduction = nullptr;
+        for (const auto building : Broodwar->self()->getUnits()) {
+            if (building == nullptr || !building->exists() || !building->isCompleted() ||
+                !building->getType().isBuilding() || building->isPowered()) {
+                continue;
+            }
+            if (disabledProduction == nullptr ||
+                building->getID() < disabledProduction->getID()) {
+                disabledProduction = building;
+            }
+        }
+        if (disabledProduction != nullptr) {
+            anchorPosition = disabledProduction->getPosition();
+        }
         Unit leastPoweredBase = nullptr;
         auto fewestNearbyPylons = std::numeric_limits<int>::max();
         for (const auto nexus : Broodwar->self()->getUnits()) {
@@ -736,7 +751,9 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
                 leastPoweredBase = nexus;
             }
         }
-        if (leastPoweredBase != nullptr) anchorPosition = leastPoweredBase->getPosition();
+        if (disabledProduction == nullptr && leastPoweredBase != nullptr) {
+            anchorPosition = leastPoweredBase->getPosition();
+        }
     }
     if (type.requiresPsi()) {
         const auto pylon = Broodwar->getClosestUnit(

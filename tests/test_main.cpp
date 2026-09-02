@@ -288,6 +288,65 @@ void testStrategicTargeting() {
            "cleanup objective retains a remembered enemy structure");
 }
 
+void testEconomicRecovery() {
+    astra::GameState state;
+    state.frame = 10 * 60 * 24;
+    state.self.id = 1;
+    state.self.race = astra::Race::protoss;
+    state.enemy.id = 2;
+    state.enemy.race = astra::Race::terran;
+    state.self.supplyUsed = 30;
+    state.self.supplyTotal = 50;
+    state.bases.push_back(
+        {1, {256, 256}, {280, 260}, 6000, 5000, -1, 0, true, false, 8, 1});
+    for (int id = 1; id <= 5; ++id) {
+        auto probe = unit(id, astra::UnitKind::probe, true, {256 + id * 4, 256});
+        probe.role = astra::UnitRole::worker;
+        state.self.units.push_back(probe);
+    }
+    astra::StrategyEngine strategy;
+    const auto lostMain = strategy.plan(state, {});
+    expect(lostMain.posture == astra::Posture::recover &&
+               std::ranges::any_of(lostMain.goals, [](const astra::ProductionGoal& goal) {
+                   return goal.target == astra::UnitKind::nexus && goal.blocking &&
+                          goal.priority == 100;
+               }),
+           "surviving workers trigger an emergency Nexus rebuild");
+
+    state.self.units.clear();
+    state.bases.clear();
+    for (int id = 1; id <= 3; ++id) {
+        auto nexus = unit(id, astra::UnitKind::nexus, true, {id * 400, 256});
+        nexus.role = astra::UnitRole::resourceDepot;
+        state.self.units.push_back(nexus);
+        state.bases.push_back(
+            {id, {id * 400, 256}, {id * 400 + 30, 256}, 0, 0, 1, 0,
+             id == 1, false, 0, 1});
+    }
+    for (int id = 10; id < 30; ++id) {
+        auto probe = unit(id, astra::UnitKind::probe, true);
+        probe.role = astra::UnitRole::worker;
+        state.self.units.push_back(probe);
+    }
+    const auto depleted = strategy.plan(state, {});
+    expect(depleted.desiredBases >= 4 &&
+               std::ranges::any_of(depleted.goals, [](const astra::ProductionGoal& goal) {
+                   return goal.target == astra::UnitKind::nexus &&
+                          goal.desiredCount >= 4 && goal.blocking;
+               }),
+           "mined-out Nexuses do not prevent replacement expansion");
+
+    auto disabledGateway = unit(50, astra::UnitKind::gateway, true);
+    disabledGateway.powered = false;
+    state.self.units.push_back(disabledGateway);
+    const auto repower = strategy.plan(state, {});
+    expect(std::ranges::any_of(repower.goals, [](const astra::ProductionGoal& goal) {
+               return goal.target == astra::UnitKind::pylon && goal.priority == 98 &&
+                      goal.blocking;
+           }),
+           "unpowered production triggers mandatory local repowering");
+}
+
 void testMacroReservations() {
     astra::GameState state;
     state.self.minerals = 200;
@@ -618,6 +677,22 @@ void testWorkersAndScouts() {
     expect(leased.size() == 1 && leased.front().job == astra::WorkerJob::build,
            "leased scout or builder probe cannot be reclaimed by mining");
 
+    astra::GameState noNexus;
+    noNexus.self.id = 1;
+    noNexus.mapWidthPixels = 2048;
+    noNexus.mapHeightPixels = 2048;
+    noNexus.bases.push_back(
+        {1, {256, 256}, {300, 260}, 6000, 5000, -1, 0, true, false, 8, 1});
+    auto survivor = unit(70, astra::UnitKind::probe, true, {260, 260});
+    survivor.role = astra::UnitRole::worker;
+    noNexus.self.units.push_back(survivor);
+    astra::InfluenceMap recoveryInfluence;
+    recoveryInfluence.update(noNexus);
+    const auto recoveryMining = workers.assign(noNexus, {}, recoveryInfluence);
+    expect(recoveryMining.size() == 1 &&
+               recoveryMining.front().job == astra::WorkerJob::minerals,
+           "surviving Probes keep mining while a replacement Nexus is built");
+
     const auto scoutState = state;
     state.bases[1].ownerId = 1;
     state.bases[1].mineralPatches = 8;
@@ -705,6 +780,7 @@ int main() {
     testSupplyPlanning();
     testOpeningMilestones();
     testStrategicTargeting();
+    testEconomicRecovery();
     testMacroReservations();
     testOpponentLearning();
     testInfluenceAndCombat();

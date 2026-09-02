@@ -133,6 +133,7 @@ StrategicPlan StrategyEngine::plan(
     addInfrastructure(result, state);
     addSafetyReactions(result, threat);
     applyOpeningStyle(result, state, style);
+    addEconomicRecovery(result, state);
 
     std::ranges::stable_sort(result.goals, std::greater{}, &ProductionGoal::priority);
     return result;
@@ -422,6 +423,72 @@ void StrategyEngine::addSafetyReactions(
         goal(plan, GoalKind::train, UnitKind::dragoon, 10, 94, "mobile anti-air", true);
         goal(plan, GoalKind::build, UnitKind::photonCannon, 5, 90,
              "mineral-line anti-air");
+    }
+}
+
+void StrategyEngine::addEconomicRecovery(
+    StrategicPlan& plan,
+    const GameState& state) {
+    const auto workers = countRole(state, UnitRole::worker);
+    const auto nexuses = count(state, UnitKind::nexus);
+    const auto completedNexuses = count(state, UnitKind::nexus, true);
+    const auto pendingNexuses = nexuses - completedNexuses;
+    const auto activeBases = static_cast<int>(std::ranges::count_if(
+        state.bases, [&state](const BaseSnapshot& base) {
+            return base.ownerId == state.self.id && base.mineralsRemaining > 1000;
+        }));
+
+    if (nexuses == 0 && workers > 0) {
+        plan.name = "Emergency Nexus recovery";
+        plan.posture = Posture::recover;
+        plan.desiredBases = 1;
+        plan.desiredWorkers = std::max(12, workers);
+        goal(plan, GoalKind::expand, UnitKind::nexus, 1, 100,
+             "replace the lost economy anchor", true);
+    }
+
+    if (state.frame >= 4 * 60 * 24 && completedNexuses > 0 &&
+        workers < std::min(12, completedNexuses * 8)) {
+        plan.name += " [worker recovery]";
+        plan.posture = Posture::recover;
+        plan.desiredWorkers = std::max(plan.desiredWorkers, completedNexuses * 14);
+        goal(plan, GoalKind::train, UnitKind::probe,
+             std::max(8, completedNexuses * 10), 96,
+             "recover after severe worker losses", workers < 6);
+    }
+
+    const auto depletedEconomy = completedNexuses > 0 && activeBases < completedNexuses;
+    const auto saturatedEconomy = activeBases > 0 && workers >= activeBases * 20;
+    if (pendingNexuses == 0 && completedNexuses < 8 &&
+        (depletedEconomy || saturatedEconomy)) {
+        plan.desiredBases = std::max(plan.desiredBases, completedNexuses + 1);
+        goal(plan, GoalKind::expand, UnitKind::nexus, plan.desiredBases, 86,
+             depletedEconomy ? "replace a mined-out base" : "expand a saturated economy",
+             depletedEconomy);
+    }
+
+    const auto unpowered = std::ranges::any_of(
+        state.self.units, [](const UnitSnapshot& unit) {
+            return unit.completed && isBuilding(unit.kind) &&
+                   unitStats(unit.kind).requiresPsi && !unit.powered;
+        });
+    if (unpowered) {
+        const auto pylons = count(state, UnitKind::pylon);
+        goal(plan, GoalKind::build, UnitKind::pylon, pylons + 1, 98,
+             "restore power to disabled production", true);
+    }
+
+    // A large mineral bank means production, not another passive combat-unit
+    // target, is the bottleneck. Scale infrastructure with the live economy.
+    if (state.self.minerals >= 900 && completedNexuses > 0) {
+        const auto targetGateways = std::clamp(completedNexuses * 3, 3, 12);
+        goal(plan, GoalKind::build, UnitKind::gateway, targetGateways, 73,
+             "convert excess mineral bank into production");
+        if (state.self.gas >= 500 && minute(state) >= 12) {
+            goal(plan, GoalKind::build, UnitKind::stargate,
+                 std::clamp(completedNexuses, 1, 4), 61,
+                 "add a late-game production branch");
+        }
     }
 }
 

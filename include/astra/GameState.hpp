@@ -179,6 +179,7 @@ struct UnitSnapshot {
     bool underAttack{};
     bool hallucination{};
     UnitSize size{UnitSize::unknown};
+    bool powered{true};
 
     [[nodiscard]] int durability() const noexcept {
         return hitPoints + shields;

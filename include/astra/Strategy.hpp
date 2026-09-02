@@ -61,6 +61,7 @@ private:
         const ThreatAssessment& threat) const;
     static void addInfrastructure(StrategicPlan& plan, const GameState& state);
     static void addSafetyReactions(StrategicPlan& plan, const ThreatAssessment& threat);
+    static void addEconomicRecovery(StrategicPlan& plan, const GameState& state);
     static void applyOpeningStyle(
         StrategicPlan& plan,
         const GameState& state,
