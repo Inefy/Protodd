@@ -18,7 +18,8 @@ tournament bot or depend on code whose license restricts competition entry.
 - Resource-reserving macro planner with production, technology, expansion, and
   supply goals, queued-production accounting, and automatic prerequisite repair.
 - Canonical depot-site discovery, mining-lane-safe construction, reachable
-  expansions, projected-supply timing, and saturation transfers across bases.
+  expansions, per-base Assimilator selection, projected-supply timing, and
+  saturation transfers across bases.
 - Ground/air/detection influence maps, risk-aware scouting, combat evaluation,
   threat-deadline scout priorities, persistent scout assignments, local squads,
   detector escorts, coordinated focus fire, unit-specific kiting, surrounds,

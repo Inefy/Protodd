@@ -761,9 +761,30 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
     const BWAPI::Unit builder,
     const StrategicPlan& plan) const {
     if (kind == UnitKind::assimilator) {
-        const auto geyser = Broodwar->getClosestUnit(
-            builder->getPosition(), Filter::GetType == UnitTypes::Resource_Vespene_Geyser);
-        return geyser != nullptr ? geyser->getTilePosition() : TilePositions::None;
+        Unit bestGeyser = nullptr;
+        auto bestScore = std::numeric_limits<int>::max();
+        for (const auto geyser : Broodwar->getGeysers()) {
+            if (geyser == nullptr || !geyser->exists() || geyser->getResources() <= 0) continue;
+            const auto nexus = Broodwar->getClosestUnit(
+                geyser->getPosition(),
+                Filter::IsOwned && Filter::GetType == UnitTypes::Protoss_Nexus);
+            if (nexus == nullptr || nexus->getDistance(geyser) > 448 ||
+                !builder->hasPath(geyser->getPosition())) {
+                continue;
+            }
+            // Taken geysers disappear from getGeysers(), so the remaining
+            // candidate nearest an owned base naturally advances from main gas
+            // to natural and third without repeatedly selecting an occupied tile.
+            const auto score = builder->getDistance(geyser) + nexus->getDistance(geyser) * 2;
+            if (score < bestScore || (score == bestScore &&
+                                      (bestGeyser == nullptr ||
+                                       geyser->getID() < bestGeyser->getID()))) {
+                bestScore = score;
+                bestGeyser = geyser;
+            }
+        }
+        return bestGeyser != nullptr ? bestGeyser->getTilePosition()
+                                     : TilePositions::None;
     }
     if (kind == UnitKind::nexus) {
         const ResourceSite* best = nullptr;
