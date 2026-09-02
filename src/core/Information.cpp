@@ -28,6 +28,36 @@ double recencyWeight(const GameState& state, const UnitSnapshot& unit) {
     return std::exp(-static_cast<double>(age) / (24.0 * 90.0));
 }
 
+Position homeAnchor(const GameState& state) {
+    const auto depot = std::ranges::find_if(state.self.units, [](const UnitSnapshot& unit) {
+        return unit.role == UnitRole::resourceDepot || unit.kind == UnitKind::nexus;
+    });
+    if (depot != state.self.units.end() && depot->position.valid()) return depot->position;
+
+    const auto start = std::ranges::find_if(state.bases, [&state](const BaseSnapshot& base) {
+        return base.startLocation && base.ownerId == state.self.id && base.center.valid();
+    });
+    if (start != state.bases.end()) return start->center;
+
+    const auto owned = std::ranges::find_if(state.bases, [&state](const BaseSnapshot& base) {
+        return base.ownerId == state.self.id && base.center.valid();
+    });
+    return owned != state.bases.end() ? owned->center : Position{-1, -1};
+}
+
+bool proxyStructure(const UnitKind kind) {
+    return isBuilding(kind) && kind != UnitKind::resourceDepot &&
+           kind != UnitKind::commandCenter && kind != UnitKind::hatchery &&
+           kind != UnitKind::lair && kind != UnitKind::hive &&
+           kind != UnitKind::nexus && kind != UnitKind::refinery &&
+           kind != UnitKind::assimilator;
+}
+
+bool containStructure(const UnitKind kind) {
+    return kind == UnitKind::photonCannon || kind == UnitKind::bunker ||
+           kind == UnitKind::sunkenColony;
+}
+
 }  // namespace
 
 OpponentModel::OpponentModel() {
@@ -64,29 +94,31 @@ void OpponentModel::update(const GameState& state) {
     const auto enemyBases = count(state, UnitKind::commandCenter) +
                             count(state, UnitKind::hatchery) + count(state, UnitKind::lair) +
                             count(state, UnitKind::hive) + count(state, UnitKind::nexus);
+    const auto anchor = homeAnchor(state);
+    const auto nearMain = [&anchor](const UnitSnapshot& unit, const int radius) {
+        return anchor.valid() && unit.position.valid() &&
+               distanceSquared(unit.position, anchor) < radius * radius;
+    };
+    const auto workersNearUs = std::ranges::count_if(
+        state.enemy.units, [&nearMain](const UnitSnapshot& unit) {
+            return unit.visible && isWorker(unit.kind) && nearMain(unit, 704);
+        });
+    const auto proxyBuildings = std::ranges::count_if(
+        state.enemy.units, [&nearMain](const UnitSnapshot& unit) {
+            return unit.visible && proxyStructure(unit.kind) && nearMain(unit, 1248);
+        });
+    const auto proxyStatic = std::ranges::count_if(
+        state.enemy.units, [&nearMain](const UnitSnapshot& unit) {
+            return unit.visible && containStructure(unit.kind) && nearMain(unit, 1248);
+        });
 
     if (minutes < 4.0 && enemyWorkers >= 3) {
-        const auto workersNearUs = std::ranges::count_if(
-            state.enemy.units,
-            [&state](const UnitSnapshot& unit) {
-                if (!isWorker(unit.kind) || state.self.units.empty()) {
-                    return false;
-                }
-                return distanceSquared(unit.position, state.self.units.front().position) < 640 * 640;
-            });
         evidence[index(EnemyPlan::workerRush)] += static_cast<double>(workersNearUs) * 2.5;
     }
 
-    const auto proxyBuildings = std::ranges::count_if(
-        state.enemy.units,
-        [&state](const UnitSnapshot& unit) {
-            if (!isBuilding(unit.kind) || state.self.units.empty()) {
-                return false;
-            }
-            return distanceSquared(unit.position, state.self.units.front().position) < 1200 * 1200;
-        });
     if (minutes < 6.0) {
         evidence[index(EnemyPlan::proxyRush)] += static_cast<double>(proxyBuildings) * 3.0;
+        evidence[index(EnemyPlan::staticContain)] += static_cast<double>(proxyStatic) * 5.0;
     }
 
     const auto rushUnits = count(state, UnitKind::zergling) + count(state, UnitKind::marine) +
@@ -147,9 +179,26 @@ void OpponentModel::update(const GameState& state) {
     }
 
     assessment_.mostLikely = mostLikelyPlan();
+    assessment_.workerRush = probability(EnemyPlan::workerRush);
+    assessment_.proxy = probability(EnemyPlan::proxyRush);
+    assessment_.staticContain = probability(EnemyPlan::staticContain);
+    const auto localCombat = std::ranges::count_if(
+        state.enemy.units, [&nearMain](const UnitSnapshot& unit) {
+            return unit.visible && !unit.flying && isCombatUnit(unit.kind) &&
+                   nearMain(unit, 896);
+        });
+    assessment_.enemiesNearMain = static_cast<int>(workersNearUs + proxyBuildings +
+                                                   localCombat);
+    const auto localPressure = std::clamp(
+        static_cast<double>(workersNearUs) * 0.09 +
+            static_cast<double>(proxyBuildings) * 0.14 +
+            static_cast<double>(localCombat) * 0.12,
+        0.0, 1.0);
     assessment_.immediateGround = std::clamp(
-        probability(EnemyPlan::workerRush) + probability(EnemyPlan::proxyRush) +
-            probability(EnemyPlan::fastRush),
+        std::max(localPressure,
+                 probability(EnemyPlan::workerRush) + probability(EnemyPlan::proxyRush) +
+                     probability(EnemyPlan::staticContain) +
+                     probability(EnemyPlan::fastRush)),
         0.0, 1.0);
     assessment_.air = std::clamp(probability(EnemyPlan::airTech) + airCount * 0.05, 0.0, 1.0);
     assessment_.cloak = std::clamp(probability(EnemyPlan::cloakedTech) + cloakUnits * 0.08,
@@ -198,6 +247,7 @@ std::string_view enemyPlanName(const EnemyPlan plan) noexcept {
         case EnemyPlan::unknown: return "Unknown";
         case EnemyPlan::workerRush: return "WorkerRush";
         case EnemyPlan::proxyRush: return "ProxyRush";
+        case EnemyPlan::staticContain: return "StaticContain";
         case EnemyPlan::fastRush: return "FastRush";
         case EnemyPlan::heavyPressure: return "HeavyPressure";
         case EnemyPlan::fastExpand: return "FastExpand";

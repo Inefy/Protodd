@@ -12,6 +12,7 @@ enum class EnemyPlan : std::uint8_t {
     unknown,
     workerRush,
     proxyRush,
+    staticContain,
     fastRush,
     heavyPressure,
     fastExpand,
@@ -23,12 +24,16 @@ enum class EnemyPlan : std::uint8_t {
 
 struct ThreatAssessment {
     double immediateGround{};
+    double workerRush{};
+    double proxy{};
+    double staticContain{};
     double air{};
     double cloak{};
     double aggression{};
     double expansion{};
     double uncertainty{1.0};
     double estimatedArmyValue{};
+    int enemiesNearMain{};
     EnemyPlan mostLikely{EnemyPlan::unknown};
 };
 
@@ -57,4 +62,3 @@ private:
 [[nodiscard]] std::string_view enemyPlanName(EnemyPlan plan) noexcept;
 
 }  // namespace astra
-

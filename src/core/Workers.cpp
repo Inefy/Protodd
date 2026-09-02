@@ -4,10 +4,50 @@
 
 #include <algorithm>
 #include <limits>
+#include <numeric>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace astra {
+namespace {
+
+int militiaDemand(const UnitSnapshot& enemy, const Frame frame) {
+    if (!enemy.visible || !enemy.detected || enemy.flying || enemy.hallucination) return 0;
+    if (isWorker(enemy.kind)) return 1;
+    if (isBuilding(enemy.kind)) {
+        if (enemy.completed) return 0;
+        if (enemy.kind == UnitKind::photonCannon || enemy.kind == UnitKind::bunker ||
+            enemy.kind == UnitKind::sunkenColony) {
+            return 4;
+        }
+        if (enemy.kind == UnitKind::pylon) return 2;
+        if (enemy.kind == UnitKind::gateway || enemy.kind == UnitKind::barracks ||
+            enemy.kind == UnitKind::forge) {
+            return 3;
+        }
+        return 1;
+    }
+
+    // Worker surrounds are an emergency bridge until the first combat units
+    // arrive, never a general answer to ranged or high-tier armies.
+    if (frame < 7 * 60 * 24 && enemy.kind == UnitKind::zergling) return 2;
+    if (frame < 6 * 60 * 24 && enemy.kind == UnitKind::zealot) return 3;
+    if (frame < 5 * 60 * 24 && enemy.kind == UnitKind::marine) return 1;
+    return 0;
+}
+
+int targetPriority(const UnitSnapshot& enemy) {
+    if (!enemy.completed && (enemy.kind == UnitKind::photonCannon ||
+                             enemy.kind == UnitKind::bunker ||
+                             enemy.kind == UnitKind::sunkenColony)) {
+        return 4;
+    }
+    if (isWorker(enemy.kind)) return 3;
+    if (!enemy.completed && isBuilding(enemy.kind)) return 2;
+    return 1;
+}
+
+}  // namespace
 
 std::vector<WorkerAssignment> WorkerManager::assign(
     const GameState& state,
@@ -68,32 +108,55 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         available.push_back(worker);
     }
 
-    // Pull a bounded local militia whenever a visible enemy reaches an owned
-    // mineral line. Hidden memory must never send probes chasing ghosts.
-    std::vector<const UnitSnapshot*> baseThreats;
+    // A worker militia only answers threats for which worker contact is useful:
+    // workers, unfinished proxies, and tiny opening-unit groups. In particular,
+    // never feed Probes into tanks or completed static defenses.
+    struct MilitiaTarget {
+        const UnitSnapshot* unit{};
+        int demand{};
+    };
+    std::vector<MilitiaTarget> baseThreats;
     for (const auto& enemy : state.enemy.units) {
-        if (!enemy.visible || enemy.flying || !enemy.position.valid()) continue;
+        const auto demand = militiaDemand(enemy, state.frame);
+        if (demand == 0 || !enemy.position.valid()) continue;
         if (std::ranges::any_of(ownedBases, [&enemy](const BaseSnapshot* base) {
-                return distanceSquared(enemy.position, base->center) < 420 * 420;
+                return distanceSquared(enemy.position, base->center) < 512 * 512;
             })) {
-            baseThreats.push_back(&enemy);
+            baseThreats.push_back({&enemy, demand});
         }
     }
-    auto defendersRemaining = std::min(
-        {6, static_cast<int>(baseThreats.size()) * 2,
-         static_cast<int>(available.size())});
+    const auto requestedDefenders = std::accumulate(
+        baseThreats.begin(), baseThreats.end(), 0,
+        [](const int total, const MilitiaTarget& target) { return total + target.demand; });
+    const auto localArmy = std::ranges::count_if(
+        state.self.units, [&baseThreats](const UnitSnapshot& unit) {
+            return unit.completed && isCombatUnit(unit.kind) && !unit.flying &&
+                   std::ranges::any_of(baseThreats, [&unit](const MilitiaTarget& target) {
+                       return distanceSquared(unit.position, target.unit->position) < 576 * 576;
+                   });
+        });
+    const auto economyCap = workers.size() >= 10U
+                                ? static_cast<int>(available.size() / 2U)
+                                : std::min(4, static_cast<int>(available.size()));
+    auto defendersRemaining = std::clamp(
+        requestedDefenders - static_cast<int>(localArmy) * 2, 0,
+        std::min(8, economyCap));
     while (defendersRemaining > 0 && !available.empty()) {
         auto bestWorker = available.end();
         const UnitSnapshot* bestTarget = nullptr;
-        auto bestDistance = std::numeric_limits<int>::max();
+        auto bestScore = std::numeric_limits<long long>::max();
         for (auto worker = available.begin(); worker != available.end(); ++worker) {
-            if ((*worker)->carryingResources) continue;
-            for (const auto* enemy : baseThreats) {
-                const auto candidate = distanceSquared((*worker)->position, enemy->position);
-                if (candidate < bestDistance) {
-                    bestDistance = candidate;
+            if ((*worker)->carryingResources || (*worker)->healthFraction() < 0.5) continue;
+            for (const auto& target : baseThreats) {
+                if (target.demand <= 0) continue;
+                const auto priorityBias = 5 - targetPriority(*target.unit);
+                const auto score = static_cast<long long>(priorityBias) * 1'000'000LL +
+                                   distanceSquared((*worker)->position,
+                                                   target.unit->position);
+                if (score < bestScore) {
+                    bestScore = score;
                     bestWorker = worker;
-                    bestTarget = enemy;
+                    bestTarget = target.unit;
                 }
             }
         }
@@ -101,6 +164,9 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         result.push_back({(*bestWorker)->id, WorkerJob::defend, -1, bestTarget->id,
                           bestTarget->position, 90});
         available.erase(bestWorker);
+        const auto assignedTarget = std::ranges::find(
+            baseThreats, bestTarget, &MilitiaTarget::unit);
+        if (assignedTarget != baseThreats.end()) --assignedTarget->demand;
         --defendersRemaining;
     }
 

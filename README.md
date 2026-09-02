@@ -9,10 +9,12 @@ tournament bot or depend on code whose license restricts competition entry.
 
 ## What is implemented
 
-- Matchup-specific PvT, PvZ, and PvP plans with reactive anti-rush, anti-air,
-  and anti-cloak transitions.
+- Matchup-specific PvT, PvZ, and PvP plans with base-anchored worker-rush and
+  proxy-contain recognition plus reactive anti-air and anti-cloak transitions.
 - Bayesian opening recognition under fog of war and decaying enemy memory.
-- Economy saturation, gas policy, worker defense, evacuation, and transfers.
+- Economy saturation, gas policy, threat-specific worker defense, evacuation,
+  and transfers; Probes attack unfinished proxies but never charge tanks or
+  completed static defenses.
 - Resource-reserving macro planner with production, technology, expansion, and
   supply goals, queued-production accounting, and automatic prerequisite repair.
 - Canonical depot-site discovery, mining-lane-safe construction, reachable

@@ -41,11 +41,11 @@ opponent file during a live game.
 
 | Module | Responsibility |
 |---|---|
-| `OpponentModel` | Bayesian opening recognition and enemy capability estimates |
+| `OpponentModel` | Base-anchored Bayesian opening, rush, proxy and capability inference |
 | `InfluenceMap` | Ground/air threat, detection, mobility, and strategic value |
 | `StrategyEngine` | Matchup plans, transitions, counter production, attack timing |
 | `MacroPlanner` | Goal reconciliation, reservations, production and expansion |
-| `WorkerManager` | Saturation, gas policy, transfer, construction, worker defense |
+| `WorkerManager` | Saturation, gas, transfer, construction and bounded threat-specific militia |
 | `SquadPlanner` | Local connected armies, base defense, harassment, objectives and detector escorts |
 | `CombatEvaluator` | Fast local fight estimate with uncertainty penalties |
 | `TacticalController` | Volley allocation, kiting, surrounds, caster screening and cloak preservation |

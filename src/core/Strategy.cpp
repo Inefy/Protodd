@@ -131,9 +131,11 @@ StrategicPlan StrategyEngine::plan(
     result.rallyPoint = ourMain(state);
     result.attackTarget = enemyMain(state);
     addInfrastructure(result, state);
-    addSafetyReactions(result, threat);
     applyOpeningStyle(result, state, style);
     addEconomicRecovery(result, state);
+    // Safety runs last so an opponent-specific economic style cannot override
+    // direct evidence of an all-in at our main.
+    addSafetyReactions(result, threat);
 
     std::ranges::stable_sort(result.goals, std::greater{}, &ProductionGoal::priority);
     return result;
@@ -409,6 +411,39 @@ void StrategyEngine::addInfrastructure(StrategicPlan& plan, const GameState& sta
 void StrategyEngine::addSafetyReactions(
     StrategicPlan& plan,
     const ThreatAssessment& threat) {
+    if (threat.workerRush > 0.30) {
+        plan.name += " [worker-rush hold]";
+        plan.posture = Posture::defend;
+        plan.desiredBases = 1;
+        plan.attackThreshold = std::max(plan.attackThreshold, 1.55);
+        goal(plan, GoalKind::build, UnitKind::gateway, 1, 100,
+             "complete the first anti-worker combat unit", true);
+        goal(plan, GoalKind::train, UnitKind::zealot, 3, 99,
+             "end the worker rush without prolonged economic damage", true);
+    }
+
+    if (threat.proxy + threat.staticContain > 0.34 ||
+        (threat.enemiesNearMain >= 2 && threat.proxy > 0.18)) {
+        plan.name += threat.staticContain > threat.proxy
+                         ? " [break static contain]"
+                         : " [break proxy]";
+        plan.posture = Posture::defend;
+        plan.desiredBases = 1;
+        plan.attackThreshold = std::max(plan.attackThreshold, 1.65);
+        plan.goals.erase(
+            std::remove_if(plan.goals.begin(), plan.goals.end(),
+                           [](const ProductionGoal& candidate) {
+                               return candidate.goal == GoalKind::expand;
+                           }),
+            plan.goals.end());
+        goal(plan, GoalKind::build, UnitKind::gateway, 2, 100,
+             "replace greed with proxy-breaking production", true);
+        goal(plan, GoalKind::train, UnitKind::zealot, 5, 99,
+             "clear unfinished or unsupported proxy structures", true);
+        goal(plan, GoalKind::build, UnitKind::shieldBattery, 1, 95,
+             "sustain the main-base defense");
+    }
+
     if (threat.cloak > 0.28) {
         goal(plan, GoalKind::build, UnitKind::roboticsFacility, 1, 97,
              "detected cloaked threat", true);

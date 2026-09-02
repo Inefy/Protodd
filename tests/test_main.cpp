@@ -172,6 +172,46 @@ void testOpponentInferenceAndStrategy() {
             return goal.target == astra::UnitKind::zealot && goal.blocking;
         });
     expect(emergencyZealots != plan.goals.end(), "rush plan contains blocking zealots");
+
+    astra::GameState workerRush;
+    workerRush.frame = 2 * 60 * 24;
+    workerRush.self.id = 1;
+    workerRush.enemy.id = 2;
+    workerRush.enemy.race = astra::Race::protoss;
+    auto remoteProbe = unit(1, astra::UnitKind::probe, true, {3000, 3000});
+    remoteProbe.role = astra::UnitRole::worker;
+    auto homeNexus = unit(2, astra::UnitKind::nexus, true, {256, 256});
+    homeNexus.role = astra::UnitRole::resourceDepot;
+    workerRush.self.units = {remoteProbe, homeNexus};
+    for (int i = 0; i < 4; ++i) {
+        workerRush.enemy.units.push_back(
+            unit(20 + i, astra::UnitKind::probe, false, {300 + i * 12, 280}));
+    }
+    astra::OpponentModel workerModel;
+    workerModel.update(workerRush);
+    expect(workerModel.mostLikelyPlan() == astra::EnemyPlan::workerRush &&
+               workerModel.assessment().workerRush > 0.3,
+           "worker rush inference anchors to the Nexus rather than unit ordering");
+
+    astra::GameState cannonRush = workerRush;
+    cannonRush.enemy.units.clear();
+    auto cannon = unit(80, astra::UnitKind::photonCannon, false, {480, 300});
+    cannon.completed = false;
+    cannon.buildProgress = 40;
+    cannonRush.enemy.units.push_back(cannon);
+    astra::OpponentModel cannonModel;
+    cannonModel.update(cannonRush);
+    expect(cannonModel.mostLikelyPlan() == astra::EnemyPlan::staticContain,
+           "nearby opening cannon classifies as a static contain");
+    const auto containPlan = strategy.plan(cannonRush, cannonModel.assessment(),
+                                           astra::OpeningStyle::economic);
+    expect(containPlan.posture == astra::Posture::defend &&
+               containPlan.desiredBases == 1 &&
+               std::ranges::none_of(containPlan.goals,
+                                    [](const astra::ProductionGoal& candidate) {
+                                        return candidate.goal == astra::GoalKind::expand;
+                                    }),
+           "static contain overrides learned greed and suppresses expansion");
 }
 
 void testSupplyPlanning() {
@@ -693,6 +733,47 @@ void testWorkersAndScouts() {
     const auto assignments = workers.assign(state, plan, influence);
     expect(assignments.size() == 1 && assignments.front().job == astra::WorkerJob::gas,
            "gas policy assigns requested worker count");
+
+    astra::GameState militiaState;
+    militiaState.frame = 4 * 60 * 24;
+    militiaState.self.id = 1;
+    militiaState.enemy.id = 2;
+    militiaState.mapWidthPixels = 2048;
+    militiaState.mapHeightPixels = 2048;
+    militiaState.bases.push_back(
+        {1, {256, 256}, {300, 260}, 8000, 5000, 1, 0, true, false, 8, 1});
+    for (int i = 0; i < 10; ++i) {
+        auto defender = unit(100 + i, astra::UnitKind::probe, true,
+                             {240 + i * 8, 260});
+        defender.role = astra::UnitRole::worker;
+        militiaState.self.units.push_back(defender);
+    }
+    auto tank = unit(200, astra::UnitKind::siegeTank, false, {400, 260});
+    tank.role = astra::UnitRole::groundArmy;
+    tank.groundWeapon = {.damage = 70, .cooldown = 75, .maxRange = 384,
+                         .targetsGround = true};
+    militiaState.enemy.units.push_back(tank);
+    astra::InfluenceMap militiaInfluence;
+    militiaInfluence.update(militiaState);
+    const auto tankResponse = workers.assign(militiaState, {}, militiaInfluence);
+    expect(std::ranges::none_of(tankResponse, [](const astra::WorkerAssignment& assignment) {
+               return assignment.job == astra::WorkerJob::defend;
+           }),
+           "worker militia never charges a siege tank");
+
+    auto proxyCannon = unit(201, astra::UnitKind::photonCannon, false, {420, 280});
+    proxyCannon.completed = false;
+    proxyCannon.buildProgress = 35;
+    militiaState.enemy.units.push_back(proxyCannon);
+    militiaInfluence.update(militiaState);
+    const auto cannonResponse = workers.assign(militiaState, {}, militiaInfluence);
+    expect(std::ranges::count(cannonResponse, astra::WorkerJob::defend,
+                              &astra::WorkerAssignment::job) == 4 &&
+               std::ranges::all_of(cannonResponse, [](const astra::WorkerAssignment& assignment) {
+                   return assignment.job != astra::WorkerJob::defend ||
+                          assignment.targetUnit == 201;
+               }),
+           "four healthy Probes focus an unfinished proxy cannon");
 
     const astra::UnitId reservedProbe[]{probe.id};
     const auto leased = workers.assign(state, plan, influence, reservedProbe);
