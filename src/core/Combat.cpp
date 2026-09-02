@@ -8,6 +8,176 @@
 #include <limits>
 
 namespace astra {
+namespace {
+
+struct SimUnit {
+    const UnitSnapshot* unit{};
+    double durability{};
+    int readyFrame{};
+};
+
+struct SimulationOutcome {
+    double friendlyRemaining{};
+    double enemyRemaining{};
+    double friendlyInitial{};
+    double enemyInitial{};
+    double coverage{1.0};
+};
+
+double sizeMultiplier(const DamageType damage, const UnitSize size) noexcept {
+    if (damage == DamageType::concussive) {
+        if (size == UnitSize::medium) return 0.5;
+        if (size == UnitSize::large) return 0.25;
+    }
+    if (damage == DamageType::explosive) {
+        if (size == UnitSize::small) return 0.5;
+        if (size == UnitSize::medium) return 0.75;
+    }
+    return 1.0;
+}
+
+double volleyDamage(const UnitSnapshot& attacker, const UnitSnapshot& target) noexcept {
+    const auto& weapon = target.flying ? attacker.airWeapon : attacker.groundWeapon;
+    if (weapon.damage <= 0) return 0.0;
+    const auto raw = static_cast<double>(weapon.damage * std::max(1, weapon.hits));
+    const auto modified = raw * sizeMultiplier(weapon.damageType, target.size);
+    const auto armor = weapon.damageType == DamageType::ignoreArmor ? 0 : target.armor;
+    return std::max(0.5, modified - static_cast<double>(armor));
+}
+
+double simulationValue(const SimUnit& unit) noexcept {
+    const auto maximum = std::max(1, unit.unit->maxHitPoints + unit.unit->maxShields);
+    const auto health = std::clamp(unit.durability / static_cast<double>(maximum), 0.0, 1.0);
+    return unitStats(unit.unit->kind).combatValue * health;
+}
+
+std::vector<SimUnit> simulationUnits(const std::span<const UnitSnapshot> source) {
+    std::vector<const UnitSnapshot*> selected;
+    selected.reserve(source.size());
+    for (const auto& unit : source) {
+        if (unit.completed && (isCombatUnit(unit.kind) || isStaticDefense(unit.kind))) {
+            selected.push_back(&unit);
+        }
+    }
+    std::ranges::stable_sort(selected, [](const UnitSnapshot* left, const UnitSnapshot* right) {
+        const auto leftScore = unitStats(left->kind).combatValue * left->healthFraction();
+        const auto rightScore = unitStats(right->kind).combatValue * right->healthFraction();
+        if (std::abs(leftScore - rightScore) > 0.001) return leftScore > rightScore;
+        return left->id < right->id;
+    });
+    constexpr auto maximumUnits = std::size_t{96};
+    if (selected.size() > maximumUnits) selected.resize(maximumUnits);
+
+    std::vector<SimUnit> result;
+    result.reserve(selected.size());
+    for (const auto* unit : selected) {
+        result.push_back({unit, static_cast<double>(std::max(1, unit->durability())),
+                          std::max(0, unit->weaponCooldown)});
+    }
+    return result;
+}
+
+const UnitSnapshot* nearestLivingTarget(
+    const SimUnit& attacker,
+    const std::span<const SimUnit> defenders,
+    const std::span<const double> pending,
+    std::size_t& targetIndex,
+    const int frame) {
+    const UnitSnapshot* best = nullptr;
+    auto bestScore = std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < defenders.size(); ++i) {
+        const auto& defender = defenders[i];
+        if (defender.durability - pending[i] <= 0.0 ||
+            !attacker.unit->canAttack(*defender.unit)) {
+            continue;
+        }
+        const auto& weapon = defender.unit->flying ? attacker.unit->airWeapon
+                                                    : attacker.unit->groundWeapon;
+        const auto separation = distance(attacker.unit->position, defender.unit->position);
+        const auto gap = std::max(0.0, separation - static_cast<double>(weapon.maxRange));
+        const auto closingSpeed = std::max(0.1, attacker.unit->topSpeed +
+                                                   defender.unit->topSpeed * 0.20);
+        const auto contactFrame = static_cast<int>(std::ceil(gap / closingSpeed));
+        if (frame < contactFrame) continue;
+        const auto damage = volleyDamage(*attacker.unit, *defender.unit);
+        if (damage <= 0.0) continue;
+        const auto remaining = std::max(0.5, defender.durability - pending[i]);
+        const auto volleys = std::ceil(remaining / damage);
+        const auto value = std::max(0.1, unitStats(defender.unit->kind).combatValue);
+        const auto score = volleys * std::max(1, weapon.cooldown) / value +
+                           separation / 2048.0;
+        if (score < bestScore || (std::abs(score - bestScore) < 0.001 &&
+                                  (best == nullptr || defender.unit->id < best->id))) {
+            best = defender.unit;
+            bestScore = score;
+            targetIndex = i;
+        }
+    }
+    return best;
+}
+
+void scheduleVolleys(
+    std::vector<SimUnit>& attackers,
+    const std::vector<SimUnit>& defenders,
+    std::vector<double>& pending,
+    const int frame) {
+    for (auto& attacker : attackers) {
+        if (attacker.durability <= 0.0 || frame < attacker.readyFrame) continue;
+        auto targetIndex = std::size_t{0};
+        const auto* target = nearestLivingTarget(attacker, defenders, pending,
+                                                 targetIndex, frame);
+        if (target == nullptr) continue;
+        const auto& weapon = target->flying ? attacker.unit->airWeapon
+                                            : attacker.unit->groundWeapon;
+        pending[targetIndex] += volleyDamage(*attacker.unit, *target);
+        attacker.readyFrame = frame + std::max(1, weapon.cooldown);
+    }
+}
+
+SimulationOutcome simulateEngagement(
+    const std::span<const UnitSnapshot> friendlySource,
+    const std::span<const UnitSnapshot> enemySource) {
+    auto friendly = simulationUnits(friendlySource);
+    auto enemy = simulationUnits(enemySource);
+    SimulationOutcome result;
+    for (const auto& unit : friendly) result.friendlyInitial += simulationValue(unit);
+    for (const auto& unit : enemy) result.enemyInitial += simulationValue(unit);
+
+    constexpr auto stepFrames = 6;
+    constexpr auto horizonFrames = 24 * 14;
+    for (auto frame = 0; frame <= horizonFrames; frame += stepFrames) {
+        std::vector<double> damageToFriendly(friendly.size(), 0.0);
+        std::vector<double> damageToEnemy(enemy.size(), 0.0);
+        scheduleVolleys(friendly, enemy, damageToEnemy, frame);
+        scheduleVolleys(enemy, friendly, damageToFriendly, frame);
+        for (std::size_t i = 0; i < friendly.size(); ++i) {
+            friendly[i].durability -= damageToFriendly[i];
+        }
+        for (std::size_t i = 0; i < enemy.size(); ++i) {
+            enemy[i].durability -= damageToEnemy[i];
+        }
+        const auto friendlyAlive = std::ranges::any_of(
+            friendly, [](const SimUnit& unit) { return unit.durability > 0.0; });
+        const auto enemyAlive = std::ranges::any_of(
+            enemy, [](const SimUnit& unit) { return unit.durability > 0.0; });
+        if (!friendlyAlive || !enemyAlive) break;
+    }
+    for (const auto& unit : friendly) {
+        if (unit.durability > 0.0) result.friendlyRemaining += simulationValue(unit);
+    }
+    for (const auto& unit : enemy) {
+        if (unit.durability > 0.0) result.enemyRemaining += simulationValue(unit);
+    }
+    const auto considered = friendly.size() + enemy.size();
+    const auto available = friendlySource.size() + enemySource.size();
+    result.coverage = available == 0U
+                          ? 1.0
+                          : static_cast<double>(considered) /
+                                static_cast<double>(available);
+    return result;
+}
+
+}  // namespace
 
 CombatEstimate CombatEvaluator::evaluate(
     const std::span<const UnitSnapshot> friendly,
@@ -22,10 +192,32 @@ CombatEstimate CombatEvaluator::evaluate(
         result.enemyPower += unitPower(unit, friendly);
     }
 
+    const auto rawFriendlyPower = result.friendlyPower;
+    const auto rawEnemyPower = result.enemyPower;
+    const auto simulation = simulateEngagement(friendly, enemy);
+    result.simulatedFriendlyRemaining = simulation.friendlyRemaining;
+    result.simulatedEnemyRemaining = simulation.enemyRemaining;
+
+    const auto friendlySurvival = simulation.friendlyInitial > 0.0
+                                      ? simulation.friendlyRemaining /
+                                            simulation.friendlyInitial
+                                      : (friendly.empty() ? 0.0 : 1.0);
+    const auto enemySurvival = simulation.enemyInitial > 0.0
+                                   ? simulation.enemyRemaining /
+                                         simulation.enemyInitial
+                                   : (enemy.empty() ? 0.0 : 1.0);
+    // Blend the fast static estimate with the bounded local simulation. The
+    // static component covers unsupported spell effects while the simulated
+    // survival component captures range, approach time, focus fire, armor,
+    // damage type, cooldowns, and simultaneous volleys.
+    result.friendlyPower = rawFriendlyPower * (0.35 + 0.65 * friendlySurvival);
+    result.enemyPower = rawEnemyPower * (0.35 + 0.65 * enemySurvival);
+
     const auto uncertaintyPenalty = 1.0 + std::clamp(uncertainty, 0.0, 1.0) * 0.28;
     result.enemyPower *= uncertaintyPenalty;
     result.ratio = result.friendlyPower / std::max(0.1, result.enemyPower);
-    result.confidence = std::clamp(1.0 - uncertainty * 0.65, 0.2, 1.0);
+    result.confidence = std::clamp((1.0 - uncertainty * 0.65) * simulation.coverage,
+                                   0.2, 1.0);
     if (result.ratio >= requiredRatio) {
         result.decision = FightDecision::engage;
     } else if (result.ratio >= requiredRatio * 0.72) {

@@ -488,6 +488,8 @@ void testInfluenceAndCombat() {
     const auto estimate = evaluator.evaluate(friendly, state.enemy.units, 1.1, 0.1);
     expect(estimate.decision == astra::FightDecision::engage,
            "overwhelming dragoon force elects to engage");
+    expect(estimate.simulatedEnemyRemaining < 0.001,
+           "bounded combat simulation predicts lethal focus-fire volleys");
     expect(evaluator.selectTarget(friendly.front(), state.enemy.units) != nullptr,
            "combat target selection finds compatible target");
 
@@ -500,6 +502,25 @@ void testInfluenceAndCombat() {
     };
     expect(evaluator.selectTarget(friendly.front(), targetChoices, lethalVolley)->id == enemy.id,
            "focus fire redirects once a target has lethal committed damage");
+
+    auto explosiveAttacker = friendly.front();
+    explosiveAttacker.groundWeapon = {
+        .damage = 100, .cooldown = 1000, .maxRange = 192,
+        .damageType = astra::DamageType::explosive, .targetsGround = true,
+    };
+    auto smallTarget = enemy;
+    smallTarget.hitPoints = 100;
+    smallTarget.maxHitPoints = 100;
+    smallTarget.size = astra::UnitSize::small;
+    auto largeTarget = smallTarget;
+    largeTarget.size = astra::UnitSize::large;
+    const std::vector<astra::UnitSnapshot> oneAttacker{explosiveAttacker};
+    const std::vector<astra::UnitSnapshot> smallForce{smallTarget};
+    const std::vector<astra::UnitSnapshot> largeForce{largeTarget};
+    const auto versusSmall = evaluator.evaluate(oneAttacker, smallForce, 1.0, 0.0);
+    const auto versusLarge = evaluator.evaluate(oneAttacker, largeForce, 1.0, 0.0);
+    expect(versusSmall.simulatedEnemyRemaining > versusLarge.simulatedEnemyRemaining,
+           "simulation applies Brood War damage-type modifiers by unit size");
 
     auto kiter = friendly.front();
     kiter.position = {200, 200};

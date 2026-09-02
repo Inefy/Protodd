@@ -65,6 +65,7 @@ private:
 
     [[nodiscard]] static Race toRace(BWAPI::Race race) noexcept;
     [[nodiscard]] static DamageType toDamageType(BWAPI::DamageType type) noexcept;
+    [[nodiscard]] static UnitSize toUnitSize(BWAPI::UnitSizeType type) noexcept;
     [[nodiscard]] static UnitRole roleOf(BWAPI::UnitType type, UnitKind kind) noexcept;
     [[nodiscard]] static WeaponSnapshot weapon(BWAPI::WeaponType type) noexcept;
     [[nodiscard]] static UnitSnapshot snapshotUnit(BWAPI::Unit unit, bool ours);

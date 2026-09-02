@@ -16,6 +16,8 @@ struct CombatEstimate {
     double enemyPower{};
     double ratio{};
     double confidence{};
+    double simulatedFriendlyRemaining{};
+    double simulatedEnemyRemaining{};
     FightDecision decision{FightDecision::retreat};
 };
 

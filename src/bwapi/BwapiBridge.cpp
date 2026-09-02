@@ -445,6 +445,13 @@ DamageType BwapiBridge::toDamageType(const BWAPI::DamageType type) noexcept {
     return DamageType::normal;
 }
 
+UnitSize BwapiBridge::toUnitSize(const BWAPI::UnitSizeType type) noexcept {
+    if (type == UnitSizeTypes::Small) return UnitSize::small;
+    if (type == UnitSizeTypes::Medium) return UnitSize::medium;
+    if (type == UnitSizeTypes::Large) return UnitSize::large;
+    return UnitSize::unknown;
+}
+
 UnitRole BwapiBridge::roleOf(const BWAPI::UnitType type, const UnitKind kind) noexcept {
     if (type.isWorker()) return UnitRole::worker;
     if (type.isResourceDepot()) return UnitRole::resourceDepot;
@@ -465,14 +472,15 @@ WeaponSnapshot BwapiBridge::weapon(const BWAPI::WeaponType type) noexcept {
         return {};
     }
     return {type.damageAmount(), type.damageCooldown(), type.minRange(), type.maxRange(),
-            toDamageType(type.damageType()), type.targetsAir(), type.targetsGround()};
+            toDamageType(type.damageType()), type.targetsAir(), type.targetsGround(),
+            type.damageFactor()};
 }
 
 UnitSnapshot BwapiBridge::snapshotUnit(const BWAPI::Unit unit, const bool ours) {
     const auto type = unit->getType();
     const auto kind = toKind(type);
     const auto buildTime = std::max(1, type.buildTime());
-    return {
+    auto result = UnitSnapshot{
         unit->getID(), type.getID(), kind, toRace(type.getRace()), roleOf(type, kind),
         fromBwapi(unit->getPosition()), fromBwapi(unit->getPosition()),
         Broodwar->getFrameCount(), unit->getHitPoints(), type.maxHitPoints(),
@@ -485,6 +493,16 @@ UnitSnapshot BwapiBridge::snapshotUnit(const BWAPI::Unit unit, const bool ours) 
         unit->isCarryingGas() || unit->isCarryingMinerals(), unit->isUnderAttack(),
         unit->isHallucination(),
     };
+    result.size = toUnitSize(type.size());
+    if (ours && unit->getPlayer() != nullptr) {
+        if (type.groundWeapon() != WeaponTypes::None) {
+            result.groundWeapon.damage = unit->getPlayer()->damage(type.groundWeapon());
+        }
+        if (type.airWeapon() != WeaponTypes::None) {
+            result.airWeapon.damage = unit->getPlayer()->damage(type.airWeapon());
+        }
+    }
+    return result;
 }
 
 PlayerSnapshot BwapiBridge::snapshotPlayer(const BWAPI::Player player, const bool ours) {

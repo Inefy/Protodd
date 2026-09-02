@@ -135,6 +135,8 @@ enum class UnitRole : std::uint8_t {
 
 enum class DamageType : std::uint8_t { normal, explosive, concussive, ignoreArmor };
 
+enum class UnitSize : std::uint8_t { unknown, small, medium, large };
+
 struct WeaponSnapshot {
     int damage{};
     int cooldown{};
@@ -143,6 +145,7 @@ struct WeaponSnapshot {
     DamageType damageType{DamageType::normal};
     bool targetsAir{};
     bool targetsGround{};
+    int hits{1};
 };
 
 struct UnitSnapshot {
@@ -175,6 +178,7 @@ struct UnitSnapshot {
     bool carryingResources{};
     bool underAttack{};
     bool hallucination{};
+    UnitSize size{UnitSize::unknown};
 
     [[nodiscard]] int durability() const noexcept {
         return hitPoints + shields;
