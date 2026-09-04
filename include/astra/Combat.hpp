@@ -11,6 +11,12 @@
 
 namespace astra {
 
+// Edge-to-edge weapon distance and per-volley damage, shared by targeting and
+// simulation. Remaining durability permits shields to deplete during a fight.
+[[nodiscard]] double weaponDistance(const UnitSnapshot& a, const UnitSnapshot& b) noexcept;
+[[nodiscard]] double attackDamage(const UnitSnapshot& attacker, const UnitSnapshot& target,
+                                  double remainingDurability = -1.0) noexcept;
+
 enum class FightDecision : std::uint8_t { engage, kite, retreat };
 
 struct CombatEstimate {

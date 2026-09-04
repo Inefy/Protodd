@@ -36,6 +36,7 @@ struct StrategicPlan {
     int desiredWorkers{8};
     int desiredGasWorkers{};
     double attackThreshold{1.25};
+    int minimumAttackSize{8};
     Position rallyPoint{-1, -1};
     Position attackTarget{-1, -1};
     std::vector<ProductionGoal> goals;

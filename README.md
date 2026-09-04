@@ -98,8 +98,10 @@ Use [the competition workflow](docs/competition.md) to benchmark changes and
 the included log analyzer to compare batches rather than individual games.
 The [research notes](docs/research.md) record the open-source projects and
 design patterns reviewed while keeping Astra's implementation license-clean.
-The [validation record](docs/validation.md) documents the exact release DLL,
-automated gates, and the latest direct UAlbertaBot result.
+The [validation record](docs/validation.md) documents the exact candidate DLL,
+automated gates, iterative match outcomes, and unresolved validation gaps.
+The [strength audit](docs/strength-audit.md) details the September 2026 fixes,
+remaining micro/macro weaknesses, and the experiments needed before AIIDE.
 
 ## Local opponent ladder
 

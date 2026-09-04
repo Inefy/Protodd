@@ -60,20 +60,24 @@ void AstraModule::onStart() {
     std::filesystem::create_directories("bwapi-data/write", error);
     opponentName_ = BWAPI::Broodwar->enemy() ? BWAPI::Broodwar->enemy()->getName() : "unknown";
     mapName_ = BWAPI::Broodwar->mapName();
-    history_.parse(readFile("bwapi-data/read/AstraBot.csv"));
-    history_.merge(readFile("bwapi-data/write/AstraBot.csv"));
+    const auto historyFile = OpponentHistory::filename(opponentName_);
+    history_.parse(readFile(std::filesystem::path("bwapi-data/read") / historyFile));
+    history_.merge(readFile(std::filesystem::path("bwapi-data/write") / historyFile));
     openingStyle_ = history_.choose(opponentName_, mapName_,
                                     stableSeed(opponentName_ + "|" + mapName_));
     log_.open("bwapi-data/write/AstraBot.log", std::ios::app);
     if (log_) {
         log_ << "START," << BWAPI::Broodwar->mapName() << ','
              << opponentName_ << ',' << openingStyleName(openingStyle_) << '\n';
+        log_ << "MATCH,seed=" << BWAPI::Broodwar->getRandomSeed()
+             << ",map_hash=" << BWAPI::Broodwar->mapHash() << '\n';
     }
 }
 
 void AstraModule::onEnd(const bool winner) {
     history_.record(opponentName_, mapName_, openingStyle_, winner);
-    std::ofstream historyOutput("bwapi-data/write/AstraBot.csv",
+    std::ofstream historyOutput(std::filesystem::path("bwapi-data/write") /
+                                    OpponentHistory::filename(opponentName_),
                                 std::ios::binary | std::ios::trunc);
     if (historyOutput) historyOutput << history_.serialize();
     if (log_) {
@@ -177,7 +181,7 @@ void AstraModule::updateMacro() {
         maintenanceGasReserve_ = std::max(maintenanceGasReserve_, action.gas);
         break;
     }
-    bridge_.executeMacro(actions, plan_);
+    bridge_.executeMacro(actions, plan_, leasedScouts_);
 }
 
 void AstraModule::updateWorkers() {
@@ -253,7 +257,10 @@ void AstraModule::updateCombat(
         auto requiredRatio = squad.requiredRatio;
         auto objective = squad.objective;
         if (squad.role == SquadRole::mainArmy) {
-            if (!aggressive || (vanguard == &squad && squad.units.size() < 4)) {
+            if (!aggressive ||
+                (vanguard == &squad &&
+                 squad.units.size() <
+                     static_cast<std::size_t>(std::max(1, plan_.minimumAttackSize)))) {
                 requiredRatio = 0.88;
                 objective = plan_.rallyPoint;
             } else if (vanguard != nullptr && vanguard != &squad &&
@@ -280,13 +287,19 @@ void AstraModule::updateCombat(
             retreatWaypoints_[squadIndex] = {-1, -1};
         }
         if (refreshRoute && hasGroundUnit) {
-            advanceWaypoints_[squadIndex] =
-                navigation_.nextWaypoint(squad.center, objective);
+            // During uncontested travel, let BWAPI route each unit to the
+            // actual destination. A short waypoint from a large squad's
+            // centroid can lie behind its front units or on the wrong side
+            // of terrain, continually pulling the force back into itself.
+            if (!squad.enemies.empty()) {
+                advanceWaypoints_[squadIndex] =
+                    navigation_.nextWaypoint(squad.center, objective);
+            }
             retreatWaypoints_[squadIndex] =
                 navigation_.nextWaypoint(squad.center, squad.retreat);
         }
         if (hasGroundUnit) {
-            if (advanceWaypoints_[squadIndex].valid()) {
+            if (!squad.enemies.empty() && advanceWaypoints_[squadIndex].valid()) {
                 objective = advanceWaypoints_[squadIndex];
             }
             if (retreatWaypoints_[squadIndex].valid()) {
@@ -322,10 +335,17 @@ void AstraModule::updateCombat(
         }
     }
 
-    // Use completed Shield Batteries between exchanges. The recharge order is
-    // submitted through the same priority bus as combat, so a wounded unit can
-    // disengage without a maintenance command fighting its tactical order.
-    for (const auto& unit : friendly) {
+    // Use completed Shield Batteries between exchanges. During a base defense,
+    // Probes are combat resources too: recharging wounded militia prevents one
+    // Zealot wave from permanently deleting the economy. The order is issued
+    // after worker jobs and therefore safely overrides mining for that tick.
+    for (const auto& unit : state_.self.units) {
+        const auto eligibleWorker = plan_.posture == Posture::defend &&
+                                    isWorker(unit.kind) && unit.completed;
+        if ((!isCombatUnit(unit.kind) && !eligibleWorker) || unit.hallucination ||
+            unit.loaded) {
+            continue;
+        }
         if (unit.maxShields <= 0 || unit.shields * 5 >= unit.maxShields * 2 ||
             unit.attackFrame || (unit.underAttack && unit.healthFraction() >= 0.5)) {
             continue;
@@ -400,6 +420,21 @@ void AstraModule::logDecision() {
     const auto batteries = countUnits(UnitKind::shieldBattery, false);
     const auto zealots = countUnits(UnitKind::zealot, false);
     const auto completedZealots = countUnits(UnitKind::zealot, true);
+    const auto dragoons = countUnits(UnitKind::dragoon, false);
+    const auto completedDragoons = countUnits(UnitKind::dragoon, true);
+    const auto reavers = countUnits(UnitKind::reaver, false);
+    const auto darkTemplar = countUnits(UnitKind::darkTemplar, true);
+    const auto highTemplar = countUnits(UnitKind::highTemplar, true);
+    const auto stormReady =
+        technologyLevel(state_.self, TechnologyKind::psionicStorm) > 0;
+    const auto mobileArmy = std::ranges::count_if(
+        state_.self.units, [](const UnitSnapshot& unit) {
+            return unit.completed && isCombatUnit(unit.kind) && !unit.flying;
+        });
+    const auto visibleEnemyArmy = std::ranges::count_if(
+        state_.enemy.units, [](const UnitSnapshot& unit) {
+            return unit.visible && unit.completed && isCombatUnit(unit.kind);
+        });
     ResourceLedger diagnosticLedger{state_.self.minerals, state_.self.gas};
     const auto diagnosticActions = macro_.reconcile(state_, plan_, diagnosticLedger);
     log_ << "STATE," << state_.frame << ',' << plan_.name << ','
@@ -414,7 +449,69 @@ void AstraModule::logDecision() {
          << ",gateways=" << gateways << ",nexuses=" << nexuses
          << ",probes=" << probes << ",cannons=" << cannons << '/'
          << completedCannons << ",batteries=" << batteries
-         << ",zealots=" << zealots << '/' << completedZealots << ",actions=";
+         << ",zealots=" << zealots << '/' << completedZealots
+         << ",dragoons=" << dragoons << '/' << completedDragoons
+         << ",reavers=" << reavers << ",dt=" << darkTemplar
+         << ",ht=" << highTemplar << ",storm=" << (stormReady ? 1 : 0)
+         << ",army=" << mobileArmy
+         << ",enemyVisibleArmy=" << visibleEnemyArmy
+         << ",minAttack=" << plan_.minimumAttackSize
+         << ",attackTarget=" << plan_.attackTarget.x << 'x' << plan_.attackTarget.y
+         << ",rally=" << plan_.rallyPoint.x << 'x' << plan_.rallyPoint.y
+         << ",defense=";
+    auto firstDefense = true;
+    for (const auto& unit : state_.self.units) {
+        char marker{};
+        if (unit.kind == UnitKind::nexus) marker = 'N';
+        if (unit.kind == UnitKind::pylon) marker = 'P';
+        if (unit.kind == UnitKind::photonCannon) marker = 'C';
+        if (unit.kind == UnitKind::shieldBattery) marker = 'B';
+        if (unit.kind == UnitKind::gateway) marker = 'G';
+        if (unit.kind == UnitKind::cyberneticsCore) marker = 'R';
+        if (unit.kind == UnitKind::citadelOfAdun) marker = 'T';
+        if (unit.kind == UnitKind::templarArchives) marker = 'X';
+        if (marker == 0 || !unit.completed || !unit.position.valid()) continue;
+        if (!firstDefense) log_ << ';';
+        firstDefense = false;
+        log_ << marker << '@' << unit.position.x << 'x' << unit.position.y;
+    }
+    log_ << ",workers=";
+    auto workerIndex = 0;
+    for (const auto& unit : state_.self.units) {
+        if (unit.kind != UnitKind::probe || !unit.position.valid()) continue;
+        if (workerIndex++ > 0) log_ << ';';
+        log_ << unit.id << '@' << unit.position.x << 'x' << unit.position.y << ':'
+             << unit.hitPoints + unit.shields;
+    }
+    log_ << ",armyPositions=";
+    auto armyIndex = 0;
+    for (const auto& unit : state_.self.units) {
+        if (!unit.completed || !isCombatUnit(unit.kind) ||
+            !unit.position.valid()) continue;
+        if (armyIndex++ > 0) log_ << ';';
+        log_ << unit.id << ':' << unitStats(unit.kind).name << '@'
+             << unit.position.x << 'x' << unit.position.y;
+    }
+    log_ << ",knownStructures=";
+    auto structureIndex = 0;
+    for (const auto& unit : state_.enemy.units) {
+        if (!isBuilding(unit.kind) || !unit.position.valid()) continue;
+        if (structureIndex++ > 0) log_ << ';';
+        log_ << unitStats(unit.kind).name << '@' << unit.position.x << 'x'
+             << unit.position.y << ':' << unit.lastSeen;
+    }
+    log_ << ",visibleCombat=";
+    auto enemyIndex = 0;
+    for (const auto& unit : state_.enemy.units) {
+        if (!unit.visible || !unit.completed || !isCombatUnit(unit.kind) ||
+            !unit.position.valid() || enemyIndex >= 16) {
+            continue;
+        }
+        if (enemyIndex++ > 0) log_ << ';';
+        log_ << unitStats(unit.kind).name << '@' << unit.position.x << 'x'
+             << unit.position.y << ':' << unit.hitPoints + unit.shields;
+    }
+    log_ << ",actions=";
     for (std::size_t index = 0; index < diagnosticActions.size() && index < 4; ++index) {
         if (index > 0) log_ << ';';
         const auto& action = diagnosticActions[index];

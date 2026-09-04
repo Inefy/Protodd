@@ -26,7 +26,8 @@ void InfluenceMap::update(const GameState& state) {
     std::ranges::fill(cells_, InfluenceCell{});
 
     for (const auto& unit : state.enemy.units) {
-        if (unit.hallucination || !unit.position.valid()) {
+        if (unit.hallucination || !unit.position.valid() || !unit.completed ||
+            unit.disabled || (unitStats(unit.kind).requiresPsi && !unit.powered)) {
             continue;
         }
         addThreat(unit, state.frame);
@@ -133,6 +134,7 @@ void InfluenceMap::addThreat(const UnitSnapshot& unit, const Frame currentFrame)
     addWeapon(unit.airWeapon, true);
     if (unit.role == UnitRole::detector || unit.kind == UnitKind::observer ||
         unit.kind == UnitKind::scienceVessel || unit.kind == UnitKind::overlord ||
+        unit.kind == UnitKind::photonCannon ||
         unit.kind == UnitKind::missileTurret || unit.kind == UnitKind::sporeColony) {
         const auto radius = std::max(7 * 32, unit.sightRange);
         const auto minX = std::max(0, (unit.position.x - radius) / cellSize_);
@@ -141,6 +143,9 @@ void InfluenceMap::addThreat(const UnitSnapshot& unit, const Frame currentFrame)
         const auto maxY = std::min(height_ - 1, (unit.position.y + radius) / cellSize_);
         for (auto y = minY; y <= maxY; ++y) {
             for (auto x = minX; x <= maxX; ++x) {
+                const Position center{x * cellSize_ + cellSize_ / 2,
+                                      y * cellSize_ + cellSize_ / 2};
+                if (distanceSquared(center, unit.position) > radius * radius) continue;
                 auto& detection = cells_[offset(x, y)].detection;
                 detection = std::max(
                     detection, static_cast<float>(memoryConfidence));

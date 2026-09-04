@@ -115,12 +115,46 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     }
     std::ranges::sort(ownedBases, {}, [](const BaseSnapshot* base) { return base->id; });
     const auto safeBase = safestOwnedBase(state, influence);
+    const auto hasCompletedStaticScreen = std::ranges::any_of(
+        state.self.units, [](const UnitSnapshot& unit) {
+            return unit.completed && (unit.kind == UnitKind::photonCannon ||
+                                      unit.kind == UnitKind::shieldBattery);
+        });
     std::vector<const UnitSnapshot*> available;
     available.reserve(workers.size());
 
     for (const auto* worker : workers) {
         if (builders.contains(worker->id)) {
             result.push_back({worker->id, WorkerJob::build, -1, -1, {-1, -1}, 100});
+            continue;
+        }
+
+        const auto rangedBio = std::ranges::min_element(
+            state.enemy.units, {}, [worker, &ownedBases](const UnitSnapshot& enemy) {
+                const auto relevant = enemy.visible && enemy.detected && enemy.completed &&
+                                      enemy.kind == UnitKind::marine &&
+                                      enemy.position.valid() &&
+                                      std::ranges::any_of(
+                                          ownedBases, [&enemy](const BaseSnapshot* base) {
+                                              return distanceSquared(enemy.position,
+                                                                     base->center) <
+                                                     512 * 512;
+                                          });
+                return relevant
+                           ? distanceSquared(worker->position, enemy.position)
+                           : std::numeric_limits<int>::max();
+            });
+        if (hasCompletedStaticScreen && rangedBio != state.enemy.units.end() &&
+            rangedBio->visible && rangedBio->kind == UnitKind::marine &&
+            distanceSquared(worker->position, rangedBio->position) < 288 * 288) {
+            const Position away{
+                worker->position.x + worker->position.x - rangedBio->position.x,
+                worker->position.y + worker->position.y - rangedBio->position.y,
+            };
+            result.push_back({worker->id, WorkerJob::evacuate,
+                              safeBase != nullptr ? safeBase->id : -1,
+                              rangedBio->id,
+                              influence.safestStep(worker->position, away, false), 99});
             continue;
         }
 
@@ -167,6 +201,10 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     for (const auto& enemy : state.enemy.units) {
         const auto demand = militiaDemand(enemy, state.frame);
         if (demand == 0 || !enemy.position.valid()) continue;
+        // Probes cannot close on ranged bio efficiently. Once a Cannon/Battery
+        // screen exists, charging Marines only donates the economy and blocks
+        // the combat units that should be using that screen.
+        if (enemy.kind == UnitKind::marine && hasCompletedStaticScreen) continue;
         if (isWorker(enemy.kind) && localEnemyWorkers < 3) continue;
         if (std::ranges::any_of(ownedBases, [&enemy](const BaseSnapshot* base) {
                 return distanceSquared(enemy.position, base->center) < 512 * 512;
@@ -184,10 +222,23 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                        return distanceSquared(unit.position, target.unit->position) < 576 * 576;
                    });
         });
-    const auto economyCap = workers.size() >= 10U
-                                ? static_cast<int>(available.size() / 2U)
-                                : std::min(6, std::max(
-                                      4, static_cast<int>(available.size()) - 2));
+    const auto meleeBreach = std::ranges::any_of(
+        baseThreats, [&ownedBases](const MilitiaTarget& target) {
+            if (target.unit->kind != UnitKind::zealot &&
+                target.unit->kind != UnitKind::zergling) {
+                return false;
+            }
+            return std::ranges::any_of(ownedBases, [&target](const BaseSnapshot* base) {
+                return distanceSquared(target.unit->position, base->center) < 320 * 320;
+            });
+        });
+    const auto economyCap = meleeBreach
+                                ? std::min(10, std::max(
+                                      4, static_cast<int>(available.size()) - 2))
+                                : (workers.size() >= 10U
+                                       ? static_cast<int>(available.size() / 2U)
+                                       : std::min(6, std::max(
+                                             4, static_cast<int>(available.size()) - 2)));
     auto defendersRemaining = std::clamp(
         requestedDefenders - static_cast<int>(localArmy) * 2, 0,
         std::min(8, economyCap));
@@ -204,7 +255,10 @@ std::vector<WorkerAssignment> WorkerManager::assign(
             for (const auto& target : baseThreats) {
                 if (target.demand <= 0) continue;
                 if (!isBuilding(target.unit->kind)) {
-                    const auto contactRange = target.unit->groundWeapon.maxRange + 128;
+                    const auto isMelee = target.unit->groundWeapon.maxRange <= 32;
+                    const auto contactRange = isMelee
+                                                  ? 320
+                                                  : target.unit->groundWeapon.maxRange + 128;
                     if (distanceSquared((*worker)->position, target.unit->position) >
                         contactRange * contactRange) {
                         continue;

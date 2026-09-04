@@ -47,7 +47,8 @@ Get-ChildItem -LiteralPath $sourceRoot -Directory -Filter "__pycache__" -Recurse
 Get-ChildItem -LiteralPath $sourceRoot -File -Include "*.pyc", "*.pyo" -Recurse |
     Remove-Item -Force
 New-Item -ItemType Directory -Path (Join-Path $sourceRoot "scripts") -Force | Out-Null
-foreach ($script in @("build-tournament.ps1", "verify.ps1", "ladder.ps1")) {
+foreach ($script in @("build-tournament.ps1", "verify.ps1", "ladder.ps1",
+                      "direct-match.ps1")) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) `
         -Destination (Join-Path $sourceRoot "scripts/$script")
 }

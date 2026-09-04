@@ -94,31 +94,42 @@ std::vector<Squad> SquadPlanner::form(
     // Build a defense detachment only for a real, visible threat near an owned
     // base. Size it by combat value rather than headcount: three tanks require
     // a very different response from three Zerglings.
-    const BaseSnapshot* threatenedBase = nullptr;
-    std::vector<UnitSnapshot> baseThreats;
-    auto highestThreat = 0.0;
+    struct BaseThreat {
+        const BaseSnapshot* base{};
+        std::vector<UnitSnapshot> enemies;
+        double power{};
+    };
+    std::vector<BaseThreat> threats;
     for (const auto& base : state.bases) {
         if (base.ownerId != state.self.id) continue;
         std::vector<UnitSnapshot> nearby;
         auto threatPower = 0.0;
         for (const auto& unit : enemy) {
-            if (!unit.visible || !unit.position.valid() ||
+            if (!unit.visible || !unit.position.valid() || !unit.completed ||
+                unit.disabled || (unit.groundWeapon.damage <= 0 &&
+                                  unit.role != UnitRole::spellcaster) ||
+                nearestOwnedBase(state, unit.position) != &base ||
                 distanceSquared(unit.position, base.center) > 800 * 800) {
                 continue;
             }
             nearby.push_back(unit);
             threatPower += allocationPower(unit);
         }
-        if (threatPower > highestThreat) {
-            highestThreat = threatPower;
-            threatenedBase = &base;
-            baseThreats = std::move(nearby);
-        }
+        if (threatPower > 0.0) threats.push_back({&base, std::move(nearby), threatPower});
     }
-    if (threatenedBase != nullptr && highestThreat > 0.0 && !friendly.empty()) {
+    std::ranges::sort(threats, [](const BaseThreat& left, const BaseThreat& right) {
+        if (left.power != right.power) return left.power > right.power;
+        return left.base->id < right.base->id;
+    });
+    for (const auto& baseThreat : threats) {
+        const auto* threatenedBase = baseThreat.base;
+        const auto& baseThreats = baseThreat.enemies;
+        const auto highestThreat = baseThreat.power;
         std::vector<UnitSnapshot> candidates;
         std::vector<UnitSnapshot> staticSupport;
         for (const auto& unit : friendly) {
+            if (assigned.contains(unit.id) || !unit.completed || unit.disabled ||
+                (unitStats(unit.kind).requiresPsi && !unit.powered)) continue;
             if (isStaticDefense(unit.kind)) {
                 const auto useful = distanceSquared(unit.position, threatenedBase->center) <=
                                         576 * 576 &&
@@ -162,9 +173,11 @@ std::vector<Squad> SquadPlanner::form(
                                      (plan.posture == Posture::defend ? 1.45 : 1.30) +
                                  0.35;
         const auto minimumMobile = std::min<std::size_t>(2, candidates.size());
+        auto mobileCount = std::size_t{0};
         for (const auto& candidate : candidates) {
-            if (defense.units.size() >= minimumMobile && committedPower >= targetPower) break;
+            if (mobileCount >= minimumMobile && committedPower >= targetPower) break;
             defense.units.push_back(candidate);
+            ++mobileCount;
             assigned.insert(candidate.id);
             if (std::ranges::any_of(baseThreats, [&candidate](const UnitSnapshot& threat) {
                     return candidate.canAttack(threat);
@@ -172,6 +185,8 @@ std::vector<Squad> SquadPlanner::form(
                 committedPower += allocationPower(candidate);
             }
         }
+        if (defense.units.empty()) continue;
+        for (const auto& unit : defense.units) assigned.insert(unit.id);
         defense.center = centroid(defense.units);
         finishSquad(defense);
         defense.enemies = localEnemies(enemy, defense.units, defense.objective, 900);
@@ -347,7 +362,7 @@ std::vector<std::vector<UnitSnapshot>> SquadPlanner::connectedGroups(
 std::vector<UnitSnapshot> SquadPlanner::localEnemies(
     const std::span<const UnitSnapshot> enemies,
     const std::span<const UnitSnapshot> units,
-    const Position objective,
+    const Position /*objective*/,
     const int radius) {
     std::vector<UnitSnapshot> result;
     for (const auto& enemy : enemies) {
@@ -355,9 +370,9 @@ std::vector<UnitSnapshot> SquadPlanner::localEnemies(
         const auto nearMember = std::ranges::any_of(units, [&enemy, radius](const UnitSnapshot& unit) {
             return distanceSquared(enemy.position, unit.position) <= radius * radius;
         });
-        const auto guardingObjective = isStaticDefense(enemy.kind) && objective.valid() &&
-                                       distanceSquared(enemy.position, objective) <= radius * radius;
-        if (nearMember || guardingObjective) result.push_back(enemy);
+        // A distant target's defenses must not enter a local fight until the
+        // army approaches them; otherwise reinforcements can retreat at home.
+        if (nearMember) result.push_back(enemy);
     }
     std::ranges::sort(result, {}, &UnitSnapshot::id);
     return result;

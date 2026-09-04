@@ -56,7 +56,15 @@ UnitId selectOpeningWorkerScout(
     const GameState& state,
     const std::span<const UnitId> previousScouts,
     const std::span<const UnitId> unavailableWorkers) noexcept {
-    if (state.frame >= 6 * 60 * 24 ||
+    const auto enemyLocated = std::ranges::any_of(
+        state.enemy.units, [](const UnitSnapshot& unit) {
+            return unit.role == UnitRole::resourceDepot;
+        });
+    const auto enemyArmySeen = std::ranges::any_of(
+        state.enemy.units, [](const UnitSnapshot& unit) {
+            return unit.completed && isCombatUnit(unit.kind);
+        });
+    if (state.frame >= 6 * 60 * 24 || enemyLocated || enemyArmySeen ||
         std::ranges::none_of(state.self.units, [](const UnitSnapshot& unit) {
             return unit.kind == UnitKind::pylon;
         })) {

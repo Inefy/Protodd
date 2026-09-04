@@ -69,8 +69,26 @@ batch win rate rises.
 
 ## Persistent learning
 
-At game end, `bwapi-data/write/AstraBot.csv` receives aggregate outcomes. On the
-next game Astra first looks for `bwapi-data/read/AstraBot.csv`, matching common
-tournament read/write isolation, then falls back to the local write copy. If a
-tournament forbids persistent learning, omit the CSV from the package; Astra
-will deterministically explore as if facing a new opponent.
+At game end, `bwapi-data/write/AstraBot-<encoded-alias>.csv` receives cumulative
+outcomes for the current opponent alias. Astra merges the corresponding read
+and local write snapshots without double-counting common history. Separate
+filenames prevent AIIDE's round transfers from overwriting other opponents'
+updates. The alias is encoded as hexadecimal bytes, without identifying the
+real bot. Clearing both read and write history starts a fresh learning run;
+omitting initial data alone does not disable learning during a tournament.
+
+Direct local tests record a `.json` outcome manifest before StarCraft is
+closed. Use `tools/direct_report.py` with those manifests: an interrupted game
+is incomplete even if shutdown subsequently writes `END,loss` to a raw trace.
+The direct-match helper preserves a raw trace and archives the pre-cleanup
+trace separately. Its default resets learning; `-PreserveLearning` retains it.
+Use `-Seed <integer>` to request BWAPI's seed override on both clients, then
+check the manifest's observed seed and the initial base positions before
+treating runs as paired. Matching a requested seed alone is not proof of
+deterministic behavior from an independently randomized opponent.
+
+The direct helper also accepts `-OpponentName BananaBrain -OpponentRace Protoss`
+after that bot is imported into the local ladder. It loads the named DLL and
+copies its complete AI folder. The current direct runtime requires BWAPI 4.4.0
+opponents. All AI component hashes are recorded; reports separate differing
+opponent binaries, configurations, and map hashes when those fields exist.

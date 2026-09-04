@@ -265,6 +265,7 @@ bool BwapiBridge::execute(const Command& command) {
 int BwapiBridge::executeMacro(
     const std::span<const MacroAction> actions,
     const StrategicPlan& plan,
+    const std::span<const UnitId> unavailableBuilders,
     const int maximumCommands) {
     auto issued = 0;
     std::string firstFailure;
@@ -284,7 +285,9 @@ int BwapiBridge::executeMacro(
         bool success = false;
         switch (action.action) {
             case MacroActionKind::build:
-            case MacroActionKind::expand: success = build(action, plan); break;
+            case MacroActionKind::expand:
+                success = build(action, plan, unavailableBuilders);
+                break;
             case MacroActionKind::train: success = train(action); break;
             case MacroActionKind::research:
             case MacroActionKind::upgrade: success = executeTechnology(action); break;
@@ -295,11 +298,9 @@ int BwapiBridge::executeMacro(
         } else if (firstFailure.empty() || lastMacroStatus_.starts_with("build-")) {
             firstFailure = lastMacroStatus_;
         }
-        // A mandatory action is a true execution barrier. Reserving its bank
-        // in the planner is not enough if placement, supply, power, or a BWAPI
-        // command rejects it: spending on later actions here would recreate
-        // the observed build-order drift and large delayed milestones.
-        if (!success && action.blocksLowerPriority) break;
+        // Every emitted reserved action has a disjoint allocation in the
+        // ledger. A rejected placement keeps its allocation, but must not
+        // freeze unrelated producers funded from the remaining surplus.
     }
     if (issued == 0 && !firstFailure.empty()) lastMacroStatus_ = firstFailure;
     return issued;
@@ -747,6 +748,14 @@ UnitSnapshot BwapiBridge::snapshotUnit(const BWAPI::Unit unit, const bool ours) 
     result.orderTargetId = orderTarget != nullptr ? orderTarget->getID() : -1;
     result.underStorm = unit->isUnderStorm();
     result.firstSeen = result.lastSeen;
+    result.dimensionLeft = type.dimensionLeft();
+    result.dimensionRight = type.dimensionRight();
+    result.dimensionUp = type.dimensionUp();
+    result.dimensionDown = type.dimensionDown();
+    result.disabled = unit->isLockedDown() || unit->isMaelstrommed() || unit->isStasised();
+    result.invincible = unit->isInvincible() || unit->isStasised();
+    result.groundWeapon.hits = std::max(result.groundWeapon.hits, type.maxGroundHits());
+    result.airWeapon.hits = std::max(result.airWeapon.hits, type.maxAirHits());
     if (kind == UnitKind::reaver) result.ammo = unit->getScarabCount();
     if (kind == UnitKind::carrier) result.ammo = unit->getInterceptorCount();
 
@@ -756,6 +765,10 @@ UnitSnapshot BwapiBridge::snapshotUnit(const BWAPI::Unit unit, const bool ours) 
     // as harmless. Bunkers similarly inherit four Marines' Gauss Rifles.
     if (kind == UnitKind::reaver) {
         result.groundWeapon = weapon(WeaponTypes::Scarab);
+        // Scarab's BWAPI weapon range is 128; the controllable Reaver launches
+        // from eight tiles and fires once per 60 frames.
+        result.groundWeapon.maxRange = 8 * 32;
+        result.groundWeapon.cooldown = 60;
     } else if (kind == UnitKind::carrier) {
         auto payload = weapon(WeaponTypes::Pulse_Cannon);
         payload.maxRange = 8 * 32;
@@ -770,6 +783,10 @@ UnitSnapshot BwapiBridge::snapshotUnit(const BWAPI::Unit unit, const bool ours) 
         result.airWeapon = garrison;
     }
     if (ours && unit->getPlayer() != nullptr) {
+        const auto owner = unit->getPlayer();
+        result.armor = owner->armor(type);
+        result.shieldArmor = owner->getUpgradeLevel(UpgradeTypes::Protoss_Plasma_Shields);
+        result.topSpeed = owner->topSpeed(type);
         if (kind == UnitKind::reaver) {
             result.groundWeapon.damage = unit->getPlayer()->damage(WeaponTypes::Scarab);
         } else if (kind == UnitKind::carrier) {
@@ -778,10 +795,14 @@ UnitSnapshot BwapiBridge::snapshotUnit(const BWAPI::Unit unit, const bool ours) 
             result.airWeapon.damage = damage;
         }
         if (type.groundWeapon() != WeaponTypes::None) {
-            result.groundWeapon.damage = unit->getPlayer()->damage(type.groundWeapon());
+            result.groundWeapon.damage = owner->damage(type.groundWeapon()) /
+                                         std::max(1, type.groundWeapon().damageFactor());
+            result.groundWeapon.maxRange = owner->weaponMaxRange(type.groundWeapon());
         }
         if (type.airWeapon() != WeaponTypes::None) {
-            result.airWeapon.damage = unit->getPlayer()->damage(type.airWeapon());
+            result.airWeapon.damage = owner->damage(type.airWeapon()) /
+                                      std::max(1, type.airWeapon().damageFactor());
+            result.airWeapon.maxRange = owner->weaponMaxRange(type.airWeapon());
         }
     }
     return result;
@@ -1007,13 +1028,18 @@ void BwapiBridge::discoverResourceClusters() {
 
 BWAPI::Unit BwapiBridge::findBuilder(
     const BWAPI::UnitType type,
-    const BWAPI::Position near) const {
+    const BWAPI::Position near,
+    const std::span<const UnitId> unavailableBuilders) const {
     BWAPI::Unit best = nullptr;
-    auto bestDistance = std::numeric_limits<int>::max();
+    auto bestScore = std::numeric_limits<long long>::max();
     const auto builderType = type.whatBuilds().first;
     for (const auto unit : Broodwar->self()->getUnits()) {
         if (unit == nullptr || !unit->exists() || !unit->isCompleted() ||
             unit->getType() != builderType || unit->isConstructing() || unit->isTraining()) {
+            continue;
+        }
+        if (std::ranges::find(unavailableBuilders, unit->getID()) !=
+            unavailableBuilders.end()) {
             continue;
         }
         // Pending Protoss construction is a real lease even while the Probe
@@ -1024,9 +1050,27 @@ BWAPI::Unit BwapiBridge::findBuilder(
             })) {
             continue;
         }
-        const auto distance = unit->getDistance(near);
-        if (distance < bestDistance) {
-            bestDistance = distance;
+        auto exposed = false;
+        if (const auto enemy = Broodwar->enemy()) {
+            exposed = std::ranges::any_of(enemy->getUnits(), [unit](const Unit threat) {
+                if (threat == nullptr || !threat->exists() || !threat->isVisible() ||
+                    !threat->isCompleted()) {
+                    return false;
+                }
+                const auto weapon = threat->getType().groundWeapon();
+                return weapon != WeaponTypes::None &&
+                       threat->getDistance(unit) <= weapon.maxRange() + 96;
+            });
+        }
+        const auto missingDurability =
+            unit->getType().maxHitPoints() + unit->getType().maxShields() -
+            unit->getHitPoints() - unit->getShields();
+        const auto score = static_cast<long long>(unit->getDistance(near)) +
+                           static_cast<long long>(std::max(0, missingDurability)) * 16LL +
+                           (exposed ? 1'000'000LL : 0LL);
+        if (score < bestScore ||
+            (score == bestScore && (best == nullptr || unit->getID() < best->getID()))) {
+            bestScore = score;
             best = unit;
         }
     }
@@ -1128,6 +1172,11 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
     auto anchorPosition = plan.rallyPoint.valid()
                               ? toBwapiPosition(plan.rallyPoint)
                               : BWAPI::Position(Broodwar->self()->getStartLocation());
+    const auto twoPlayerMap = Broodwar->getStartLocations().size() == 2U;
+    auto useForwardLayout = false;
+    auto startLayoutAtCenter = false;
+    auto preserveBaseAnchor = false;
+    auto avoidEnemyFire = false;
     if (kind == UnitKind::pylon) {
         Unit disabledProduction = nullptr;
         for (const auto building : Broodwar->self()->getUnits()) {
@@ -1157,10 +1206,72 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
             }
         }
         if (disabledProduction == nullptr && leastPoweredBase != nullptr) {
-            anchorPosition = leastPoweredBase->getPosition();
+            const auto pylonCount = std::ranges::count_if(
+                Broodwar->self()->getUnits(), [](const Unit unit) {
+                    return unit != nullptr && unit->exists() &&
+                           unit->getType() == UnitTypes::Protoss_Pylon;
+                });
+            const auto hasForwardDefense = std::ranges::any_of(
+                Broodwar->self()->getUnits(), [](const Unit unit) {
+                    return unit != nullptr && unit->exists() &&
+                           (unit->getType() == UnitTypes::Protoss_Photon_Cannon ||
+                            unit->getType() == UnitTypes::Protoss_Shield_Battery);
+                });
+            const auto needsFirstForwardPower = pylonCount == 0;
+            const auto needsRedundantForwardPower = pylonCount == 1 && hasForwardDefense;
+            const auto forwardDistance = plan.rallyPoint.valid()
+                                             ? distance(fromBwapi(leastPoweredBase->getPosition()),
+                                                        plan.rallyPoint)
+                                             : 0.0;
+            if (twoPlayerMap &&
+                (needsFirstForwardPower || needsRedundantForwardPower) &&
+                forwardDistance >= 64.0 && forwardDistance <= 256.0) {
+                // On a two-player map the enemy-facing direction is known at
+                // frame zero. Power the intercept with the first Pylon, then
+                // put redundant power halfway back toward the Nexus. The
+                // backup still overlaps the Cannon screen without sending its
+                // builder through the forward Marine lane.
+                if (needsRedundantForwardPower) {
+                    const auto basePosition = fromBwapi(leastPoweredBase->getPosition());
+                    anchorPosition = toBwapiPosition(
+                        {(basePosition.x + plan.rallyPoint.x) / 2,
+                         (basePosition.y + plan.rallyPoint.y) / 2});
+                    startLayoutAtCenter = true;
+                    avoidEnemyFire = true;
+                } else {
+                    anchorPosition = toBwapiPosition(plan.rallyPoint);
+                }
+                useForwardLayout = true;
+            } else {
+                anchorPosition = leastPoweredBase->getPosition();
+            }
         }
     }
-    if (type.requiresPsi()) {
+    const auto vulnerableTech = kind == UnitKind::forge ||
+                                kind == UnitKind::cyberneticsCore ||
+                                kind == UnitKind::roboticsFacility ||
+                                kind == UnitKind::observatory ||
+                                kind == UnitKind::roboticsSupportBay ||
+                                kind == UnitKind::stargate ||
+                                kind == UnitKind::citadelOfAdun ||
+                                kind == UnitKind::templarArchives ||
+                                kind == UnitKind::fleetBeacon ||
+                                kind == UnitKind::arbiterTribunal;
+    if (twoPlayerMap && type.requiresPsi() && vulnerableTech) {
+        const auto base = Broodwar->getClosestUnit(
+            builder->getPosition(),
+            Filter::GetType == UnitTypes::Protoss_Nexus && Filter::IsCompleted &&
+                Filter::IsOwned);
+        if (base != nullptr) {
+            // The first Pylons intentionally sit on the intercept. Tech built
+            // around those Pylons was exposed ahead of the Cannons and had to
+            // be rebuilt. Search the powered tiles nearest the Nexus instead.
+            anchorPosition = base->getPosition();
+            useForwardLayout = true;
+            preserveBaseAnchor = true;
+        }
+    }
+    if (type.requiresPsi() && !preserveBaseAnchor) {
         const auto pylon = Broodwar->getClosestUnit(
             anchorPosition,
             Filter::GetType == UnitTypes::Protoss_Pylon && Filter::IsCompleted &&
@@ -1200,20 +1311,60 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
             // to it and applying another layout offset placed Cannons beyond
             // useful mineral-line coverage. Search around the defended Nexus
             // instead; the normal hasPower check below still guarantees psi.
-            anchorPosition = forwardNexus->getPosition();
+            const auto forwardDistance = plan.rallyPoint.valid()
+                                             ? distance(fromBwapi(forwardNexus->getPosition()),
+                                                        plan.rallyPoint)
+                                             : 0.0;
+            if (twoPlayerMap && forwardDistance >= 64.0 &&
+                forwardDistance <= 256.0) {
+                // Intercept ranged rushes before they acquire the Probe line.
+                // Keeping the anchor within eight tiles of the Nexus preserves
+                // compact power coverage and short reinforcement paths.
+                const auto groundPressure = std::ranges::any_of(
+                    Broodwar->enemy()->getUnits(), [forwardNexus](const Unit enemy) {
+                        if (enemy == nullptr || !enemy->exists() || !enemy->isVisible() ||
+                            !enemy->isCompleted()) {
+                            return false;
+                        }
+                        const auto weapon = enemy->getType().groundWeapon();
+                        return weapon != WeaponTypes::None &&
+                               enemy->getDistance(forwardNexus) <= 512;
+                    });
+                if (groundPressure) {
+                    const auto basePosition = fromBwapi(forwardNexus->getPosition());
+                    anchorPosition = toBwapiPosition(
+                        {(basePosition.x + plan.rallyPoint.x) / 2,
+                         (basePosition.y + plan.rallyPoint.y) / 2});
+                    startLayoutAtCenter = true;
+                    avoidEnemyFire = true;
+                } else {
+                    anchorPosition = toBwapiPosition(plan.rallyPoint);
+                }
+                useForwardLayout = true;
+            } else {
+                anchorPosition = forwardNexus->getPosition();
+            }
         }
     }
 
-    static const std::array layout{
+    static const std::array standardLayout{
         TilePosition{4, 2}, TilePosition{-4, 2}, TilePosition{4, -3},
         TilePosition{-4, -3}, TilePosition{7, 1}, TilePosition{-7, 1},
         TilePosition{2, 6}, TilePosition{-2, 6}, TilePosition{2, -6},
         TilePosition{-2, -6},
     };
+    static const std::array forwardLayout{
+        TilePosition{0, 0}, TilePosition{2, 0}, TilePosition{-2, 0},
+        TilePosition{0, 2}, TilePosition{0, -2}, TilePosition{2, 2},
+        TilePosition{-2, 2}, TilePosition{2, -2}, TilePosition{-2, -2},
+        TilePosition{4, 0},
+    };
+    const auto& layout = useForwardLayout ? forwardLayout : standardLayout;
     const auto existing = static_cast<std::size_t>(std::ranges::count_if(
         Broodwar->self()->getUnits(), [type](const Unit unit) {
             return unit != nullptr && unit->exists() && unit->getType() == type;
         }));
+    const auto layoutStart = startLayoutAtCenter ? std::size_t{0} : existing;
     const auto anchor = TilePosition(anchorPosition);
     auto miningLaneFallback = TilePositions::None;
     auto validCandidates = 0;
@@ -1239,6 +1390,19 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
             location.x * 32 + type.tileWidth() * 16,
             location.y * 32 + type.tileHeight() * 16,
         };
+        if (avoidEnemyFire && std::ranges::any_of(
+                                  Broodwar->enemy()->getUnits(), [&center](const Unit enemy) {
+                                      if (enemy == nullptr || !enemy->exists() ||
+                                          !enemy->isVisible() || !enemy->isCompleted()) {
+                                          return false;
+                                      }
+                                      const auto weapon = enemy->getType().groundWeapon();
+                                      return weapon != WeaponTypes::None &&
+                                             enemy->getDistance(toBwapiPosition(center)) <=
+                                                 weapon.maxRange() + 96;
+                                  })) {
+            return false;
+        }
         if (std::ranges::any_of(
                 failedBuildSites_, [kind, center](const FailedBuildSite& failed) {
                     return failed.kind == kind &&
@@ -1258,7 +1422,7 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         return TilePositions::None;
     };
     for (std::size_t attempt = 0; attempt < layout.size(); ++attempt) {
-        const auto offset = layout[(existing + attempt) % layout.size()];
+        const auto offset = layout[(layoutStart + attempt) % layout.size()];
         const auto location = Broodwar->getBuildLocation(type, anchor + offset, 8);
         const auto accepted = consider(location);
         if (accepted.isValid()) {
@@ -1353,7 +1517,10 @@ bool BwapiBridge::blocksMiningLane(
     return false;
 }
 
-bool BwapiBridge::build(const MacroAction& action, const StrategicPlan& plan) {
+bool BwapiBridge::build(
+    const MacroAction& action,
+    const StrategicPlan& plan,
+    const std::span<const UnitId> unavailableBuilders) {
     const auto type = toBwapi(action.target);
     if (type == UnitTypes::None || !type.isBuilding()) {
         lastMacroStatus_ = "build-invalid-type";
@@ -1366,7 +1533,7 @@ bool BwapiBridge::build(const MacroAction& action, const StrategicPlan& plan) {
     }
     const auto near = plan.rallyPoint.valid() ? toBwapiPosition(plan.rallyPoint)
                                               : BWAPI::Position(Broodwar->self()->getStartLocation());
-    const auto builder = findBuilder(type, near);
+    const auto builder = findBuilder(type, near, unavailableBuilders);
     if (builder == nullptr) {
         lastMacroStatus_ = "build-no-builder";
         return false;

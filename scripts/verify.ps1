@@ -1,15 +1,18 @@
 param(
     [switch]$SkipAdapter,
-    [string]$BwapiRoot = "build/_deps/bwapi-src"
+    [string]$BwapiRoot = "build/_deps/bwapi-src",
+    [string]$ZigPath = ""
 )
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 Push-Location $repo
 try {
-    $zigPath = python -c "import pathlib, ziglang; print(pathlib.Path(ziglang.__file__).parent / 'zig.exe')"
-    if (-not (Test-Path -LiteralPath $zigPath)) {
-        throw "The portable verifier requires ziglang: python -m pip install --user ziglang"
+    if (-not $ZigPath) {
+        $ZigPath = python -c "import importlib.util, pathlib; s = importlib.util.find_spec('ziglang'); print(pathlib.Path(s.origin).parent / 'zig.exe' if s else '')"
+    }
+    if (-not $ZigPath -or -not (Test-Path -LiteralPath $ZigPath)) {
+        throw "Pass -ZigPath to zig.exe, or install it for the active Python: python -m pip install --user ziglang"
     }
 
     New-Item -ItemType Directory -Force -Path "build/verify" | Out-Null
@@ -26,6 +29,9 @@ try {
 
     python tools/log_analyzer.py --self-test
     if ($LASTEXITCODE -ne 0) { throw "Log analyzer tests failed" }
+
+    python tools/direct_report.py --self-test
+    if ($LASTEXITCODE -ne 0) { throw "Direct-match report tests failed" }
 
     python tests/test_ladder.py
     if ($LASTEXITCODE -ne 0) { throw "Ladder tests failed" }

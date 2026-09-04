@@ -219,6 +219,13 @@ struct UnitSnapshot {
     UnitId orderTargetId{-1};
     bool underStorm{};
     Frame firstSeen{};
+    int shieldArmor{};
+    int dimensionLeft{};
+    int dimensionRight{};
+    int dimensionUp{};
+    int dimensionDown{};
+    bool disabled{};
+    bool invincible{};
 
     [[nodiscard]] int durability() const noexcept {
         return hitPoints + shields;

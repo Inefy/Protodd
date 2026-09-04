@@ -94,11 +94,23 @@ endif()
 if(ASTRA_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+    if(ASTRA_BUILD_BWAPI_MODULE)
+        add_executable(astra_bwapi_catalog_tests tests/bwapi_catalog.cpp)
+        target_include_directories(astra_bwapi_catalog_tests PRIVATE "${BWAPI_INCLUDE_DIR}")
+        target_link_libraries(astra_bwapi_catalog_tests PRIVATE Astra::Core "${BWAPI_LIBRARY}")
+        target_compile_features(astra_bwapi_catalog_tests PRIVATE cxx_std_20)
+        astra_enable_warnings(astra_bwapi_catalog_tests)
+        add_test(NAME astra_bwapi_catalog_tests COMMAND astra_bwapi_catalog_tests)
+    endif()
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
         add_test(
             NAME astra_log_analyzer_tests
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/log_analyzer.py" --self-test
+        )
+        add_test(
+            NAME astra_direct_report_tests
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/direct_report.py" --self-test
         )
     endif()
 endif()

@@ -47,6 +47,12 @@ Astra applies those ideas through its own data model and algorithms:
 
 ## Validation rule
 
+The September 2026 audit also imported the official
+[AIIDE 2025 BananaBrain package](https://davechurchill.ca/starcraft/aiide/results/2025/bots/)
+as a local BWAPI 4.4.0 opponent. Its binary, configuration, pretraining data,
+and source remain in the ignored benchmark vault. None of its implementation
+is incorporated into Astra or its submission archive.
+
 No behavior is accepted solely because it looks plausible in source. It must
 pass portable regression tests, a strict 32-bit Release/BWAPI build, and direct
 games where the live trace confirms milestone timing, production occupancy,

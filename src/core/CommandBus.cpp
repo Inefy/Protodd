@@ -31,11 +31,11 @@ std::vector<Command> CommandBus::finalize(const std::size_t maximumCommands) {
     selected.reserve(pending_.size());
     UnitId actor = -1;
     for (const auto& command : pending_) {
-        if (command.actor == actor || redundant(command)) {
-            continue;
-        }
-        selected.push_back(command);
+        if (command.actor == actor) continue;
         actor = command.actor;
+        // A redundant winning order still owns the unit. Otherwise a lower
+        // priority attack can cancel a retreat/recharge on the very next tick.
+        if (!redundant(command)) selected.push_back(command);
     }
     if (selected.size() <= maximumCommands) return selected;
     if (maximumCommands == 0) return {};

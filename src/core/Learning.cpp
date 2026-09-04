@@ -87,6 +87,19 @@ std::string OpponentHistory::serialize() const {
     return output.str();
 }
 
+std::string OpponentHistory::filename(const std::string_view opponent) {
+    // Encode the actual tournament alias losslessly. No path separators,
+    // platform-dependent hash, or identification of the underlying bot.
+    constexpr std::string_view hex = "0123456789abcdef";
+    std::string result = "AstraBot-";
+    for (const auto character : opponent) {
+        const auto byte = static_cast<unsigned char>(character);
+        result += hex[byte >> 4];
+        result += hex[byte & 15];
+    }
+    return result + ".csv";
+}
+
 OpeningStyle OpponentHistory::choose(
     const std::string_view opponent,
     const std::string_view map,
@@ -96,7 +109,12 @@ OpeningStyle OpponentHistory::choose(
         totalGames += lookup(opponent, map, static_cast<OpeningStyle>(raw)).games();
     }
 
-    // Try each style once in a deterministic opponent/map-specific order.
+    // Start unknown opponents from the balanced arm. Exploration still begins
+    // after that evidence-bearing baseline game, but never spends the first
+    // and least-informed tournament game on arbitrary greed or deception.
+    if (totalGames == 0) return OpeningStyle::standard;
+
+    // Try each remaining style once in a deterministic opponent/map-specific order.
     const auto offset = static_cast<int>(deterministicSeed %
                                          static_cast<std::uint64_t>(OpeningStyle::count));
     for (auto step = 0; step < static_cast<int>(OpeningStyle::count); ++step) {

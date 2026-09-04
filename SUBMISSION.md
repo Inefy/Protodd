@@ -27,8 +27,9 @@ tests, and prints the DLL's SHA-256 digest.
 ## Runtime files
 
 Copy `AstraBot.dll` to `bwapi-data/AI/` and select it as the release AI in
-`bwapi-data/bwapi.ini`. Astra only reads `bwapi-data/read/AstraBot.csv` and
-writes `bwapi-data/write/AstraBot.csv` plus `AstraBot.log`. It requires no
+`bwapi-data/bwapi.ini`. Astra reads per-opponent `AstraBot-<encoded-alias>.csv`
+files from `bwapi-data/read/` and its own local `bwapi-data/write/` directory,
+then writes cumulative history for that alias plus `AstraBot.log`. It requires no
 network, GPU, registry setting, environment variable, or absolute runtime path.
 
 The bot must play Protoss. Tournament aliases are treated as opaque opponent

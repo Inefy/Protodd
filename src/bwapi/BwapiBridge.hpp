@@ -36,6 +36,7 @@ public:
     int executeMacro(
         std::span<const MacroAction> actions,
         const StrategicPlan& plan,
+        std::span<const UnitId> unavailableBuilders = {},
         int maximumCommands = 8);
     void executeWorkers(std::span<const WorkerAssignment> assignments);
     void executeScouts(std::span<const ScoutOrder> orders);
@@ -94,7 +95,10 @@ private:
     [[nodiscard]] std::vector<BaseSnapshot> snapshotBases(const GameState& state);
     void discoverResourceClusters();
 
-    [[nodiscard]] BWAPI::Unit findBuilder(BWAPI::UnitType type, BWAPI::Position near) const;
+    [[nodiscard]] BWAPI::Unit findBuilder(
+        BWAPI::UnitType type,
+        BWAPI::Position near,
+        std::span<const UnitId> unavailableBuilders) const;
     [[nodiscard]] BWAPI::TilePosition buildLocation(
         UnitKind kind,
         BWAPI::UnitType type,
@@ -103,7 +107,10 @@ private:
     [[nodiscard]] bool blocksMiningLane(
         BWAPI::TilePosition tile,
         BWAPI::UnitType type) const;
-    [[nodiscard]] bool build(const MacroAction& action, const StrategicPlan& plan);
+    [[nodiscard]] bool build(
+        const MacroAction& action,
+        const StrategicPlan& plan,
+        std::span<const UnitId> unavailableBuilders);
     [[nodiscard]] bool train(const MacroAction& action);
     [[nodiscard]] bool executeTechnology(const MacroAction& action);
     [[nodiscard]] static BWAPI::Position toBwapiPosition(Position position) noexcept;

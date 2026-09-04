@@ -21,7 +21,8 @@ UnitKind producerFor(const UnitKind kind) noexcept {
         case UnitKind::shuttle: return UnitKind::roboticsFacility;
         case UnitKind::scout:
         case UnitKind::corsair:
-        case UnitKind::carrier: return UnitKind::stargate;
+        case UnitKind::carrier:
+        case UnitKind::arbiter: return UnitKind::stargate;
         default: return UnitKind::unknown;
     }
 }
@@ -34,6 +35,14 @@ int queuedForProducer(const GameState& state, const UnitKind producer) {
     const auto busyWithoutQueue = static_cast<int>(std::ranges::count(
         state.self.busyProducers, producer));
     return queued + busyWithoutQueue;
+}
+
+int usableProducers(const GameState& state, const UnitKind kind) {
+    return static_cast<int>(std::ranges::count_if(state.self.units,
+        [kind](const UnitSnapshot& unit) {
+            return unit.kind == kind && unit.completed &&
+                   (!unitStats(kind).requiresPsi || unit.powered);
+        }));
 }
 
 }  // namespace
@@ -65,6 +74,13 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     std::vector<ProductionGoal> goals = plan.goals;
     actions.reserve(goals.size() + 1U);
     std::unordered_map<UnitKind, int> planned;
+    std::unordered_map<UnitKind, int> committedProducers;
+    auto plannedSupply = state.self.supplyUsed;
+    for (const auto& technology : state.self.technologies) {
+        if (technology.inProgress) {
+            ++committedProducers[technologyStats(technology.kind).producer];
+        }
+    }
 
     // Supply is an operational invariant, not merely a strategic preference.
     // If a future strategy accidentally omits its pylon goal, the macro layer
@@ -135,12 +151,18 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                 continue;
             }
 
+            // Research and upgrades share one slot on a building. Saving for
+            // another operation there must not starve a usable producer.
+            if (usableProducers(state, stats.producer) <=
+                committedProducers[stats.producer]) continue;
+
             MacroAction action{
                 stats.research ? MacroActionKind::research : MacroActionKind::upgrade,
                 UnitKind::unknown, goal.priority, minerals, gas, false,
                 goal.reason, goal.technology, goal.blocking,
             };
             action.reserved = ledger.reserve(minerals, gas);
+            if (action.reserved || goal.blocking) ++committedProducers[stats.producer];
             if (action.reserved || goal.blocking) actions.push_back(std::move(action));
             if (goal.blocking && !actions.back().reserved) {
                 ledger.protect(minerals, gas);
@@ -156,7 +178,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             const auto producer = producerFor(goal.target);
             const auto producerCount = countCompleted(state, producer);
             if (producer != UnitKind::unknown && producerCount > 0 &&
-                queuedForProducer(state, producer) >= producerCount) {
+                queuedForProducer(state, producer) + committedProducers[producer] >=
+                    usableProducers(state, producer)) {
                 // A queued train action is already keeping every producer
                 // occupied. Do not reserve a second layer of queue entries and
                 // starve structures that increase actual throughput.
@@ -195,6 +218,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                 waiting.reserved = ledger.reserve(target.minerals, target.gas);
                 waiting.executable = false;
                 actions.push_back(std::move(waiting));
+                ++planned[goal.target];
                 if (!actions.back().reserved) {
                     ledger.protect(target.minerals, target.gas);
                 }
@@ -203,6 +227,12 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         }
 
         const auto& stats = unitStats(goal.target);
+        if (goal.goal == GoalKind::train && state.self.supplyTotal > 0 &&
+            plannedSupply + stats.supply > state.self.supplyTotal) {
+            // Supply already includes units in production. A blocked train
+            // order cannot reserve minerals needed for power, tech, or supply.
+            continue;
+        }
         MacroAction action{
             actionKind(goal.goal), goal.target, goal.priority,
             stats.minerals, stats.gas, false, goal.reason,
@@ -212,6 +242,10 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         if (action.reserved || goal.blocking) {
             actions.push_back(std::move(action));
             ++planned[goal.target];
+            if (goal.goal == GoalKind::train) {
+                ++committedProducers[producerFor(goal.target)];
+                if (actions.back().reserved) plannedSupply += stats.supply;
+            }
         }
         // Protect each resource independently. A gas-starved upgrade can keep
         // its mineral bank without freezing probes or other mineral-only work
@@ -235,26 +269,13 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         const auto producer = producerFor(target.kind);
         if (producer == UnitKind::unknown || openProducerSlots.contains(producer)) continue;
         openProducerSlots[producer] = std::max(
-            0, countCompleted(state, producer) - queuedForProducer(state, producer));
-    }
-    for (const auto& action : actions) {
-        if (!action.reserved || action.action != MacroActionKind::train) continue;
-        const auto producer = producerFor(action.target);
-        if (const auto slot = openProducerSlots.find(producer);
-            slot != openProducerSlots.end()) {
-            slot->second = std::max(0, slot->second - 1);
-        }
+            0, usableProducers(state, producer) - queuedForProducer(state, producer) -
+                   committedProducers[producer]);
     }
 
     auto armyCount = 0;
     for (const auto& target : plan.composition) {
         armyCount += countExisting(state, target.kind) + planned[target.kind];
-    }
-    auto plannedSupply = state.self.supplyUsed;
-    for (const auto& action : actions) {
-        if (action.reserved && action.action == MacroActionKind::train) {
-            plannedSupply += unitStats(action.target).supply;
-        }
     }
     constexpr auto maximumCompositionActions = 8;
     for (auto cycle = 0; cycle < maximumCompositionActions; ++cycle) {
@@ -268,6 +289,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                                          plannedSupply + stats.supply <=
                                              state.self.supplyTotal;
             if (!directlyProducible || producer == UnitKind::unknown ||
+                target.weight <= 0.0 ||
                 openProducerSlots[producer] <= 0 ||
                 !prerequisitesMet(state, target.kind) || !supplyAvailable ||
                 !ledger.canReserve(stats.minerals, stats.gas)) {

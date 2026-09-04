@@ -30,6 +30,20 @@ bool supplyAtLeast(const GameState& state, const int displayedSupply) {
     return state.self.supplyUsed >= displayedSupply * 2;
 }
 
+bool openingPressureExpected(
+    const GameState& state,
+    const ThreatAssessment& threat) noexcept {
+    const auto supported = threat.uncertainty <= 0.75 ||
+                           threat.combatEnemiesNearMain > 0 ||
+                           threat.approachingArmyValue >= 2.0 ||
+                           threat.immediateGround > 0.45;
+    // A nearly uniform belief distribution still has a numerical winner.
+    // Its stale label alone must not hold a ready army at home for 16 minutes.
+    return minute(state) < 16 && supported &&
+           (threat.mostLikely == EnemyPlan::fastRush ||
+            threat.mostLikely == EnemyPlan::heavyPressure);
+}
+
 int recentEnemyCount(
     const GameState& state,
     const UnitKind kind,
@@ -87,6 +101,15 @@ void technologyGoal(
                               technology == TechnologyKind::recall
                           ? GoalKind::research
                           : GoalKind::upgrade;
+    const auto existing = std::ranges::find(
+        plan.goals, technology, &ProductionGoal::technology);
+    if (existing != plan.goals.end()) {
+        existing->desiredCount = std::max(existing->desiredCount, desiredLevel);
+        if (priority > existing->priority) existing->reason = reason;
+        existing->priority = std::max(existing->priority, priority);
+        existing->blocking = existing->blocking || blocking;
+        return;
+    }
     plan.goals.push_back({kind, UnitKind::unknown, desiredLevel, priority, blocking,
                           std::string(reason), technology});
 }
@@ -171,7 +194,6 @@ StrategicPlan StrategyEngine::plan(
     result.rallyPoint = home.valid() && result.attackTarget.valid()
                             ? moveToward(home, result.attackTarget, 160.0)
                             : home;
-    addInfrastructure(result, state, threat);
     applyOpeningStyle(result, state, style);
     addAdaptiveCounters(result, state);
     addEconomicRecovery(result, state);
@@ -184,6 +206,21 @@ StrategicPlan StrategyEngine::plan(
     // enough workers to fund production and a prompt expansion.
     result.desiredWorkers = std::min(
         result.desiredWorkers, std::max(14, result.desiredBases * 22));
+
+    // Infrastructure must follow the final intent: a safety reaction or an
+    // opening style can change the economy after the matchup plan is made.
+    if (result.posture == Posture::defend) {
+        const auto existingBases = std::max(1, count(state, UnitKind::nexus));
+        result.desiredBases = std::min(result.desiredBases, existingBases);
+    }
+    for (auto& objective : result.goals) {
+        if (objective.goal == GoalKind::expand) {
+            objective.desiredCount = std::min(objective.desiredCount, result.desiredBases);
+        } else if (objective.target == UnitKind::probe) {
+            objective.desiredCount = std::min(objective.desiredCount, result.desiredWorkers);
+        }
+    }
+    addInfrastructure(result, state, threat);
 
     std::ranges::stable_sort(result.goals, std::greater{}, &ProductionGoal::priority);
     return result;
@@ -199,19 +236,42 @@ StrategicPlan StrategyEngine::planPvT(
     result.desiredGasWorkers = !supplyAtLeast(state, 11) ? 0 :
                                (minute(state) < 7 ? 3 :
                                 (minute(state) < 12 ? 6 : 9));
-    result.posture = minute(state) < 6 ? Posture::hold : Posture::pressure;
+    result.posture = minute(state) < 6 || openingPressureExpected(state, threat)
+                         ? Posture::hold
+                         : Posture::pressure;
     result.attackThreshold = 1.32;
+    result.minimumAttackSize = 14;
     result.composition = {{UnitKind::dragoon, 0.55}, {UnitKind::zealot, 0.22},
                           {UnitKind::highTemplar, 0.13}, {UnitKind::arbiter, 0.10}};
 
-    if (supplyAtLeast(state, 9)) {
-        goal(result, GoalKind::build, UnitKind::gateway, minute(state) < 6 ? 1 : 3, 88,
-             "nine-supply gateway", count(state, UnitKind::gateway) == 0);
+    // A pure Gateway opening cannot field Zealots quickly enough to trade with
+    // nonstop Barracks production on every spawn. Establish overlapping
+    // Cannon coverage first, then add the Gateway and transition to Dragoons;
+    // this also supplies detection and a safe retreat line against unfamiliar
+    // Terran openings rather than encoding one opponent by name.
+    if (minute(state) < 4 && count(state, UnitKind::zealot, true) == 0 &&
+        count(state, UnitKind::photonCannon, true) == 0) {
+        result.desiredWorkers = std::min(result.desiredWorkers, 7);
     }
-    if (supplyAtLeast(state, 10)) {
+    if (supplyAtLeast(state, 7)) {
+        goal(result, GoalKind::build, UnitKind::forge, 1, 100,
+             "fortified anti-bio opening anchor", true);
+        goal(result, GoalKind::build, UnitKind::photonCannon, 2, 99,
+             "overlap the intercept before first contact", true);
+        goal(result, GoalKind::build, UnitKind::gateway, 1, 98,
+             "field mobile defense behind the completed static intercept", true);
+    }
+
+    if (supplyAtLeast(state, 8)) {
+        goal(result, GoalKind::build, UnitKind::gateway, minute(state) < 6 ? 1 : 3, 88,
+             "eight-supply gateway", count(state, UnitKind::gateway) == 0);
+    }
+    if (count(state, UnitKind::gateway) > 0 || supplyAtLeast(state, 10)) {
         goal(result, GoalKind::train, UnitKind::zealot, 1, 94,
              "opening bodyguard before vulnerable dragoon tech",
              count(state, UnitKind::zealot) == 0);
+        goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 89,
+             "opening sustain against bio pressure");
     }
     if (supplyAtLeast(state, 13)) {
         goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 92,
@@ -270,14 +330,78 @@ StrategicPlan StrategyEngine::planPvT(
         result.desiredBases = minute(state) < 8 ? 1 : std::min(result.desiredBases, 2);
         result.desiredWorkers = std::min(result.desiredWorkers, 14);
         result.attackThreshold = 1.55;
-        goal(result, GoalKind::build, UnitKind::gateway, 2, 99,
+        if (count(state, UnitKind::gateway) > 0 &&
+            count(state, UnitKind::zealot) == 0) {
+            goal(result, GoalKind::train, UnitKind::zealot, 1, 105,
+                 "field one mobile defender before adding more structures", true);
+        }
+        if (count(state, UnitKind::photonCannon, true) >= 2) {
+            goal(result, GoalKind::build, UnitKind::pylon, 2, 102,
+                 "give the forward defensive shell redundant power", true);
+        }
+        // Four Cannons are a screen, not the army. Continuing to replace an
+        // aspirational six-Cannon target under fire can consume every mineral
+        // and leave completed Gateways idle. Stop at four, then add the third
+        // Gateway only after a mobile front line exists.
+        const auto cannonTarget = minute(state) >= 5 ? 4 : 3;
+        const auto gatewayTarget = minute(state) >= 5 &&
+                                           count(state, UnitKind::zealot, true) >= 4
+                                       ? 3
+                                       : 2;
+        goal(result, GoalKind::build, UnitKind::photonCannon, cannonTarget, 101,
+             "scale the mineral-line anchor with sustained bio", true);
+        goal(result, GoalKind::build, UnitKind::gateway, gatewayTarget, 100,
              "add emergency anti-pressure throughput", true);
-        goal(result, GoalKind::train, UnitKind::zealot, 4, 98,
+        goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 99,
+             "complete a sustainable defensive screen", true);
+        const auto screenEstablished =
+            count(state, UnitKind::photonCannon, true) >= 3;
+        if (screenEstablished) {
+            // Once three Cannons are complete this checkpoint is permanent.
+            // Tying the priority to a live Zealot count made one combat loss
+            // demote the Core before its saved minerals could be spent.
+            goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 99,
+                 "unlock the ranged counter after emergency production", true);
+            goal(result, GoalKind::build, UnitKind::assimilator, 1, 99,
+                 "fund the ranged counter after emergency production", true);
+            const auto cloakWindow =
+                count(state, UnitKind::photonCannon, true) >= 4;
+            const auto cloakCommitted = count(state, UnitKind::citadelOfAdun) > 0 ||
+                                        count(state, UnitKind::templarArchives) > 0 ||
+                                        count(state, UnitKind::darkTemplar) > 0;
+            if (count(state, UnitKind::cyberneticsCore, true) > 0 &&
+                (cloakWindow || cloakCommitted)) {
+                result.name += " [anti-bio dark templar]";
+                goal(result, GoalKind::build, UnitKind::citadelOfAdun, 1, 99,
+                     "cloak transition against sustained opening bio", true);
+                if (count(state, UnitKind::citadelOfAdun, true) > 0) {
+                    goal(result, GoalKind::build, UnitKind::templarArchives, 1, 99,
+                         "complete the cloak transition", true);
+                }
+                if (count(state, UnitKind::templarArchives, true) > 0) {
+                    goal(result, GoalKind::train, UnitKind::darkTemplar, 3, 102,
+                         "clear bio and counterattack before detection", true);
+                    setCompositionWeight(result, UnitKind::darkTemplar, 0.24);
+                }
+            }
+        }
+        goal(result, GoalKind::train, UnitKind::zealot,
+             minute(state) >= 5 ? 10 : 6, 98,
              "field bodies before vulnerable dragoon tech", true);
-        goal(result, GoalKind::train, UnitKind::dragoon, 8, 97,
-             "survive detected pressure", true);
-        goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 90,
-             "front-line sustain");
+        const auto dragoonInfrastructureReady =
+            count(state, UnitKind::cyberneticsCore, true) > 0;
+        const auto rangedReservationSafe =
+            dragoonInfrastructureReady && state.self.gas >= 50 &&
+            count(state, UnitKind::photonCannon, true) >= 2;
+        if (dragoonInfrastructureReady && count(state, UnitKind::dragoon) == 0) {
+            goal(result, GoalKind::train, UnitKind::dragoon, 1, 104,
+                 "field the first ranged defender before support infrastructure",
+                 rangedReservationSafe);
+        }
+        goal(result, GoalKind::train, UnitKind::dragoon, 8,
+             dragoonInfrastructureReady ? 99 : 96,
+             "transition to ranged defense after its prerequisite completes",
+             rangedReservationSafe);
     }
     return result;
 }
@@ -294,6 +418,7 @@ StrategicPlan StrategyEngine::planPvZ(
                                 (minute(state) < 12 ? 6 : 9));
     result.posture = minute(state) < 8 ? Posture::hold : Posture::harass;
     result.attackThreshold = 1.2;
+    result.minimumAttackSize = 14;
     result.composition = {{UnitKind::zealot, 0.35}, {UnitKind::dragoon, 0.12},
                           {UnitKind::highTemplar, 0.25}, {UnitKind::corsair, 0.18},
                           {UnitKind::archon, 0.10}};
@@ -381,7 +506,10 @@ StrategicPlan StrategyEngine::planPvZ(
         result.name = "PvZ emergency gateway hold";
         result.posture = Posture::defend;
         result.desiredBases = 1;
-        result.desiredGasWorkers = 0;
+        const auto stabilized = count(state, UnitKind::photonCannon, true) >= 2 &&
+                                count(state, UnitKind::zealot, true) >= 4;
+        if (!stabilized && minute(state) < 7) result.desiredGasWorkers = 0;
+        else result.desiredGasWorkers = std::max(3, result.desiredGasWorkers);
         result.desiredWorkers = std::min(result.desiredWorkers, 12);
         goal(result, GoalKind::build, UnitKind::gateway, 2, 99, "anti-rush production", true);
         goal(result, GoalKind::train, UnitKind::zealot, 8, 98, "hold early ground rush", true);
@@ -419,10 +547,34 @@ StrategicPlan StrategyEngine::planPvP(
     result.desiredGasWorkers = !supplyAtLeast(state, 11) ? 0 :
                                (minute(state) < 8 ? 3 :
                                 (minute(state) < 12 ? 6 : 9));
-    result.posture = minute(state) < 6 ? Posture::hold : Posture::pressure;
+    result.posture = minute(state) < 6 || openingPressureExpected(state, threat)
+                         ? Posture::hold
+                         : Posture::pressure;
     result.attackThreshold = 1.18;
+    result.minimumAttackSize = 16;
     result.composition = {{UnitKind::dragoon, 0.58}, {UnitKind::zealot, 0.14},
                           {UnitKind::reaver, 0.18}, {UnitKind::highTemplar, 0.10}};
+
+    // Four-player maps often hide a two-Gateway rush until it is already
+    // crossing the last screen. Use the same deterministic static anchor that
+    // survives pool-first Zerg: it is ready without relying on a successful
+    // scout and buys enough time for Gateways to produce a real army.
+    if (minute(state) < 4 && count(state, UnitKind::zealot, true) < 2 &&
+        count(state, UnitKind::photonCannon, true) == 0) {
+        result.desiredWorkers = std::min(result.desiredWorkers, 7);
+    }
+    if (supplyAtLeast(state, 7)) {
+        goal(result, GoalKind::build, UnitKind::forge, 1, 100,
+             "fortified mirror opening anchor", true);
+        goal(result, GoalKind::build, UnitKind::photonCannon, 2, 99,
+             "overlapping unscouted two-Gateway safety", true);
+        goal(result, GoalKind::build, UnitKind::gateway, 1, 98,
+             "production behind the completed static screen", true);
+    }
+    if (count(state, UnitKind::gateway) > 0) {
+        goal(result, GoalKind::train, UnitKind::zealot, 1, 98,
+             "first mobile defender behind the Cannon screen", true);
+    }
 
     if (supplyAtLeast(state, 9)) {
         const auto gatewayTarget = supplyAtLeast(state, 11) ?
@@ -456,7 +608,7 @@ StrategicPlan StrategyEngine::planPvP(
         technologyGoal(result, TechnologyKind::singularityCharge, 1, 86,
                        "range follows the first defensive dragoons");
     }
-    if (count(state, UnitKind::dragoon) >= 3 || supplyAtLeast(state, 24)) {
+    if (count(state, UnitKind::dragoon) >= 3) {
         goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 85,
              "reaver pressure and detection");
         goal(result, GoalKind::build, UnitKind::observatory, 1, 83, "DT safety");
@@ -487,7 +639,9 @@ StrategicPlan StrategyEngine::planPvP(
         result.posture = Posture::defend;
         result.desiredBases = 1;
         result.desiredWorkers = std::min(result.desiredWorkers, 12);
-        if (count(state, UnitKind::cyberneticsCore) == 0) {
+        const auto canTransition = count(state, UnitKind::photonCannon, true) >= 3 &&
+                                   count(state, UnitKind::zealot, true) >= 4;
+        if (count(state, UnitKind::cyberneticsCore) == 0 && !canTransition) {
             result.desiredGasWorkers = 0;
             result.goals.erase(
                 std::remove_if(result.goals.begin(), result.goals.end(),
@@ -503,12 +657,34 @@ StrategicPlan StrategyEngine::planPvP(
             result.composition = {{UnitKind::zealot, 1.0}};
         }
         result.attackThreshold = 1.5;
+        if (count(state, UnitKind::gateway) > 0 &&
+            count(state, UnitKind::zealot) == 0) {
+            goal(result, GoalKind::train, UnitKind::zealot, 1, 105,
+                 "field one mobile defender before adding more structures", true);
+        }
+        if (count(state, UnitKind::photonCannon, true) >= 2) {
+            goal(result, GoalKind::train, UnitKind::probe, 10, 104,
+                 "fund sustained mirror defense behind the Cannon screen", true);
+            if (count(state, UnitKind::gateway, true) > 0) {
+                goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 103,
+                     "finish defensive sustain before the ongoing Zealot target", true);
+            }
+        }
+        goal(result, GoalKind::build, UnitKind::photonCannon, 3, 101,
+             "deny a Zealot flood access to the Probe line", true);
         goal(result, GoalKind::build, UnitKind::gateway, 2, 100,
              "guarantee two-gate defensive throughput", true);
         goal(result, GoalKind::train, UnitKind::zealot, 8, 99,
              "continuously reinforce against opening pressure", true);
-        goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 95,
-             "defensive sustain");
+        goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 97,
+             "defensive sustain", true);
+    }
+    if (openingPressureExpected(state, threat)) {
+        // A fixed one-base flood is beaten by compact two-base production,
+        // not by taking a third Nexus while the first decisive army is still
+        // assembling. The cap disappears after the opening pressure window.
+        result.desiredBases = std::min(result.desiredBases, 2);
+        result.desiredWorkers = std::min(result.desiredWorkers, 36);
     }
     return result;
 }
@@ -545,8 +721,8 @@ void StrategyEngine::addInfrastructure(
     goal(plan, GoalKind::build, UnitKind::pylon, desiredPylons, 100,
          "maintain a supply buffer",
          openingPylonDeadline || state.self.supplyTotal - state.self.supplyUsed <= 4);
-    goal(plan, GoalKind::train, UnitKind::probe, std::max(workers, plan.desiredWorkers), 74,
-         "saturate economy");
+    goal(plan, GoalKind::train, UnitKind::probe, std::max(workers, plan.desiredWorkers), 93,
+         "maintain continuous worker production");
     // An expansion cannot be bought opportunistically while every idle
     // producer keeps spending the same income. Once the strategic phase calls
     // for another base and the main is clear, reserve its full cost ahead of
@@ -561,8 +737,10 @@ void StrategyEngine::addInfrastructure(
                                threat.combatEnemiesNearMain == 0 &&
                                threat.approachingArmyValue < 2.0 &&
                                threat.immediateGround <= 0.45;
-    goal(plan, GoalKind::expand, UnitKind::nexus, plan.desiredBases,
-         expansionSafe ? 85 : 65, "match economic phase", expansionSafe);
+    if (plan.posture != Posture::defend) {
+        goal(plan, GoalKind::expand, UnitKind::nexus, plan.desiredBases,
+             expansionSafe ? 95 : 65, "match economic phase", expansionSafe);
+    }
     if (plan.desiredGasWorkers > 0) {
         goal(plan, GoalKind::build, UnitKind::assimilator, bases, 80, "fund technology");
     }
@@ -624,10 +802,27 @@ void StrategyEngine::addAdaptiveCounters(
         }
         if (bio >= 7 && minute(state) >= 7) {
             plan.name += " [anti-bio storm]";
-            goal(plan, GoalKind::train, UnitKind::highTemplar,
-                 std::clamp(bio / 3, 3, 7), 88, "punish clustered Terran bio");
-            technologyGoal(plan, TechnologyKind::psionicStorm, 1, 90,
-                           "counter observed bio mass", true);
+            // Storm is the actual scaling answer to a packed Marine force. A
+            // minute-scaled Dragoon goal otherwise spends every 125-mineral
+            // increment before the bank can reach Storm's 200-mineral cost.
+            // Make the tech path reserve first, then fill idle Gateways with
+            // Templar and routine ranged production.
+            const auto frontline =
+                count(state, UnitKind::zealot, true) +
+                count(state, UnitKind::dragoon, true) +
+                count(state, UnitKind::darkTemplar, true);
+            const auto spellWindow = plan.posture != Posture::defend || frontline >= 8;
+            if (spellWindow) {
+                goal(plan, GoalKind::build, UnitKind::citadelOfAdun, 1, 100,
+                     "unlock the decisive anti-bio spell", true);
+                goal(plan, GoalKind::build, UnitKind::templarArchives, 1, 100,
+                     "unlock the decisive anti-bio spell", true);
+                technologyGoal(plan, TechnologyKind::psionicStorm, 1, 100,
+                               "counter observed bio mass", true);
+                goal(plan, GoalKind::train, UnitKind::highTemplar,
+                     std::clamp(bio / 3, 3, 7), 98,
+                     "punish clustered Terran bio");
+            }
             setCompositionWeight(plan, UnitKind::highTemplar, 0.24);
             setCompositionWeight(plan, UnitKind::zealot, 0.30);
         }
@@ -750,6 +945,7 @@ void StrategyEngine::addSafetyReactions(
     }
 
     if (threat.cloak > 0.28) {
+        plan.desiredGasWorkers = std::max(3, plan.desiredGasWorkers);
         goal(plan, GoalKind::build, UnitKind::roboticsFacility, 1, 97,
              "detected cloaked threat", true);
         goal(plan, GoalKind::build, UnitKind::observatory, 1, 96,
@@ -760,6 +956,7 @@ void StrategyEngine::addSafetyReactions(
              "base detection coverage");
     }
     if (threat.air > 0.42) {
+        plan.desiredGasWorkers = std::max(3, plan.desiredGasWorkers);
         goal(plan, GoalKind::train, UnitKind::dragoon, 10, 94, "mobile anti-air", true);
         goal(plan, GoalKind::build, UnitKind::photonCannon, 5, 90,
              "mineral-line anti-air");
@@ -796,6 +993,27 @@ void StrategyEngine::addEconomicRecovery(
         goal(plan, GoalKind::train, UnitKind::probe,
              std::max(8, completedNexuses * 10), defending ? 70 : 96,
              "recover after severe worker losses", workers < 6 && !defending);
+    }
+
+    // Once a defensive anchor exists, losing every new mineral to an army
+    // target is a death spiral: no economy remains to replace that army. A
+    // critical worker floor therefore outranks continuing reinforcement, but
+    // only after static/army safety exists (or the worker line is almost gone).
+    const auto mobileAnchor = count(state, UnitKind::zealot, true) >= 3 ||
+                              count(state, UnitKind::dragoon, true) >= 2;
+    const auto completedCannons = count(state, UnitKind::photonCannon, true);
+    const auto staticRecoveryAnchor = completedCannons >= 3;
+    const auto defensiveAnchor = completedCannons > 0 ||
+                                 count(state, UnitKind::shieldBattery, true) > 0 ||
+                                 mobileAnchor;
+    const auto recoveryCanSpend = plan.posture != Posture::defend ||
+                                  mobileAnchor || staticRecoveryAnchor || workers <= 3;
+    if (state.frame >= 4 * 60 * 24 && completedNexuses > 0 && workers < 8 &&
+        recoveryCanSpend && (defensiveAnchor || workers <= 3)) {
+        plan.name += " [critical worker floor]";
+        plan.desiredWorkers = std::max(plan.desiredWorkers, 8);
+        goal(plan, GoalKind::train, UnitKind::probe, 8, 105,
+             "rebuild a minimum income behind the defensive screen", true);
     }
 
     const auto depletedEconomy = completedNexuses > 0 && activeBases < completedNexuses;
@@ -850,6 +1068,7 @@ void StrategyEngine::applyOpeningStyle(
                 plan.desiredBases = std::max(1, plan.desiredBases - 1);
             }
             plan.attackThreshold = std::max(1.05, plan.attackThreshold - 0.10);
+            plan.minimumAttackSize = std::max(6, plan.minimumAttackSize - 2);
             if (supplyAtLeast(state, 10)) {
                 goal(plan, GoalKind::build, UnitKind::gateway,
                      minute(state) < 8 ? 2 : 5, 91,
@@ -870,6 +1089,7 @@ void StrategyEngine::applyOpeningStyle(
             plan.desiredBases = std::min(4, plan.desiredBases + (minute(state) >= 5 ? 1 : 0));
             plan.desiredWorkers = std::min(76, plan.desiredWorkers + 6);
             plan.attackThreshold += 0.12;
+            plan.minimumAttackSize += 2;
             goal(plan, GoalKind::expand, UnitKind::nexus, plan.desiredBases, 72,
                  "opponent-specific economic edge");
             return;

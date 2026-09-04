@@ -23,6 +23,7 @@ public:
     void parse(std::string_view csv);
     void merge(std::string_view csv);
     [[nodiscard]] std::string serialize() const;
+    [[nodiscard]] static std::string filename(std::string_view opponent);
 
     [[nodiscard]] OpeningStyle choose(
         std::string_view opponent,
