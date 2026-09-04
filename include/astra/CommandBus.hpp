@@ -20,6 +20,7 @@ enum class CommandType : std::uint8_t {
     gather,
     stop,
     hold,
+    recharge,
     useTech,
     load,
     unload,
@@ -34,6 +35,7 @@ struct Command {
     int priority{};
     Frame earliestFrame{};
     std::string source;
+    TechnologyKind technology{TechnologyKind::none};
 
     friend bool operator==(const Command&, const Command&) = default;
 };

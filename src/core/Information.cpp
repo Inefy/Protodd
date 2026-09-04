@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 
 namespace astra {
@@ -58,6 +59,21 @@ bool containStructure(const UnitKind kind) {
            kind == UnitKind::sunkenColony;
 }
 
+double productionCapacity(const UnitKind kind) noexcept {
+    switch (kind) {
+        case UnitKind::gateway:
+        case UnitKind::barracks:
+        case UnitKind::hatchery:
+        case UnitKind::lair:
+        case UnitKind::hive: return 1.0;
+        case UnitKind::roboticsFacility:
+        case UnitKind::stargate:
+        case UnitKind::factory:
+        case UnitKind::starport: return 1.25;
+        default: return 0.0;
+    }
+}
+
 }  // namespace
 
 OpponentModel::OpponentModel() {
@@ -85,12 +101,13 @@ void OpponentModel::update(const GameState& state) {
     Beliefs evidence{};
     evidence.fill(1.0);
     const auto minutes = static_cast<double>(state.frame) / (24.0 * 60.0);
-    const auto enemyWorkers = std::ranges::count_if(
-        state.enemy.units,
-        [](const UnitSnapshot& unit) { return isWorker(unit.kind); });
-    const auto enemyCombat = std::ranges::count_if(state.enemy.units, [](const UnitSnapshot& unit) {
-        return isCombatUnit(unit.kind);
-    });
+    const auto recentlySeen = [&state](const UnitSnapshot& unit, const Frame memory) {
+        return unit.visible || state.frame - unit.lastSeen <= memory;
+    };
+    const auto enemyCombat = std::ranges::count_if(
+        state.enemy.units, [&recentlySeen](const UnitSnapshot& unit) {
+            return isCombatUnit(unit.kind) && recentlySeen(unit, 30 * 24);
+        });
     const auto enemyBases = count(state, UnitKind::commandCenter) +
                             count(state, UnitKind::hatchery) + count(state, UnitKind::lair) +
                             count(state, UnitKind::hive) + count(state, UnitKind::nexus);
@@ -112,7 +129,9 @@ void OpponentModel::update(const GameState& state) {
             return unit.visible && containStructure(unit.kind) && nearMain(unit, 1248);
         });
 
-    if (minutes < 4.0 && enemyWorkers >= 3) {
+    // One normal scout must never look like a worker all-in. Require the
+    // threatening workers themselves to be clustered at our main.
+    if (minutes < 4.0 && workersNearUs >= 3) {
         evidence[index(EnemyPlan::workerRush)] += static_cast<double>(workersNearUs) * 2.5;
     }
 
@@ -121,13 +140,38 @@ void OpponentModel::update(const GameState& state) {
         evidence[index(EnemyPlan::staticContain)] += static_cast<double>(proxyStatic) * 5.0;
     }
 
-    const auto rushUnits = count(state, UnitKind::zergling) + count(state, UnitKind::marine) +
-                           count(state, UnitKind::zealot);
+    const auto recentRushCount = [&state, &recentlySeen](const UnitKind kind) {
+        return std::ranges::count_if(
+            state.enemy.units, [kind, &recentlySeen](const UnitSnapshot& unit) {
+                return unit.kind == kind && recentlySeen(unit, 30 * 24);
+            });
+    };
+    const auto rushUnits = recentRushCount(UnitKind::zergling) +
+                           recentRushCount(UnitKind::marine) +
+                           recentRushCount(UnitKind::zealot);
     if (minutes < 7.0) {
-        evidence[index(EnemyPlan::fastRush)] += rushUnits * 0.7;
+        evidence[index(EnemyPlan::fastRush)] += static_cast<double>(rushUnits) * 0.7;
         evidence[index(EnemyPlan::heavyPressure)] += static_cast<double>(enemyCombat) * 0.25;
     } else if (enemyCombat >= 10) {
         evidence[index(EnemyPlan::heavyPressure)] += static_cast<double>(enemyCombat) * 0.08;
+    }
+
+    // A completed Pool first seen early enough must have started far earlier
+    // than a macro opening. For an incomplete Pool, build progress gives a
+    // tighter start estimate. This lets the strategy prepare at the first
+    // scouting pass rather than waiting for Zerglings to cross the map.
+    auto earliestPoolStart = std::numeric_limits<Frame>::max();
+    for (const auto& unit : state.enemy.units) {
+        if (unit.kind != UnitKind::spawningPool || unit.firstSeen <= 0) continue;
+        const auto buildTime = unitStats(UnitKind::spawningPool).buildTime;
+        const auto elapsed = unit.completed
+                                 ? buildTime
+                                 : buildTime * std::clamp(unit.buildProgress, 0, 100) / 100;
+        earliestPoolStart = std::min(earliestPoolStart, unit.firstSeen - elapsed);
+    }
+    if (minutes < 6.0 && earliestPoolStart < 1'650) {
+        evidence[index(EnemyPlan::fastRush)] += 9.0;
+        evidence[index(EnemyPlan::heavyPressure)] += 2.0;
     }
 
     if (enemyBases >= 2 && minutes < 8.0) {
@@ -138,6 +182,14 @@ void OpponentModel::update(const GameState& state) {
                               seen(state, UnitKind::roboticsSupportBay) ||
                               seen(state, UnitKind::fleetBeacon) ||
                               seen(state, UnitKind::starport) ||
+                              seen(state, UnitKind::scienceFacility) ||
+                              seen(state, UnitKind::covertOps) ||
+                              seen(state, UnitKind::physicsLab) ||
+                              seen(state, UnitKind::nuclearSilo) ||
+                              seen(state, UnitKind::queensNest) ||
+                              seen(state, UnitKind::ultraliskCavern) ||
+                              seen(state, UnitKind::defilerMound) ||
+                              seen(state, UnitKind::greaterSpire) ||
                               seen(state, UnitKind::scienceVessel) ||
                               seen(state, UnitKind::lair) || seen(state, UnitKind::hive);
     if (advancedTech && minutes < 10.0) {
@@ -146,17 +198,23 @@ void OpponentModel::update(const GameState& state) {
 
     const auto airCount = count(state, UnitKind::wraith) + count(state, UnitKind::mutalisk) +
                           count(state, UnitKind::scout) + count(state, UnitKind::corsair) +
-                          count(state, UnitKind::carrier) + count(state, UnitKind::battlecruiser);
-    if (seen(state, UnitKind::spire) || seen(state, UnitKind::stargate) ||
+                          count(state, UnitKind::carrier) + count(state, UnitKind::battlecruiser) +
+                          count(state, UnitKind::valkyrie) + count(state, UnitKind::guardian) +
+                          count(state, UnitKind::devourer) + count(state, UnitKind::scourge);
+    if (seen(state, UnitKind::spire) || seen(state, UnitKind::greaterSpire) ||
+        seen(state, UnitKind::queensNest) || seen(state, UnitKind::stargate) ||
         seen(state, UnitKind::starport)) {
         evidence[index(EnemyPlan::airTech)] += 2.0;
     }
     evidence[index(EnemyPlan::airTech)] += airCount * 1.2;
 
     const auto cloakUnits = count(state, UnitKind::darkTemplar) + count(state, UnitKind::lurker) +
-                            count(state, UnitKind::wraith);
+                            count(state, UnitKind::wraith) + count(state, UnitKind::ghost) +
+                            count(state, UnitKind::spiderMine);
     if (seen(state, UnitKind::templarArchives) || seen(state, UnitKind::hydraliskDen) ||
-        seen(state, UnitKind::starport)) {
+        seen(state, UnitKind::lurkerEgg) ||
+        seen(state, UnitKind::starport) || seen(state, UnitKind::covertOps) ||
+        seen(state, UnitKind::nuclearSilo) || seen(state, UnitKind::machineShop)) {
         evidence[index(EnemyPlan::cloakedTech)] += 0.8;
     }
     evidence[index(EnemyPlan::cloakedTech)] += cloakUnits * 2.2;
@@ -170,11 +228,24 @@ void OpponentModel::update(const GameState& state) {
 
     double armyValue = 0.0;
     double visibleValue = 0.0;
+    double approachingValue = 0.0;
+    double observedProduction = 0.0;
+    auto approachingCombat = 0;
     for (const auto& unit : state.enemy.units) {
         const auto value = unitStats(unit.kind).combatValue;
         armyValue += value * recencyWeight(state, unit);
         if (unit.visible) {
             visibleValue += value;
+        }
+        if (unit.completed) {
+            observedProduction += productionCapacity(unit.kind);
+        }
+        if (unit.visible && !unit.flying && isCombatUnit(unit.kind) &&
+            anchor.valid() && unit.position.valid() && unit.lastPosition.valid() &&
+            distance(unit.position, anchor) <= 1536.0 &&
+            distance(unit.lastPosition, anchor) - distance(unit.position, anchor) >= 2.0) {
+            ++approachingCombat;
+            approachingValue += value * std::clamp(unit.healthFraction(), 0.2, 1.0);
         }
     }
 
@@ -189,10 +260,14 @@ void OpponentModel::update(const GameState& state) {
         });
     assessment_.enemiesNearMain = static_cast<int>(workersNearUs + proxyBuildings +
                                                    localCombat);
+    assessment_.combatEnemiesNearMain = static_cast<int>(localCombat);
+    assessment_.approachingCombatEnemies = approachingCombat;
+    assessment_.approachingArmyValue = approachingValue;
+    assessment_.enemyProductionCapacity = observedProduction;
     const auto localPressure = std::clamp(
         static_cast<double>(workersNearUs) * 0.09 +
             static_cast<double>(proxyBuildings) * 0.14 +
-            static_cast<double>(localCombat) * 0.12,
+            static_cast<double>(localCombat) * 0.12 + approachingValue * 0.08,
         0.0, 1.0);
     assessment_.immediateGround = std::clamp(
         std::max(localPressure,
@@ -227,7 +302,10 @@ const ThreatAssessment& OpponentModel::assessment() const noexcept {
 }
 
 EnemyPlan OpponentModel::mostLikelyPlan() const noexcept {
-    const auto found = std::max_element(beliefs_.begin() + 1, beliefs_.end());
+    // Preserve the explicit unknown prior until observations make another
+    // hypothesis more likely. Excluding it mislabeled a completely unscouted
+    // opponent as WorkerRush simply because that was the first enum entry.
+    const auto found = std::max_element(beliefs_.begin(), beliefs_.end());
     return static_cast<EnemyPlan>(std::distance(beliefs_.begin(), found));
 }
 

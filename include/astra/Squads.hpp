@@ -5,6 +5,7 @@
 #include "astra/InfluenceMap.hpp"
 #include "astra/Strategy.hpp"
 
+#include <cstdint>
 #include <span>
 #include <vector>
 
@@ -14,6 +15,9 @@ enum class SquadRole : std::uint8_t { mainArmy, baseDefense, harassment };
 
 struct Squad {
     int id{};
+    // Changes whenever the role, objective, retreat anchor, or membership
+    // changes. Runtime caches use this instead of the transient vector index.
+    std::uint64_t signature{};
     SquadRole role{SquadRole::mainArmy};
     std::vector<UnitSnapshot> units;
     std::vector<UnitSnapshot> enemies;
@@ -38,6 +42,13 @@ public:
         std::span<const Squad> squads,
         const InfluenceMap& influence) const;
 
+    [[nodiscard]] static const Squad* selectVanguard(
+        std::span<const Squad> squads,
+        Position objective) noexcept;
+
+    [[nodiscard]] static bool mustHoldDefensiveScreen(
+        const Squad& squad) noexcept;
+
 private:
     [[nodiscard]] static Position centroid(std::span<const UnitSnapshot> units) noexcept;
     [[nodiscard]] static std::vector<std::vector<UnitSnapshot>> connectedGroups(
@@ -53,4 +64,3 @@ private:
 [[nodiscard]] std::string_view squadRoleName(SquadRole role) noexcept;
 
 }  // namespace astra
-

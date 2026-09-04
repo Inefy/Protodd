@@ -40,6 +40,12 @@ foreach ($file in @("README.md", "LICENSE", "CMakeLists.txt", "CMakePresets.json
 foreach ($directory in @("cmake", "include", "src", "tests", "tools", "docs", "bwapi-data")) {
     Copy-Item -LiteralPath (Join-Path $repoPath $directory) -Destination $sourceRoot -Recurse
 }
+# Runtime helper caches can be present after verification, but they are not
+# source and should never inflate or contaminate the tournament submission.
+Get-ChildItem -LiteralPath $sourceRoot -Directory -Filter "__pycache__" -Recurse |
+    Remove-Item -Recurse -Force
+Get-ChildItem -LiteralPath $sourceRoot -File -Include "*.pyc", "*.pyo" -Recurse |
+    Remove-Item -Force
 New-Item -ItemType Directory -Path (Join-Path $sourceRoot "scripts") -Force | Out-Null
 foreach ($script in @("build-tournament.ps1", "verify.ps1", "ladder.ps1")) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) `
@@ -57,6 +63,8 @@ $manifest = [ordered]@{
     race = "Protoss"
     bwapi = "4.4.0"
     git_commit = (& git -C $repoPath rev-parse HEAD).Trim()
+    source_dirty = -not [string]::IsNullOrWhiteSpace(
+        ((& git -C $repoPath status --porcelain) -join "`n"))
     dll_sha256 = (Get-FileHash -LiteralPath $resolvedDll -Algorithm SHA256).Hash
     packaged_utc = [DateTime]::UtcNow.ToString("o")
 }

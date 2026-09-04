@@ -20,6 +20,7 @@ struct MacroAction {
     std::string reason;
     TechnologyKind technology{TechnologyKind::none};
     bool blocksLowerPriority{};
+    bool executable{true};
 };
 
 struct ResourceLedger {
@@ -32,6 +33,7 @@ struct ResourceLedger {
     [[nodiscard]] int freeGas() const noexcept { return gas - reservedGas; }
     [[nodiscard]] bool canReserve(int mineralCost, int gasCost) const noexcept;
     bool reserve(int mineralCost, int gasCost) noexcept;
+    void protect(int mineralCost, int gasCost) noexcept;
 };
 
 class MacroPlanner {

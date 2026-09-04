@@ -11,20 +11,30 @@ tournament bot or depend on code whose license restricts competition entry.
 
 - Matchup-specific PvT, PvZ, and PvP plans with base-anchored worker-rush and
   proxy-contain recognition plus reactive anti-air and anti-cloak transitions.
-- Bayesian opening recognition under fog of war and decaying enemy memory.
+- Bayesian opening recognition under fog of war, first-seen Pool timing,
+  approaching-army motion, observed production capacity, and decaying enemy
+  memory; the PvZ opener converts an early-Pool warning into close Nexus
+  Cannon coverage before the first Zerglings arrive.
+- Full opponent combat/tech coverage through late-game units, add-ons, Spider
+  Mines, morph eggs, and BWAPI proxy weapons for Reavers, Carriers, and Bunkers;
+  observed army mixes trigger matchup-specific counter-production in-game.
 - Economy saturation, deterministic per-patch mineral balancing, gas policy,
   threat-specific worker defense, evacuation, and transfers; Probes attack
   unfinished proxies but never charge tanks or completed static defenses.
 - Resource-reserving macro planner with production, technology, expansion, and
-  supply goals, queued-production accounting, and automatic prerequisite repair.
+  supply goals, active-producer occupancy, non-blocking future reservations,
+  multi-producer composition filling, hard opening deadlines, and automatic
+  prerequisite repair; interrupted builders recover without allowing scouts
+  or mining assignments to steal their construction orders.
 - Canonical depot-site discovery, mining-lane-safe construction, reachable
-  expansions, per-base Assimilator selection, projected-supply timing, and
-  saturation transfers across bases.
+  expansions with fog-revealing builder pre-positioning, per-base Assimilator
+  selection, projected-supply timing, and saturation transfers across bases.
 - Ground/air/detection influence maps, risk-aware scouting, combat evaluation,
   threat-deadline scout priorities, persistent scout assignments, local squads,
   detector escorts, exact multi-hit focus-fire reservations, unit-specific
-  kiting, surrounds, cloak preservation, value-weighted Storm/Stasis, Feedback,
-  reinforcement Recall, and ammunition upkeep.
+  attack-frame-safe kiting and focus fire, cloak preservation, value-weighted
+  tactical friendly-fire-aware Storm, Stasis, Feedback, reinforcement Recall,
+  melee locality, worker mineral-walk evacuation, and ammunition upkeep.
 - A legal-information-only BWAPI adapter with command deduplication and
   staggered frame scheduling, a fair per-tick command budget, measured
   frame-time load shedding, and callback exception containment.
@@ -86,6 +96,10 @@ or game assets. See [the setup guide](docs/setup.md) for local match setup.
 See [the architecture](docs/architecture.md) for the complete system design.
 Use [the competition workflow](docs/competition.md) to benchmark changes and
 the included log analyzer to compare batches rather than individual games.
+The [research notes](docs/research.md) record the open-source projects and
+design patterns reviewed while keeping Astra's implementation license-clean.
+The [validation record](docs/validation.md) documents the exact release DLL,
+automated gates, and the latest direct UAlbertaBot result.
 
 ## Local opponent ladder
 

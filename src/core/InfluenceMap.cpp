@@ -105,7 +105,7 @@ void InfluenceMap::addThreat(const UnitSnapshot& unit, const Frame currentFrame)
         if (weapon.damage <= 0 || (!weapon.targetsAir && !weapon.targetsGround)) {
             return;
         }
-        const auto dps = static_cast<double>(weapon.damage) /
+        const auto dps = static_cast<double>(weapon.damage * std::max(1, weapon.hits)) /
                          static_cast<double>(std::max(1, weapon.cooldown));
         const auto radius = std::max(cellSize_, weapon.maxRange + cellSize_ * 2);
         const auto minX = std::max(0, (unit.position.x - radius) / cellSize_);
@@ -134,7 +134,7 @@ void InfluenceMap::addThreat(const UnitSnapshot& unit, const Frame currentFrame)
     if (unit.role == UnitRole::detector || unit.kind == UnitKind::observer ||
         unit.kind == UnitKind::scienceVessel || unit.kind == UnitKind::overlord ||
         unit.kind == UnitKind::missileTurret || unit.kind == UnitKind::sporeColony) {
-        const auto radius = 7 * 32;
+        const auto radius = std::max(7 * 32, unit.sightRange);
         const auto minX = std::max(0, (unit.position.x - radius) / cellSize_);
         const auto maxX = std::min(width_ - 1, (unit.position.x + radius) / cellSize_);
         const auto minY = std::max(0, (unit.position.y - radius) / cellSize_);

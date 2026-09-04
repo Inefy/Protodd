@@ -11,6 +11,8 @@
 
 #include <BWAPI.h>
 
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -26,12 +28,15 @@ public:
     void remember(BWAPI::Unit unit);
     void forget(BWAPI::Unit unit);
     [[nodiscard]] std::vector<UnitId> reservedBuilders() const;
+    [[nodiscard]] std::string_view lastMacroStatus() const noexcept {
+        return lastMacroStatus_;
+    }
 
     [[nodiscard]] bool execute(const Command& command);
     int executeMacro(
         std::span<const MacroAction> actions,
         const StrategicPlan& plan,
-        int maximumCommands = 2);
+        int maximumCommands = 8);
     void executeWorkers(std::span<const WorkerAssignment> assignments);
     void executeScouts(std::span<const ScoutOrder> orders);
     void runMaintenance(int mineralReserve = 0, int gasReserve = 0);
@@ -57,6 +62,12 @@ private:
         Position target{-1, -1};
     };
 
+    struct FailedBuildSite {
+        UnitKind kind{UnitKind::unknown};
+        Position target{-1, -1};
+        Frame expires{};
+    };
+
     struct ResourceSite {
         Position resourceCenter{-1, -1};
         Position depotCenter{-1, -1};
@@ -67,8 +78,11 @@ private:
     std::unordered_map<UnitId, UnitSnapshot> enemyMemory_;
     std::unordered_map<int, Frame> baseLastScouted_;
     std::unordered_map<UnitKind, PendingBuild> pendingBuilds_;
+    std::vector<FailedBuildSite> failedBuildSites_;
+    std::unordered_map<UnitId, Frame> unitCommandLocks_;
     std::vector<ResourceSite> resourceSites_;
     std::vector<SpellZone> recentAreaSpells_;
+    std::string lastMacroStatus_{"idle"};
 
     [[nodiscard]] static Race toRace(BWAPI::Race race) noexcept;
     [[nodiscard]] static DamageType toDamageType(BWAPI::DamageType type) noexcept;
@@ -85,7 +99,7 @@ private:
         UnitKind kind,
         BWAPI::UnitType type,
         BWAPI::Unit builder,
-        const StrategicPlan& plan) const;
+        const StrategicPlan& plan);
     [[nodiscard]] bool blocksMiningLane(
         BWAPI::TilePosition tile,
         BWAPI::UnitType type) const;

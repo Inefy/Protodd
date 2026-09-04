@@ -13,6 +13,9 @@ double UnitSnapshot::healthFraction() const noexcept {
 }
 
 bool UnitSnapshot::canAttack(const UnitSnapshot& target) const noexcept {
+    if ((kind == UnitKind::reaver || kind == UnitKind::carrier) && ammo <= 0) {
+        return false;
+    }
     const auto& weapon = target.flying ? airWeapon : groundWeapon;
     return weapon.damage > 0 &&
            (target.flying ? weapon.targetsAir : weapon.targetsGround);
@@ -35,4 +38,3 @@ std::optional<UnitSnapshot> GameState::findUnit(const UnitId id) const {
 }
 
 }  // namespace astra
-

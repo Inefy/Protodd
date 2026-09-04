@@ -3,6 +3,7 @@
 #include "astra/UnitCatalog.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <numeric>
 
@@ -27,6 +28,40 @@ int minute(const GameState& state) {
 
 bool supplyAtLeast(const GameState& state, const int displayedSupply) {
     return state.self.supplyUsed >= displayedSupply * 2;
+}
+
+int recentEnemyCount(
+    const GameState& state,
+    const UnitKind kind,
+    const Frame memory = 90 * 24) {
+    return static_cast<int>(std::ranges::count_if(
+        state.enemy.units, [kind, memory, &state](const UnitSnapshot& unit) {
+            return unit.kind == kind && unit.completed &&
+                   (unit.visible || state.frame - unit.lastSeen <= memory);
+        }));
+}
+
+void setCompositionWeight(
+    StrategicPlan& plan,
+    const UnitKind kind,
+    const double minimumWeight) {
+    const auto existing = std::ranges::find(plan.composition, kind,
+                                             &CompositionTarget::kind);
+    if (existing == plan.composition.end()) {
+        plan.composition.push_back({kind, minimumWeight});
+    } else {
+        existing->weight = std::max(existing->weight, minimumWeight);
+    }
+}
+
+void normalizeComposition(StrategicPlan& plan) {
+    const auto total = std::accumulate(
+        plan.composition.begin(), plan.composition.end(), 0.0,
+        [](const double sum, const CompositionTarget& target) {
+            return sum + std::max(0.0, target.weight);
+        });
+    if (total <= 0.0) return;
+    for (auto& target : plan.composition) target.weight /= total;
 }
 
 void goal(
@@ -128,14 +163,27 @@ StrategicPlan StrategyEngine::plan(
             break;
     }
 
-    result.rallyPoint = ourMain(state);
+    const auto home = ourMain(state);
     result.attackTarget = enemyMain(state);
-    addInfrastructure(result, state);
+    // Stage the army in front of the economy instead of on top of the Nexus.
+    // A Nexus rally caused melee rushes to make first contact inside the Probe
+    // line, where even a numerically adequate army could not form a surround.
+    result.rallyPoint = home.valid() && result.attackTarget.valid()
+                            ? moveToward(home, result.attackTarget, 160.0)
+                            : home;
+    addInfrastructure(result, state, threat);
     applyOpeningStyle(result, state, style);
+    addAdaptiveCounters(result, state);
     addEconomicRecovery(result, state);
     // Safety runs last so an opponent-specific economic style cannot override
     // direct evidence of an all-in at our main.
     addSafetyReactions(result, threat);
+
+    // Never keep producing workers for bases that the current plan has
+    // explicitly postponed. This bounds one-base saturation while preserving
+    // enough workers to fund production and a prompt expansion.
+    result.desiredWorkers = std::min(
+        result.desiredWorkers, std::max(14, result.desiredBases * 22));
 
     std::ranges::stable_sort(result.goals, std::greater{}, &ProductionGoal::priority);
     return result;
@@ -147,7 +195,7 @@ StrategicPlan StrategyEngine::planPvT(
     StrategicPlan result;
     result.name = "PvT one-gate observer expansion";
     result.desiredWorkers = std::min(72, 22 + minute(state) * 4);
-    result.desiredBases = minute(state) < 7 ? 1 : (minute(state) < 13 ? 2 : 3);
+    result.desiredBases = minute(state) < 5 ? 1 : (minute(state) < 11 ? 2 : 3);
     result.desiredGasWorkers = !supplyAtLeast(state, 11) ? 0 :
                                (minute(state) < 7 ? 3 :
                                 (minute(state) < 12 ? 6 : 9));
@@ -156,19 +204,24 @@ StrategicPlan StrategyEngine::planPvT(
     result.composition = {{UnitKind::dragoon, 0.55}, {UnitKind::zealot, 0.22},
                           {UnitKind::highTemplar, 0.13}, {UnitKind::arbiter, 0.10}};
 
+    if (supplyAtLeast(state, 9)) {
+        goal(result, GoalKind::build, UnitKind::gateway, minute(state) < 6 ? 1 : 3, 88,
+             "nine-supply gateway", count(state, UnitKind::gateway) == 0);
+    }
     if (supplyAtLeast(state, 10)) {
-        goal(result, GoalKind::build, UnitKind::gateway, minute(state) < 7 ? 1 : 3, 88,
-             "ten-supply gateway", count(state, UnitKind::gateway) == 0);
+        goal(result, GoalKind::train, UnitKind::zealot, 1, 94,
+             "opening bodyguard before vulnerable dragoon tech",
+             count(state, UnitKind::zealot) == 0);
     }
     if (supplyAtLeast(state, 13)) {
         goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 92,
              "thirteen-supply cybernetics core", true);
     }
     if (supplyAtLeast(state, 14)) {
-        technologyGoal(result, TechnologyKind::singularityCharge, 1, 91,
-                       "range is mandatory for dragoon control", true);
-        goal(result, GoalKind::train, UnitKind::dragoon, std::max(3, minute(state) * 2), 82,
+        goal(result, GoalKind::train, UnitKind::dragoon, std::max(3, minute(state) * 2), 91,
              "range control against Terran");
+        technologyGoal(result, TechnologyKind::singularityCharge, 1, 84,
+                       "range completes after the first defensive dragoons");
     }
     if (count(state, UnitKind::dragoon) >= 3 || supplyAtLeast(state, 24)) {
         goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 78,
@@ -210,13 +263,21 @@ StrategicPlan StrategyEngine::planPvT(
                        minute(state) >= 19 ? 2 : 1, 51,
                        "improve zealot durability");
     }
-    if (threat.aggression > 0.62) {
+    if (threat.combatEnemiesNearMain > 0 || threat.approachingArmyValue >= 2.0 ||
+        (minute(state) < 8 && threat.aggression > 0.62)) {
         result.name = "PvT anti-pressure hold";
         result.posture = Posture::defend;
-        result.desiredBases = std::min(result.desiredBases, 2);
+        result.desiredBases = minute(state) < 8 ? 1 : std::min(result.desiredBases, 2);
+        result.desiredWorkers = std::min(result.desiredWorkers, 14);
         result.attackThreshold = 1.55;
-        goal(result, GoalKind::train, UnitKind::dragoon, 8, 98, "survive detected pressure", true);
-        goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 90, "front-line sustain");
+        goal(result, GoalKind::build, UnitKind::gateway, 2, 99,
+             "add emergency anti-pressure throughput", true);
+        goal(result, GoalKind::train, UnitKind::zealot, 4, 98,
+             "field bodies before vulnerable dragoon tech", true);
+        goal(result, GoalKind::train, UnitKind::dragoon, 8, 97,
+             "survive detected pressure", true);
+        goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 90,
+             "front-line sustain");
     }
     return result;
 }
@@ -237,9 +298,19 @@ StrategicPlan StrategyEngine::planPvZ(
                           {UnitKind::highTemplar, 0.25}, {UnitKind::corsair, 0.18},
                           {UnitKind::archon, 0.10}};
 
-    if (supplyAtLeast(state, 10)) {
-        goal(result, GoalKind::build, UnitKind::forge, 1, 93,
-             "ten-supply forge timing", true);
+    // A pool-first Zerg can make contact before a conventional Gateway army
+    // has enough surface area. Pause briefly at eight workers and establish a
+    // static anchor; resume Probe growth as soon as either that anchor or two
+    // Zealots are complete. This remains safe even when the first scout dies.
+    if (minute(state) < 4 && count(state, UnitKind::zealot, true) < 2 &&
+        count(state, UnitKind::photonCannon, true) == 0) {
+        result.desiredWorkers = std::min(result.desiredWorkers, 8);
+    }
+
+    if (supplyAtLeast(state, 10) && count(state, UnitKind::gateway) >= 2 &&
+        count(state, UnitKind::zealot) >= 2) {
+        goal(result, GoalKind::build, UnitKind::forge, 1, 82,
+             "forge after two-gate opening safety");
     }
     if (minute(state) >= 4 && threat.immediateGround <= 0.45 &&
         count(state, UnitKind::forge) > 0) {
@@ -247,16 +318,31 @@ StrategicPlan StrategyEngine::planPvZ(
                        "zealot attack timing");
     }
     const auto defensiveBases = std::max(1, count(state, UnitKind::nexus));
-    if (defensiveBases >= 2 || threat.immediateGround > 0.25 || threat.air > 0.35) {
+    const auto openingGroundSafe = count(state, UnitKind::gateway) >= 2 &&
+                                   count(state, UnitKind::zealot) >= 3;
+    const auto canCommitToForge = count(state, UnitKind::forge) > 0 ||
+                                  openingGroundSafe || minute(state) >= 4;
+    if (canCommitToForge &&
+        (defensiveBases >= 2 || threat.immediateGround > 0.25 || threat.air > 0.35)) {
         const auto safetyCannons = defensiveBases + (threat.air > 0.45 ? 2 : 0);
         goal(result, GoalKind::build, UnitKind::photonCannon,
              std::min(6, safetyCannons), 89, "ling and mutalisk coverage");
     }
-    if (supplyAtLeast(state, 11)) {
-        goal(result, GoalKind::build, UnitKind::gateway, minute(state) < 8 ? 1 : 4, 84,
-             "eleven-supply gateway", count(state, UnitKind::gateway) == 0);
-        goal(result, GoalKind::train, UnitKind::zealot, std::max(4, minute(state)), 79,
-             "mineral-efficient front line");
+    if (supplyAtLeast(state, 7)) {
+        goal(result, GoalKind::build, UnitKind::forge, 1, 100,
+             "fortified PvZ opening anchor", true);
+        goal(result, GoalKind::build, UnitKind::photonCannon, 1, 99,
+             "baseline anti-ling safety before economic commitment", true);
+        const auto openingGateways = supplyAtLeast(state, 8) ? 2 : 1;
+        goal(result, GoalKind::build, UnitKind::gateway,
+             minute(state) < 8 ? openingGateways : 4,
+             openingGateways == 1 ? 98 : 97,
+             "seven-supply gateway into two-gate Zerg safety",
+             count(state, UnitKind::gateway) < openingGateways);
+        goal(result, GoalKind::train, UnitKind::zealot,
+             std::max(4, minute(state)), 99,
+             "opening defenders before Forge economy",
+             count(state, UnitKind::zealot) < 3);
     }
     if (supplyAtLeast(state, 15)) {
         goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 82,
@@ -290,14 +376,30 @@ StrategicPlan StrategyEngine::planPvZ(
                        "keep corsairs ahead of mutalisks");
     }
 
-    if (threat.immediateGround > 0.45) {
+    if (threat.combatEnemiesNearMain > 0 || threat.approachingArmyValue >= 2.0 ||
+        (minute(state) < 8 && threat.immediateGround > 0.45)) {
         result.name = "PvZ emergency gateway hold";
         result.posture = Posture::defend;
         result.desiredBases = 1;
         result.desiredGasWorkers = 0;
+        result.desiredWorkers = std::min(result.desiredWorkers, 12);
         goal(result, GoalKind::build, UnitKind::gateway, 2, 99, "anti-rush production", true);
-        goal(result, GoalKind::train, UnitKind::zealot, 6, 98, "hold early ground rush", true);
-        goal(result, GoalKind::build, UnitKind::photonCannon, 3, 97, "seal mineral line", true);
+        goal(result, GoalKind::train, UnitKind::zealot, 8, 98, "hold early ground rush", true);
+        if (minute(state) < 6) {
+            goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 96,
+                 "sustain the anti-ling screen", true);
+        }
+        goal(result, GoalKind::build, UnitKind::photonCannon, 2, 100,
+             "double mineral-line cover against the ground all-in");
+        if (count(state, UnitKind::photonCannon, true) >= 2 &&
+            count(state, UnitKind::probe) < 10) {
+            goal(result, GoalKind::train, UnitKind::probe, 10, 100,
+                 "recover mining behind completed static safety", true);
+        }
+        if (count(state, UnitKind::photonCannon, true) >= 2) {
+            goal(result, GoalKind::build, UnitKind::pylon, 2, 100,
+                 "secure reinforcement supply inside the Cannon shell", true);
+        }
     } else if (minute(state) >= 3 &&
                (count(state, UnitKind::zealot) >= 2 ||
                 count(state, UnitKind::photonCannon) >= 1)) {
@@ -313,7 +415,7 @@ StrategicPlan StrategyEngine::planPvP(
     StrategicPlan result;
     result.name = "PvP two-gate robotics control";
     result.desiredWorkers = std::min(66, 18 + minute(state) * 4);
-    result.desiredBases = minute(state) < 9 ? 1 : (minute(state) < 15 ? 2 : 3);
+    result.desiredBases = minute(state) < 6 ? 1 : (minute(state) < 12 ? 2 : 3);
     result.desiredGasWorkers = !supplyAtLeast(state, 11) ? 0 :
                                (minute(state) < 8 ? 3 :
                                 (minute(state) < 12 ? 6 : 9));
@@ -322,22 +424,37 @@ StrategicPlan StrategyEngine::planPvP(
     result.composition = {{UnitKind::dragoon, 0.58}, {UnitKind::zealot, 0.14},
                           {UnitKind::reaver, 0.18}, {UnitKind::highTemplar, 0.10}};
 
-    if (supplyAtLeast(state, 10)) {
-        const auto gatewayTarget = supplyAtLeast(state, 15) ?
+    if (supplyAtLeast(state, 9)) {
+        const auto gatewayTarget = supplyAtLeast(state, 11) ?
                                        (minute(state) < 9 ? 2 : 4) : 1;
-        goal(result, GoalKind::build, UnitKind::gateway, gatewayTarget, 90,
-             "ten-supply gateway into two-gate control",
-             count(state, UnitKind::gateway) == 0);
+        goal(result, GoalKind::build, UnitKind::gateway, gatewayTarget, 97,
+             "nine-supply gateway into two-gate control",
+             count(state, UnitKind::gateway) < gatewayTarget && gatewayTarget <= 2);
+    }
+    if (supplyAtLeast(state, 10)) {
+        goal(result, GoalKind::train, UnitKind::zealot, 1, 98,
+             "bank the first defender while the gateway completes", true);
+    }
+    if (count(state, UnitKind::gateway) >= 2) {
+        goal(result, GoalKind::train, UnitKind::zealot, 3, 96,
+             "fill secured opening production with defenders",
+             count(state, UnitKind::zealot) < 2);
+        if (count(state, UnitKind::zealot) >= 2) {
+            goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 93,
+                 "sustain the two-gate defensive screen");
+        }
     }
     if (supplyAtLeast(state, 13)) {
-        goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 94,
-             "thirteen-supply dragoon access", true);
+        const auto productionSecured = count(state, UnitKind::gateway) >= 2 &&
+                                       count(state, UnitKind::zealot) >= 1;
+        goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 90,
+             "dragoon access after opening production", productionSecured);
     }
     if (supplyAtLeast(state, 14)) {
-        technologyGoal(result, TechnologyKind::singularityCharge, 1, 93,
-                       "range wins dragoon contact", true);
-        goal(result, GoalKind::train, UnitKind::dragoon, std::max(4, minute(state) * 2), 86,
+        goal(result, GoalKind::train, UnitKind::dragoon, std::max(4, minute(state) * 2), 91,
              "core PvP army");
+        technologyGoal(result, TechnologyKind::singularityCharge, 1, 86,
+                       "range follows the first defensive dragoons");
     }
     if (count(state, UnitKind::dragoon) >= 3 || supplyAtLeast(state, 24)) {
         goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 85,
@@ -364,19 +481,44 @@ StrategicPlan StrategyEngine::planPvP(
                        "improve reaver breakpoints");
     }
 
-    if (threat.aggression > 0.6) {
+    if (threat.combatEnemiesNearMain > 0 || threat.approachingArmyValue >= 2.0 ||
+        (minute(state) < 8 && threat.aggression > 0.6)) {
         result.name = "PvP two-gate emergency defense";
         result.posture = Posture::defend;
         result.desiredBases = 1;
+        result.desiredWorkers = std::min(result.desiredWorkers, 12);
+        if (count(state, UnitKind::cyberneticsCore) == 0) {
+            result.desiredGasWorkers = 0;
+            result.goals.erase(
+                std::remove_if(result.goals.begin(), result.goals.end(),
+                               [](const ProductionGoal& candidate) {
+                                   return candidate.target == UnitKind::cyberneticsCore ||
+                                          candidate.target == UnitKind::roboticsFacility ||
+                                          candidate.target == UnitKind::observatory ||
+                                          candidate.target == UnitKind::roboticsSupportBay ||
+                                          candidate.technology ==
+                                              TechnologyKind::singularityCharge;
+                               }),
+                result.goals.end());
+            result.composition = {{UnitKind::zealot, 1.0}};
+        }
         result.attackThreshold = 1.5;
-        goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 96, "defensive sustain");
-        goal(result, GoalKind::train, UnitKind::zealot, 3, 95, "buffer against pressure");
+        goal(result, GoalKind::build, UnitKind::gateway, 2, 100,
+             "guarantee two-gate defensive throughput", true);
+        goal(result, GoalKind::train, UnitKind::zealot, 8, 99,
+             "continuously reinforce against opening pressure", true);
+        goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 95,
+             "defensive sustain");
     }
     return result;
 }
 
-void StrategyEngine::addInfrastructure(StrategicPlan& plan, const GameState& state) {
+void StrategyEngine::addInfrastructure(
+    StrategicPlan& plan,
+    const GameState& state,
+    const ThreatAssessment& threat) {
     const auto bases = std::max(1, count(state, UnitKind::nexus));
+    const auto completedBases = std::max(1, count(state, UnitKind::nexus, true));
     const auto workers = countRole(state, UnitRole::worker);
     const auto pylons = count(state, UnitKind::pylon);
     const auto pendingPylons = static_cast<int>(std::ranges::count_if(
@@ -397,15 +539,178 @@ void StrategyEngine::addInfrastructure(StrategicPlan& plan, const GameState& sta
     const auto supplyNeeded = projectedSupply < 400 &&
                               projectedSupply - projectedUsed <= desiredBuffer;
     const auto desiredPylons = std::max(bases, pylons + (supplyNeeded ? 1 : 0));
+    const auto openingPylonDeadline = pylons == 0 &&
+                                      (state.self.supplyUsed >= 12 ||
+                                       state.frame >= 45 * 24);
     goal(plan, GoalKind::build, UnitKind::pylon, desiredPylons, 100,
-         "maintain a supply buffer", state.self.supplyTotal - state.self.supplyUsed <= 4);
+         "maintain a supply buffer",
+         openingPylonDeadline || state.self.supplyTotal - state.self.supplyUsed <= 4);
     goal(plan, GoalKind::train, UnitKind::probe, std::max(workers, plan.desiredWorkers), 74,
          "saturate economy");
-    goal(plan, GoalKind::expand, UnitKind::nexus, plan.desiredBases, 65,
-         "match economic phase");
+    // An expansion cannot be bought opportunistically while every idle
+    // producer keeps spending the same income. Once the strategic phase calls
+    // for another base and the main is clear, reserve its full cost ahead of
+    // routine workers, tech, and composition fills. Direct pressure cancels
+    // the reservation immediately so a Nexus never starves emergency units.
+    const auto expansionDue = plan.desiredBases > bases;
+    const auto expansionReady = bases == completedBases &&
+                                workers >= bases * 12;
+    const auto expansionSafe = expansionDue && expansionReady &&
+                               plan.posture != Posture::defend &&
+                               plan.posture != Posture::recover &&
+                               threat.combatEnemiesNearMain == 0 &&
+                               threat.approachingArmyValue < 2.0 &&
+                               threat.immediateGround <= 0.45;
+    goal(plan, GoalKind::expand, UnitKind::nexus, plan.desiredBases,
+         expansionSafe ? 85 : 65, "match economic phase", expansionSafe);
     if (plan.desiredGasWorkers > 0) {
         goal(plan, GoalKind::build, UnitKind::assimilator, bases, 80, "fund technology");
     }
+
+    // Size baseline production from the live economy. A useful tournament
+    // rule is roughly one continuously-produced combat unit per six workers;
+    // keep that throughput behind the intended expansion so it cannot crowd
+    // out a planned Nexus.
+    const auto gateways = count(state, UnitKind::gateway);
+    const auto productionCeiling = std::clamp(bases * 3, 2, 12);
+    auto throughputTarget = std::clamp(
+        (workers + 5) / 6, 1, productionCeiling);
+    // Scouting multiple enemy production structures is direct evidence that
+    // our income-only heuristic may be too slow. Match most of that observed
+    // capacity without blindly copying it across asymmetric race mechanics.
+    const auto observedParity = std::clamp(
+        static_cast<int>(std::ceil(threat.enemyProductionCapacity * 0.8)),
+        1, productionCeiling);
+    throughputTarget = std::max(throughputTarget, observedParity);
+    if (state.frame >= 4 * 60 * 24 && bases >= plan.desiredBases &&
+        gateways < throughputTarget) {
+        goal(plan, GoalKind::build, UnitKind::gateway, throughputTarget,
+             observedParity > (workers + 5) / 6 ? 78 : 73,
+             observedParity > (workers + 5) / 6
+                 ? "match scouted enemy production capacity"
+                 : "match army throughput to the mining economy");
+    }
+    // A large residual bank still means infrastructure is the bottleneck,
+    // even if recent worker losses make the throughput estimate conservative.
+    if (state.frame >= 4 * 60 * 24 && state.self.minerals >= 650 &&
+        bases >= plan.desiredBases && gateways < productionCeiling) {
+        goal(plan, GoalKind::build, UnitKind::gateway, gateways + 1, 62,
+             "convert sustained mineral surplus into army production");
+    }
+}
+
+void StrategyEngine::addAdaptiveCounters(
+    StrategicPlan& plan,
+    const GameState& state) {
+    // Convert legal observations into concrete production changes. Broad
+    // air/cloak alarms keep bases alive; these matchup-aware counters prevent
+    // the standing composition from continuing into a unit mix it cannot beat.
+    if (state.enemy.race == Race::terran) {
+        const auto bio = recentEnemyCount(state, UnitKind::marine) +
+                         recentEnemyCount(state, UnitKind::medic) +
+                         recentEnemyCount(state, UnitKind::firebat) +
+                         recentEnemyCount(state, UnitKind::ghost);
+        const auto mines = recentEnemyCount(state, UnitKind::spiderMine);
+        const auto mech = recentEnemyCount(state, UnitKind::vulture) +
+                          recentEnemyCount(state, UnitKind::siegeTank) +
+                          recentEnemyCount(state, UnitKind::goliath) + mines;
+        const auto capitalAir = recentEnemyCount(state, UnitKind::battlecruiser) +
+                                recentEnemyCount(state, UnitKind::wraith) +
+                                recentEnemyCount(state, UnitKind::valkyrie);
+
+        if (mines > 0 || recentEnemyCount(state, UnitKind::siegeTank) >= 2) {
+            goal(plan, GoalKind::train, UnitKind::observer, 3, 92,
+                 "track mines and siege lines", true);
+        }
+        if (bio >= 7 && minute(state) >= 7) {
+            plan.name += " [anti-bio storm]";
+            goal(plan, GoalKind::train, UnitKind::highTemplar,
+                 std::clamp(bio / 3, 3, 7), 88, "punish clustered Terran bio");
+            technologyGoal(plan, TechnologyKind::psionicStorm, 1, 90,
+                           "counter observed bio mass", true);
+            setCompositionWeight(plan, UnitKind::highTemplar, 0.24);
+            setCompositionWeight(plan, UnitKind::zealot, 0.30);
+        }
+        if (mech >= 7) {
+            plan.name += " [anti-mech mobility]";
+            technologyGoal(plan, TechnologyKind::legEnhancements, 1, 86,
+                           "close on observed siege composition");
+            goal(plan, GoalKind::train, UnitKind::zealot,
+                 std::clamp(mech, 8, 18), 83, "absorb mines and surround tanks");
+            setCompositionWeight(plan, UnitKind::zealot, 0.34);
+            setCompositionWeight(plan, UnitKind::arbiter, 0.14);
+        }
+        if (capitalAir >= 3) {
+            plan.name += " [anti-air fleet]";
+            goal(plan, GoalKind::train, UnitKind::dragoon,
+                 std::clamp(8 + capitalAir * 2, 10, 20), 95,
+                 "counter observed Terran air", true);
+            setCompositionWeight(plan, UnitKind::dragoon, 0.68);
+        }
+    } else if (state.enemy.race == Race::zerg) {
+        const auto hydraLurker = recentEnemyCount(state, UnitKind::hydralisk) +
+                                 recentEnemyCount(state, UnitKind::lurker);
+        const auto zergAir = recentEnemyCount(state, UnitKind::mutalisk) +
+                             recentEnemyCount(state, UnitKind::guardian) +
+                             recentEnemyCount(state, UnitKind::devourer);
+        const auto lateGround = recentEnemyCount(state, UnitKind::ultralisk) +
+                                recentEnemyCount(state, UnitKind::defiler);
+
+        if (hydraLurker >= 7) {
+            plan.name += " [anti-hydra splash]";
+            goal(plan, GoalKind::build, UnitKind::roboticsSupportBay, 1, 84,
+                 "unlock reavers against observed ground mass");
+            goal(plan, GoalKind::train, UnitKind::reaver,
+                 std::clamp(hydraLurker / 5, 2, 4), 85,
+                 "splash clustered hydralisks and lurkers");
+            goal(plan, GoalKind::train, UnitKind::observer, 3, 91,
+                 "maintain lurker detection", true);
+            setCompositionWeight(plan, UnitKind::reaver, 0.16);
+            setCompositionWeight(plan, UnitKind::highTemplar, 0.28);
+        }
+        if (zergAir >= 4) {
+            plan.name += " [anti-air control]";
+            goal(plan, GoalKind::train, UnitKind::corsair,
+                 std::clamp(4 + zergAir / 2, 5, 10), 94,
+                 "win air control against observed Zerg flyers", true);
+            goal(plan, GoalKind::train, UnitKind::dragoon,
+                 std::clamp(zergAir, 6, 12), 89,
+                 "protect ground army from Zerg flyers");
+            setCompositionWeight(plan, UnitKind::corsair, 0.28);
+            setCompositionWeight(plan, UnitKind::dragoon, 0.22);
+        }
+        if (lateGround >= 3) {
+            goal(plan, GoalKind::train, UnitKind::highTemplar, 6, 88,
+                 "zone ultralisks and defiler support");
+            goal(plan, GoalKind::train, UnitKind::reaver, 3, 82,
+                 "add durable late-game ground splash");
+            setCompositionWeight(plan, UnitKind::highTemplar, 0.30);
+            setCompositionWeight(plan, UnitKind::archon, 0.18);
+        }
+    } else if (state.enemy.race == Race::protoss) {
+        const auto reavers = recentEnemyCount(state, UnitKind::reaver);
+        const auto enemyFleet = recentEnemyCount(state, UnitKind::carrier) +
+                                recentEnemyCount(state, UnitKind::scout) +
+                                recentEnemyCount(state, UnitKind::corsair);
+        if (reavers >= 2) {
+            goal(plan, GoalKind::train, UnitKind::observer, 3, 89,
+                 "maintain vision over enemy reavers");
+            goal(plan, GoalKind::train, UnitKind::reaver, 3, 82,
+                 "contest enemy reaver control");
+        }
+        if (enemyFleet >= 3) {
+            plan.name += " [anti-carrier fleet]";
+            goal(plan, GoalKind::train, UnitKind::dragoon,
+                 std::clamp(8 + enemyFleet * 2, 10, 20), 94,
+                 "pressure observed Protoss air", true);
+            goal(plan, GoalKind::train, UnitKind::scout,
+                 std::clamp(enemyFleet, 3, 6), 86,
+                 "focus high-value Protoss capital ships");
+            setCompositionWeight(plan, UnitKind::dragoon, 0.62);
+            setCompositionWeight(plan, UnitKind::scout, 0.16);
+        }
+    }
+    normalizeComposition(plan);
 }
 
 void StrategyEngine::addSafetyReactions(
@@ -484,12 +789,13 @@ void StrategyEngine::addEconomicRecovery(
 
     if (state.frame >= 4 * 60 * 24 && completedNexuses > 0 &&
         workers < std::min(12, completedNexuses * 8)) {
+        const auto defending = plan.posture == Posture::defend;
         plan.name += " [worker recovery]";
-        plan.posture = Posture::recover;
+        if (!defending) plan.posture = Posture::recover;
         plan.desiredWorkers = std::max(plan.desiredWorkers, completedNexuses * 14);
         goal(plan, GoalKind::train, UnitKind::probe,
-             std::max(8, completedNexuses * 10), 96,
-             "recover after severe worker losses", workers < 6);
+             std::max(8, completedNexuses * 10), defending ? 70 : 96,
+             "recover after severe worker losses", workers < 6 && !defending);
     }
 
     const auto depletedEconomy = completedNexuses > 0 && activeBases < completedNexuses;
@@ -531,12 +837,18 @@ void StrategyEngine::applyOpeningStyle(
     StrategicPlan& plan,
     const GameState& state,
     const OpeningStyle style) {
+    const auto emergency = plan.posture == Posture::defend ||
+                           plan.posture == Posture::recover;
     switch (style) {
         case OpeningStyle::standard: return;
         case OpeningStyle::aggressive:
             plan.name += " [pressure]";
-            plan.posture = minute(state) < 5 ? Posture::hold : Posture::pressure;
-            plan.desiredBases = std::max(1, plan.desiredBases - 1);
+            if (!emergency) {
+                plan.posture = minute(state) < 5 ? Posture::hold : Posture::pressure;
+            }
+            if (minute(state) < 8) {
+                plan.desiredBases = std::max(1, plan.desiredBases - 1);
+            }
             plan.attackThreshold = std::max(1.05, plan.attackThreshold - 0.10);
             if (supplyAtLeast(state, 10)) {
                 goal(plan, GoalKind::build, UnitKind::gateway,
@@ -551,6 +863,9 @@ void StrategyEngine::applyOpeningStyle(
             return;
         case OpeningStyle::economic:
             plan.name += " [economic]";
+            // Opponent-history exploration is a preference, not authority to
+            // ignore a rush that is already visible inside our main.
+            if (emergency) return;
             plan.posture = minute(state) < 9 ? Posture::hold : plan.posture;
             plan.desiredBases = std::min(4, plan.desiredBases + (minute(state) >= 5 ? 1 : 0));
             plan.desiredWorkers = std::min(76, plan.desiredWorkers + 6);
@@ -560,6 +875,7 @@ void StrategyEngine::applyOpeningStyle(
             return;
         case OpeningStyle::deceptive:
             plan.name += " [tech switch]";
+            if (emergency) return;
             plan.attackThreshold += 0.05;
             if (minute(state) < 5 && !supplyAtLeast(state, 24)) return;
             if (state.enemy.race == Race::zerg) {
@@ -582,6 +898,51 @@ void StrategyEngine::applyOpeningStyle(
             return;
         case OpeningStyle::count: return;
     }
+}
+
+StrategicPlan StrategicDirector::stabilize(
+    StrategicPlan candidate,
+    const GameState& state,
+    const ThreatAssessment& threat) {
+    constexpr auto clearWindow = 8 * 24;
+    const auto emergencyEvidence = candidate.posture == Posture::defend ||
+                                   candidate.posture == Posture::recover ||
+                                   threat.combatEnemiesNearMain > 0 ||
+                                   threat.approachingArmyValue >= 2.0;
+
+    if (!initialized_) {
+        initialized_ = true;
+        posture_ = candidate.posture;
+        if (emergencyEvidence) lastEmergencyFrame_ = state.frame;
+        return candidate;
+    }
+
+    if (emergencyEvidence) {
+        posture_ = candidate.posture == Posture::recover
+                       ? Posture::recover
+                       : Posture::defend;
+        lastEmergencyFrame_ = state.frame;
+        candidate.posture = posture_;
+        return candidate;
+    }
+
+    if ((posture_ == Posture::defend || posture_ == Posture::recover) &&
+        lastEmergencyFrame_ >= 0 &&
+        state.frame - lastEmergencyFrame_ < clearWindow) {
+        candidate.posture = posture_;
+        candidate.attackThreshold = std::max(candidate.attackThreshold, 1.40);
+        candidate.name += " [regrouping after defense]";
+        return candidate;
+    }
+
+    posture_ = candidate.posture;
+    return candidate;
+}
+
+void StrategicDirector::reset() noexcept {
+    posture_ = Posture::hold;
+    lastEmergencyFrame_ = -1;
+    initialized_ = false;
 }
 
 std::string_view postureName(const Posture posture) noexcept {

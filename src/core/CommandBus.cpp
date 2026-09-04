@@ -85,7 +85,16 @@ bool CommandBus::redundant(const Command& command) const {
     }
     const auto& previous = found->second;
     const auto age = frame_ - previous.frame;
-    if (age > std::max(2, latencyFrames_ + 1)) {
+    auto suppressionWindow = std::max(2, latencyFrames_ + 1);
+    if (command.type == CommandType::attackUnit) {
+        suppressionWindow = std::max(suppressionWindow, 18);
+    } else if (command.type == CommandType::move ||
+               command.type == CommandType::attackMove) {
+        suppressionWindow = std::max(suppressionWindow, 24);
+    } else if (command.type == CommandType::recharge) {
+        suppressionWindow = std::max(suppressionWindow, 24);
+    }
+    if (age > suppressionWindow) {
         return false;
     }
     const auto samePosition = !command.targetPosition.valid() ||

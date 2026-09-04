@@ -117,6 +117,36 @@ enum class UnitKind : std::uint16_t {
     ultralisk,
     defiler,
     overlord,
+    // Additional enemy tech and combat kinds required for complete legal
+    // observation. These are appended to keep serialized/test enum values
+    // stable as the catalog grows.
+    ghost,
+    valkyrie,
+    spiderMine,
+    academy,
+    engineeringBay,
+    armory,
+    machineShop,
+    controlTower,
+    scienceFacility,
+    covertOps,
+    physicsLab,
+    comsatStation,
+    queen,
+    guardian,
+    devourer,
+    broodling,
+    infestedTerran,
+    creepColony,
+    evolutionChamber,
+    queensNest,
+    ultraliskCavern,
+    defilerMound,
+    nydusCanal,
+    lurkerEgg,
+    cocoon,
+    nuclearSilo,
+    count,
 };
 
 enum class UnitRole : std::uint8_t {
@@ -184,6 +214,11 @@ struct UnitSnapshot {
     UnitId transportId{-1};
     int cargoSpace{};
     int ammo{};
+    int sightRange{};
+    bool attackFrame{};
+    UnitId orderTargetId{-1};
+    bool underStorm{};
+    Frame firstSeen{};
 
     [[nodiscard]] int durability() const noexcept {
         return hitPoints + shields;
@@ -224,6 +259,10 @@ struct PlayerSnapshot {
     int gatheredGas{};
     std::vector<UnitSnapshot> units;
     std::vector<UnitKind> queuedUnits;
+    // Some BWAPI builds report isTraining() before exposing the active item in
+    // getTrainingQueue(). Record those occupied producers separately so macro
+    // does not treat latency-window production as idle.
+    std::vector<UnitKind> busyProducers;
     std::vector<TechnologySnapshot> technologies;
 };
 

@@ -52,6 +52,40 @@ Position friendlyMain(const GameState& state) {
 
 }  // namespace
 
+UnitId selectOpeningWorkerScout(
+    const GameState& state,
+    const std::span<const UnitId> previousScouts,
+    const std::span<const UnitId> unavailableWorkers) noexcept {
+    if (state.frame >= 6 * 60 * 24 ||
+        std::ranges::none_of(state.self.units, [](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::pylon;
+        })) {
+        return -1;
+    }
+
+    const auto eligible = [&unavailableWorkers](const UnitSnapshot& unit) {
+        return unit.kind == UnitKind::probe && unit.completed &&
+               !unit.carryingResources && !unit.underAttack &&
+               std::ranges::find(unavailableWorkers, unit.id) ==
+                   unavailableWorkers.end();
+    };
+    for (const auto previous : previousScouts) {
+        const auto candidate = std::ranges::find(
+            state.self.units, previous, &UnitSnapshot::id);
+        if (candidate != state.self.units.end() && eligible(*candidate)) {
+            return candidate->id;
+        }
+    }
+
+    const UnitSnapshot* selected = nullptr;
+    for (const auto& unit : state.self.units) {
+        if (eligible(unit) && (selected == nullptr || unit.id < selected->id)) {
+            selected = &unit;
+        }
+    }
+    return selected != nullptr ? selected->id : -1;
+}
+
 void ScoutManager::reset() noexcept {
     previousOrders_.clear();
 }

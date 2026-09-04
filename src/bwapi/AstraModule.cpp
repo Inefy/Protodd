@@ -1,5 +1,6 @@
 #include "AstraModule.hpp"
 
+#include "astra/Technology.hpp"
 #include "astra/UnitCatalog.hpp"
 
 #include <algorithm>
@@ -39,11 +40,21 @@ void AstraModule::onStart() {
     state_ = bridge_.observe();
     navigation_ = bridge_.navigationGrid();
     opponent_.reset(state_.enemy.race);
+    strategicDirector_.reset();
     influence_ = InfluenceMap(64);
     commands_.clear();
+    engagements_.reset();
     transports_.reset();
     scouts_.reset();
     frameBudget_.reset();
+    detectorEscorts_.clear();
+    leasedScouts_.clear();
+    advanceWaypoints_.clear();
+    retreatWaypoints_.clear();
+    navigationSignatures_.clear();
+    navigationRefresh_ = -1;
+    maintenanceMineralReserve_ = 0;
+    maintenanceGasReserve_ = 0;
 
     std::error_code error;
     std::filesystem::create_directories("bwapi-data/write", error);
@@ -150,7 +161,9 @@ void AstraModule::onUnitRenegade(const BWAPI::Unit unit) {
 }
 
 void AstraModule::updateStrategy() {
-    plan_ = strategy_.plan(state_, opponent_.assessment(), openingStyle_);
+    plan_ = strategicDirector_.stabilize(
+        strategy_.plan(state_, opponent_.assessment(), openingStyle_),
+        state_, opponent_.assessment());
 }
 
 void AstraModule::updateMacro() {
@@ -177,6 +190,8 @@ void AstraModule::updateWorkers() {
 }
 
 void AstraModule::updateScouting() {
+    const auto previousLeases = leasedScouts_;
+    const auto reservedBuilders = bridge_.reservedBuilders();
     leasedScouts_.clear();
     std::vector<UnitId> available;
     auto observersSeen = 0;
@@ -191,11 +206,14 @@ void AstraModule::updateScouting() {
             available.push_back(unit.id);
         }
     }
-    if (available.empty() && state_.frame < 6 * 60 * 24) {
-        const auto probe = std::ranges::find_if(state_.self.units, [](const UnitSnapshot& unit) {
-            return unit.kind == UnitKind::probe && !unit.carryingResources;
-        });
-        if (probe != state_.self.units.end()) available.push_back(probe->id);
+    if (available.empty()) {
+        // Keep one stable worker scout whenever possible. Most importantly,
+        // never steal a Probe that macro has ordered to construct a building:
+        // a frame-3 scout order used to cancel the opening pylon order issued
+        // on frame 1, leaving the economy supply-blocked with a large bank.
+        const auto probe = selectOpeningWorkerScout(
+            state_, previousLeases, reservedBuilders);
+        if (probe >= 0) available.push_back(probe);
     }
     const auto orders = scouts_.assign(state_, available, influence_,
                                        opponent_.assessment());
@@ -213,29 +231,55 @@ void AstraModule::updateCombat(
                             plan_.posture == Posture::attack ||
                             plan_.posture == Posture::harass;
     const auto formed = squads_.form(state_, friendly, enemy, plan_, retreatPoint());
-    const auto refreshNavigation = navigationRefresh_ < 0 ||
-                                   state_.frame - navigationRefresh_ >= navigationInterval ||
-                                   advanceWaypoints_.size() != formed.size();
-    if (refreshNavigation) {
-        navigationRefresh_ = state_.frame;
+    const auto resetNavigation = advanceWaypoints_.size() != formed.size() ||
+                                 navigationSignatures_.size() != formed.size();
+    const auto periodicNavigationRefresh = navigationRefresh_ < 0 ||
+                                           state_.frame - navigationRefresh_ >=
+                                               navigationInterval;
+    if (resetNavigation) {
         advanceWaypoints_.assign(formed.size(), {-1, -1});
         retreatWaypoints_.assign(formed.size(), {-1, -1});
+        navigationSignatures_.assign(formed.size(), 0);
+    }
+    if (periodicNavigationRefresh) {
+        navigationRefresh_ = state_.frame;
     }
     commands_.beginFrame(state_.frame, state_.latencyFrames);
     fight_ = {};
     auto debugSquadSize = std::size_t{0};
+    const auto* vanguard = SquadPlanner::selectVanguard(formed, plan_.attackTarget);
     for (std::size_t squadIndex = 0; squadIndex < formed.size(); ++squadIndex) {
         const auto& squad = formed[squadIndex];
         auto requiredRatio = squad.requiredRatio;
         auto objective = squad.objective;
-        if (squad.role == SquadRole::mainArmy && (!aggressive || squad.units.size() < 4)) {
-            requiredRatio = 0.88;
-            objective = plan_.rallyPoint;
+        if (squad.role == SquadRole::mainArmy) {
+            if (!aggressive || (vanguard == &squad && squad.units.size() < 4)) {
+                requiredRatio = 0.88;
+                objective = plan_.rallyPoint;
+            } else if (vanguard != nullptr && vanguard != &squad &&
+                       squad.enemies.empty()) {
+                // Detached reinforcements join the strongest mobile component
+                // instead of launching a second, usually losing attack wave.
+                requiredRatio = 0.88;
+                objective = vanguard->center;
+            }
         }
         auto routedRetreat = squad.retreat;
         const auto hasGroundUnit = std::ranges::any_of(
             squad.units, [](const UnitSnapshot& unit) { return !unit.flying; });
-        if (refreshNavigation && hasGroundUnit) {
+        auto routeSignature = squad.signature;
+        routeSignature ^= static_cast<std::uint32_t>(objective.x);
+        routeSignature *= 1099511628211ULL;
+        routeSignature ^= static_cast<std::uint32_t>(objective.y);
+        routeSignature *= 1099511628211ULL;
+        const auto refreshRoute = periodicNavigationRefresh || resetNavigation ||
+                                  navigationSignatures_[squadIndex] != routeSignature;
+        if (refreshRoute) {
+            navigationSignatures_[squadIndex] = routeSignature;
+            advanceWaypoints_[squadIndex] = {-1, -1};
+            retreatWaypoints_[squadIndex] = {-1, -1};
+        }
+        if (refreshRoute && hasGroundUnit) {
             advanceWaypoints_[squadIndex] =
                 navigation_.nextWaypoint(squad.center, objective);
             retreatWaypoints_[squadIndex] =
@@ -249,19 +293,60 @@ void AstraModule::updateCombat(
                 routedRetreat = retreatWaypoints_[squadIndex];
             }
         }
-        const auto estimate = combat_.evaluate(
+        auto estimate = combat_.evaluate(
             squad.units, squad.enemies, requiredRatio,
             squad.enemies.empty() ? opponent_.assessment().uncertainty * 0.25
                                   : opponent_.assessment().uncertainty,
             runSimulation);
+        if (!squad.enemies.empty()) {
+            estimate.decision = engagements_.stabilize(
+                squad.signature, estimate.decision, estimate.ratio,
+                requiredRatio, state_.frame);
+        }
+        // Once a ground threat has crossed the last defensive screen, running
+        // the army behind the Nexus only exposes workers and production. Make
+        // melee units take the last stand while ranged units still use their
+        // range-advantage kiting inside TacticalController.
+        if (SquadPlanner::mustHoldDefensiveScreen(squad)) {
+            estimate.decision = FightDecision::engage;
+        }
         if (squad.role == SquadRole::mainArmy && squad.units.size() >= debugSquadSize) {
             debugSquadSize = squad.units.size();
             fight_ = estimate;
         }
         for (const auto& order : tactics_.control(
                  squad.units, squad.enemies, estimate, objective,
-                 routedRetreat, influence_, squad.center)) {
+                 routedRetreat, influence_, squad.center, state_.latencyFrames,
+                 technologyLevel(state_.self, TechnologyKind::psionicStorm) > 0)) {
             commands_.submit(order);
+        }
+    }
+
+    // Use completed Shield Batteries between exchanges. The recharge order is
+    // submitted through the same priority bus as combat, so a wounded unit can
+    // disengage without a maintenance command fighting its tactical order.
+    for (const auto& unit : friendly) {
+        if (unit.maxShields <= 0 || unit.shields * 5 >= unit.maxShields * 2 ||
+            unit.attackFrame || (unit.underAttack && unit.healthFraction() >= 0.5)) {
+            continue;
+        }
+        const UnitSnapshot* battery = nullptr;
+        auto bestDistance = 256 * 256 + 1;
+        for (const auto& candidate : state_.self.units) {
+            if (candidate.kind != UnitKind::shieldBattery || !candidate.completed ||
+                candidate.energy < 10 || !candidate.position.valid()) {
+                continue;
+            }
+            const auto candidateDistance = distanceSquared(unit.position, candidate.position);
+            if (candidateDistance < bestDistance) {
+                bestDistance = candidateDistance;
+                battery = &candidate;
+            }
+        }
+        if (battery != nullptr) {
+            commands_.submit({unit.id, CommandType::recharge, battery->id, {-1, -1},
+                              UnitKind::shieldBattery, 92, 0,
+                              "shield-battery-recharge"});
         }
     }
 
@@ -285,7 +370,8 @@ std::vector<UnitSnapshot> AstraModule::combatUnits(const bool ours) const {
     const auto& source = ours ? state_.self.units : state_.enemy.units;
     std::vector<UnitSnapshot> result;
     for (const auto& unit : source) {
-        if ((!isCombatUnit(unit.kind) && !isStaticDefense(unit.kind)) || !unit.completed) continue;
+        if ((!isCombatUnit(unit.kind) && !isStaticDefense(unit.kind)) ||
+            !unit.completed || unit.hallucination || unit.loaded) continue;
         if (!ours && !unit.visible && state_.frame - unit.lastSeen > 24 * 45) continue;
         result.push_back(unit);
     }
@@ -299,6 +385,23 @@ Position AstraModule::retreatPoint() const {
 
 void AstraModule::logDecision() {
     if (!log_) return;
+    const auto countUnits = [this](const UnitKind kind, const bool completedOnly) {
+        return std::ranges::count_if(state_.self.units, [kind, completedOnly](const auto& unit) {
+            return unit.kind == kind && (!completedOnly || unit.completed);
+        });
+    };
+    const auto pylons = countUnits(UnitKind::pylon, false);
+    const auto completedPylons = countUnits(UnitKind::pylon, true);
+    const auto gateways = countUnits(UnitKind::gateway, false);
+    const auto probes = countUnits(UnitKind::probe, false);
+    const auto nexuses = countUnits(UnitKind::nexus, false);
+    const auto cannons = countUnits(UnitKind::photonCannon, false);
+    const auto completedCannons = countUnits(UnitKind::photonCannon, true);
+    const auto batteries = countUnits(UnitKind::shieldBattery, false);
+    const auto zealots = countUnits(UnitKind::zealot, false);
+    const auto completedZealots = countUnits(UnitKind::zealot, true);
+    ResourceLedger diagnosticLedger{state_.self.minerals, state_.self.gas};
+    const auto diagnosticActions = macro_.reconcile(state_, plan_, diagnosticLedger);
     log_ << "STATE," << state_.frame << ',' << plan_.name << ','
          << postureName(plan_.posture) << ','
          << enemyPlanName(opponent_.assessment().mostLikely) << ','
@@ -306,7 +409,20 @@ void AstraModule::logDecision() {
          << state_.self.minerals << ',' << state_.self.gas << ','
          << state_.self.supplyUsed << ',' << state_.self.supplyTotal << ','
          << frameBudget_.stats().movingAverageMs << ','
-         << runtimeLoadName(frameBudget_.load(state_.frame)) << '\n';
+         << runtimeLoadName(frameBudget_.load(state_.frame)) << ','
+         << bridge_.lastMacroStatus() << ",pylons=" << pylons << '/' << completedPylons
+         << ",gateways=" << gateways << ",nexuses=" << nexuses
+         << ",probes=" << probes << ",cannons=" << cannons << '/'
+         << completedCannons << ",batteries=" << batteries
+         << ",zealots=" << zealots << '/' << completedZealots << ",actions=";
+    for (std::size_t index = 0; index < diagnosticActions.size() && index < 4; ++index) {
+        if (index > 0) log_ << ';';
+        const auto& action = diagnosticActions[index];
+        log_ << static_cast<int>(action.action) << ':' << unitStats(action.target).name << ':'
+             << (!action.reserved ? 'W' : (action.executable ? 'R' : 'H')) << ':'
+             << action.priority;
+    }
+    log_ << '\n';
     log_.flush();
 }
 

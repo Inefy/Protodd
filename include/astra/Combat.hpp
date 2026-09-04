@@ -4,7 +4,9 @@
 #include "astra/GameState.hpp"
 #include "astra/InfluenceMap.hpp"
 
+#include <cstdint>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace astra {
@@ -46,6 +48,30 @@ private:
         std::span<const UnitSnapshot> opposition);
 };
 
+// Combat simulations naturally jitter near a decision boundary as units move
+// in and out of range. Require a short run of consistent evidence before a
+// squad reverses direction, while still allowing an immediate emergency exit.
+class EngagementTracker {
+public:
+    [[nodiscard]] FightDecision stabilize(
+        std::uint64_t squadSignature,
+        FightDecision proposed,
+        double ratio,
+        double requiredRatio,
+        Frame frame);
+    void reset();
+
+private:
+    struct Memory {
+        FightDecision decision{FightDecision::retreat};
+        FightDecision candidate{FightDecision::retreat};
+        int consecutive{};
+        Frame lastSeen{};
+    };
+
+    std::unordered_map<std::uint64_t, Memory> memory_;
+};
+
 class TacticalController {
 public:
     [[nodiscard]] std::vector<Command> control(
@@ -55,7 +81,9 @@ public:
         Position objective,
         Position retreatPoint,
         const InfluenceMap& influence,
-        Position formationCenter = {-1, -1}) const;
+        Position formationCenter = {-1, -1},
+        int latencyFrames = 0,
+        bool psionicStormAvailable = false) const;
 };
 
 }  // namespace astra

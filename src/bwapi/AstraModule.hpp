@@ -18,6 +18,7 @@
 
 #include <BWAPI.h>
 
+#include <cstdint>
 #include <fstream>
 #include <vector>
 
@@ -40,10 +41,12 @@ private:
     InfluenceMap influence_;
     NavigationGrid navigation_;
     StrategyEngine strategy_;
+    StrategicDirector strategicDirector_;
     MacroPlanner macro_;
     WorkerManager workers_;
     ScoutManager scouts_;
     CombatEvaluator combat_;
+    EngagementTracker engagements_;
     TacticalController tactics_;
     SquadPlanner squads_;
     TransportController transports_;
@@ -60,6 +63,7 @@ private:
     std::vector<UnitId> leasedScouts_;
     std::vector<Position> advanceWaypoints_;
     std::vector<Position> retreatWaypoints_;
+    std::vector<std::uint64_t> navigationSignatures_;
     Frame navigationRefresh_{-1};
     int maintenanceMineralReserve_{};
     int maintenanceGasReserve_{};

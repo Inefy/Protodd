@@ -7,6 +7,36 @@
 #include <unordered_map>
 
 namespace astra {
+namespace {
+
+UnitKind producerFor(const UnitKind kind) noexcept {
+    switch (kind) {
+        case UnitKind::probe: return UnitKind::nexus;
+        case UnitKind::zealot:
+        case UnitKind::dragoon:
+        case UnitKind::highTemplar:
+        case UnitKind::darkTemplar: return UnitKind::gateway;
+        case UnitKind::reaver:
+        case UnitKind::observer:
+        case UnitKind::shuttle: return UnitKind::roboticsFacility;
+        case UnitKind::scout:
+        case UnitKind::corsair:
+        case UnitKind::carrier: return UnitKind::stargate;
+        default: return UnitKind::unknown;
+    }
+}
+
+int queuedForProducer(const GameState& state, const UnitKind producer) {
+    const auto queued = static_cast<int>(std::ranges::count_if(
+        state.self.queuedUnits, [producer](const UnitKind queued) {
+            return producerFor(queued) == producer;
+        }));
+    const auto busyWithoutQueue = static_cast<int>(std::ranges::count(
+        state.self.busyProducers, producer));
+    return queued + busyWithoutQueue;
+}
+
+}  // namespace
 
 bool ResourceLedger::canReserve(const int mineralCost, const int gasCost) const noexcept {
     return freeMinerals() >= mineralCost && freeGas() >= gasCost;
@@ -21,15 +51,46 @@ bool ResourceLedger::reserve(const int mineralCost, const int gasCost) noexcept 
     return true;
 }
 
+void ResourceLedger::protect(const int mineralCost, const int gasCost) noexcept {
+    reservedMinerals += std::min(std::max(0, mineralCost),
+                                 std::max(0, freeMinerals()));
+    reservedGas += std::min(std::max(0, gasCost), std::max(0, freeGas()));
+}
+
 std::vector<MacroAction> MacroPlanner::reconcile(
     const GameState& state,
     const StrategicPlan& plan,
     ResourceLedger& ledger) const {
     std::vector<MacroAction> actions;
-    actions.reserve(plan.goals.size());
+    std::vector<ProductionGoal> goals = plan.goals;
+    actions.reserve(goals.size() + 1U);
     std::unordered_map<UnitKind, int> planned;
 
-    for (const auto& goal : plan.goals) {
+    // Supply is an operational invariant, not merely a strategic preference.
+    // If a future strategy accidentally omits its pylon goal, the macro layer
+    // still protects the game from a complete production deadlock.
+    if (state.self.race == Race::protoss && state.self.supplyTotal > 0 &&
+        state.self.supplyTotal < 400) {
+        const auto pylons = countExisting(state, UnitKind::pylon);
+        const auto pylonInProgress = std::ranges::any_of(
+            state.self.units, [](const UnitSnapshot& unit) {
+                return unit.kind == UnitKind::pylon && !unit.completed;
+            });
+        const auto activeProducers = countCompleted(state, UnitKind::nexus) +
+                                     countCompleted(state, UnitKind::gateway) +
+                                     countCompleted(state, UnitKind::roboticsFacility) +
+                                     countCompleted(state, UnitKind::stargate);
+        const auto safetyMargin = std::clamp(2 + activeProducers * 2, 4, 16);
+        const auto remaining = state.self.supplyTotal - state.self.supplyUsed;
+        const auto openingDeadline = pylons == 0 && state.self.supplyUsed >= 12;
+        if (!pylonInProgress && (openingDeadline || remaining <= safetyMargin)) {
+            goals.push_back({GoalKind::build, UnitKind::pylon, pylons + 1, 110, true,
+                             "operational supply invariant"});
+        }
+    }
+    std::ranges::stable_sort(goals, std::greater{}, &ProductionGoal::priority);
+
+    for (const auto& goal : goals) {
         if (goal.technology != TechnologyKind::none) {
             const auto& stats = technologyStats(goal.technology);
             const auto currentLevel = technologyLevel(state.self, goal.technology);
@@ -55,8 +116,10 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                     };
                     action.reserved = ledger.reserve(unit.minerals, unit.gas);
                     actions.push_back(std::move(action));
-                    if (actions.back().reserved) ++planned[prerequisite];
-                    if (goal.blocking && !actions.back().reserved) break;
+                    ++planned[prerequisite];
+                    if (goal.blocking && !actions.back().reserved) {
+                        ledger.protect(unit.minerals, unit.gas);
+                    }
                 } else if (goal.blocking) {
                     MacroAction waiting{
                         stats.research ? MacroActionKind::research
@@ -65,8 +128,9 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                         goal.reason, goal.technology, true,
                     };
                     waiting.reserved = ledger.reserve(minerals, gas);
+                    waiting.executable = false;
                     actions.push_back(std::move(waiting));
-                    break;
+                    if (!actions.back().reserved) ledger.protect(minerals, gas);
                 }
                 continue;
             }
@@ -78,13 +142,26 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             };
             action.reserved = ledger.reserve(minerals, gas);
             if (action.reserved || goal.blocking) actions.push_back(std::move(action));
-            if (goal.blocking && !actions.back().reserved) break;
+            if (goal.blocking && !actions.back().reserved) {
+                ledger.protect(minerals, gas);
+            }
             continue;
         }
 
         const auto existing = countExisting(state, goal.target) + planned[goal.target];
         if (existing >= goal.desiredCount) {
             continue;
+        }
+        if (goal.goal == GoalKind::train) {
+            const auto producer = producerFor(goal.target);
+            const auto producerCount = countCompleted(state, producer);
+            if (producer != UnitKind::unknown && producerCount > 0 &&
+                queuedForProducer(state, producer) >= producerCount) {
+                // A queued train action is already keeping every producer
+                // occupied. Do not reserve a second layer of queue entries and
+                // starve structures that increase actual throughput.
+                continue;
+            }
         }
         if (!prerequisitesMet(state, goal.target)) {
             const auto prerequisite = nextMissingPrerequisite(state, goal.target);
@@ -100,9 +177,11 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                 action.reserved = ledger.reserve(stats.minerals, stats.gas);
                 if (action.reserved || goal.blocking) {
                     actions.push_back(std::move(action));
-                    if (actions.back().reserved) ++planned[prerequisite];
+                    ++planned[prerequisite];
                 }
-                if (goal.blocking && !actions.back().reserved) break;
+                if (goal.blocking && !actions.back().reserved) {
+                    ledger.protect(stats.minerals, stats.gas);
+                }
             } else if (goal.blocking) {
                 // The prerequisite already exists but is incomplete. Reserve
                 // the target now so routine production cannot drain its bank
@@ -114,8 +193,11 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                     TechnologyKind::none, true,
                 };
                 waiting.reserved = ledger.reserve(target.minerals, target.gas);
+                waiting.executable = false;
                 actions.push_back(std::move(waiting));
-                break;
+                if (!actions.back().reserved) {
+                    ledger.protect(target.minerals, target.gas);
+                }
             }
             continue;
         }
@@ -129,52 +211,88 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         action.reserved = ledger.reserve(stats.minerals, stats.gas);
         if (action.reserved || goal.blocking) {
             actions.push_back(std::move(action));
-            if (actions.back().reserved) ++planned[goal.target];
+            ++planned[goal.target];
         }
-        // A blocking goal owns the economy until it is affordable. Letting
-        // cheaper goals spend around it can delay emergency supply or detection
-        // forever under continuous production.
+        // Protect each resource independently. A gas-starved upgrade can keep
+        // its mineral bank without freezing probes or other mineral-only work
+        // paid for from the true surplus.
         if (goal.blocking && !actions.back().reserved) {
-            break;
+            ledger.protect(stats.minerals, stats.gas);
         }
     }
 
     // Spend remaining resources toward the strategic composition rather than
-    // stopping at the opening's fixed unit counts. Select the most
-    // underrepresented currently-producible unit for one production cycle.
+    // stopping at the opening's fixed unit counts. Allocate every genuinely
+    // idle producer once; issuing only one composition action per planning
+    // pass left large gateway economies needlessly idle with a full bank.
     struct CompositionCandidate {
         UnitKind kind{UnitKind::unknown};
+        UnitKind producer{UnitKind::unknown};
         double deficit{};
     };
-    std::vector<CompositionCandidate> compositionCandidates;
+    std::unordered_map<UnitKind, int> openProducerSlots;
+    for (const auto& target : plan.composition) {
+        const auto producer = producerFor(target.kind);
+        if (producer == UnitKind::unknown || openProducerSlots.contains(producer)) continue;
+        openProducerSlots[producer] = std::max(
+            0, countCompleted(state, producer) - queuedForProducer(state, producer));
+    }
+    for (const auto& action : actions) {
+        if (!action.reserved || action.action != MacroActionKind::train) continue;
+        const auto producer = producerFor(action.target);
+        if (const auto slot = openProducerSlots.find(producer);
+            slot != openProducerSlots.end()) {
+            slot->second = std::max(0, slot->second - 1);
+        }
+    }
+
     auto armyCount = 0;
     for (const auto& target : plan.composition) {
         armyCount += countExisting(state, target.kind) + planned[target.kind];
     }
-    for (const auto& target : plan.composition) {
-        const auto& stats = unitStats(target.kind);
-        const auto directlyProducible = !stats.building && stats.minerals + stats.gas > 0;
-        if (!directlyProducible || !prerequisitesMet(state, target.kind) ||
-            std::ranges::any_of(actions, [&target](const MacroAction& action) {
-                return action.target == target.kind;
-            })) {
-            continue;
+    auto plannedSupply = state.self.supplyUsed;
+    for (const auto& action : actions) {
+        if (action.reserved && action.action == MacroActionKind::train) {
+            plannedSupply += unitStats(action.target).supply;
         }
-        const auto count = countExisting(state, target.kind) + planned[target.kind];
-        const auto desired = target.weight * static_cast<double>(armyCount + 1);
-        const auto deficit = desired - static_cast<double>(count);
-        compositionCandidates.push_back({target.kind, deficit});
     }
-    std::ranges::stable_sort(compositionCandidates, [](const auto& left, const auto& right) {
-        return left.deficit > right.deficit;
-    });
-    for (const auto& candidate : compositionCandidates) {
-        const auto& stats = unitStats(candidate.kind);
-        const auto supplyAvailable = state.self.supplyUsed + stats.supply <= state.self.supplyTotal;
-        if (supplyAvailable && ledger.reserve(stats.minerals, stats.gas)) {
-            actions.push_back({MacroActionKind::train, candidate.kind, 58,
-                               stats.minerals, stats.gas, true,
-                               "maintain strategic army composition"});
+    constexpr auto maximumCompositionActions = 8;
+    for (auto cycle = 0; cycle < maximumCompositionActions; ++cycle) {
+        std::vector<CompositionCandidate> candidates;
+        for (const auto& target : plan.composition) {
+            const auto& stats = unitStats(target.kind);
+            const auto producer = producerFor(target.kind);
+            const auto directlyProducible = !stats.building &&
+                                            stats.minerals + stats.gas > 0;
+            const auto supplyAvailable = state.self.supplyTotal <= 0 ||
+                                         plannedSupply + stats.supply <=
+                                             state.self.supplyTotal;
+            if (!directlyProducible || producer == UnitKind::unknown ||
+                openProducerSlots[producer] <= 0 ||
+                !prerequisitesMet(state, target.kind) || !supplyAvailable ||
+                !ledger.canReserve(stats.minerals, stats.gas)) {
+                continue;
+            }
+            const auto current = countExisting(state, target.kind) + planned[target.kind];
+            const auto desired = target.weight * static_cast<double>(armyCount + 1);
+            candidates.push_back({target.kind, producer,
+                                  desired - static_cast<double>(current)});
+        }
+        if (candidates.empty()) break;
+        const auto best = std::ranges::max_element(
+            candidates, {}, &CompositionCandidate::deficit);
+        const auto& stats = unitStats(best->kind);
+        if (!ledger.reserve(stats.minerals, stats.gas)) break;
+        actions.push_back({MacroActionKind::train, best->kind, 58,
+                           stats.minerals, stats.gas, true,
+                           "fill idle production with strategic composition"});
+        ++planned[best->kind];
+        ++armyCount;
+        plannedSupply += stats.supply;
+        --openProducerSlots[best->producer];
+        if (std::ranges::none_of(openProducerSlots, [](const auto& entry) {
+                return entry.second > 0;
+            })) {
             break;
         }
     }
@@ -211,6 +329,10 @@ UnitKind MacroPlanner::nextMissingPrerequisite(
     const UnitKind kind) {
     for (const auto prerequisite : unitPrerequisites(kind)) {
         if (countCompleted(state, prerequisite) > 0) continue;
+        // Construction has already been paid for. Continue walking the direct
+        // requirements so the ledger can fund the next structure in the chain
+        // rather than reserving an impossible end-unit behind this one.
+        if (countExisting(state, prerequisite) > 0) continue;
         const auto nested = nextMissingPrerequisite(state, prerequisite);
         return nested != UnitKind::unknown ? nested : prerequisite;
     }

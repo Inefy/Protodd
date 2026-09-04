@@ -20,13 +20,14 @@ import ladder  # noqa: E402
 class LadderTests(unittest.TestCase):
     def test_schedule_is_deterministic_and_balances_host(self) -> None:
         opponents = [{"name": "Iron"}, {"name": "Steamhammer"}]
-        maps = ["Benzene.scx", "Python.scx"]
+        maps = ["maps/aiide/Benzene.scx", "maps/aiide/Python.scx"]
         first = ladder.make_schedule("AstraBot", opponents, maps, 2)
         second = ladder.make_schedule("AstraBot", opponents, maps, 2)
 
         self.assertEqual(first, second)
         self.assertEqual(len(first), 8)
         self.assertEqual([game["gameID"] for game in first], list(range(8)))
+        self.assertEqual({game["map"] for game in first}, {"Benzene.scx", "Python.scx"})
         for opponent in ("Iron", "Steamhammer"):
             games = [game for game in first if opponent in (game["homeBot"], game["awayBot"])]
             self.assertEqual(sum(game["homeBot"] == "AstraBot" for game in games), 2)
@@ -138,6 +139,7 @@ class LadderTests(unittest.TestCase):
             self.assertEqual(manifest["git_commit"], "abc123")
             self.assertEqual(manifest["scheduled_games"], 2)
             self.assertEqual(len(games), 2)
+            self.assertEqual(json.loads(games[0])["map"], "Python.scx")
             self.assertTrue((run / "tournament" / "server" / "bots" / "AstraBot" / "AI" / "AstraBot.dll").is_file())
             self.assertTrue((run / "tournament" / "server" / "bots" / "Iron" / "AI" / "Iron.dll").is_file())
 

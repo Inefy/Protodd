@@ -33,7 +33,11 @@ struct ThreatAssessment {
     double expansion{};
     double uncertainty{1.0};
     double estimatedArmyValue{};
+    double approachingArmyValue{};
+    double enemyProductionCapacity{};
     int enemiesNearMain{};
+    int combatEnemiesNearMain{};
+    int approachingCombatEnemies{};
     EnemyPlan mostLikely{EnemyPlan::unknown};
 };
 

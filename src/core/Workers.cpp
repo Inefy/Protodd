@@ -125,9 +125,25 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         }
 
         const auto local = influence.at(worker->position);
-        if (worker->healthFraction() < 0.35 && local.groundThreat > 0.25F && safeBase != nullptr) {
-            result.push_back({worker->id, WorkerJob::evacuate, safeBase->id, -1,
-                              safeBase->mineralLine, 98});
+        const auto woundedNearThreat = worker->healthFraction() < 0.75;
+        if ((worker->healthFraction() < 0.35 || woundedNearThreat) &&
+            local.groundThreat > 0.25F && safeBase != nullptr) {
+            const auto threat = std::ranges::min_element(
+                state.enemy.units, {}, [worker](const UnitSnapshot& enemy) {
+                    return enemy.visible && enemy.position.valid() &&
+                                   enemy.groundWeapon.damage > 0
+                               ? distanceSquared(worker->position, enemy.position)
+                               : std::numeric_limits<int>::max();
+                });
+            const auto threatId = threat != state.enemy.units.end() &&
+                                          threat->visible &&
+                                          threat->groundWeapon.damage > 0
+                                      ? threat->id
+                                      : -1;
+            const auto escape = influence.safestStep(
+                worker->position, safeBase->mineralLine, false);
+            result.push_back({worker->id, WorkerJob::evacuate, safeBase->id,
+                              threatId, escape, 98});
             continue;
         }
         available.push_back(worker);
@@ -141,9 +157,17 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         int demand{};
     };
     std::vector<MilitiaTarget> baseThreats;
+    const auto localEnemyWorkers = std::ranges::count_if(
+        state.enemy.units, [&ownedBases](const UnitSnapshot& enemy) {
+            return enemy.visible && isWorker(enemy.kind) && enemy.position.valid() &&
+                   std::ranges::any_of(ownedBases, [&enemy](const BaseSnapshot* base) {
+                       return distanceSquared(enemy.position, base->center) < 512 * 512;
+                   });
+        });
     for (const auto& enemy : state.enemy.units) {
         const auto demand = militiaDemand(enemy, state.frame);
         if (demand == 0 || !enemy.position.valid()) continue;
+        if (isWorker(enemy.kind) && localEnemyWorkers < 3) continue;
         if (std::ranges::any_of(ownedBases, [&enemy](const BaseSnapshot* base) {
                 return distanceSquared(enemy.position, base->center) < 512 * 512;
             })) {
@@ -162,7 +186,8 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         });
     const auto economyCap = workers.size() >= 10U
                                 ? static_cast<int>(available.size() / 2U)
-                                : std::min(4, static_cast<int>(available.size()));
+                                : std::min(6, std::max(
+                                      4, static_cast<int>(available.size()) - 2));
     auto defendersRemaining = std::clamp(
         requestedDefenders - static_cast<int>(localArmy) * 2, 0,
         std::min(8, economyCap));
@@ -171,9 +196,20 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         const UnitSnapshot* bestTarget = nullptr;
         auto bestScore = std::numeric_limits<long long>::max();
         for (auto worker = available.begin(); worker != available.end(); ++worker) {
-            if ((*worker)->carryingResources || (*worker)->healthFraction() < 0.5) continue;
+            // When an actual rush is already inside the base, carrying a
+            // mineral must not exempt a healthy Probe from the emergency
+            // surround. Cargo is disposable; the Nexus and worker line are
+            // not. Wounded Probes are still handled by the evacuation pass.
+            if ((*worker)->healthFraction() < 0.5) continue;
             for (const auto& target : baseThreats) {
                 if (target.demand <= 0) continue;
+                if (!isBuilding(target.unit->kind)) {
+                    const auto contactRange = target.unit->groundWeapon.maxRange + 128;
+                    if (distanceSquared((*worker)->position, target.unit->position) >
+                        contactRange * contactRange) {
+                        continue;
+                    }
+                }
                 const auto priorityBias = 5 - targetPriority(*target.unit);
                 const auto score = static_cast<long long>(priorityBias) * 1'000'000LL +
                                    distanceSquared((*worker)->position,
@@ -198,29 +234,71 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     // Each completed assimilator has exactly three efficient worker slots.
     // Pair gas workers with a concrete base so multi-base economies do not
     // repeatedly drag probes across the map.
-    std::vector<const BaseSnapshot*> gasSlots;
+    struct GasSlot {
+        const BaseSnapshot* base{};
+        const UnitSnapshot* refinery{};
+    };
+    std::vector<GasSlot> gasSlots;
     for (const auto& building : state.self.units) {
         if (building.kind != UnitKind::assimilator || !building.completed) continue;
         const auto base = std::ranges::min_element(
             ownedBases, {}, [&building](const BaseSnapshot* candidate) {
                 return distanceSquared(building.position, candidate->center);
-            });
+        });
         if (base != ownedBases.end()) {
-            for (auto slot = 0; slot < 3; ++slot) gasSlots.push_back(*base);
+            for (auto slot = 0; slot < 3; ++slot) {
+                gasSlots.push_back({*base, &building});
+            }
         }
     }
+    auto effectiveDesiredGas = plan.desiredGasWorkers;
+    const auto mineralStarved = state.self.minerals < 150;
+    if (mineralStarved && state.self.gas >= 300 &&
+        (plan.posture == Posture::defend || plan.posture == Posture::recover)) {
+        // A large existing gas bank already funds several Dragoon/tech cycles.
+        // During a base defense, the binding resource is almost always the
+        // mineral cost of units, pylons, batteries, and replacement workers.
+        effectiveDesiredGas = 0;
+    } else if (mineralStarved && state.self.gas >= 600) {
+        effectiveDesiredGas = std::min(effectiveDesiredGas, 1);
+    }
     const auto desiredGas = std::min(
-        {plan.desiredGasWorkers, static_cast<int>(gasSlots.size()),
+        {effectiveDesiredGas, static_cast<int>(gasSlots.size()),
          static_cast<int>(available.size())});
-    for (auto slot = 0; slot < desiredGas; ++slot) {
-        const auto* base = gasSlots[static_cast<std::size_t>(slot)];
+    auto gasAssigned = 0;
+
+    // Keep workers that are already on the requested refinery. Re-selecting
+    // the probes nearest the Nexus every worker tick used to rotate mineral
+    // workers onto gas and gas workers back to minerals, losing mining time.
+    for (auto worker = available.begin(); worker != available.end() &&
+                                    gasAssigned < desiredGas;) {
+        const auto slot = std::ranges::find_if(
+            gasSlots, [worker](const GasSlot& candidate) {
+                return candidate.refinery->id == (*worker)->orderTargetId;
+            });
+        if (slot == gasSlots.end()) {
+            ++worker;
+            continue;
+        }
+        result.push_back({(*worker)->id, WorkerJob::gas, slot->base->id, -1,
+                          slot->refinery->position, 55});
+        worker = available.erase(worker);
+        gasSlots.erase(slot);
+        ++gasAssigned;
+    }
+
+    while (gasAssigned < desiredGas && !gasSlots.empty()) {
+        const auto slot = gasSlots.begin();
         const auto worker = std::ranges::min_element(
-            available, {}, [base](const UnitSnapshot* candidate) {
-                return distanceSquared(candidate->position, base->center);
+            available, {}, [slot](const UnitSnapshot* candidate) {
+                return distanceSquared(candidate->position, slot->refinery->position);
             });
         if (worker == available.end()) break;
-        result.push_back({(*worker)->id, WorkerJob::gas, base->id, -1, base->center, 55});
+        result.push_back({(*worker)->id, WorkerJob::gas, slot->base->id, -1,
+                          slot->refinery->position, 55});
         available.erase(worker);
+        gasSlots.erase(slot);
+        ++gasAssigned;
     }
 
     // Greedily equalize mineral saturation while retaining a small distance

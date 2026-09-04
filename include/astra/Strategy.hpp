@@ -59,13 +59,35 @@ private:
     [[nodiscard]] StrategicPlan planPvP(
         const GameState& state,
         const ThreatAssessment& threat) const;
-    static void addInfrastructure(StrategicPlan& plan, const GameState& state);
+    static void addInfrastructure(
+        StrategicPlan& plan,
+        const GameState& state,
+        const ThreatAssessment& threat);
+    static void addAdaptiveCounters(StrategicPlan& plan, const GameState& state);
     static void addSafetyReactions(StrategicPlan& plan, const ThreatAssessment& threat);
     static void addEconomicRecovery(StrategicPlan& plan, const GameState& state);
     static void applyOpeningStyle(
         StrategicPlan& plan,
         const GameState& state,
         OpeningStyle style);
+};
+
+// Strategy rules may legitimately change from one observation to the next,
+// but an army should not reverse its map-level intent on a single clear frame.
+// Emergency states take effect immediately; leaving them requires sustained
+// safety so reinforcements can assemble before the next push.
+class StrategicDirector {
+public:
+    [[nodiscard]] StrategicPlan stabilize(
+        StrategicPlan candidate,
+        const GameState& state,
+        const ThreatAssessment& threat);
+    void reset() noexcept;
+
+private:
+    Posture posture_{Posture::hold};
+    Frame lastEmergencyFrame_{-1};
+    bool initialized_{};
 };
 
 [[nodiscard]] std::string_view postureName(Posture posture) noexcept;

@@ -30,26 +30,32 @@ opponent file during a live game.
 - No manager owns a BWAPI object. Stable IDs cross the adapter boundary.
 - Every behavior has deterministic tie-breaking and a CPU budget.
 - Urgent reactions run every frame; macro work is staggered across frames.
-- Resource commitments include queued units and buildings under construction.
+- Resource commitments include real producer queues, remaining train time,
+  explicit held-versus-executable reservations, and observed/pending
+  construction; mobile-unit queue bytes are never treated as production.
 - Mobile enemy influence decays continuously after vision is lost; remembered
   buildings remain authoritative until their tile is seen empty.
+- First-seen tech timing and observed production capacity create early
+  anti-all-in transitions; completed static safety then raises worker recovery
+  above additional army reservations so defense converts into an economy.
 - Resource bases use canonical depot tiles and distinct mineral-line centroids;
-  ordinary construction is rejected when it would obstruct worker travel lanes.
+  ordinary construction is rejected when it would obstruct worker travel lanes,
+  and expansion builders reveal fogged depot footprints before issuing a Nexus.
 - A safe fallback remains playable if terrain analysis or a subsystem fails.
 
 ## Implemented modules
 
 | Module | Responsibility |
 |---|---|
-| `OpponentModel` | Base-anchored Bayesian opening, rush, proxy and capability inference |
+| `OpponentModel` | Base-anchored Bayesian opening, rush, first-seen timing, motion and production-capacity inference |
 | `InfluenceMap` | Ground/air threat, detection, mobility, and strategic value |
 | `ScoutManager` | Route-risk sampling, search/tech/expansion deadlines and assignment hysteresis |
-| `StrategyEngine` | Matchup plans, transitions, counter production, attack timing |
-| `MacroPlanner` | Goal reconciliation, reservations, production and expansion |
+| `StrategyEngine` | Matchup plans, observed-composition counters, transitions and attack timing |
+| `MacroPlanner` | Goal reconciliation, held/executable reservations, parallel production and expansion |
 | `WorkerManager` | Per-patch saturation, gas, transfer, construction and threat-specific militia |
 | `SquadPlanner` | Local connected armies, base defense, harassment, objectives and detector escorts |
 | `CombatEvaluator` | Fast local fight estimate with uncertainty penalties |
-| `TacticalController` | Exact volley allocation, kiting, surrounds, caster screening and cloak preservation |
+| `TacticalController` | Exact volley allocation, locality-aware melee, kiting, tactical Storm, caster screening and cloak preservation |
 | `BwapiBridge` | Legal observations, base geometry, safe construction, upgrades and value-aware spell coordination |
 | `CommandBus` | Legal command validation, deduplication, arbitration and throttling |
 | `OpponentHistory` | Tournament-safe cross-game opening exploration and exploitation |

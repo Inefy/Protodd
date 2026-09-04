@@ -98,7 +98,35 @@ const UnitStats& unitStats(const UnitKind kind) noexcept {
         make("Ultralisk", 200, 200, 8, 900, 2.7),
         make("Defiler", 50, 150, 4, 750, 1.5),
         make("Overlord", 100, 0, 0, 600, 0.4),
+        make("Ghost", 25, 75, 2, 750, 1.15),
+        make("Valkyrie", 250, 125, 6, 750, 1.9),
+        make("Spider Mine", 0, 0, 0, 0, 0.75),
+        make("Academy", 150, 0, 0, 1200, 0.0, true),
+        make("Engineering Bay", 125, 0, 0, 900, 0.0, true),
+        make("Armory", 100, 50, 0, 1200, 0.0, true),
+        make("Machine Shop", 50, 50, 0, 600, 0.0, true),
+        make("Control Tower", 50, 50, 0, 600, 0.0, true),
+        make("Science Facility", 100, 150, 0, 900, 0.0, true),
+        make("Covert Ops", 50, 50, 0, 600, 0.0, true),
+        make("Physics Lab", 50, 50, 0, 600, 0.0, true),
+        make("Comsat Station", 50, 50, 0, 600, 0.0, true),
+        make("Queen", 100, 100, 4, 750, 1.05),
+        make("Guardian", 150, 200, 4, 600, 2.0),
+        make("Devourer", 250, 150, 4, 600, 1.8),
+        make("Broodling", 0, 0, 1, 300, 0.35),
+        make("Infested Terran", 100, 50, 2, 600, 1.4),
+        make("Creep Colony", 75, 0, 0, 300, 0.1, true),
+        make("Evolution Chamber", 75, 0, 0, 600, 0.0, true),
+        make("Queen's Nest", 150, 100, 0, 900, 0.0, true),
+        make("Ultralisk Cavern", 150, 200, 0, 1200, 0.0, true),
+        make("Defiler Mound", 100, 100, 0, 900, 0.0, true),
+        make("Nydus Canal", 150, 0, 0, 600, 0.0, true),
+        make("Lurker Egg", 0, 0, 0, 600, 0.0),
+        make("Cocoon", 0, 0, 0, 600, 0.0),
+        make("Nuclear Silo", 100, 100, 0, 1200, 0.0, true),
     };
+
+    static_assert(table.size() == static_cast<std::size_t>(UnitKind::count));
 
     const auto index = static_cast<std::size_t>(kind);
     return index < table.size() ? table[index] : unknown;
@@ -120,11 +148,15 @@ bool isStaticDefense(const UnitKind kind) noexcept {
 }
 
 bool isCombatUnit(const UnitKind kind) noexcept {
+    if (kind == UnitKind::count) return false;
     const auto& stats = unitStats(kind);
     const auto supportOnly = kind == UnitKind::observer || kind == UnitKind::shuttle ||
                              kind == UnitKind::dropship || kind == UnitKind::overlord ||
                              kind == UnitKind::transport || kind == UnitKind::detector;
-    return !stats.building && !isWorker(kind) && !supportOnly && stats.combatValue > 0.5;
+    // Cost is not a combat-role boundary. Cheap units such as Zerglings,
+    // Scourge, and Broodlings are still lethal and must reach threat analysis,
+    // squad assignment, simulation, and target selection.
+    return !stats.building && !isWorker(kind) && !supportOnly && stats.combatValue > 0.0;
 }
 
 std::span<const UnitKind> unitPrerequisites(const UnitKind kind) noexcept {

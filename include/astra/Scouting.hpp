@@ -25,6 +25,11 @@ struct ScoutOrder {
     double score{};
 };
 
+[[nodiscard]] UnitId selectOpeningWorkerScout(
+    const GameState& state,
+    std::span<const UnitId> previousScouts = {},
+    std::span<const UnitId> unavailableWorkers = {}) noexcept;
+
 class ScoutManager {
 public:
     void reset() noexcept;

@@ -263,7 +263,9 @@ def make_schedule(our_name: str, opponents: Sequence[dict[str, Any]], maps: Sequ
                         "roundID": round_id,
                         "homeBot": home,
                         "awayBot": away,
-                        "map": map_name,
+                        # Tournament Manager resolves this against the full paths in
+                        # server_settings.json and expects only the filename here.
+                        "map": Path(map_name).name,
                     }
                 )
                 game_id += 1
