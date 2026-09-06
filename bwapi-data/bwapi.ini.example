@@ -1,6 +1,6 @@
 [ai]
-ai     = bwapi-data/AI/AstraBot.dll
-ai_dbg = bwapi-data/AI/AstraBot.dll
+ai     = bwapi-data/AI/Protodd.dll
+ai_dbg = bwapi-data/AI/Protodd.dll
 tournament =
 
 [auto_menu]
@@ -14,7 +14,7 @@ race = Protoss
 enemy_count = 1
 enemy_race = Random
 game_type = MELEE
-save_replay = maps/replays/AstraBot/%MAP%_%ENEMYRACES%_$Y$b$d_$H$M$S.rep
+save_replay = maps/replays/Protodd/%MAP%_%ENEMYRACES%_$Y$b$d_$H$M$S.rep
 
 [config]
 shared_memory = ON

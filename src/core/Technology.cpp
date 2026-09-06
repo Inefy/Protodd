@@ -1,9 +1,9 @@
-#include "astra/Technology.hpp"
+#include "protodd/Technology.hpp"
 
 #include <algorithm>
 #include <array>
 
-namespace astra {
+namespace protodd {
 namespace {
 
 constexpr TechnologyStats unknown{"None", 0, 0, 0, 0, 0, UnitKind::unknown, false};
@@ -78,4 +78,4 @@ bool technologyInProgress(
     return found != player.technologies.end() && found->inProgress;
 }
 
-}  // namespace astra
+}  // namespace protodd

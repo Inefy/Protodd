@@ -1,12 +1,12 @@
 #pragma once
 
-#include "astra/GameState.hpp"
-#include "astra/Strategy.hpp"
+#include "protodd/GameState.hpp"
+#include "protodd/Strategy.hpp"
 
 #include <string>
 #include <vector>
 
-namespace astra {
+namespace protodd {
 
 // The next command arrives after latency: a producer finishing within that
 // window can accept one successor, but never a second waiting queue entry.
@@ -75,4 +75,4 @@ private:
     [[nodiscard]] static MacroActionKind actionKind(GoalKind goal) noexcept;
 };
 
-}  // namespace astra
+}  // namespace protodd

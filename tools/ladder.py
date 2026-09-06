@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare reproducible AstraBot ladders and analyze tournament results.
+"""Prepare reproducible Protodd ladders and analyze tournament results.
 
 The match executor is davechurchill/StarcraftAITournamentManager. This tool owns
 the reproducible schedule, private bot vault, run manifest, and statistical
@@ -227,7 +227,7 @@ def command_add_bot(args: argparse.Namespace) -> None:
         "imported_utc": utc_now(),
         "sha256": directory_digest(destination),
     }
-    write_json(destination / ".astra-ladder.json", provenance)
+    write_json(destination / ".protodd-ladder.json", provenance)
     opponents.append(bot)
     write_json(config_path, config)
     print(f"Imported {args.name} into ignored vault: {destination}")
@@ -302,7 +302,7 @@ def command_prepare(args: argparse.Namespace) -> None:
     validate_bot_name(str(our_bot.get("name", "")))
     artifact = resolve_from(config_path, str(our_bot.get("artifact", "")))
     if not artifact.is_file():
-        raise LadderError(f"AstraBot artifact not found: {artifact}")
+        raise LadderError(f"Protodd artifact not found: {artifact}")
     opponent_sources = []
     for opponent in config["opponents"]:
         source = resolve_from(config_path, str(opponent.get("directory", "")))
@@ -662,7 +662,7 @@ def report_markdown(report: dict[str, Any]) -> str:
     summary = report["summary"]
     low, high = summary["wilson_95"]
     label = (report.get("manifest") or {}).get("label", "unlabelled")
-    telemetry = report.get("astra_telemetry")
+    telemetry = report.get("protodd_telemetry")
     telemetry_section = ""
     if telemetry:
         runtime = telemetry["runtime"]
@@ -675,7 +675,7 @@ def report_markdown(report: dict[str, Any]) -> str:
 
 The per-game values are in `telemetry-games.csv`; use them to open the matching replay and fix recurring failure modes.
 """
-    return f"""# AstraBot ladder report: {label}
+    return f"""# Protodd ladder report: {label}
 
 Generated {report['generated_utc']}.
 
@@ -683,7 +683,7 @@ Generated {report['generated_utc']}.
 
 **{summary['indication']}** - {summary['wins']}-{summary['losses']} over {summary['scored_games']} scored games, {percent(summary['win_rate'])} win rate (Wilson 95% CI {percent(low)} to {percent(high)}).
 
-- Reliability: {summary['our_crashes']} Astra crashes, {summary['our_timeouts']} per-frame timeouts, {summary['game_timeouts']} game-length timeouts, {summary['excluded_incomplete_games']} incomplete/excluded.
+- Reliability: {summary['our_crashes']} Protodd crashes, {summary['our_timeouts']} per-frame timeouts, {summary['game_timeouts']} game-length timeouts, {summary['excluded_incomplete_games']} incomplete/excluded.
 - Coverage: {summary['reported_games']} result records, {summary['missing_scheduled_games']} scheduled games missing.
 - Trend: first half {percent(summary['first_half_win_rate'])}, second half {percent(summary['second_half_win_rate'])}, latest 20 {percent(summary['latest_20_win_rate'])}.
 - Average game length: {summary['average_game_minutes']:.1f} in-game minutes.
@@ -721,16 +721,16 @@ def report_html(report: dict[str, Any]) -> str:
         f"<section><h2>By {title}</h2><table><thead><tr><th>{title.title()}</th><th>Games</th><th>Win rate</th><th></th><th>95% interval</th><th>Signal</th></tr></thead><tbody>{rows(report[key])}</tbody></table></section>"
         for title, key in (("opponent", "by_opponent"), ("race", "by_race"), ("map", "by_map"))
     )
-    telemetry = report.get("astra_telemetry")
+    telemetry = report.get("protodd_telemetry")
     diagnostic_section = ""
     if telemetry:
         runtime = telemetry["runtime"]
         diagnostics = telemetry["diagnostics"]
         diagnostic_section = f"""<section><h2>Bot diagnostics</h2><div class="cards"><div class="card">Peak frame<div class="big">{runtime['peak_frame_ms']:.2f} ms</div><div class="sub">{runtime['over_55ms']} over 55 ms · {runtime['caught_errors']} errors</div></div><div class="card">Supply blocks<div class="big">{diagnostics['supply_block_snapshots']}</div><div class="sub">decision snapshots</div></div><div class="card">Late high bank<div class="big">{diagnostics['late_high_bank_snapshots']}</div><div class="sub">800+ minerals after 5:00</div></div><div class="card">Bad fight entry<div class="big">{diagnostics['dangerous_fight_snapshots']}</div><div class="sub">aggressive under 0.85 ratio</div></div></div></section>"""
     return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>AstraBot ladder report</title><style>
+<title>Protodd ladder report</title><style>
 :root{{--bg:#0b1020;--panel:#151c32;--text:#edf2ff;--muted:#9daaca;--accent:#6ee7b7;--bad:#fb7185}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,sans-serif}}main{{max-width:1120px;margin:auto;padding:32px}}h1{{font-size:32px;margin-bottom:6px}}.sub{{color:var(--muted)}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:24px 0}}.card,section{{background:var(--panel);border:1px solid #283352;border-radius:12px;padding:18px}}.big{{font-size:28px;font-weight:750;margin-top:8px}}section{{margin:16px 0;overflow:auto}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;text-align:left;border-bottom:1px solid #283352;white-space:nowrap}}th{{color:var(--muted)}}.track{{width:130px}}.bar{{display:block;height:8px;max-width:130px;background:var(--accent);border-radius:10px}}@media(max-width:650px){{main{{padding:16px}}}}
-</style></head><body><main><h1>AstraBot ladder report</h1><div class="sub">{html.escape(report['generated_utc'])} · {html.escape(summary['indication'])}</div>
+</style></head><body><main><h1>Protodd ladder report</h1><div class="sub">{html.escape(report['generated_utc'])} · {html.escape(summary['indication'])}</div>
 <div class="cards"><div class="card">Win rate<div class="big">{percent(summary['win_rate'])}</div><div class="sub">95% CI {percent(low)} to {percent(high)}</div></div><div class="card">Record<div class="big">{summary['wins']}-{summary['losses']}</div><div class="sub">{summary['scored_games']} scored games</div></div><div class="card">Reliability<div class="big">{summary['our_crashes']} crashes</div><div class="sub">{summary['our_timeouts']} timeouts / {summary['excluded_incomplete_games']} incomplete</div></div><div class="card">Coverage<div class="big">{summary['reported_games']}</div><div class="sub">{summary['missing_scheduled_games']} scheduled games missing</div></div><div class="card">Latest 20<div class="big">{percent(summary['latest_20_win_rate'])}</div><div class="sub">First {percent(summary['first_half_win_rate'])} / second {percent(summary['second_half_win_rate'])}</div></div></div>{diagnostic_section}{sections}</main></body></html>"""
 
 
@@ -755,27 +755,27 @@ def write_telemetry_csv(path: Path, games: Sequence[dict[str, Any]]) -> None:
 def command_report(args: argparse.Namespace) -> None:
     manifest = load_json(Path(args.manifest).resolve()) if args.manifest else None
     config = load_json(Path(args.config).resolve()) if args.config and Path(args.config).exists() else {}
-    our_bot = args.our_bot or (manifest or {}).get("our_bot") or config.get("our_bot", {}).get("name", "AstraBot")
+    our_bot = args.our_bot or (manifest or {}).get("our_bot") or config.get("our_bot", {}).get("name", "Protodd")
     timeouts = config.get("timeout_limits", (manifest or {}).get("timeout_limits", []))
     records = parse_results([Path(path).resolve() for path in args.results], our_bot, timeouts)
     report = summarize(records, our_bot, manifest)
-    if args.astra_log:
+    if args.protodd_log:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from log_analyzer import analyze  # pylint: disable=import-outside-toplevel
         lines = (
             line
-            for raw_path in args.astra_log
+            for raw_path in args.protodd_log
             for line in Path(raw_path).read_text(encoding="utf-8", errors="replace").splitlines()
         )
-        report["astra_telemetry"] = analyze(lines)
+        report["protodd_telemetry"] = analyze(lines)
     output = Path(args.output).resolve() if args.output else REPO_ROOT / "ladder" / "reports" / datetime.now().strftime("%Y%m%d-%H%M%S")
     output.mkdir(parents=True, exist_ok=False)
     write_json(output / "report.json", report)
     (output / "report.md").write_text(report_markdown(report), encoding="utf-8")
     (output / "index.html").write_text(report_html(report), encoding="utf-8")
     write_games_csv(output / "games.csv", report["games"])
-    if report.get("astra_telemetry"):
-        write_telemetry_csv(output / "telemetry-games.csv", report["astra_telemetry"]["game_details"])
+    if report.get("protodd_telemetry"):
+        write_telemetry_csv(output / "telemetry-games.csv", report["protodd_telemetry"]["game_details"])
     print(report_markdown(report))
     print(f"Reports written to {output}")
 
@@ -879,7 +879,7 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--config", default=str(DEFAULT_CONFIG))
     report.add_argument("--manifest")
     report.add_argument("--our-bot")
-    report.add_argument("--astra-log", action="append")
+    report.add_argument("--protodd-log", action="append")
     report.add_argument("--output")
     report.set_defaults(func=command_report)
 

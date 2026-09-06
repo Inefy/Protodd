@@ -1,13 +1,13 @@
-#include "astra/MacroPlanner.hpp"
+#include "protodd/MacroPlanner.hpp"
 
-#include "astra/Technology.hpp"
-#include "astra/UnitCatalog.hpp"
+#include "protodd/Technology.hpp"
+#include "protodd/UnitCatalog.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
 
-namespace astra {
+namespace protodd {
 namespace {
 
 UnitKind producerFor(const UnitKind kind) noexcept {
@@ -256,9 +256,83 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                              "operational supply invariant"});
         }
     }
+    if (plan.prioritizeReinforcements) {
+        // Fund one cycle per usable Gateway before optional structures or
+        // research. This remains useful when a matchup rule cleared its
+        // composition to save for tech. Busy/unpowered producers reserve none.
+        const auto slots = std::clamp(usableProducers(state, UnitKind::gateway) -
+            queuedForProducer(state, UnitKind::gateway), 0, 4);
+        const auto counterWindow = usableProducers(state, UnitKind::photonCannon) >= 2 &&
+            countCompleted(state, UnitKind::zealot) + countCompleted(state, UnitKind::dragoon) >= 1;
+        const auto mobileScreen = countCompleted(state, UnitKind::zealot) +
+            countCompleted(state, UnitKind::dragoon) + countCompleted(state, UnitKind::darkTemplar);
+        auto gasBudget = ledger.freeGas();
+        auto dragoons = countExisting(state, UnitKind::dragoon);
+        auto zealots = countExisting(state, UnitKind::zealot);
+        for (auto cycle = 0; cycle < slots; ++cycle) {
+            const auto ranged = prerequisitesMet(state, UnitKind::dragoon) && gasBudget >= 50;
+            const auto kind = ranged ? UnitKind::dragoon : UnitKind::zealot;
+            const auto desired = ranged ? ++dragoons : ++zealots;
+            if (ranged) gasBudget -= 50;
+            goals.push_back({GoalKind::train, kind, desired, 112, true,
+                             "protect a defensive reinforcement cycle", TechnologyKind::none, true});
+        }
+        for (auto& demand : goals) {
+            const auto detectorChain = plan.requireMobileDetection &&
+                (demand.target == UnitKind::observer || demand.target == UnitKind::observatory ||
+                 demand.target == UnitKind::roboticsFacility || demand.target == UnitKind::cyberneticsCore ||
+                 demand.target == UnitKind::assimilator);
+            if (demand.target == UnitKind::pylon) demand.priority = std::max(130, demand.priority);
+            else if (detectorChain) demand.priority = std::max(124, demand.priority);
+            else if (mobileScreen >= 8 && demand.goal == GoalKind::train &&
+                ((demand.target == UnitKind::highTemplar && countExisting(state, UnitKind::highTemplar) < 2 &&
+                  (technologyLevel(state.self, TechnologyKind::psionicStorm) > 0 ||
+                   technologyInProgress(state.self, TechnologyKind::psionicStorm))) ||
+                 (demand.target == UnitKind::reaver && countExisting(state, UnitKind::reaver) == 0 &&
+                  countCompleted(state, UnitKind::roboticsSupportBay) > 0))) {
+                demand.priority = std::max(114, demand.priority);
+                demand.desiredCount = std::min(demand.desiredCount, demand.target == UnitKind::reaver ? 1 : 2);
+            }
+            else if (mobileScreen >= 8 && demand.blocking &&
+                (demand.technology == TechnologyKind::psionicStorm ||
+                 demand.technology == TechnologyKind::singularityCharge ||
+                 demand.technology == TechnologyKind::legEnhancements ||
+                 demand.target == UnitKind::citadelOfAdun ||
+                 demand.target == UnitKind::templarArchives ||
+                 demand.target == UnitKind::roboticsSupportBay))
+                demand.priority = std::max(113, demand.priority);
+            else if (demand.target == UnitKind::probe && countExisting(state, UnitKind::probe) < 8)
+                demand.priority = std::max(125, demand.priority);
+            else if (counterWindow && demand.target == UnitKind::probe &&
+                     countExisting(state, UnitKind::probe) < 16)
+                demand.priority = std::max(125, demand.priority);
+            else if (counterWindow &&
+                     (demand.target == UnitKind::cyberneticsCore ||
+                      demand.target == UnitKind::assimilator ||
+                      demand.target == UnitKind::shieldBattery) && countExisting(state, demand.target) == 0)
+                demand.priority = std::max(120, demand.priority);
+            else if ((demand.target == UnitKind::forge || demand.target == UnitKind::photonCannon) &&
+                     countExisting(state, UnitKind::photonCannon) == 0 && demand.priority >= 110) {
+                demand.priority = std::max(126, demand.priority);
+                // Once the first Cannon is paid for, let the mobile screen
+                // reinforce while it warps in instead of funding another
+                // unfinished Cannon ahead of every available Gateway.
+                demand.desiredCount = 1;
+            }
+            else if (demand.goal != GoalKind::train)
+                demand.priority = std::min(111, demand.priority);
+        }
+    }
     std::ranges::stable_sort(goals, std::greater{}, &ProductionGoal::priority);
 
-    for (const auto& goal : goals) {
+    for (auto goal : goals) {
+        // Higher-priority detection may have consumed gas since the budget
+        // was composed. Recheck the actual ledger before leaving a usable
+        // Gateway idle with enough minerals for its fallback unit.
+        if (goal.allowMineralFallback && goal.target == UnitKind::dragoon && ledger.freeGas() < 50) {
+            goal.target = UnitKind::zealot;
+            goal.desiredCount = countExisting(state, UnitKind::zealot) + planned[UnitKind::zealot] + 1;
+        }
         if (goal.technology != TechnologyKind::none) {
             const auto& stats = technologyStats(goal.technology);
             const auto currentLevel = technologyLevel(state.self, goal.technology);
@@ -578,4 +652,4 @@ MacroActionKind MacroPlanner::actionKind(const GoalKind goal) noexcept {
     return MacroActionKind::train;
 }
 
-}  // namespace astra
+}  // namespace protodd

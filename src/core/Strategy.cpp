@@ -1,13 +1,13 @@
-#include "astra/Strategy.hpp"
+#include "protodd/Strategy.hpp"
 
-#include "astra/UnitCatalog.hpp"
+#include "protodd/UnitCatalog.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <numeric>
 
-namespace astra {
+namespace protodd {
 namespace {
 
 int count(const GameState& state, const UnitKind kind, const bool completedOnly = false) {
@@ -145,7 +145,7 @@ Position enemyMain(const GameState& state) {
 
     // Before the enemy start is confirmed, search the stalest plausible start.
     // Explicitly exclude our own start; the previous ownerId != -1 fallback
-    // selected Astra's main as soon as its Nexus was observed.
+    // selected Protodd's main as soon as its Nexus was observed.
     const BaseSnapshot* candidate = nullptr;
     auto oldest = std::numeric_limits<Frame>::max();
     for (const auto& base : state.bases) {
@@ -299,6 +299,26 @@ StrategicPlan StrategyEngine::plan(
     }
     addInfrastructure(result, state, threat);
 
+    result.prioritizeReinforcements = hardBreachAtMain(state) ||
+        threat.combatEnemiesNearMain > 0 || activeApproach(state, threat) ||
+        threat.immediateGround > 0.45 || threat.workerRush > 0.30 ||
+        threat.proxy + threat.staticContain > 0.34;
+    result.requireMobileDetection = threat.cloak > 0.28 ||
+        recentEnemyCount(state, UnitKind::spiderMine) > 0 ||
+        recentEnemyCount(state, UnitKind::lurker) > 0 ||
+        recentEnemyCount(state, UnitKind::darkTemplar) > 0 ||
+        (state.enemy.race == Race::terran && minute(state) >= 5 &&
+         (threat.uncertainty > 0.65 || recentEnemyCount(state, UnitKind::factory) >= 2 ||
+          recentEnemyCount(state, UnitKind::starport) > 0));
+    if (result.requireMobileDetection) {
+        result.desiredGasWorkers = std::max(3, result.desiredGasWorkers);
+        goal(result, GoalKind::build, UnitKind::assimilator, 1, 123,
+             "fund required mobile detection", true);
+        goal(result, GoalKind::train, UnitKind::observer,
+             count(state, UnitKind::nexus) >= 2 ? 3 : 2, 124,
+             "replace and maintain mission detectors", true);
+    }
+
     std::ranges::stable_sort(result.goals, std::greater{}, &ProductionGoal::priority);
     return result;
 }
@@ -307,9 +327,13 @@ StrategicPlan StrategyEngine::planPvT(
     const GameState& state,
     const ThreatAssessment& threat) const {
     StrategicPlan result;
-    result.name = "PvT one-gate observer expansion";
+    result.name = "PvT 28 Nexus";
     result.desiredWorkers = std::min(72, 22 + minute(state) * 4);
-    result.desiredBases = minute(state) < 5 ? 1 : (minute(state) < 11 ? 2 : 3);
+    const auto expansionReady = count(state, UnitKind::dragoon, true) >= 3 &&
+                                supplyAtLeast(state, 28);
+    result.desiredBases = expansionReady || count(state, UnitKind::nexus) >= 2 ?
+                              (minute(state) < 11 ? 2 : 3) : 1;
+    result.maximumBases = count(state, UnitKind::nexus) < 2 ? result.desiredBases : 8;
     result.desiredGasWorkers = !supplyAtLeast(state, 11) ? 0 :
                                (minute(state) < 7 ? 3 :
                                 (minute(state) < 12 ? 6 : 9));
@@ -321,16 +345,17 @@ StrategicPlan StrategyEngine::planPvT(
     result.composition = {{UnitKind::dragoon, 0.55}, {UnitKind::zealot, 0.22},
                           {UnitKind::highTemplar, 0.13}, {UnitKind::arbiter, 0.10}};
 
-    // A pure Gateway opening cannot field Zealots quickly enough to trade with
-    // nonstop Barracks production on every spawn. Establish overlapping
-    // Cannon coverage first, then add the Gateway and transition to Dragoons;
-    // this also supplies detection and a safe retreat line against unfamiliar
-    // Terran openings rather than encoding one opponent by name.
-    if (minute(state) < 4 && count(state, UnitKind::zealot, true) == 0 &&
+    // Fortify only when current observations justify the economic cost.
+    // Unknown Terran openings use the Gateway/Core baseline.
+    const auto rushEvidence = threat.workerRush > 0.30 ||
+        threat.proxy + threat.staticContain > 0.34 ||
+        threat.combatEnemiesNearMain > 0 || activeApproach(state, threat) ||
+        threat.immediateGround > 0.45;
+    if (rushEvidence && minute(state) < 4 && count(state, UnitKind::zealot, true) == 0 &&
         count(state, UnitKind::photonCannon, true) == 0) {
         result.desiredWorkers = std::min(result.desiredWorkers, 7);
     }
-    if (supplyAtLeast(state, 7)) {
+    if (rushEvidence && supplyAtLeast(state, 7)) {
         goal(result, GoalKind::build, UnitKind::forge, 1, 100,
              "fortified anti-bio opening anchor", true);
         goal(result, GoalKind::build, UnitKind::photonCannon, 2, 99,
@@ -339,11 +364,11 @@ StrategicPlan StrategyEngine::planPvT(
              "field mobile defense behind the completed static intercept", true);
     }
 
-    if (supplyAtLeast(state, 8)) {
+    if (supplyAtLeast(state, 10) || (rushEvidence && supplyAtLeast(state, 8))) {
         goal(result, GoalKind::build, UnitKind::gateway, minute(state) < 6 ? 1 : 3, 88,
-             "eight-supply gateway", count(state, UnitKind::gateway) == 0);
+             "Gateway opening before gas and Core", count(state, UnitKind::gateway) == 0);
     }
-    if (count(state, UnitKind::gateway) > 0 || supplyAtLeast(state, 10)) {
+    if (rushEvidence && (count(state, UnitKind::gateway) > 0 || supplyAtLeast(state, 10))) {
         goal(result, GoalKind::train, UnitKind::zealot, 1, 94,
              "opening bodyguard before vulnerable dragoon tech",
              count(state, UnitKind::zealot) == 0);
@@ -351,16 +376,21 @@ StrategicPlan StrategyEngine::planPvT(
              "opening sustain against bio pressure");
     }
     if (supplyAtLeast(state, 13)) {
-        goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 92,
+        goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 97,
              "thirteen-supply cybernetics core", true);
+    }
+    if (supplyAtLeast(state, 11)) {
+        goal(result, GoalKind::build, UnitKind::assimilator, 1, 96,
+             "opening gas for Dragoons and range", true);
     }
     if (supplyAtLeast(state, 14)) {
         goal(result, GoalKind::train, UnitKind::dragoon, std::max(3, minute(state) * 2), 91,
              "range control against Terran");
-        technologyGoal(result, TechnologyKind::singularityCharge, 1, 84,
-                       "range completes after the first defensive dragoons");
+        if (count(state, UnitKind::dragoon) >= 1)
+            technologyGoal(result, TechnologyKind::singularityCharge, 1, 98,
+                           "range follows the first Dragoon before expansion", true);
     }
-    if (count(state, UnitKind::dragoon) >= 3 || supplyAtLeast(state, 24)) {
+    if (count(state, UnitKind::nexus) >= 2 || rushEvidence || threat.cloak > 0.28) {
         goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 78,
              "observers against mines and tech scouting");
         goal(result, GoalKind::build, UnitKind::observatory, 1, 77, "observer access");
@@ -487,7 +517,7 @@ StrategicPlan StrategyEngine::planPvZ(
     const GameState& state,
     const ThreatAssessment& threat) const {
     StrategicPlan result;
-    result.name = "PvZ forge expansion into corsair-templar";
+    result.name = "PvZ fortified gateway into corsair-templar";
     result.desiredWorkers = std::min(70, 20 + minute(state) * 4);
     result.desiredBases = minute(state) < 3 ? 1 : (minute(state) < 11 ? 2 : 3);
     result.desiredGasWorkers = !supplyAtLeast(state, 14) ? 0 :
@@ -617,6 +647,61 @@ StrategicPlan StrategyEngine::planPvZ(
 StrategicPlan StrategyEngine::planPvP(
     const GameState& state,
     const ThreatAssessment& threat) const {
+    // Supply and actual structures own the opening. Re-evaluate safety every
+    // pass; no stored phase or irreversible script cursor is required.
+    const auto meleeEvidence = recentEnemyCount(state, UnitKind::zealot) >= 2 ||
+        (recentEnemyCount(state, UnitKind::gateway) >= 2 &&
+         recentEnemyCount(state, UnitKind::cyberneticsCore) == 0);
+    const auto pressureEvidence = hardBreachAtMain(state) || meleeEvidence ||
+        threat.combatEnemiesNearMain > 0 || activeApproach(state, threat) ||
+        threat.immediateGround > 0.45 || threat.workerRush > 0.30 ||
+        threat.proxy + threat.staticContain > 0.34 || threat.cloak > 0.20;
+    if (minute(state) < 8 && !pressureEvidence) {
+        StrategicPlan opening;
+        opening.name = "PvP 3-Gate Robo";
+        opening.desiredWorkers = 32;
+        opening.desiredGasWorkers = supplyAtLeast(state, 12) ? 3 : 0;
+        opening.minimumAttackSize = 8;
+        opening.attackThreshold = 1.25;
+        const auto roboCommitted = count(state, UnitKind::roboticsFacility) > 0;
+        const auto gates = count(state, UnitKind::gateway);
+        const auto detectorReady = count(state, UnitKind::observer, true) > 0;
+        opening.desiredBases = detectorReady && count(state, UnitKind::dragoon, true) >= 6 ? 2 : 1;
+        opening.maximumBases = opening.desiredBases;
+        opening.posture = detectorReady && count(state, UnitKind::dragoon, true) >= 6 ?
+                              Posture::pressure : Posture::hold;
+        opening.composition = {{UnitKind::dragoon, 0.85}, {UnitKind::zealot, 0.15}};
+        if (supplyAtLeast(state, 10))
+            goal(opening, GoalKind::build, UnitKind::gateway, 1, 100, "opening Gateway", true);
+        if (supplyAtLeast(state, 12))
+            goal(opening, GoalKind::build, UnitKind::assimilator, 1, 99, "opening gas", true);
+        if (supplyAtLeast(state, 14)) {
+            goal(opening, GoalKind::train, UnitKind::zealot, 1, 98, "opening bodyguard", true);
+            goal(opening, GoalKind::build, UnitKind::cyberneticsCore, 1, 97, "timely ranged access", true);
+        }
+        if (count(state, UnitKind::cyberneticsCore) > 0) {
+            goal(opening, GoalKind::train, UnitKind::dragoon, 2, 96, "first ranged screen", true);
+            if (count(state, UnitKind::dragoon) >= 1)
+                technologyGoal(opening, TechnologyKind::singularityCharge, 1, 98, "opening range", true);
+        }
+        if (supplyAtLeast(state, 26) || roboCommitted) {
+            goal(opening, GoalKind::build, UnitKind::roboticsFacility, 1, 105, "3-Gate Robo detection", true);
+        }
+        if (roboCommitted && supplyAtLeast(state, 29)) {
+            goal(opening, GoalKind::build, UnitKind::gateway, 3, 104, "three-Gateway throughput", true);
+            if (gates < 3) opening.desiredWorkers = count(state, UnitKind::probe);
+        }
+        if (roboCommitted) {
+            goal(opening, GoalKind::build, UnitKind::observatory, 1, 106, "detection before optional splash", true);
+            goal(opening, GoalKind::train, UnitKind::observer, 1, 107, "first army detector", true);
+        }
+        if (detectorReady) {
+            goal(opening, GoalKind::train, UnitKind::observer, 2, 85, "spare detector and tech scout");
+            goal(opening, GoalKind::build, UnitKind::roboticsSupportBay, 1, 75, "Robo follow-up splash");
+            goal(opening, GoalKind::train, UnitKind::reaver, 1, 74, "support the ranged army");
+        }
+        return opening;
+    }
     StrategicPlan result;
     result.name = "PvP two-gate robotics control";
     result.desiredWorkers = std::min(66, 18 + minute(state) * 4);
@@ -2521,4 +2606,4 @@ std::string_view openingStyleName(const OpeningStyle style) noexcept {
     return "invalid";
 }
 
-}  // namespace astra
+}  // namespace protodd

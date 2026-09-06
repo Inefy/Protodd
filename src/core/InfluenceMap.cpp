@@ -1,13 +1,13 @@
-#include "astra/InfluenceMap.hpp"
+#include "protodd/InfluenceMap.hpp"
 
-#include "astra/UnitCatalog.hpp"
+#include "protodd/UnitCatalog.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
 
-namespace astra {
+namespace protodd {
 
 InfluenceMap::InfluenceMap(const int cellSize)
     : cellSize_(std::max(16, cellSize)) {}
@@ -154,4 +154,4 @@ void InfluenceMap::addThreat(const UnitSnapshot& unit, const Frame currentFrame)
     }
 }
 
-}  // namespace astra
+}  // namespace protodd

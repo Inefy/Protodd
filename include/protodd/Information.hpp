@@ -1,12 +1,12 @@
 #pragma once
 
-#include "astra/GameState.hpp"
+#include "protodd/GameState.hpp"
 
 #include <array>
 #include <cstddef>
 #include <string_view>
 
-namespace astra {
+namespace protodd {
 
 enum class EnemyPlan : std::uint8_t {
     unknown,
@@ -39,6 +39,7 @@ struct ThreatAssessment {
     int combatEnemiesNearMain{};
     int approachingCombatEnemies{};
     EnemyPlan mostLikely{EnemyPlan::unknown};
+    bool enemyNaturalCheckedEmpty{};
 };
 
 class OpponentModel {
@@ -64,5 +65,6 @@ private:
 };
 
 [[nodiscard]] std::string_view enemyPlanName(EnemyPlan plan) noexcept;
+[[nodiscard]] const BaseSnapshot* enemyNatural(const GameState& state) noexcept;
 
-}  // namespace astra
+}  // namespace protodd

@@ -1,14 +1,14 @@
 #pragma once
 
-#include "astra/GameState.hpp"
-#include "astra/Information.hpp"
-#include "astra/InfluenceMap.hpp"
+#include "protodd/GameState.hpp"
+#include "protodd/Information.hpp"
+#include "protodd/InfluenceMap.hpp"
 
 #include <span>
 #include <unordered_map>
 #include <vector>
 
-namespace astra {
+namespace protodd {
 
 enum class ScoutPurpose : std::uint8_t {
     findEnemy,
@@ -34,6 +34,11 @@ class ScoutManager {
 public:
     void reset() noexcept;
 
+    [[nodiscard]] UnitId selectWorkerScout(
+        const GameState& state, const ThreatAssessment& threat,
+        std::span<const UnitId> previousScouts = {},
+        std::span<const UnitId> unavailableWorkers = {});
+
     [[nodiscard]] std::vector<ScoutOrder> assign(
         const GameState& state,
         std::span<const UnitId> availableScouts,
@@ -42,6 +47,9 @@ public:
 
 private:
     std::unordered_map<UnitId, ScoutOrder> previousOrders_;
+    Frame workerMissionStarted_{-1};
+    Frame nextWorkerMission_{};
+    UnitId workerScout_{-1};
 };
 
-}  // namespace astra
+}  // namespace protodd

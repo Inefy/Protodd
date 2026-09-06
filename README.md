@@ -1,6 +1,6 @@
-# AstraBot
+# Protodd
 
-AstraBot is an original, competition-oriented StarCraft: Brood War AI. It plays
+Protodd is an original, competition-oriented StarCraft: Brood War AI. It plays
 Protoss through BWAPI 4.4.0 and is designed around partial information,
 opponent adaptation, deterministic behavior, and replay-driven testing.
 
@@ -62,7 +62,7 @@ tests, adapter translation-unit checks, and whitespace validation), run:
 The `dev` preset uses Ninja. Any generator works if configured manually:
 
 ```powershell
-cmake -S . -B build/dev -DASTRA_BUILD_BWAPI_MODULE=OFF
+cmake -S . -B build/dev -DPROTODD_BUILD_BWAPI_MODULE=OFF
 cmake --build build/dev
 ctest --test-dir build/dev --output-on-failure
 ```
@@ -72,14 +72,14 @@ ctest --test-dir build/dev --output-on-failure
 Install Visual Studio with the C++ workload and unpack the official BWAPI 4.4.0
 source tree. The reproducible builder generates BWAPI's revision header,
 retargets its interface library to the installed toolset, builds Release/Win32,
-links AstraBot, and runs the release tests:
+links Protodd, and runs the release tests:
 
 ```powershell
 ./scripts/build-tournament.ps1 -BwapiRoot C:/deps/BWAPI
 ./scripts/package-tournament.ps1
 ```
 
-Copy `AstraBot.dll` into `StarCraft/bwapi-data/AI/` and select it in
+Copy `Protodd.dll` into `StarCraft/bwapi-data/AI/` and select it in
 `bwapi-data/bwapi.ini`. StarCraft 1.16.1 and the tournament's BWAPI injector are
 required to run matches. The package script emits an AIIDE-ready archive with
 the DLL, full source, manifest, exact build instructions, and no bundled BWAPI
@@ -97,18 +97,21 @@ See [the architecture](docs/architecture.md) for the complete system design.
 Use [the competition workflow](docs/competition.md) to benchmark changes and
 the included log analyzer to compare batches rather than individual games.
 The [research notes](docs/research.md) record the open-source projects and
-design patterns reviewed while keeping Astra's implementation license-clean.
+design patterns reviewed while keeping Protodd's implementation license-clean.
 The [validation record](docs/validation.md) documents the exact candidate DLL,
 automated gates, iterative match outcomes, and unresolved validation gaps.
 The [strength audit](docs/strength-audit.md) details the September 2026 fixes,
 remaining micro/macro weaknesses, and the experiments needed before AIIDE.
 The [follow-up audit](docs/strength-pass2.md) records the subsequent defense,
 economy, placement, and decision-conflict fixes, including failed experiments.
+The [opening and defense update](docs/report-improvements.md) records the
+report-driven opening guards, reinforcement budget, follow-up scouting, and
+local detection requirements, with regression and live-match validation.
 
 ## Local opponent ladder
 
 The repository includes a reproducible wrapper around Starcraft AI Tournament
-Manager for testing AstraBot against locally imported open-source bots. It
+Manager for testing Protodd against locally imported open-source bots. It
 creates balanced schedules, snapshots every participating binary, produces
 per-opponent/per-map reports with confidence intervals, preserves per-game
 diagnostics, and compares candidate builds with a baseline.

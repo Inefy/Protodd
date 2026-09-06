@@ -1,10 +1,10 @@
 #pragma once
 
-#include "astra/GameState.hpp"
+#include "protodd/GameState.hpp"
 
 #include <string_view>
 
-namespace astra {
+namespace protodd {
 
 struct TechnologyStats {
     std::string_view name;
@@ -28,4 +28,4 @@ struct TechnologyStats {
     const PlayerSnapshot& player,
     TechnologyKind kind) noexcept;
 
-}  // namespace astra
+}  // namespace protodd

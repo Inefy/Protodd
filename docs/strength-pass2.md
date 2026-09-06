@@ -2,7 +2,7 @@
 
 This pass starts from commit `3a74e70` and the previous v5 audit candidate.
 The changes address observed economy, defense, placement, and information
-failures. They do not establish that Astra can win AIIDE. BananaBrain remains
+failures. They do not establish that Protodd can win AIIDE. BananaBrain remains
 the demanding opponent used to expose weaknesses; UAlbertaBot is an
 integration and rush-response benchmark.
 
@@ -100,7 +100,7 @@ surviving army value improve. Preserve the prior package for comparison. Native
 Windows 10 verification and a broad tournament benchmark are still outstanding.
 
 The v13 BananaBrain test was another loss, at frame 12,371. This opening
-included worker harassment and an enemy ranged force that outgrew Astra's
+included worker harassment and an enemy ranged force that outgrew Protodd's
 army. The scout's limited production observations did not establish a reliable
 picture of that transition. The next opening experiments should measure Probe
 production gaps and Core/first-Dragoon timing, plus a second safe tech check

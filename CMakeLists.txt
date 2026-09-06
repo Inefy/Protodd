@@ -1,16 +1,16 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(AstraBot VERSION 0.1.0 LANGUAGES CXX)
+project(Protodd VERSION 0.1.0 LANGUAGES CXX)
 
-option(ASTRA_BUILD_TESTS "Build deterministic core tests" ON)
-option(ASTRA_BUILD_BWAPI_MODULE "Build the 32-bit BWAPI tournament DLL" OFF)
+option(PROTODD_BUILD_TESTS "Build deterministic core tests" ON)
+option(PROTODD_BUILD_BWAPI_MODULE "Build the 32-bit BWAPI tournament DLL" OFF)
 set(BWAPI_ROOT "" CACHE PATH "Path to an unpacked BWAPI 4.4.0 release")
 set(BWAPI_LIBRARY "" CACHE FILEPATH "Path to a 32-bit BWAPILIB.lib")
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-include(AstraWarnings)
+include(ProtoddWarnings)
 
-add_library(astra_core OBJECT
+add_library(protodd_core OBJECT
     src/core/GameState.cpp
     src/core/UnitCatalog.cpp
     src/core/Technology.cpp
@@ -28,17 +28,17 @@ add_library(astra_core OBJECT
     src/core/Squads.cpp
     src/core/Transport.cpp
 )
-add_library(Astra::Core ALIAS astra_core)
+add_library(Protodd::Core ALIAS protodd_core)
 
-target_include_directories(astra_core
+target_include_directories(protodd_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
-target_compile_features(astra_core PUBLIC cxx_std_20)
-astra_enable_warnings(astra_core)
+target_compile_features(protodd_core PUBLIC cxx_std_20)
+protodd_enable_warnings(protodd_core)
 
-if(ASTRA_BUILD_BWAPI_MODULE)
+if(PROTODD_BUILD_BWAPI_MODULE)
     if(NOT WIN32)
         message(FATAL_ERROR "The injected BWAPI module must be built for 32-bit Windows")
     endif()
@@ -71,45 +71,45 @@ if(ASTRA_BUILD_BWAPI_MODULE)
         set(BWAPI_LIBRARY "${BWAPI_LIBRARY_DISCOVERED}")
     endif()
 
-    add_library(astra_bwapi MODULE
-        src/bwapi/AstraModule.cpp
+    add_library(protodd_bwapi MODULE
+        src/bwapi/ProtoddModule.cpp
         src/bwapi/BwapiBridge.cpp
         src/bwapi/Entry.cpp
     )
-    target_include_directories(astra_bwapi PRIVATE
+    target_include_directories(protodd_bwapi PRIVATE
         "${BWAPI_INCLUDE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/bwapi"
     )
-    target_link_libraries(astra_bwapi PRIVATE Astra::Core "${BWAPI_LIBRARY}")
-    target_compile_features(astra_bwapi PRIVATE cxx_std_20)
-    target_compile_definitions(astra_bwapi PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-    astra_enable_warnings(astra_bwapi)
-    set_target_properties(astra_bwapi PROPERTIES
-        OUTPUT_NAME "AstraBot"
+    target_link_libraries(protodd_bwapi PRIVATE Protodd::Core "${BWAPI_LIBRARY}")
+    target_compile_features(protodd_bwapi PRIVATE cxx_std_20)
+    target_compile_definitions(protodd_bwapi PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    protodd_enable_warnings(protodd_bwapi)
+    set_target_properties(protodd_bwapi PROPERTIES
+        OUTPUT_NAME "Protodd"
         PREFIX ""
         SUFFIX ".dll"
     )
 endif()
 
-if(ASTRA_BUILD_TESTS)
+if(PROTODD_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
-    if(ASTRA_BUILD_BWAPI_MODULE)
-        add_executable(astra_bwapi_catalog_tests tests/bwapi_catalog.cpp)
-        target_include_directories(astra_bwapi_catalog_tests PRIVATE "${BWAPI_INCLUDE_DIR}")
-        target_link_libraries(astra_bwapi_catalog_tests PRIVATE Astra::Core "${BWAPI_LIBRARY}")
-        target_compile_features(astra_bwapi_catalog_tests PRIVATE cxx_std_20)
-        astra_enable_warnings(astra_bwapi_catalog_tests)
-        add_test(NAME astra_bwapi_catalog_tests COMMAND astra_bwapi_catalog_tests)
+    if(PROTODD_BUILD_BWAPI_MODULE)
+        add_executable(protodd_bwapi_catalog_tests tests/bwapi_catalog.cpp)
+        target_include_directories(protodd_bwapi_catalog_tests PRIVATE "${BWAPI_INCLUDE_DIR}")
+        target_link_libraries(protodd_bwapi_catalog_tests PRIVATE Protodd::Core "${BWAPI_LIBRARY}")
+        target_compile_features(protodd_bwapi_catalog_tests PRIVATE cxx_std_20)
+        protodd_enable_warnings(protodd_bwapi_catalog_tests)
+        add_test(NAME protodd_bwapi_catalog_tests COMMAND protodd_bwapi_catalog_tests)
     endif()
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
         add_test(
-            NAME astra_log_analyzer_tests
+            NAME protodd_log_analyzer_tests
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/log_analyzer.py" --self-test
         )
         add_test(
-            NAME astra_direct_report_tests
+            NAME protodd_direct_report_tests
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/direct_report.py" --self-test
         )
     endif()

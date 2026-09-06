@@ -21,7 +21,7 @@ an experiment over a map and opponent matrix, not as a verdict from one replay.
 
 ## Metrics
 
-`tools/log_analyzer.py` consumes one or more `AstraBot.log` files and reports:
+`tools/log_analyzer.py` consumes one or more `Protodd.log` files and reports:
 
 - wins, losses, and Wilson 95% win-rate interval;
 - game length distribution;
@@ -33,7 +33,7 @@ an experiment over a map and opponent matrix, not as a verdict from one replay.
 Example:
 
 ```powershell
-python tools/log_analyzer.py bwapi-data/write/AstraBot.log --pretty
+python tools/log_analyzer.py bwapi-data/write/Protodd.log --pretty
 ```
 
 The interval is intentionally shown alongside raw win rate. Prefer a candidate
@@ -57,7 +57,7 @@ can hide a PvT, PvZ, PvP, opponent, or map regression.
 
 ## Runtime budget
 
-Astra measures every callback. A frame at 28 ms temporarily disables local
+Protodd measures every callback. A frame at 28 ms temporarily disables local
 combat simulation and reduces navigation/scouting cadence; a frame at 40 ms
 enters an emergency tier with a smaller command budget. Macro, workers,
 detection, and retreat control continue. The bot returns to full quality after
@@ -69,8 +69,8 @@ batch win rate rises.
 
 ## Persistent learning
 
-At game end, `bwapi-data/write/AstraBot-<encoded-alias>.csv` receives cumulative
-outcomes for the current opponent alias. Astra merges the corresponding read
+At game end, `bwapi-data/write/Protodd-<encoded-alias>.csv` receives cumulative
+outcomes for the current opponent alias. Protodd merges the corresponding read
 and local write snapshots without double-counting common history. Separate
 filenames prevent AIIDE's round transfers from overwriting other opponents'
 updates. The alias is encoded as hexadecimal bytes, without identifying the
@@ -81,7 +81,7 @@ Direct local tests record a `.json` outcome manifest before StarCraft is
 closed. Use `tools/direct_report.py` with those manifests: an interrupted game
 is incomplete even if shutdown subsequently writes `END,loss` to a raw trace.
 The direct-match helper preserves a raw trace and archives the pre-cleanup
-trace separately. Its default resets Astra's learning; `-PreserveLearning`
+trace separately. Its default resets Protodd's learning; `-PreserveLearning`
 retains it. Opponent read/write data is preserved, so repeated tests may face
 different learned openings even with the same opponent package and seed.
 Use `-Seed <integer>` to request BWAPI's seed override on both clients, then

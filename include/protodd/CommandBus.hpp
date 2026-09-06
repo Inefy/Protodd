@@ -1,6 +1,6 @@
 #pragma once
 
-#include "astra/GameState.hpp"
+#include "protodd/GameState.hpp"
 
 #include <cstddef>
 #include <limits>
@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace astra {
+namespace protodd {
 
 enum class CommandType : std::uint8_t {
     move,
@@ -64,4 +64,4 @@ private:
     [[nodiscard]] bool redundant(const Command& command) const;
 };
 
-}  // namespace astra
+}  // namespace protodd

@@ -1,13 +1,13 @@
-#include "astra/Information.hpp"
+#include "protodd/Information.hpp"
 
-#include "astra/UnitCatalog.hpp"
+#include "protodd/UnitCatalog.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <numeric>
 
-namespace astra {
+namespace protodd {
 namespace {
 
 constexpr auto index(const EnemyPlan plan) noexcept {
@@ -78,6 +78,23 @@ double productionCapacity(const UnitKind kind) noexcept {
 
 OpponentModel::OpponentModel() {
     reset(Race::unknown);
+}
+
+const BaseSnapshot* enemyNatural(const GameState& state) noexcept {
+    const auto main = std::ranges::find_if(state.bases, [&state](const BaseSnapshot& base) {
+        return base.startLocation && base.ownerId == state.enemy.id &&
+               state.enemy.id >= 0 && base.center.valid();
+    });
+    if (main == state.bases.end()) return nullptr;
+    const BaseSnapshot* natural = nullptr;
+    auto nearest = std::numeric_limits<int>::max();
+    for (const auto& base : state.bases) {
+        if (base.id == main->id || base.startLocation || base.island ||
+            !base.center.valid() || base.ownerId == state.self.id) continue;
+        const auto distance = distanceSquared(main->center, base.center);
+        if (distance < nearest) { nearest = distance; natural = &base; }
+    }
+    return natural;
 }
 
 void OpponentModel::reset(const Race enemyRace) {
@@ -177,6 +194,17 @@ void OpponentModel::update(const GameState& state) {
 
     if (enemyBases >= 2 && minutes < 8.0) {
         evidence[index(EnemyPlan::fastExpand)] += 5.0;
+    }
+    const auto natural = enemyNatural(state);
+    const auto checkedEmpty = natural != nullptr && natural->ownerId == -1 &&
+        natural->lastConfirmedEmpty >= 3 * 60 * 24 &&
+        natural->lastConfirmedEmpty <= state.frame &&
+        state.frame - natural->lastConfirmedEmpty <= 45 * 24;
+    if (checkedEmpty && enemyBases < 2 && minutes >= 3.0 && minutes < 8.0) {
+        // The nearest reachable candidate is only a natural hypothesis. Give
+        // its observed emptiness modest weight; never infer unseen main tech.
+        evidence[index(EnemyPlan::heavyPressure)] += 2.0;
+        evidence[index(EnemyPlan::fastTech)] += 1.0;
     }
 
     const auto advancedTech = seen(state, UnitKind::templarArchives) ||
@@ -311,6 +339,7 @@ void OpponentModel::update(const GameState& state) {
         assessment_.immediateGround + probability(EnemyPlan::heavyPressure) * 0.7,
         0.0, 1.0);
     assessment_.expansion = probability(EnemyPlan::fastExpand);
+    assessment_.enemyNaturalCheckedEmpty = checkedEmpty;
     assessment_.estimatedArmyValue = std::max(visibleValue, armyValue);
 
     const auto entropy = -std::accumulate(
@@ -366,4 +395,4 @@ std::string_view enemyPlanName(const EnemyPlan plan) noexcept {
     return "Invalid";
 }
 
-}  // namespace astra
+}  // namespace protodd

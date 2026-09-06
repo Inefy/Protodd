@@ -1,7 +1,7 @@
 #include "BwapiBridge.hpp"
 
-#include "astra/Combat.hpp"
-#include "astra/UnitCatalog.hpp"
+#include "protodd/Combat.hpp"
+#include "protodd/UnitCatalog.hpp"
 
 #include <algorithm>
 #include <array>
@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace astra::bwapi {
+namespace protodd::bwapi {
 namespace {
 
 using namespace BWAPI;
@@ -29,6 +29,7 @@ void BwapiBridge::onStart() {
     enemyMemory_.clear();
     mineralAllocator_.reset();
     baseLastScouted_.clear();
+    baseLastConfirmedEmpty_.clear();
     pendingBuilds_.clear();
     failedBuildSites_.clear();
     unitCommandLocks_.clear();
@@ -702,7 +703,7 @@ void BwapiBridge::drawDebug(
     const StrategicPlan& plan,
     const ThreatAssessment& threat,
     const CombatEstimate& combat) const {
-    Broodwar->drawTextScreen(8, 8, "AstraBot | %s", plan.name.c_str());
+    Broodwar->drawTextScreen(8, 8, "Protodd | %s", plan.name.c_str());
     Broodwar->drawTextScreen(8, 22, "Posture: %s | Enemy: %s (%.0f%% uncertainty)",
                             postureName(plan.posture).data(),
                             enemyPlanName(threat.mostLikely).data(), threat.uncertainty * 100.0);
@@ -995,6 +996,16 @@ std::vector<BaseSnapshot> BwapiBridge::snapshotBases(const GameState& state) {
         if (tile.isValid() && Broodwar->isVisible(tile)) {
             baseLastScouted_[id] = state.frame;
         }
+        auto footprintVisible = true;
+        for (auto x = -2; x < 2; ++x) {
+            for (auto y = -1; y < 2; ++y) {
+                const TilePosition footprintTile(tile.x + x, tile.y + y);
+                footprintVisible = footprintVisible && footprintTile.isValid() &&
+                                   Broodwar->isVisible(footprintTile);
+            }
+        }
+        if (owner == -1 && footprintVisible) baseLastConfirmedEmpty_[id] = state.frame;
+        if (owner != -1) baseLastConfirmedEmpty_.erase(id);
         const auto start = std::ranges::any_of(
             Broodwar->getStartLocations(),
             [center](const TilePosition startTile) {
@@ -1004,7 +1015,8 @@ std::vector<BaseSnapshot> BwapiBridge::snapshotBases(const GameState& state) {
         const auto island = !Broodwar->hasPath(startPosition, toBwapiPosition(center));
         bases.push_back({id, center, site.mineralLine, minerals, gas, owner,
                          baseLastScouted_[id],
-                         start, island, mineralPatches, geysers});
+                         start, island, mineralPatches, geysers,
+                         baseLastConfirmedEmpty_.contains(id) ? baseLastConfirmedEmpty_.at(id) : -1});
     }
     return bases;
 }
@@ -2114,4 +2126,4 @@ BWAPI::UpgradeType BwapiBridge::toBwapiUpgrade(const TechnologyKind kind) noexce
     }
 }
 
-}  // namespace astra::bwapi
+}  // namespace protodd::bwapi

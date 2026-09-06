@@ -1,4 +1,4 @@
-#include "astra/Navigation.hpp"
+#include "protodd/Navigation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -8,7 +8,7 @@
 #include <queue>
 #include <utility>
 
-namespace astra {
+namespace protodd {
 namespace {
 
 constexpr int unreachable = std::numeric_limits<int>::max() / 4;
@@ -195,4 +195,4 @@ Position NavigationGrid::cellCenter(const int cellIndex) const noexcept {
     return {x * cellSize_ + cellSize_ / 2, y * cellSize_ + cellSize_ / 2};
 }
 
-}  // namespace astra
+}  // namespace protodd

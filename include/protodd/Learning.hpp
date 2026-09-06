@@ -1,6 +1,6 @@
 #pragma once
 
-#include "astra/Strategy.hpp"
+#include "protodd/Strategy.hpp"
 
 #include <array>
 #include <cstdint>
@@ -8,7 +8,7 @@
 #include <string_view>
 #include <unordered_map>
 
-namespace astra {
+namespace protodd {
 
 struct OpeningRecord {
     int wins{};
@@ -48,4 +48,4 @@ private:
         OpeningStyle style);
 };
 
-}  // namespace astra
+}  // namespace protodd

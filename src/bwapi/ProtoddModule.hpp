@@ -2,19 +2,19 @@
 
 #include "BwapiBridge.hpp"
 
-#include "astra/Combat.hpp"
-#include "astra/CommandBus.hpp"
-#include "astra/InfluenceMap.hpp"
-#include "astra/Information.hpp"
-#include "astra/Learning.hpp"
-#include "astra/MacroPlanner.hpp"
-#include "astra/Navigation.hpp"
-#include "astra/Scouting.hpp"
-#include "astra/Runtime.hpp"
-#include "astra/Squads.hpp"
-#include "astra/Strategy.hpp"
-#include "astra/Transport.hpp"
-#include "astra/Workers.hpp"
+#include "protodd/Combat.hpp"
+#include "protodd/CommandBus.hpp"
+#include "protodd/InfluenceMap.hpp"
+#include "protodd/Information.hpp"
+#include "protodd/Learning.hpp"
+#include "protodd/MacroPlanner.hpp"
+#include "protodd/Navigation.hpp"
+#include "protodd/Scouting.hpp"
+#include "protodd/Runtime.hpp"
+#include "protodd/Squads.hpp"
+#include "protodd/Strategy.hpp"
+#include "protodd/Transport.hpp"
+#include "protodd/Workers.hpp"
 
 #include <BWAPI.h>
 
@@ -22,9 +22,9 @@
 #include <fstream>
 #include <vector>
 
-namespace astra::bwapi {
+namespace protodd::bwapi {
 
-class AstraModule final : public BWAPI::AIModule {
+class ProtoddModule final : public BWAPI::AIModule {
 public:
     void onStart() override;
     void onEnd(bool winner) override;
@@ -65,6 +65,35 @@ private:
     std::vector<std::uint64_t> navigationSignatures_;
     Frame navigationRefresh_{-1};
     Frame firstCounterattackFrame_{-1};
+    Frame firstEnemyContactFrame_{-1};
+    Frame firstBaseBreachFrame_{-1};
+    Frame firstCoreFrame_{-1};
+    Frame firstDragoonFrame_{-1};
+    Frame firstRangeFrame_{-1};
+    Frame firstExpansionFrame_{-1};
+    Frame firstArmyZeroFrame_{-1};
+    Frame firstNexusLossFrame_{-1};
+    Frame firstAttackFrame_{-1};
+    Frame lastTelemetryFrame_{-1};
+    Frame lastEventFrame_{-1};
+    int lastArmyCount_{-1};
+    int lastProbeCount_{-1};
+    int lastNexusCount_{-1};
+    int lastCompletedNexusCount_{-1};
+    int lastEnemyVisibleArmy_{-1};
+    int maxArmyCount_{};
+    int maxProbeCount_{};
+    int maxNexusCount_{};
+    int maxEnemyVisibleArmy_{};
+    int peakMinerals_{};
+    int peakGas_{};
+    int telemetrySamples_{};
+    int supplyBlockSamples_{};
+    int highBankSamples_{};
+    int planChanges_{};
+    int postureChanges_{};
+    std::string lastPlanName_;
+    Posture lastPosture_{Posture::hold};
     int maintenanceMineralReserve_{};
     int maintenanceGasReserve_{};
     Frame lastErrorFrame_{-1000};
@@ -79,7 +108,8 @@ private:
                       std::size_t commandLimit);
     [[nodiscard]] std::vector<UnitSnapshot> combatUnits(bool ours) const;
     [[nodiscard]] Position retreatPoint() const;
+    void sampleTelemetry();
     void logDecision();
 };
 
-}  // namespace astra::bwapi
+}  // namespace protodd::bwapi

@@ -1,7 +1,7 @@
-# AstraBot tournament submission
+# Protodd tournament submission
 
-AstraBot is a Protoss BWAPI 4.4.0 module for StarCraft: Brood War 1.16.1.
-`AstraBot.dll` is the Release/Win32 competition binary. The `source` directory
+Protodd is a Protoss BWAPI 4.4.0 module for StarCraft: Brood War 1.16.1.
+`Protodd.dll` is the Release/Win32 competition binary. The `source` directory
 contains the complete original source, tests, build system, and documentation.
 No BWAPI binaries or other large external libraries are bundled.
 
@@ -21,16 +21,16 @@ From the source directory:
 ```
 
 The script generates BWAPI's revision header, builds the official BWAPILIB as
-Release/Win32, configures AstraBot for Win32, builds the DLL, runs the Release
+Release/Win32, configures Protodd for Win32, builds the DLL, runs the Release
 tests, and prints the DLL's SHA-256 digest.
 
 ## Runtime files
 
-Copy `AstraBot.dll` to `bwapi-data/AI/` and select it as the release AI in
-`bwapi-data/bwapi.ini`. Astra reads per-opponent `AstraBot-<encoded-alias>.csv`
+Copy `Protodd.dll` to `bwapi-data/AI/` and select it as the release AI in
+`bwapi-data/bwapi.ini`. Protodd reads per-opponent `Protodd-<encoded-alias>.csv`
 files from `bwapi-data/read/` and its own local `bwapi-data/write/` directory,
-then writes cumulative history for that alias plus `AstraBot.log`. It requires no
+then writes cumulative history for that alias plus `Protodd.log`. It requires no
 network, GPU, registry setting, environment variable, or absolute runtime path.
 
 The bot must play Protoss. Tournament aliases are treated as opaque opponent
-keys; Astra does not attempt to infer real bot identities.
+keys; Protodd does not attempt to infer real bot identities.

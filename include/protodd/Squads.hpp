@@ -1,15 +1,15 @@
 #pragma once
 
-#include "astra/Combat.hpp"
-#include "astra/GameState.hpp"
-#include "astra/InfluenceMap.hpp"
-#include "astra/Strategy.hpp"
+#include "protodd/Combat.hpp"
+#include "protodd/GameState.hpp"
+#include "protodd/InfluenceMap.hpp"
+#include "protodd/Strategy.hpp"
 
 #include <cstdint>
 #include <span>
 #include <vector>
 
-namespace astra {
+namespace protodd {
 
 enum class SquadRole : std::uint8_t { mainArmy, baseDefense, harassment };
 
@@ -49,6 +49,8 @@ public:
 
     [[nodiscard]] static bool mustHoldDefensiveScreen(
         const Squad& squad) noexcept;
+    [[nodiscard]] static bool mobileDetectionReady(
+        const GameState& state, const Squad& squad) noexcept;
 
     [[nodiscard]] static DefenseArea defensiveArea(
         const GameState& state, Position rally);
@@ -75,4 +77,4 @@ private:
 
 [[nodiscard]] std::string_view squadRoleName(SquadRole role) noexcept;
 
-}  // namespace astra
+}  // namespace protodd

@@ -1,12 +1,12 @@
 param(
-    [string]$DllPath = "build/tournament/Release/AstraBot.dll",
-    [string]$OutputPath = "artifacts/AstraBot-AIIDE-2026.zip"
+    [string]$DllPath = "build/tournament/Release/Protodd.dll",
+    [string]$OutputPath = "artifacts/Protodd-AIIDE-2026.zip"
 )
 
 $ErrorActionPreference = "Stop"
 $repoPath = Split-Path -Parent $PSScriptRoot
 $artifactRoot = [System.IO.Path]::GetFullPath((Join-Path $repoPath "artifacts"))
-$stagingRoot = [System.IO.Path]::GetFullPath((Join-Path $artifactRoot "staging/AstraBot"))
+$stagingRoot = [System.IO.Path]::GetFullPath((Join-Path $artifactRoot "staging/Protodd"))
 $resolvedDll = if ([System.IO.Path]::IsPathRooted($DllPath)) {
     [System.IO.Path]::GetFullPath($DllPath)
 } else {
@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
 $sourceRoot = Join-Path $stagingRoot "source"
 New-Item -ItemType Directory -Path $sourceRoot -Force | Out-Null
 
-Copy-Item -LiteralPath $resolvedDll -Destination (Join-Path $stagingRoot "AstraBot.dll")
+Copy-Item -LiteralPath $resolvedDll -Destination (Join-Path $stagingRoot "Protodd.dll")
 foreach ($file in @("README.md", "LICENSE", "CMakeLists.txt", "CMakePresets.json")) {
     Copy-Item -LiteralPath (Join-Path $repoPath $file) -Destination $sourceRoot
 }
@@ -60,7 +60,7 @@ foreach ($file in @("README.md", "ladder.example.json")) {
 Copy-Item -LiteralPath (Join-Path $repoPath "SUBMISSION.md") -Destination $stagingRoot
 
 $manifest = [ordered]@{
-    bot = "AstraBot"
+    bot = "Protodd"
     race = "Protoss"
     bwapi = "4.4.0"
     git_commit = (& git -C $repoPath rev-parse HEAD).Trim()

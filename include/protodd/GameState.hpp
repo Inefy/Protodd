@@ -1,6 +1,6 @@
 #pragma once
 
-#include "astra/Geometry.hpp"
+#include "protodd/Geometry.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace astra {
+namespace protodd {
 
 using Frame = std::int32_t;
 using UnitId = std::int32_t;
@@ -252,6 +252,8 @@ struct BaseSnapshot {
     bool island{};
     int mineralPatches{};
     int geysers{};
+    // A visible, empty depot footprint; -1 means never confirmed empty.
+    Frame lastConfirmedEmpty{-1};
 };
 
 struct TechnologySnapshot {
@@ -299,4 +301,4 @@ struct GameState {
     [[nodiscard]] std::optional<UnitSnapshot> findUnit(UnitId id) const;
 };
 
-}  // namespace astra
+}  // namespace protodd

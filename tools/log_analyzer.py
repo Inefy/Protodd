@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Aggregate AstraBot tournament logs using only the Python standard library."""
+"""Aggregate Protodd tournament logs using only the Python standard library."""
 
 from __future__ import annotations
 
@@ -26,6 +26,19 @@ def wilson_interval(wins: int, games: int, z: float = 1.959963984540054) -> list
     return [max(0.0, center - margin), min(1.0, center + margin)]
 
 
+def parse_key_values(fields: list[str]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for field in fields:
+        if "=" not in field:
+            continue
+        key, value = field.split("=", 1)
+        try:
+            result[key] = float(value) if "." in value else int(value)
+        except ValueError:
+            result[key] = value
+    return result
+
+
 def analyze(lines: Iterable[str]) -> dict[str, object]:
     games: list[dict[str, object]] = []
     current: dict[str, object] | None = None
@@ -39,11 +52,13 @@ def analyze(lines: Iterable[str]) -> dict[str, object]:
                 "opponent": fields[2],
                 "opening": fields[3],
                 "states": [],
+                "events": [],
                 "slow_frames": [],
                 "errors": 0,
             }
         elif fields[0] == "STATE" and len(fields) >= 11 and current is not None:
             try:
+                extras = parse_key_values(fields[14:])
                 current["states"].append(
                     {
                         "frame": int(fields[1]),
@@ -58,6 +73,7 @@ def analyze(lines: Iterable[str]) -> dict[str, object]:
                         "supply_total": int(fields[10]),
                         "frame_ms": float(fields[11]) if len(fields) >= 12 else 0.0,
                         "runtime_load": fields[12] if len(fields) >= 13 else "unknown",
+                        "extras": extras,
                     }
                 )
             except (TypeError, ValueError):
@@ -86,6 +102,15 @@ def analyze(lines: Iterable[str]) -> dict[str, object]:
                 }
             except (TypeError, ValueError):
                 continue
+        elif fields[0] == "EVENT" and len(fields) >= 4 and current is not None:
+            try:
+                current["events"].append(
+                    {"frame": int(fields[1]), "kind": fields[2], "value": ",".join(fields[3:])}
+                )
+            except ValueError:
+                continue
+        elif fields[0] == "SUMMARY" and current is not None:
+            current["summary"] = parse_key_values(fields[1:])
         elif fields[0] == "ERROR" and current is not None:
             current["errors"] = int(current["errors"]) + 1
         elif fields[0] == "END" and len(fields) >= 3 and current is not None:
@@ -156,6 +181,8 @@ def analyze(lines: Iterable[str]) -> dict[str, object]:
                     int(state["frame"]) >= 5760 and float(state["uncertainty"]) >= 0.65
                     for state in states
                 ),
+                "summary": game.get("summary", {}),
+                "events": game.get("events", []),
                 "caught_errors": int(game["errors"]),
                 "peak_frame_ms": float(performance_summary.get("peak_ms", 0.0)),
                 "over_55ms": int(performance_summary.get("over_55ms", 0)),
@@ -217,6 +244,7 @@ def analyze(lines: Iterable[str]) -> dict[str, object]:
             "late_high_uncertainty_snapshots": sum(
                 int(game["late_high_uncertainty_snapshots"]) for game in game_details
             ),
+            "outcome_summaries": sum(bool(game.get("summary")) for game in games),
         },
         "game_details": game_details,
     }
@@ -247,6 +275,20 @@ class AnalyzerTests(unittest.TestCase):
     def test_empty_interval(self) -> None:
         self.assertEqual(wilson_interval(0, 0), [0.0, 1.0])
 
+    def test_events_and_summary_are_retained(self) -> None:
+        result = analyze([
+            "START,Python,BananaBrain,standard\n",
+            "EVENT,4008,enemy-contact,4008\n",
+            "STATE,4200,Plan,Defend,FastRush,0.9,0,20,40,30,50,0.1,normal,idle,"
+            "army=0,enemyComp=Zealot=4/4/4\n",
+            "SUMMARY,won=0,frames=5000,maxArmy=6,firstArmyZero=4200\n",
+            "END,loss,5000\n",
+        ])
+        detail = result["game_details"][0]
+        self.assertEqual(detail["summary"]["maxArmy"], 6)
+        self.assertEqual(detail["events"][0]["kind"], "enemy-contact")
+        self.assertEqual(detail["events"][0]["frame"], 4008)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -259,7 +301,7 @@ def main() -> int:
         result = unittest.TextTestRunner(verbosity=1).run(suite)
         return 0 if result.wasSuccessful() else 1
     if not args.logs:
-        parser.error("provide at least one AstraBot.log file")
+        parser.error("provide at least one Protodd.log file")
     lines = (
         line
         for path in args.logs

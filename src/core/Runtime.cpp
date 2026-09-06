@@ -1,8 +1,8 @@
-#include "astra/Runtime.hpp"
+#include "protodd/Runtime.hpp"
 
 #include <algorithm>
 
-namespace astra {
+namespace protodd {
 
 void FrameBudget::reset() noexcept {
     stats_ = {};
@@ -83,4 +83,4 @@ std::string_view runtimeLoadName(const RuntimeLoad load) noexcept {
     return "invalid";
 }
 
-}  // namespace astra
+}  // namespace protodd

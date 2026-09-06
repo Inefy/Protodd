@@ -1,13 +1,13 @@
-#include "astra/Combat.hpp"
+#include "protodd/Combat.hpp"
 
-#include "astra/UnitCatalog.hpp"
+#include "protodd/UnitCatalog.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
 
-namespace astra {
+namespace protodd {
 namespace {
 
 struct SimUnit {
@@ -532,6 +532,17 @@ std::vector<Command> TacticalController::control(
         // producing stutter, cancelled Dragoon volleys, and indecisive melee.
         if (unit.attackFrame) continue;
 
+        // Apply the mission gate before cloak-preserving advances and target
+        // pursuit. Air-only harassment remains independent; endangered ground
+        // units can still escape while the escort catches up.
+        if (estimate.advanceBlocked && !unit.flying) {
+            const auto escape = fragile || unit.underAttack || localThreat > 0.05F;
+            commands.push_back({unit.id, escape ? CommandType::move : CommandType::hold, -1,
+                escape ? influence.safestStep(unit.position, retreatPoint, false) : unit.position,
+                UnitKind::unknown, 100, 0, "wait-for-mobile-detection"});
+            continue;
+        }
+
         // An attack-unit order follows a kiting opponent indefinitely. Return
         // stragglers to the protected area, and never acquire a distant target
         // merely because it is visible to another member of the squad.
@@ -719,4 +730,4 @@ std::vector<Command> TacticalController::control(
     return commands;
 }
 
-}  // namespace astra
+}  // namespace protodd

@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure
-        run: cmake -S . -B build/ci -A x64 -DASTRA_BUILD_BWAPI_MODULE=OFF -DASTRA_BUILD_TESTS=ON
+        run: cmake -S . -B build/ci -A x64 -DPROTODD_BUILD_BWAPI_MODULE=OFF -DPROTODD_BUILD_TESTS=ON
       - name: Build
         run: cmake --build build/ci --config Release --parallel
       - name: Test

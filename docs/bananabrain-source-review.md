@@ -6,17 +6,17 @@ that work or establish a stronger win rate by itself.
 
 ## Source comparison and implemented changes
 
-| BananaBrain implementation | Gap in Astra | Change in this pass |
+| BananaBrain implementation | Gap in Protodd | Change in this pass |
 | --- | --- | --- |
-| `Macro.cpp`, `TrainingManager::is_training_queue_empty` and `apply_worker_train_orders` (1034, 1174); `BananaBrain.cpp` (217–227) | Astra ran macro frequently, but both its snapshot and command adapter still considered a producer unavailable until training finished. | A shared training-slot predicate admits one successor when completion falls inside remaining latency. Recent commands and a second queue entry prevent duplicate spending. This applies to Nexuses and combat producers. |
+| `Macro.cpp`, `TrainingManager::is_training_queue_empty` and `apply_worker_train_orders` (1034, 1174); `BananaBrain.cpp` (217–227) | Protodd ran macro frequently, but both its snapshot and command adapter still considered a producer unavailable until training finished. | A shared training-slot predicate admits one successor when completion falls inside remaining latency. Recent commands and a second queue entry prevent duplicate spending. This applies to Nexuses and combat producers. |
 | `Macro.cpp`, `BuildingManager::update_supply_requests` (129) | A fixed supply buffer underestimates several fast producers; an unfinished Pylon suppressed all additional requests. | Forecast supply consumption over Pylon construction plus a 96-frame builder allowance, using each producer's normalized composition and unit build times. Credit pending supply; another Pylon is allowed if that supply still falls short. |
 | `Worker.cpp`, `defend_base_with_workers_if_needed` (1385) and `is_dangerous_unit` (2035) | Worker escape was coupled to the early militia cutoff; a distant undetected DT could evacuate every Probe. | Evaluate melee danger beyond the opening cutoff, choose the nearby threat for each worker, and stop escape assignments once separation is restored. Keep the existing small militia policy. |
 | Worker orders and local defense decisions in `Worker.cpp` | The adapter alternated move/gather during command latency and sent fleeing workers to the same farthest mineral patch. | Respect pending commands, mineral-walk to safer patches with an assignment-load penalty, check other visible attackers at the destination, and use the explicit escape step when no suitable patch exists. |
 | `ProtossStrategy.cpp`, `mode_main` (3769–3875) | Army posture automatically cancelled economic growth even after saturation. | A guarded economy may reserve a natural while its army stays defensive. The opening base cap, active rush/containment, breach, and missing cloak detection still veto growth. |
-| `Worker.cpp`, `WorkerAllocation::max_workers` (79) derives its cap from allocated resources | Desired-but-unstarted expansions allowed 40 Probes on one base in the third test. | Worker targets use actual Nexus count, including construction, rather than desired base count. Astra retains its approximate 22-workers-per-base limit; it does not copy BananaBrain's three-workers-per-resource calculation. |
+| `Worker.cpp`, `WorkerAllocation::max_workers` (79) derives its cap from allocated resources | Desired-but-unstarted expansions allowed 40 Probes on one base in the third test. | Worker targets use actual Nexus count, including construction, rather than desired base count. Protodd retains its approximate 22-workers-per-base limit; it does not copy BananaBrain's three-workers-per-resource calculation. |
 | `ProtossStrategy.cpp` selects distinct opponent responses and tech requests | Every visible ground combat unit counted as current melee pressure. | Only visible Zealots/DTs activate that contact signal. Correct an adjacent Cannon-count branch that could request more Cannons when the second was judged unaffordable. |
 
-The review also exposed two bugs in the previous Astra changes. Deferred
+The review also exposed two bugs in the previous Protodd changes. Deferred
 structures refreshed their own last-request timestamp forever; now only an
 explicit strategic request refreshes the 30-second memory, and cancelled
 expansions release it immediately. Different upgrades share an unknown unit
@@ -32,24 +32,24 @@ submissions containing substantial portions of its software.
 
 BananaBrain's `Strategy::attack_check_condition` (117) keeps an attack committed
 between separate entry and exit army-supply thresholds, correcting for excess
-air-only units. Astra's director mainly has a timed post-defense hold, and its
+air-only units. Protodd's director mainly has a timed post-defense hold, and its
 matchup rules still contain many competing overrides. This pass separates
 growth from defense but does not replace that whole strategic controller.
 
 `WorkerManager::is_dangerous_unit` asks a local enemy cluster whether the front
-units should win. Astra's revised escape checks use proximity and its influence
+units should win. Protodd's revised escape checks use proximity and its influence
 map, not that cluster simulation. The 160-pixel melee escape distance and
 mining floor need live tuning; path safety between a worker and a selected
 mineral patch is still approximate.
 
 BananaBrain's `BaseState::update_next_available_bases` (177) uses BWEM base and
 area ownership, reachable ground distances, distance from enemy bases, and an
-explicit preference for the natural. Astra still uses its resource-site
+explicit preference for the natural. Protodd still uses its resource-site
 discovery and placement/navigation checks. Porting the topology model would
 be a separate architectural change.
 
 BananaBrain also has persistent worker orders and map-specific optimal-mining
-data. Astra retains mineral assignments but does not have that movement/cargo
+data. Protodd retains mineral assignments but does not have that movement/cargo
 optimization. Its new supply forecast is a throughput estimate with a fixed
 travel allowance, not BananaBrain's measured builder travel estimate or a
 complete future resource scheduler.
@@ -57,7 +57,7 @@ complete future resource scheduler.
 `BananaBrain::after` (211–227) explicitly switches combat training ahead of
 optional construction/research when `prioritize_training` is enabled. Its
 Protoss main mode enables this for rushes, containment, anti-air needs, or an
-oversized opponent army. Astra still expresses most of this through individual
+oversized opponent army. Protodd still expresses most of this through individual
 goal priorities. The new traces show why a coherent reinforcement budget is
 the next useful scheduling change: expensive tech can finish while the mobile
 screen and Gateways are being lost. Fixing latency does not fix that spending

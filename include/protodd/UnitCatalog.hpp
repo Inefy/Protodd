@@ -1,11 +1,11 @@
 #pragma once
 
-#include "astra/GameState.hpp"
+#include "protodd/GameState.hpp"
 
 #include <span>
 #include <string_view>
 
-namespace astra {
+namespace protodd {
 
 struct UnitStats {
     std::string_view name;
@@ -26,4 +26,4 @@ struct UnitStats {
 [[nodiscard]] bool isStaticDefense(UnitKind kind) noexcept;
 [[nodiscard]] std::span<const UnitKind> unitPrerequisites(UnitKind kind) noexcept;
 
-}  // namespace astra
+}  // namespace protodd

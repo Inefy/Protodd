@@ -1,6 +1,6 @@
-#include "astra/Workers.hpp"
+#include "protodd/Workers.hpp"
 
-#include "astra/UnitCatalog.hpp"
+#include "protodd/UnitCatalog.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -8,7 +8,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace astra {
+namespace protodd {
 namespace {
 
 int militiaDemand(const UnitSnapshot& enemy, const Frame frame) {
@@ -596,4 +596,4 @@ const BaseSnapshot* WorkerManager::safestOwnedBase(
     return best;
 }
 
-}  // namespace astra
+}  // namespace protodd

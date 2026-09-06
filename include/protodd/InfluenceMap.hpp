@@ -1,10 +1,10 @@
 #pragma once
 
-#include "astra/GameState.hpp"
+#include "protodd/GameState.hpp"
 
 #include <vector>
 
-namespace astra {
+namespace protodd {
 
 struct InfluenceCell {
     float groundThreat{};
@@ -39,4 +39,4 @@ private:
     void addThreat(const UnitSnapshot& unit, Frame currentFrame);
 };
 
-}  // namespace astra
+}  // namespace protodd

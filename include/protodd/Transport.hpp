@@ -1,13 +1,13 @@
 #pragma once
 
-#include "astra/CommandBus.hpp"
-#include "astra/GameState.hpp"
-#include "astra/InfluenceMap.hpp"
+#include "protodd/CommandBus.hpp"
+#include "protodd/GameState.hpp"
+#include "protodd/InfluenceMap.hpp"
 
 #include <unordered_map>
 #include <vector>
 
-namespace astra {
+namespace protodd {
 
 enum class TransportPhase : std::uint8_t { gathering, attacking, extracting, returning };
 
@@ -30,4 +30,4 @@ private:
     std::unordered_map<UnitId, Mission> missions_;
 };
 
-}  // namespace astra
+}  // namespace protodd

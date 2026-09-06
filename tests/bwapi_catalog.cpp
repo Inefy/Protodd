@@ -1,4 +1,4 @@
-#include "astra/UnitCatalog.hpp"
+#include "protodd/UnitCatalog.hpp"
 
 #include <BWAPI/UnitType.h>
 #include <BWAPI/WeaponType.h>
@@ -8,7 +8,7 @@
 #include <utility>
 
 int main() {
-    using astra::UnitKind;
+    using protodd::UnitKind;
     using namespace BWAPI::UnitTypes;
     const std::array pairs{
         std::pair{UnitKind::probe, Protoss_Probe},
@@ -42,7 +42,7 @@ int main() {
     };
     auto failures = 0;
     for (const auto& [kind, type] : pairs) {
-        const auto& stats = astra::unitStats(kind);
+        const auto& stats = protodd::unitStats(kind);
         if (stats.minerals != type.mineralPrice() || stats.gas != type.gasPrice() ||
             stats.supply != type.supplyRequired() || stats.buildTime != type.buildTime()) {
             std::cerr << "Catalog mismatch: " << stats.name << " (BWAPI "

@@ -1,11 +1,11 @@
 #pragma once
 
-#include "astra/Geometry.hpp"
+#include "protodd/Geometry.hpp"
 
 #include <cstdint>
 #include <vector>
 
-namespace astra {
+namespace protodd {
 
 // A compact, deterministic terrain grid used by the portable core. The BWAPI
 // adapter samples Brood War walk tiles once at game start; no map names or
@@ -48,4 +48,4 @@ private:
     [[nodiscard]] Position cellCenter(int index) const noexcept;
 };
 
-}  // namespace astra
+}  // namespace protodd

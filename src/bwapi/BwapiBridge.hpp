@@ -1,13 +1,13 @@
 #pragma once
 
-#include "astra/Combat.hpp"
-#include "astra/CommandBus.hpp"
-#include "astra/GameState.hpp"
-#include "astra/MacroPlanner.hpp"
-#include "astra/Navigation.hpp"
-#include "astra/Scouting.hpp"
-#include "astra/Strategy.hpp"
-#include "astra/Workers.hpp"
+#include "protodd/Combat.hpp"
+#include "protodd/CommandBus.hpp"
+#include "protodd/GameState.hpp"
+#include "protodd/MacroPlanner.hpp"
+#include "protodd/Navigation.hpp"
+#include "protodd/Scouting.hpp"
+#include "protodd/Strategy.hpp"
+#include "protodd/Workers.hpp"
 
 #include <BWAPI.h>
 
@@ -16,7 +16,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace astra::bwapi {
+namespace protodd::bwapi {
 
 class BwapiBridge {
 public:
@@ -79,6 +79,7 @@ private:
     std::unordered_map<UnitId, UnitSnapshot> enemyMemory_;
     MineralAllocator mineralAllocator_;
     std::unordered_map<int, Frame> baseLastScouted_;
+    std::unordered_map<int, Frame> baseLastConfirmedEmpty_;
     std::unordered_map<UnitKind, PendingBuild> pendingBuilds_;
     std::vector<FailedBuildSite> failedBuildSites_;
     std::unordered_map<UnitId, Frame> unitCommandLocks_;
@@ -117,4 +118,4 @@ private:
     [[nodiscard]] static BWAPI::Position toBwapiPosition(Position position) noexcept;
 };
 
-}  // namespace astra::bwapi
+}  // namespace protodd::bwapi

@@ -1,12 +1,12 @@
 #pragma once
 
-#include "astra/GameState.hpp"
+#include "protodd/GameState.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
 
-namespace astra {
+namespace protodd {
 
 enum class RuntimeLoad : std::uint8_t { normal, reduced, emergency };
 
@@ -40,4 +40,4 @@ private:
 
 [[nodiscard]] std::string_view runtimeLoadName(RuntimeLoad load) noexcept;
 
-}  // namespace astra
+}  // namespace protodd

@@ -21,8 +21,8 @@ class LadderTests(unittest.TestCase):
     def test_schedule_is_deterministic_and_balances_host(self) -> None:
         opponents = [{"name": "Iron"}, {"name": "Steamhammer"}]
         maps = ["maps/aiide/Benzene.scx", "maps/aiide/Python.scx"]
-        first = ladder.make_schedule("AstraBot", opponents, maps, 2)
-        second = ladder.make_schedule("AstraBot", opponents, maps, 2)
+        first = ladder.make_schedule("Protodd", opponents, maps, 2)
+        second = ladder.make_schedule("Protodd", opponents, maps, 2)
 
         self.assertEqual(first, second)
         self.assertEqual(len(first), 8)
@@ -30,36 +30,36 @@ class LadderTests(unittest.TestCase):
         self.assertEqual({game["map"] for game in first}, {"Benzene.scx", "Python.scx"})
         for opponent in ("Iron", "Steamhammer"):
             games = [game for game in first if opponent in (game["homeBot"], game["awayBot"])]
-            self.assertEqual(sum(game["homeBot"] == "AstraBot" for game in games), 2)
-            self.assertEqual(sum(game["awayBot"] == "AstraBot" for game in games), 2)
+            self.assertEqual(sum(game["homeBot"] == "Protodd" for game in games), 2)
+            self.assertEqual(sum(game["awayBot"] == "Protodd" for game in games), 2)
 
     def test_raw_tournament_reports_are_merged_and_failures_attributed(self) -> None:
         reports = [
             {
-                "gameID": 0, "round": 0, "map": "Python", "reportingBot": "AstraBot",
+                "gameID": 0, "round": 0, "map": "Python", "reportingBot": "Protodd",
                 "opponentBot": "Iron", "won": True, "crash": False, "gameEndType": "NORMAL",
                 "gameTimeout": False, "finalFrame": 7200, "timers": [{"frameCount": 0}],
             },
             {
                 "gameID": 0, "round": 0, "map": "Python", "reportingBot": "Iron",
-                "opponentBot": "AstraBot", "won": False, "crash": False, "gameEndType": "NORMAL",
+                "opponentBot": "Protodd", "won": False, "crash": False, "gameEndType": "NORMAL",
                 "gameTimeout": False, "finalFrame": 7200, "timers": [{"frameCount": 0}],
             },
             {
-                "gameID": 1, "round": 1, "map": "Benzene", "reportingBot": "AstraBot",
+                "gameID": 1, "round": 1, "map": "Benzene", "reportingBot": "Protodd",
                 "opponentBot": "Iron", "won": False, "crash": True,
                 "gameEndType": "STARCRAFT_CRASH", "gameTimeout": False, "finalFrame": 2400,
                 "timers": [{"frameCount": 0}],
             },
             {
                 "gameID": 1, "round": 1, "map": "Benzene", "reportingBot": "Iron",
-                "opponentBot": "AstraBot", "won": True, "crash": False,
+                "opponentBot": "Protodd", "won": True, "crash": False,
                 "gameEndType": "NORMAL", "gameTimeout": False, "finalFrame": 2400,
                 "timers": [{"frameCount": 0}],
             },
         ]
-        records = ladder.merge_raw_reports(reports, "AstraBot", [{"time_ms": 55, "frame_count": 320}])
-        report = ladder.summarize(records, "AstraBot")
+        records = ladder.merge_raw_reports(reports, "Protodd", [{"time_ms": 55, "frame_count": 320}])
+        report = ladder.summarize(records, "Protodd")
 
         self.assertEqual(len(records), 2)
         self.assertTrue(records[0]["won"])
@@ -71,26 +71,26 @@ class LadderTests(unittest.TestCase):
     def test_incomplete_reports_are_not_scored(self) -> None:
         reports = [
             {
-                "gameID": 7, "round": 0, "map": "Python", "reportingBot": "AstraBot",
+                "gameID": 7, "round": 0, "map": "Python", "reportingBot": "Protodd",
                 "opponentBot": "Iron", "won": True, "crash": False, "gameEndType": "NORMAL",
                 "gameTimeout": False, "finalFrame": 100, "timers": [],
             }
         ]
-        records = ladder.merge_raw_reports(reports, "AstraBot", [])
-        summary = ladder.summarize(records, "AstraBot")["summary"]
+        records = ladder.merge_raw_reports(reports, "Protodd", [])
+        summary = ladder.summarize(records, "Protodd")["summary"]
         self.assertEqual(summary["scored_games"], 0)
         self.assertEqual(summary["excluded_incomplete_games"], 1)
 
     def test_detailed_results_javascript_is_supported(self) -> None:
         payload = [{
-            "gameID": 2, "round": 0, "bots": ["AstraBot", "Steamhammer"],
+            "gameID": 2, "round": 0, "bots": ["Protodd", "Steamhammer"],
             "winner": 1, "crash": -1, "timeout": -1, "map": "Tau Cross",
             "gameEndType": "NORMAL", "duration": "00:05:00",
         }]
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "detailed_results_json.js"
             path.write_text("var replayPath='../';\nvar detailedResults = " + json.dumps(payload) + ";", encoding="utf-8")
-            records = ladder.parse_results([path], "AstraBot", [])
+            records = ladder.parse_results([path], "Protodd", [])
         self.assertEqual(records[0]["frames"], 7200)
         self.assertFalse(records[0]["won"])
 
@@ -107,9 +107,9 @@ class LadderTests(unittest.TestCase):
             manager = config_dir / "manager"
             (manager / "server").mkdir(parents=True)
             (manager / "server" / "run_server.bat").write_text("@echo off\n", encoding="utf-8")
-            artifact = root / "build" / "AstraBot.dll"
+            artifact = root / "build" / "Protodd.dll"
             artifact.parent.mkdir()
-            artifact.write_bytes(b"astra")
+            artifact.write_bytes(b"protodd")
             opponent = config_dir / "bots" / "Iron"
             (opponent / "AI").mkdir(parents=True)
             (opponent / "AI" / "Iron.dll").write_bytes(b"iron")
@@ -119,7 +119,7 @@ class LadderTests(unittest.TestCase):
             maps.parent.mkdir()
             maps.write_bytes(b"maps")
             config = {
-                "our_bot": {"name": "AstraBot", "race": "Protoss", "type": "dll", "bwapi_version": "BWAPI_440", "artifact": "../build/AstraBot.dll"},
+                "our_bot": {"name": "Protodd", "race": "Protoss", "type": "dll", "bwapi_version": "BWAPI_440", "artifact": "../build/Protodd.dll"},
                 "opponents": [{"name": "Iron", "race": "Terran", "type": "dll", "bwapi_version": "BWAPI_412", "directory": "bots/Iron"}],
                 "maps": ["maps/aiide/Python.scx"], "rounds": 2,
                 "tournament_manager": "manager", "maps_archive": "maps/maps.zip",
@@ -140,32 +140,32 @@ class LadderTests(unittest.TestCase):
             self.assertEqual(manifest["scheduled_games"], 2)
             self.assertEqual(len(games), 2)
             self.assertEqual(json.loads(games[0])["map"], "Python.scx")
-            self.assertTrue((run / "tournament" / "server" / "bots" / "AstraBot" / "AI" / "AstraBot.dll").is_file())
+            self.assertTrue((run / "tournament" / "server" / "bots" / "Protodd" / "AI" / "Protodd.dll").is_file())
             self.assertTrue((run / "tournament" / "server" / "bots" / "Iron" / "AI" / "Iron.dll").is_file())
 
     def test_report_writes_dashboard_and_per_game_telemetry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             reports = [
-                {"gameID": 0, "round": 0, "map": "Python", "reportingBot": "AstraBot", "opponentBot": "Iron", "won": True, "crash": False, "gameEndType": "NORMAL", "gameTimeout": False, "finalFrame": 7200, "timers": []},
-                {"gameID": 0, "round": 0, "map": "Python", "reportingBot": "Iron", "opponentBot": "AstraBot", "won": False, "crash": False, "gameEndType": "NORMAL", "gameTimeout": False, "finalFrame": 7200, "timers": []},
+                {"gameID": 0, "round": 0, "map": "Python", "reportingBot": "Protodd", "opponentBot": "Iron", "won": True, "crash": False, "gameEndType": "NORMAL", "gameTimeout": False, "finalFrame": 7200, "timers": []},
+                {"gameID": 0, "round": 0, "map": "Python", "reportingBot": "Iron", "opponentBot": "Protodd", "won": False, "crash": False, "gameEndType": "NORMAL", "gameTimeout": False, "finalFrame": 7200, "timers": []},
             ]
             results = root / "results.txt"
             results.write_text("".join(json.dumps(item) + "\n" for item in reports), encoding="utf-8")
             manifest = root / "manifest.json"
-            manifest.write_text(json.dumps({"our_bot": "AstraBot", "label": "test", "scheduled_games": 1, "bots": [{"name": "AstraBot", "race": "Protoss"}, {"name": "Iron", "race": "Terran"}]}), encoding="utf-8")
-            log = root / "AstraBot.log"
+            manifest.write_text(json.dumps({"our_bot": "Protodd", "label": "test", "scheduled_games": 1, "bots": [{"name": "Protodd", "race": "Protoss"}, {"name": "Iron", "race": "Terran"}]}), encoding="utf-8")
+            log = root / "Protodd.log"
             log.write_text("START,Python,Iron,standard\nSTATE,3600,PvT,Attack,FastExpand,0.4,1.2,100,50,30,34\nPERF_SUMMARY,7200,0.8,2.0,0,0,0,0\nEND,win,7200\n", encoding="utf-8")
             output = root / "report"
             with redirect_stdout(io.StringIO()):
-                ladder.command_report(Namespace(results=[str(results)], config=str(root / "missing.json"), manifest=str(manifest), our_bot=None, astra_log=[str(log)], output=str(output)))
+                ladder.command_report(Namespace(results=[str(results)], config=str(root / "missing.json"), manifest=str(manifest), our_bot=None, protodd_log=[str(log)], output=str(output)))
 
             self.assertTrue((output / "index.html").is_file())
             self.assertTrue((output / "games.csv").is_file())
             self.assertTrue((output / "telemetry-games.csv").is_file())
             parsed = json.loads((output / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(parsed["summary"]["missing_scheduled_games"], 0)
-            self.assertEqual(parsed["astra_telemetry"]["runtime"]["over_55ms"], 0)
+            self.assertEqual(parsed["protodd_telemetry"]["runtime"]["over_55ms"], 0)
 
 
 if __name__ == "__main__":

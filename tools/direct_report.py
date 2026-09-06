@@ -20,10 +20,53 @@ def diagnose_states(lines: list[str]) -> dict:
               "first_observed_completed_core_frame": None,
               "first_observed_range_frame": None,
               "first_counterattack_frame": None,
+              "first_enemy_contact_frame": None,
+              "first_base_breach_frame": None,
+              "first_expansion_frame": None,
+              "first_army_zero_frame": None,
+              "first_nexus_loss_frame": None,
+              "first_attack_frame": None,
+              "summary": {}, "events": [],
               "gas_assignment_samples": 0, "gas_above_target_samples": 0,
               "last_mined_minerals": None, "last_mined_gas": None}
     for line in lines:
         fields = line.strip().split(",")
+        if fields and fields[0] == "EVENT" and len(fields) >= 4:
+            try:
+                frame = int(fields[1])
+                result["events"].append(
+                    {"frame": frame, "kind": fields[2], "value": ",".join(fields[3:])}
+                )
+                event_milestones = {
+                    "enemy-contact": "first_enemy_contact_frame",
+                    "base-breach": "first_base_breach_frame",
+                    "core-complete": "first_observed_completed_core_frame",
+                    "dragoon-complete": "first_observed_completed_dragoon_frame",
+                    "range-complete": "first_observed_range_frame",
+                    "second-nexus": "first_expansion_frame",
+                    "counterattack": "first_counterattack_frame",
+                    "attack-posture": "first_attack_frame",
+                    "army-zero": "first_army_zero_frame",
+                    "nexus-loss": "first_nexus_loss_frame",
+                }
+                milestone = event_milestones.get(fields[2])
+                if milestone is not None and result[milestone] is None:
+                    result[milestone] = frame
+            except ValueError:
+                pass
+            continue
+        if fields and fields[0] == "SUMMARY":
+            values = {}
+            for field in fields[1:]:
+                if "=" not in field:
+                    continue
+                key, value = field.split("=", 1)
+                try:
+                    values[key] = float(value) if "." in value else int(value)
+                except ValueError:
+                    values[key] = value
+            result["summary"] = values
+            continue
         if len(fields) < 14 or fields[0] != "STATE":
             continue
         try:
@@ -45,6 +88,14 @@ def diagnose_states(lines: list[str]) -> dict:
             counterattack = int(extras.get("counterattackFirst", -1))
             if counterattack >= 0 and result["first_counterattack_frame"] is None:
                 result["first_counterattack_frame"] = counterattack
+            for field, key in (("firstEnemyContact", "first_enemy_contact_frame"),
+                               ("firstBaseBreach", "first_base_breach_frame"),
+                               ("firstExpansion", "first_expansion_frame"),
+                               ("firstArmyZero", "first_army_zero_frame"),
+                               ("firstNexusLoss", "first_nexus_loss_frame"),
+                               ("firstAttack", "first_attack_frame")):
+                if field in extras and int(extras[field]) >= 0 and result[key] is None:
+                    result[key] = int(extras[field])
             if "gasWorkers" in extras and "gasTarget" in extras:
                 result["gas_assignment_samples"] += 1
                 result["gas_above_target_samples"] += int(int(extras["gasWorkers"]) > int(extras["gasTarget"]))
@@ -53,6 +104,22 @@ def diagnose_states(lines: list[str]) -> dict:
                     result[key] = int(extras[field])
         except (ValueError, IndexError):
             continue
+    summary = result["summary"]
+    for field, key in (("firstEnemyContact", "first_enemy_contact_frame"),
+                       ("firstBaseBreach", "first_base_breach_frame"),
+                       ("firstCore", "first_observed_completed_core_frame"),
+                       ("firstDragoon", "first_observed_completed_dragoon_frame"),
+                       ("firstRange", "first_observed_range_frame"),
+                       ("firstExpansion", "first_expansion_frame"),
+                       ("firstCounterattack", "first_counterattack_frame"),
+                       ("firstArmyZero", "first_army_zero_frame"),
+                       ("firstNexusLoss", "first_nexus_loss_frame"),
+                       ("firstAttack", "first_attack_frame")):
+        if key in result and result[key] is None and field in summary and int(summary[field]) >= 0:
+            result[key] = int(summary[field])
+    for field, key in (("maxProbes", "max_probes"),):
+        if field in summary:
+            result[key] = max(int(result[key]), int(summary[field]))
     return result
 
 
@@ -119,6 +186,16 @@ class DirectReportTests(unittest.TestCase):
         self.assertEqual(result["last_mined_minerals"], 2400)
         self.assertEqual(result["last_mined_gas"], 300)
         self.assertEqual(result["gas_above_target_samples"], 1)
+
+    def test_summary_and_events_are_retained(self):
+        result = diagnose_states([
+            "EVENT,4008,enemy-contact,4008",
+            "SUMMARY,won=0,frames=5000,maxProbes=19,firstArmyZero=4200",
+        ])
+        self.assertEqual(result["events"][0]["kind"], "enemy-contact")
+        self.assertEqual(result["first_enemy_contact_frame"], 4008)
+        self.assertEqual(result["first_army_zero_frame"], 4200)
+        self.assertEqual(result["max_probes"], 19)
 
     def test_shutdown_loss_is_incomplete(self):
         report = summarize([{"status": "incomplete", "result": "END,loss,18377"}])

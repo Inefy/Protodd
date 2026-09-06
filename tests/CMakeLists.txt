@@ -1,9 +1,9 @@
-add_executable(astra_tests
+add_executable(protodd_tests
     test_main.cpp
 )
-target_link_libraries(astra_tests PRIVATE Astra::Core)
-target_compile_features(astra_tests PRIVATE cxx_std_20)
-astra_enable_warnings(astra_tests)
+target_link_libraries(protodd_tests PRIVATE Protodd::Core)
+target_compile_features(protodd_tests PRIVATE cxx_std_20)
+protodd_enable_warnings(protodd_tests)
 
-add_test(NAME astra_core_tests COMMAND astra_tests)
+add_test(NAME protodd_core_tests COMMAND protodd_tests)
 

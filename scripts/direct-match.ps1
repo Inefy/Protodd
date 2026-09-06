@@ -9,7 +9,7 @@ param(
     [int]$FrameMilliseconds = 0,
     [ValidateRange(-1, 2147483646)]
     [int]$Seed = -1,
-    [string]$BotDll = "build/tournament/Release/AstraBot.dll",
+    [string]$BotDll = "build/tournament/Release/Protodd.dll",
     [switch]$PreserveLearning
 )
 
@@ -61,7 +61,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $opponentRoot $moduleName) -PathType
 $opponentComponents = [ordered]@{}
 $opponentFiles = @(Get-ChildItem -LiteralPath $opponentRoot -File -Recurse | Sort-Object FullName)
 foreach ($file in $opponentFiles) {
-    $relative = [System.IO.Path]::GetRelativePath($opponentRoot, $file.FullName)
+    $relative = $file.FullName.Substring($opponentRoot.Length).TrimStart('\', '/')
     $opponentComponents[$relative] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
 }
 
@@ -70,10 +70,10 @@ $writeRoot = Join-Path $runtimeA "bwapi-data/write"
 if (Test-Path -LiteralPath (Join-Path $archiveRoot "$Label.json")) {
     throw "A match record already exists for label '$Label'; choose a new label"
 }
-$archiveFiles = @(Join-Path $writeRoot "AstraBot.log")
+$archiveFiles = @(Join-Path $writeRoot "Protodd.log")
 if (-not $PreserveLearning) {
     foreach ($dataDirectory in @($writeRoot, (Join-Path $runtimeA "bwapi-data/read"))) {
-        $archiveFiles += @(Get-ChildItem -LiteralPath $dataDirectory -Filter 'AstraBot*.csv' -File |
+        $archiveFiles += @(Get-ChildItem -LiteralPath $dataDirectory -Filter 'Protodd*.csv' -File |
             Select-Object -ExpandProperty FullName)
     }
 }
@@ -86,7 +86,7 @@ foreach ($existing in $archiveFiles) {
 }
 
 $sourceDllHash = (Get-FileHash -LiteralPath $resolvedDll -Algorithm SHA256).Hash
-$deployedDll = Join-Path $runtimeA "bwapi-data/AI/AstraBot.dll"
+$deployedDll = Join-Path $runtimeA "bwapi-data/AI/Protodd.dll"
 Copy-Item -LiteralPath $resolvedDll -Destination $deployedDll -Force
 $deployedDllHash = (Get-FileHash -LiteralPath $deployedDll -Algorithm SHA256).Hash
 if ($sourceDllHash -ne $deployedDllHash) {
@@ -95,7 +95,7 @@ if ($sourceDllHash -ne $deployedDllHash) {
 "MATCH_DLL=$resolvedDll"
 "DLL_SHA256=$sourceDllHash"
 foreach ($file in $opponentFiles) {
-    $relative = [System.IO.Path]::GetRelativePath($opponentRoot, $file.FullName)
+    $relative = $file.FullName.Substring($opponentRoot.Length).TrimStart('\', '/')
     $destination = Join-Path $runtimeB "bwapi-data/AI/$relative"
     New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
     Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
@@ -104,8 +104,8 @@ foreach ($file in $opponentFiles) {
 $seedConfiguration = if ($Seed -ge 0) { "seed_override = $Seed" } else { "" }
 $hostIni = @"
 [ai]
-ai = bwapi-data/AI/AstraBot.dll
-ai_dbg = bwapi-data/AI/AstraBot.dll
+ai = bwapi-data/AI/Protodd.dll
+ai_dbg = bwapi-data/AI/Protodd.dll
 tournament =
 
 [auto_menu]
@@ -115,7 +115,7 @@ pause_dbg = OFF
 lan_mode = Local PC
 auto_restart = OFF
 map = $Map
-game = AstraUAB
+game = ProtoddUAB
 mapiteration = SEQUENCE
 race = Protoss
 enemy_count = 1
@@ -248,7 +248,7 @@ function Close-LaunchedStarCraft {
     }
 }
 
-$logPath = Join-Path $writeRoot "AstraBot.log"
+$logPath = Join-Path $writeRoot "Protodd.log"
 $result = $null
 $traceBeforeCleanup = ""
 $script:startedAtUtc = [DateTime]::UtcNow

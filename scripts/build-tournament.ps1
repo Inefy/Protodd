@@ -53,7 +53,7 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $bwapiLibrary)) {
 
 $buildPath = Join-Path $repoPath "build/tournament"
 & cmake -S $repoPath -B $buildPath -G "Visual Studio 17 2022" -A Win32 `
-    -DASTRA_BUILD_TESTS=ON -DASTRA_BUILD_BWAPI_MODULE=ON `
+    -DPROTODD_BUILD_TESTS=ON -DPROTODD_BUILD_BWAPI_MODULE=ON `
     "-DBWAPI_ROOT=$bwapiPath" "-DBWAPI_LIBRARY=$bwapiLibrary"
 if ($LASTEXITCODE -ne 0) { throw "Tournament CMake configuration failed" }
 & cmake --build $buildPath --config $Configuration --parallel
@@ -61,10 +61,10 @@ if ($LASTEXITCODE -ne 0) { throw "Tournament DLL build failed" }
 & ctest --test-dir $buildPath -C $Configuration --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw "Tournament Release tests failed" }
 
-$dllPath = Join-Path $buildPath "$Configuration/AstraBot.dll"
+$dllPath = Join-Path $buildPath "$Configuration/Protodd.dll"
 if (-not (Test-Path -LiteralPath $dllPath)) {
     throw "Expected tournament DLL was not produced: $dllPath"
 }
 $hash = (Get-FileHash -LiteralPath $dllPath -Algorithm SHA256).Hash
-Write-Output "AstraBot tournament DLL: $dllPath"
+Write-Output "Protodd tournament DLL: $dllPath"
 Write-Output "SHA256: $hash"

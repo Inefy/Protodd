@@ -1,6 +1,6 @@
-#include "astra/Squads.hpp"
+#include "protodd/Squads.hpp"
 
-#include "astra/UnitCatalog.hpp"
+#include "protodd/UnitCatalog.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -8,7 +8,7 @@
 #include <limits>
 #include <unordered_set>
 
-namespace astra {
+namespace protodd {
 namespace {
 
 bool harassmentUnit(const UnitSnapshot& unit) {
@@ -246,7 +246,8 @@ std::vector<Squad> SquadPlanner::form(
                 guard.retreat = defensiveScreen(state, *homeBase);
                 guard.defense = {homeBase->center, 448, homeBase->center};
                 guard.requiredRatio = 1.15;
-                guard.units.assign(candidates.begin(), candidates.begin() + guardCount);
+                guard.units.assign(candidates.begin(), candidates.begin() +
+                    static_cast<std::ptrdiff_t>(guardCount));
                 for (const auto& unit : guard.units) assigned.insert(unit.id);
                 finishSquad(guard);
                 guard.enemies = localEnemies(enemy, guard.units, guard.objective, 900);
@@ -299,8 +300,26 @@ std::vector<Squad> SquadPlanner::form(
         result.push_back(std::move(squad));
     }
 
+    for (auto& squad : result) {
+        if (plan.requireMobileDetection && squad.role != SquadRole::baseDefense &&
+            std::ranges::any_of(squad.units, [](const UnitSnapshot& unit) { return !unit.flying; }))
+            squad.needsDetection = true;
+    }
     std::ranges::sort(result, {}, &Squad::id);
     return result;
+}
+
+bool SquadPlanner::mobileDetectionReady(const GameState& state, const Squad& squad) noexcept {
+    if (!squad.needsDetection) return true;
+    const auto ahead = squad.objective.valid() ? moveToward(squad.center, squad.objective, 128.0) : squad.center;
+    return std::ranges::any_of(state.self.units, [&squad, ahead](const UnitSnapshot& observer) {
+        if (observer.kind != UnitKind::observer || !observer.completed || observer.disabled ||
+            observer.loaded || observer.hallucination || observer.healthFraction() < 0.25 ||
+            !observer.position.valid()) return false;
+        const auto radius = std::max(0, (observer.sightRange > 0 ? observer.sightRange : 288) - 32);
+        return distanceSquared(observer.position, squad.center) <= radius * radius &&
+               distanceSquared(observer.position, ahead) <= radius * radius;
+    });
 }
 
 std::vector<Command> SquadPlanner::detectorEscorts(
@@ -309,7 +328,8 @@ std::vector<Command> SquadPlanner::detectorEscorts(
     const InfluenceMap& influence) const {
     std::vector<const UnitSnapshot*> observers;
     for (const auto& unit : state.self.units) {
-        if (unit.kind == UnitKind::observer && unit.completed) observers.push_back(&unit);
+        if (unit.kind == UnitKind::observer && unit.completed && !unit.loaded &&
+            !unit.disabled && !unit.hallucination) observers.push_back(&unit);
     }
     std::ranges::sort(observers, {}, [](const UnitSnapshot* unit) { return unit->id; });
 
@@ -329,9 +349,19 @@ std::vector<Command> SquadPlanner::detectorEscorts(
     const auto count = std::min(observers.size(), priorities.size());
     result.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
-        const auto* observer = observers[i];
         const auto* squad = priorities[i];
         const auto anchor = moveToward(squad->center, squad->retreat, 96.0);
+        const auto closest = std::min_element(observers.begin() + static_cast<std::ptrdiff_t>(i),
+            observers.end(), [anchor](const UnitSnapshot* left, const UnitSnapshot* right) {
+                const auto leftReady = left->healthFraction() >= 0.25;
+                const auto rightReady = right->healthFraction() >= 0.25;
+                if (leftReady != rightReady) return leftReady;
+                const auto a = distanceSquared(left->position, anchor);
+                const auto b = distanceSquared(right->position, anchor);
+                return a != b ? a < b : left->id < right->id;
+            });
+        std::iter_swap(observers.begin() + static_cast<std::ptrdiff_t>(i), closest);
+        const auto* observer = observers[i];
         const auto destination = influence.safestStep(observer->position, anchor, true);
         result.push_back({observer->id, CommandType::move, -1, destination,
                           UnitKind::unknown, squad->needsDetection ? 96 : 72, 0,
@@ -507,4 +537,4 @@ std::string_view squadRoleName(const SquadRole role) noexcept {
     return "Invalid";
 }
 
-}  // namespace astra
+}  // namespace protodd

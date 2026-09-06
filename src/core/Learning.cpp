@@ -1,4 +1,4 @@
-#include "astra/Learning.hpp"
+#include "protodd/Learning.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -6,7 +6,7 @@
 #include <sstream>
 #include <vector>
 
-namespace astra {
+namespace protodd {
 namespace {
 
 std::string clean(std::string_view value) {
@@ -91,7 +91,7 @@ std::string OpponentHistory::filename(const std::string_view opponent) {
     // Encode the actual tournament alias losslessly. No path separators,
     // platform-dependent hash, or identification of the underlying bot.
     constexpr std::string_view hex = "0123456789abcdef";
-    std::string result = "AstraBot-";
+    std::string result = "Protodd-";
     for (const auto character : opponent) {
         const auto byte = static_cast<unsigned char>(character);
         result += hex[byte >> 4];
@@ -163,4 +163,4 @@ std::string OpponentHistory::key(
     return clean(opponent) + ',' + clean(map) + ',' + std::string(openingStyleName(style));
 }
 
-}  // namespace astra
+}  // namespace protodd

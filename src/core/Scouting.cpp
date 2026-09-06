@@ -1,6 +1,6 @@
-#include "astra/Scouting.hpp"
+#include "protodd/Scouting.hpp"
 
-#include "astra/UnitCatalog.hpp"
+#include "protodd/UnitCatalog.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -8,7 +8,7 @@
 #include <unordered_set>
 #include <utility>
 
-namespace astra {
+namespace protodd {
 namespace {
 
 struct Candidate {
@@ -96,6 +96,49 @@ UnitId selectOpeningWorkerScout(
 
 void ScoutManager::reset() noexcept {
     previousOrders_.clear();
+    workerMissionStarted_ = -1;
+    nextWorkerMission_ = 0;
+    workerScout_ = -1;
+}
+
+UnitId ScoutManager::selectWorkerScout(
+    const GameState& state, const ThreatAssessment& threat,
+    const std::span<const UnitId> previousScouts,
+    const std::span<const UnitId> unavailableWorkers) {
+    if (workerMissionStarted_ > state.frame) reset();
+    const auto opening = selectOpeningWorkerScout(state, previousScouts, unavailableWorkers);
+    if (opening >= 0) return opening;
+    const auto enoughWorkers = std::ranges::count_if(state.self.units, [](const UnitSnapshot& unit) {
+        return unit.kind == UnitKind::probe && unit.completed;
+    }) >= 12;
+    const auto safe = enoughWorkers && state.frame >= 3 * 60 * 24 &&
+        state.frame < 8 * 60 * 24 && threat.combatEnemiesNearMain == 0 &&
+        threat.immediateGround < 0.45 && threat.approachingArmyValue < 2.0 &&
+        threat.workerRush <= 0.30 && threat.proxy + threat.staticContain <= 0.34;
+    const auto eligible = [&unavailableWorkers](const UnitSnapshot& unit) {
+        return unit.kind == UnitKind::probe && unit.completed && !unit.carryingResources &&
+            !unit.underAttack && !unit.loaded &&
+            std::ranges::find(unavailableWorkers, unit.id) == unavailableWorkers.end();
+    };
+    if (workerScout_ >= 0) {
+        const auto worker = state.findUnit(workerScout_);
+        if (safe && worker && eligible(*worker) &&
+            state.frame - workerMissionStarted_ < 45 * 24) return workerScout_;
+        workerScout_ = -1;
+        nextWorkerMission_ = state.frame + 45 * 24;
+        return -1;
+    }
+    if (!safe || state.frame < nextWorkerMission_) return -1;
+    const auto enemyKnown = std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& unit) {
+        return unit.role == UnitRole::resourceDepot;
+    });
+    if (!enemyKnown) return -1;
+    for (const auto& candidate : state.self.units) {
+        if (eligible(candidate) && (workerScout_ < 0 || candidate.id < workerScout_))
+            workerScout_ = candidate.id;
+    }
+    if (workerScout_ >= 0) workerMissionStarted_ = state.frame;
+    return workerScout_;
 }
 
 std::vector<ScoutOrder> ScoutManager::assign(
@@ -105,6 +148,7 @@ std::vector<ScoutOrder> ScoutManager::assign(
     const ThreatAssessment& threat) {
     std::vector<Candidate> candidates;
     candidates.reserve(state.bases.size() + 4);
+    const auto natural = enemyNatural(state);
     const auto enemyDepot = std::ranges::find_if(state.enemy.units, [](const UnitSnapshot& unit) {
         return unit.role == UnitRole::resourceDepot;
     });
@@ -116,6 +160,8 @@ std::vector<ScoutOrder> ScoutManager::assign(
         const auto staleSeconds = std::max(0, state.frame - base.lastScouted) / 24.0;
         auto value = std::min(12.0, 1.0 + staleSeconds / 15.0);
         auto purpose = ScoutPurpose::checkExpansion;
+        if (natural != nullptr && base.id == natural->id && staleSeconds >= 30.0)
+            value += 12.0;
         if (base.startLocation && enemyDepot == state.enemy.units.end()) {
             value += state.frame < 5 * 60 * 24 ? 18.0 : 12.0;
             purpose = ScoutPurpose::findEnemy;
@@ -181,11 +227,16 @@ std::vector<ScoutOrder> ScoutManager::assign(
         std::size_t bestIndex = 0;
         auto bestScore = -std::numeric_limits<double>::infinity();
         for (std::size_t i = 0; i < candidates.size(); ++i) {
-            if (claimed.contains(i)) {
+            if (claimed.contains(i) || (scout->kind == UnitKind::probe &&
+                (candidates[i].purpose == ScoutPurpose::watchArmy ||
+                 candidates[i].purpose == ScoutPurpose::patrolDropPath))) {
                 continue;
             }
             const auto risk = routeRisk(influence, scout->position,
                                         candidates[i].position, scout->flying);
+            // Refuse known dangerous worker missions; air scouts retain their
+            // own risk-weighted policy.
+            if (scout->kind == UnitKind::probe && risk > 1.0) continue;
             const auto travel = distance(scout->position, candidates[i].position) / 1000.0;
             const auto riskWeight = scout->kind == UnitKind::probe
                                         ? 8.0
@@ -203,7 +254,7 @@ std::vector<ScoutOrder> ScoutManager::assign(
                 bestIndex = i;
             }
         }
-        if (!candidates.empty() && !claimed.contains(bestIndex)) {
+        if (std::isfinite(bestScore) && !candidates.empty() && !claimed.contains(bestIndex)) {
             claimed.insert(bestIndex);
             ScoutOrder order{scoutId, candidates[bestIndex].position,
                              candidates[bestIndex].purpose, bestScore};
@@ -215,4 +266,4 @@ std::vector<ScoutOrder> ScoutManager::assign(
     return orders;
 }
 
-}  // namespace astra
+}  // namespace protodd

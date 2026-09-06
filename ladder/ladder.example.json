@@ -1,10 +1,10 @@
 {
   "our_bot": {
-    "name": "AstraBot",
+    "name": "Protodd",
     "race": "Protoss",
     "type": "dll",
     "bwapi_version": "BWAPI_440",
-    "artifact": "../build/tournament/Release/AstraBot.dll"
+    "artifact": "../build/tournament/Release/Protodd.dll"
   },
   "opponents": [],
   "maps": [

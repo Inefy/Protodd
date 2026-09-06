@@ -1,4 +1,4 @@
-function(astra_enable_warnings target)
+function(protodd_enable_warnings target)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /permissive- /EHsc)
     else()

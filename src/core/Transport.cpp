@@ -1,11 +1,11 @@
-#include "astra/Transport.hpp"
+#include "protodd/Transport.hpp"
 
 #include <algorithm>
 #include <limits>
 #include <string_view>
 #include <unordered_set>
 
-namespace astra {
+namespace protodd {
 namespace {
 
 const UnitSnapshot* findUnit(const GameState& state, const UnitId id) {
@@ -186,4 +186,4 @@ void TransportController::reset() {
     missions_.clear();
 }
 
-}  // namespace astra
+}  // namespace protodd

@@ -4,7 +4,7 @@ This is the initial audit record. The [follow-up audit](strength-pass2.md)
 documents subsequent implementation changes and live experiments; consult
 [validation](validation.md) for the current candidate.
 
-Astra has a useful architecture and reproducible local testing, but there is
+Protodd has a useful architecture and reproducible local testing, but there is
 not yet evidence that it can contend for first place at AIIDE. The immediate
 work in this audit fixes concrete execution and evaluation errors. The next
 stage must measure strategy quality against several independent opponents,
@@ -60,7 +60,7 @@ Registration and submission have not been performed by this audit.
 
 BWAPI contracts were checked against the installed official 4.4.0 source and
 an executable linked to its library. That executable compares the costs,
-supply, and build times of 28 producible Protoss units/buildings with Astra's
+supply, and build times of 28 producible Protoss units/buildings with Protodd's
 catalog. Range/cooldown semantics are documented in the
 [BWAPI unit reference](https://bwapi.github.io/class_b_w_a_p_i_1_1_unit_interface.html).
 The Reaver correction also follows Blizzard's
@@ -83,7 +83,7 @@ Prioritize BananaBrain, Stardust, and PurpleWave as demanding Protoss
 benchmarks, then add independent Zerg and Terran opponents. My tally of the
 organizer's 18,746 unique game records for AIIDE 2025 gives roughly 88%, 84%,
 and 83% wins for those three, versus 37% for UAlbertaBot. These are historical
-field-wide results, not predictions of Astra's head-to-head results. They
+field-wide results, not predictions of Protodd's head-to-head results. They
 explain why beating UAlbertaBot alone is an insufficient release target.
 [Official 2025 detailed results](https://davechurchill.ca/starcraft/aiide/results/2025/results/detailed_results.txt)
 and [submitted opponent packages](https://davechurchill.ca/starcraft/aiide/results/2025/bots/)
@@ -227,7 +227,7 @@ Use the direct-match manifest as the outcome authority:
 python tools/direct_report.py build/direct-logs/unique-candidate-label.json
 ```
 
-The default direct match clears Astra learning files for an independent
+The default direct match clears Protodd learning files for an independent
 opening test; `-PreserveLearning` deliberately tests adaptation. The regular
 tournament module always supports cumulative per-alias learning.
 

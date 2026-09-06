@@ -1,13 +1,13 @@
 #pragma once
 
-#include "astra/GameState.hpp"
-#include "astra/InfluenceMap.hpp"
-#include "astra/Strategy.hpp"
+#include "protodd/GameState.hpp"
+#include "protodd/InfluenceMap.hpp"
+#include "protodd/Strategy.hpp"
 
 #include <vector>
 #include <unordered_map>
 
-namespace astra {
+namespace protodd {
 
 enum class WorkerJob : std::uint8_t {
     minerals,
@@ -75,4 +75,4 @@ private:
         const InfluenceMap& influence);
 };
 
-}  // namespace astra
+}  // namespace protodd

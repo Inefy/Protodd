@@ -1,12 +1,12 @@
 #pragma once
 
-#include "astra/GameState.hpp"
-#include "astra/Information.hpp"
+#include "protodd/GameState.hpp"
+#include "protodd/Information.hpp"
 
 #include <string>
 #include <vector>
 
-namespace astra {
+namespace protodd {
 
 enum class Posture : std::uint8_t { hold, defend, pressure, attack, harass, recover };
 
@@ -22,6 +22,7 @@ struct ProductionGoal {
     bool blocking{};
     std::string reason;
     TechnologyKind technology{TechnologyKind::none};
+    bool allowMineralFallback{};
 };
 
 struct CompositionTarget {
@@ -43,6 +44,9 @@ struct StrategicPlan {
     std::vector<CompositionTarget> composition;
     // Explicit matchup safety constraints survive style and recovery modifiers.
     int maximumBases{8};
+    // Current threat, independent of whether the army is holding or attacking.
+    bool prioritizeReinforcements{};
+    bool requireMobileDetection{};
 };
 
 class StrategyEngine {
@@ -96,4 +100,4 @@ private:
 [[nodiscard]] std::string_view postureName(Posture posture) noexcept;
 [[nodiscard]] std::string_view openingStyleName(OpeningStyle style) noexcept;
 
-}  // namespace astra
+}  // namespace protodd

@@ -1,6 +1,6 @@
 # Open-source bot research notes
 
-This document records the design ideas evaluated while hardening Astra. The
+This document records the design ideas evaluated while hardening Protodd. The
 implementation remains original: repositories with restrictive, unclear, or
 copyleft terms were used only to study architecture and testing practices.
 
@@ -26,14 +26,14 @@ copyleft terms were used only to study architecture and testing practices.
   high-level concepts where their current licensing is not suitable for direct
   reuse in this MIT tournament entry.
 
-## Ideas translated into Astra
+## Ideas translated into Protodd
 
 The useful common pattern was not a single build order. Strong bots keep
 strategic intent persistent, react to evidence before units arrive, allocate
 production per available producer, divide armies by local objective, and test
 both isolated scenarios and complete games.
 
-Astra applies those ideas through its own data model and algorithms:
+Protodd applies those ideas through its own data model and algorithms:
 
 - first-seen tech timing, motion, and production-capacity inference;
 - a strategic director that enters defense immediately and releases it only
@@ -51,7 +51,7 @@ The September 2026 audit also imported the official
 [AIIDE 2025 BananaBrain package](https://davechurchill.ca/starcraft/aiide/results/2025/bots/)
 as a local BWAPI 4.4.0 opponent. Its binary, configuration, pretraining data,
 and source remain in the ignored benchmark vault. None of its implementation
-is incorporated into Astra or its submission archive.
+is incorporated into Protodd or its submission archive.
 
 No behavior is accepted solely because it looks plausible in source. It must
 pass portable regression tests, a strict 32-bit Release/BWAPI build, and direct

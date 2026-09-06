@@ -22,9 +22,9 @@ try {
     $coreSources += (Resolve-Path "tests/test_main.cpp").Path
     & $zigPath c++ -std=c++20 -Iinclude -Wall -Wextra -Wpedantic -Wconversion `
         -Wshadow -Werror -Wno-nullability-completeness @coreSources `
-        -o build/verify/astra_tests.exe
+        -o build/verify/protodd_tests.exe
     if ($LASTEXITCODE -ne 0) { throw "Core compilation failed" }
-    & build/verify/astra_tests.exe
+    & build/verify/protodd_tests.exe
     if ($LASTEXITCODE -ne 0) { throw "Core tests failed" }
 
     python tools/log_analyzer.py --self-test
@@ -67,7 +67,7 @@ try {
 
     git diff --check
     if ($LASTEXITCODE -ne 0) { throw "Whitespace validation failed" }
-    Write-Output "AstraBot verification passed"
+    Write-Output "Protodd verification passed"
 }
 finally {
     Pop-Location

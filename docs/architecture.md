@@ -1,6 +1,6 @@
-# Astra architecture
+# Protodd architecture
 
-Astra is a Protoss tournament bot with a deterministic, event-driven core. It
+Protodd is a Protoss tournament bot with a deterministic, event-driven core. It
 separates game observation from decision making so that strategic and tactical
 logic can be replayed and regression-tested without running StarCraft.
 
@@ -19,7 +19,7 @@ logic can be replayed and regression-tested without running StarCraft.
    invalid actions.
 6. **Measure** records decisions and outcomes for replay-driven tuning.
 
-Between games, Astra stores only aggregate win/loss counts by opponent, map,
+Between games, Protodd stores only aggregate win/loss counts by opponent, map,
 and opening style. A deterministic UCB selector tries untested styles and then
 balances observed win rate against uncertainty. It never reads a replay or
 opponent file during a live game.

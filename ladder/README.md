@@ -1,9 +1,9 @@
 # Local bot ladder
 
 This directory contains the tracked configuration template for repeatable
-AstraBot experiments. All third-party bots, maps, Tournament Manager files,
+Protodd experiments. All third-party bots, maps, Tournament Manager files,
 results, replays, reports, and machine-specific settings live in ignored
-subdirectories. They are local test inputs, not part of AstraBot.
+subdirectories. They are local test inputs, not part of Protodd.
 
 The ladder uses
 [StarcraftAITournamentManager](https://github.com/davechurchill/StarcraftAITournamentManager)
@@ -71,7 +71,7 @@ specific release or commit so a later run can be reproduced.
 
 ## 4. Prepare and run a batch
 
-Build the exact AstraBot DLL, choose an even number of rounds, then prepare a
+Build the exact Protodd DLL, choose an even number of rounds, then prepare a
 named run:
 
 ```powershell
@@ -81,7 +81,7 @@ named run:
 
 Preparation copies the local Tournament Manager into
 `ladder/runs/baseline-main/tournament`, removes its bundled bot pool from that
-copy, stages AstraBot and the configured opponents, and writes:
+copy, stages Protodd and the configured opponents, and writes:
 
 - a deterministic 1-vs-all `server/games.txt` schedule;
 - alternating host order for every opponent across rounds;
@@ -95,13 +95,13 @@ baseline and candidate runs.
 
 ## 5. Generate the report
 
-After the batch completes, include AstraBot's collected log when available:
+After the batch completes, include Protodd's collected log when available:
 
 ```powershell
 ./scripts/ladder.ps1 report `
   ladder/runs/baseline-main/tournament/server/results.txt `
   --manifest ladder/runs/baseline-main/manifest.json `
-  --astra-log ladder/runs/baseline-main/tournament/server/bots/AstraBot/write/AstraBot.log `
+  --protodd-log ladder/runs/baseline-main/tournament/server/bots/Protodd/write/Protodd.log `
   --output ladder/reports/baseline-main
 ```
 
@@ -110,7 +110,7 @@ The output includes:
 - `index.html` — local dashboard;
 - `report.md` and `report.json` — human- and machine-readable summaries;
 - `games.csv` — one row per Tournament Manager game;
-- `telemetry-games.csv` — one row per AstraBot log game when logs were passed.
+- `telemetry-games.csv` — one row per Protodd log game when logs were passed.
 
 Win rates always include Wilson 95% intervals. Fewer than 30 games is marked
 `insufficient`, 30–99 is `directional`, and 100+ is `strong`. A segment is only
@@ -132,5 +132,5 @@ Use the same opponents, versions, maps, number of games, and time limits:
 
 The comparison reports the overall percentage-point change and a Newcombe
 score-based 95% interval, plus opponent-level deltas. Treat `inconclusive` as a
-request for more games, not evidence of no effect. Any AstraBot crash or severe
+request for more games, not evidence of no effect. Any Protodd crash or severe
 frame timeout is a release blocker regardless of win rate.

@@ -1,20 +1,20 @@
-#include "astra/Combat.hpp"
-#include "astra/CommandBus.hpp"
-#include "astra/GameState.hpp"
-#include "astra/Geometry.hpp"
-#include "astra/InfluenceMap.hpp"
-#include "astra/Information.hpp"
-#include "astra/Learning.hpp"
-#include "astra/MacroPlanner.hpp"
-#include "astra/Navigation.hpp"
-#include "astra/Scouting.hpp"
-#include "astra/Runtime.hpp"
-#include "astra/Strategy.hpp"
-#include "astra/Squads.hpp"
-#include "astra/UnitCatalog.hpp"
-#include "astra/Technology.hpp"
-#include "astra/Transport.hpp"
-#include "astra/Workers.hpp"
+#include "protodd/Combat.hpp"
+#include "protodd/CommandBus.hpp"
+#include "protodd/GameState.hpp"
+#include "protodd/Geometry.hpp"
+#include "protodd/InfluenceMap.hpp"
+#include "protodd/Information.hpp"
+#include "protodd/Learning.hpp"
+#include "protodd/MacroPlanner.hpp"
+#include "protodd/Navigation.hpp"
+#include "protodd/Scouting.hpp"
+#include "protodd/Runtime.hpp"
+#include "protodd/Strategy.hpp"
+#include "protodd/Squads.hpp"
+#include "protodd/UnitCatalog.hpp"
+#include "protodd/Technology.hpp"
+#include "protodd/Transport.hpp"
+#include "protodd/Workers.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -34,22 +34,22 @@ void expect(const bool condition, const std::string_view message) {
 }
 
 void testGeometry() {
-    expect(std::abs(astra::distance({0, 0}, {3, 4}) - 5.0) < 0.001,
+    expect(std::abs(protodd::distance({0, 0}, {3, 4}) - 5.0) < 0.001,
            "Euclidean distance");
-    expect(astra::moveToward({0, 0}, {100, 0}, 32.0) == astra::Position{32, 0},
+    expect(protodd::moveToward({0, 0}, {100, 0}, 32.0) == protodd::Position{32, 0},
            "bounded movement toward a target");
-    const astra::BuildingFootprint gateway{{100, 100}, 128, 96};
-    expect(!astra::separatedByGap(gateway, {{228, 100}, 64, 64}, 32),
+    const protodd::BuildingFootprint gateway{{100, 100}, 128, 96};
+    expect(!protodd::separatedByGap(gateway, {{228, 100}, 64, 64}, 32),
            "adjacent structures cannot close a production exit");
-    expect(!astra::separatedByGap(gateway, {{244, 100}, 64, 64}, 32),
+    expect(!protodd::separatedByGap(gateway, {{244, 100}, 64, 64}, 32),
            "a sixteen-pixel slit is insufficient for a Dragoon corridor");
-    expect(astra::separatedByGap(gateway, {{260, 100}, 64, 64}, 32) &&
-               astra::separatedByGap(gateway, {{100, 228}, 64, 64}, 32),
+    expect(protodd::separatedByGap(gateway, {{260, 100}, 64, 64}, 32) &&
+               protodd::separatedByGap(gateway, {{100, 228}, 64, 64}, 32),
            "a full tile of clearance permits passage on either axis");
 }
 
 void testSnapshots() {
-    astra::UnitSnapshot dragoon;
+    protodd::UnitSnapshot dragoon;
     dragoon.id = 7;
     dragoon.hitPoints = 80;
     dragoon.maxHitPoints = 100;
@@ -57,21 +57,21 @@ void testSnapshots() {
     dragoon.maxShields = 80;
     dragoon.groundWeapon = {.damage = 20, .targetsGround = true};
 
-    astra::UnitSnapshot enemy;
+    protodd::UnitSnapshot enemy;
     enemy.id = 9;
 
     expect(std::abs(dragoon.healthFraction() - (120.0 / 180.0)) < 0.001,
            "combined shield and hit point fraction");
     expect(dragoon.canAttack(enemy), "ground target compatibility");
 
-    astra::GameState state;
+    protodd::GameState state;
     state.self.units.push_back(dragoon);
     state.enemy.units.push_back(enemy);
     expect(state.findUnit(9).has_value(), "unit lookup across both players");
     expect(!state.findUnit(42).has_value(), "missing unit lookup");
 
     auto reaver = dragoon;
-    reaver.kind = astra::UnitKind::reaver;
+    reaver.kind = protodd::UnitKind::reaver;
     reaver.ammo = 0;
     expect(!reaver.canAttack(enemy), "empty Reaver cannot promise a combat volley");
     reaver.ammo = 1;
@@ -85,32 +85,32 @@ void testNavigation() {
     for (auto y = 0; y < height; ++y) {
         if (y != 2) walkable[static_cast<std::size_t>(y * width + 3)] = 0U;
     }
-    astra::NavigationGrid navigation(width, height, 32, walkable);
+    protodd::NavigationGrid navigation(width, height, 32, walkable);
     expect(!navigation.lineWalkable({16, 16}, {208, 16}),
            "terrain line test detects a blocking cliff");
     const auto path = navigation.findPath({16, 16}, {208, 16});
-    expect(!path.empty() && std::ranges::any_of(path, [](const astra::Position point) {
+    expect(!path.empty() && std::ranges::any_of(path, [](const protodd::Position point) {
                return point.y == 80;
            }),
            "A* routes a ground army through the available choke");
     const auto waypoint = navigation.nextWaypoint({16, 16}, {208, 16}, 3);
-    expect(waypoint.valid() && waypoint != astra::Position{208, 16},
+    expect(waypoint.valid() && waypoint != protodd::Position{208, 16},
            "long blocked route yields an intermediate waypoint");
 
     for (auto y = 0; y < height; ++y) {
         walkable[static_cast<std::size_t>(y * width + 3)] = 0U;
     }
-    astra::NavigationGrid disconnected(width, height, 32, walkable);
+    protodd::NavigationGrid disconnected(width, height, 32, walkable);
     expect(disconnected.findPath({16, 16}, {208, 16}).empty(),
            "disconnected terrain fails safely without inventing a route");
 }
 
-astra::UnitSnapshot unit(
-    const astra::UnitId id,
-    const astra::UnitKind kind,
+protodd::UnitSnapshot unit(
+    const protodd::UnitId id,
+    const protodd::UnitKind kind,
     const bool ours,
-    const astra::Position position = {128, 128}) {
-    astra::UnitSnapshot result;
+    const protodd::Position position = {128, 128}) {
+    protodd::UnitSnapshot result;
     result.id = id;
     result.kind = kind;
     result.ours = ours;
@@ -125,107 +125,107 @@ astra::UnitSnapshot unit(
 }
 
 void testCatalog() {
-    expect(astra::unitStats(astra::UnitKind::probe).minerals == 50,
+    expect(protodd::unitStats(protodd::UnitKind::probe).minerals == 50,
            "Probe catalog cost");
-    expect(astra::unitStats(astra::UnitKind::overlord).name == "Overlord",
+    expect(protodd::unitStats(protodd::UnitKind::overlord).name == "Overlord",
            "catalog enum and table remain aligned");
-    expect(astra::isCombatUnit(astra::UnitKind::dragoon), "Dragoon combat classification");
-    expect(!astra::isCombatUnit(astra::UnitKind::pylon), "Pylon combat classification");
-    expect(!astra::isCombatUnit(astra::UnitKind::observer),
+    expect(protodd::isCombatUnit(protodd::UnitKind::dragoon), "Dragoon combat classification");
+    expect(!protodd::isCombatUnit(protodd::UnitKind::pylon), "Pylon combat classification");
+    expect(!protodd::isCombatUnit(protodd::UnitKind::observer),
            "Observer remains support rather than attack army");
-    expect(astra::isCombatUnit(astra::UnitKind::valkyrie) &&
-               astra::isCombatUnit(astra::UnitKind::guardian) &&
-               astra::isCombatUnit(astra::UnitKind::spiderMine),
+    expect(protodd::isCombatUnit(protodd::UnitKind::valkyrie) &&
+               protodd::isCombatUnit(protodd::UnitKind::guardian) &&
+               protodd::isCombatUnit(protodd::UnitKind::spiderMine),
            "late-game flyers and Spider Mines remain visible to combat evaluation");
-    expect(astra::isCombatUnit(astra::UnitKind::zergling) &&
-               astra::isCombatUnit(astra::UnitKind::scourge) &&
-               astra::isCombatUnit(astra::UnitKind::broodling),
+    expect(protodd::isCombatUnit(protodd::UnitKind::zergling) &&
+               protodd::isCombatUnit(protodd::UnitKind::scourge) &&
+               protodd::isCombatUnit(protodd::UnitKind::broodling),
            "low-cost combat units are never filtered by an arbitrary value cutoff");
-    expect(astra::isBuilding(astra::UnitKind::scienceFacility) &&
-               astra::isBuilding(astra::UnitKind::defilerMound),
+    expect(protodd::isBuilding(protodd::UnitKind::scienceFacility) &&
+               protodd::isBuilding(protodd::UnitKind::defilerMound),
            "advanced enemy tech structures remain visible to inference");
-    const auto tribunalRequirements = astra::unitPrerequisites(
-        astra::UnitKind::arbiterTribunal);
-    expect(std::ranges::find(tribunalRequirements, astra::UnitKind::stargate) !=
+    const auto tribunalRequirements = protodd::unitPrerequisites(
+        protodd::UnitKind::arbiterTribunal);
+    expect(std::ranges::find(tribunalRequirements, protodd::UnitKind::stargate) !=
                tribunalRequirements.end() &&
-               std::ranges::find(tribunalRequirements, astra::UnitKind::templarArchives) !=
+               std::ranges::find(tribunalRequirements, protodd::UnitKind::templarArchives) !=
                    tribunalRequirements.end(),
            "Arbiter Tribunal requires both branches of its tech tree");
-    const auto batteryRequirements = astra::unitPrerequisites(
-        astra::UnitKind::shieldBattery);
+    const auto batteryRequirements = protodd::unitPrerequisites(
+        protodd::UnitKind::shieldBattery);
     expect(batteryRequirements.size() == 1 &&
-               batteryRequirements.front() == astra::UnitKind::gateway,
+               batteryRequirements.front() == protodd::UnitKind::gateway,
            "Shield Battery follows the actual Gateway prerequisite");
-    expect(astra::technologyStats(astra::TechnologyKind::protossGroundWeapons)
+    expect(protodd::technologyStats(protodd::TechnologyKind::protossGroundWeapons)
                        .mineralCost(2) == 150,
            "repeatable upgrades use next-level pricing");
 }
 
 void testOpponentInferenceAndStrategy() {
-    astra::GameState unseen;
-    unseen.enemy.race = astra::Race::terran;
-    astra::OpponentModel unseenModel;
+    protodd::GameState unseen;
+    unseen.enemy.race = protodd::Race::terran;
+    protodd::OpponentModel unseenModel;
     unseenModel.update(unseen);
-    expect(unseenModel.mostLikelyPlan() == astra::EnemyPlan::unknown,
+    expect(unseenModel.mostLikelyPlan() == protodd::EnemyPlan::unknown,
            "unscouted opponents remain unknown instead of defaulting to worker rush");
 
     auto distantOpening = unseen;
-    distantOpening.enemy.race = astra::Race::protoss;
+    distantOpening.enemy.race = protodd::Race::protoss;
     distantOpening.frame = 3000;
-    distantOpening.self.units = {unit(1, astra::UnitKind::nexus, true, {256, 256})};
-    distantOpening.enemy.units = {unit(2, astra::UnitKind::zealot, false, {3000, 3000})};
-    astra::OpponentModel distantModel;
+    distantOpening.self.units = {unit(1, protodd::UnitKind::nexus, true, {256, 256})};
+    distantOpening.enemy.units = {unit(2, protodd::UnitKind::zealot, false, {3000, 3000})};
+    protodd::OpponentModel distantModel;
     distantModel.update(distantOpening);
-    const auto singleObservation = distantModel.probability(astra::EnemyPlan::fastRush);
+    const auto singleObservation = distantModel.probability(protodd::EnemyPlan::fastRush);
     for (int i = 0; i < 100; ++i) {
         distantOpening.frame += 6;
         distantModel.update(distantOpening);
     }
-    expect(std::abs(distantModel.probability(astra::EnemyPlan::fastRush) -
+    expect(std::abs(distantModel.probability(protodd::EnemyPlan::fastRush) -
                     singleObservation) < 0.0001 &&
                distantModel.assessment().aggression < 0.6,
            "repeated snapshots of one remote Zealot cannot manufacture certainty about a rush");
-    expect(astra::StrategyEngine{}.plan(distantOpening, distantModel.assessment()).posture !=
-               astra::Posture::defend,
+    expect(protodd::StrategyEngine{}.plan(distantOpening, distantModel.assessment()).posture !=
+               protodd::Posture::defend,
            "an ordinary first enemy Zealot does not cancel the opening technology plan");
 
-    astra::GameState state;
+    protodd::GameState state;
     state.frame = 3 * 60 * 24;
     state.mapWidthPixels = 4096;
     state.mapHeightPixels = 4096;
     state.self.id = 1;
-    state.self.race = astra::Race::protoss;
+    state.self.race = protodd::Race::protoss;
     state.enemy.id = 2;
-    state.enemy.race = astra::Race::zerg;
-    auto nexus = unit(1, astra::UnitKind::nexus, true, {256, 256});
-    nexus.role = astra::UnitRole::resourceDepot;
+    state.enemy.race = protodd::Race::zerg;
+    auto nexus = unit(1, protodd::UnitKind::nexus, true, {256, 256});
+    nexus.role = protodd::UnitRole::resourceDepot;
     state.self.units.push_back(nexus);
     for (int i = 0; i < 8; ++i) {
-        auto zergling = unit(100 + i, astra::UnitKind::zergling, false,
+        auto zergling = unit(100 + i, protodd::UnitKind::zergling, false,
                             {300 + i * 4, 300});
-        zergling.role = astra::UnitRole::groundArmy;
+        zergling.role = protodd::UnitRole::groundArmy;
         zergling.groundWeapon = {.damage = 5, .cooldown = 8, .maxRange = 32,
                                 .targetsGround = true};
         state.enemy.units.push_back(zergling);
     }
 
-    astra::OpponentModel model;
+    protodd::OpponentModel model;
     model.update(state);
-    expect(model.mostLikelyPlan() == astra::EnemyPlan::fastRush,
+    expect(model.mostLikelyPlan() == protodd::EnemyPlan::fastRush,
            "early zerglings classify as fast rush");
     expect(model.assessment().immediateGround > 0.3,
            "rush produces immediate-ground warning");
 
-    astra::GameState earlyPoolState = state;
+    protodd::GameState earlyPoolState = state;
     earlyPoolState.enemy.units.clear();
-    auto earlyPool = unit(120, astra::UnitKind::spawningPool, false,
+    auto earlyPool = unit(120, protodd::UnitKind::spawningPool, false,
                           {2400, 2400});
     earlyPool.firstSeen = 2'700;
     earlyPool.lastSeen = earlyPoolState.frame;
     earlyPoolState.enemy.units.push_back(earlyPool);
-    astra::OpponentModel earlyPoolModel;
+    protodd::OpponentModel earlyPoolModel;
     earlyPoolModel.update(earlyPoolState);
-    expect(earlyPoolModel.mostLikelyPlan() == astra::EnemyPlan::fastRush,
+    expect(earlyPoolModel.mostLikelyPlan() == protodd::EnemyPlan::fastRush,
            "an early scouted Spawning Pool warns of a rush before contact");
 
     auto developingPool = earlyPool;
@@ -237,50 +237,50 @@ void testOpponentInferenceAndStrategy() {
     completedPool.completed = true;
     completedPool.lastSeen = 4000;
     completedPool.constructionStartUpperBound = 4000 -
-        astra::unitStats(astra::UnitKind::spawningPool).buildTime;
+        protodd::unitStats(protodd::UnitKind::spawningPool).buildTime;
     completedPool.inheritObservationHistory(developingPool);
     earlyPoolState.enemy.units = {completedPool};
-    astra::OpponentModel normalPoolModel;
+    protodd::OpponentModel normalPoolModel;
     normalPoolModel.update(earlyPoolState);
-    expect(normalPoolModel.mostLikelyPlan() != astra::EnemyPlan::fastRush,
+    expect(normalPoolModel.mostLikelyPlan() != protodd::EnemyPlan::fastRush,
            "later Pool completion does not move its start before the first unfinished observation");
     auto oldDrone = developingPool;
-    oldDrone.kind = astra::UnitKind::drone;
+    oldDrone.kind = protodd::UnitKind::drone;
     oldDrone.firstSeen = 100;
     developingPool.inheritObservationHistory(oldDrone);
     expect(developingPool.firstSeen == 2500,
            "a Zerg structure does not inherit the first-seen timestamp of its Drone");
 
-    astra::StrategyEngine strategy;
+    protodd::StrategyEngine strategy;
     const auto plan = strategy.plan(state, model.assessment());
-    expect(plan.posture == astra::Posture::defend, "PvZ rush switches to defense");
+    expect(plan.posture == protodd::Posture::defend, "PvZ rush switches to defense");
     const auto emergencyZealots = std::ranges::find_if(
         plan.goals,
-        [](const astra::ProductionGoal& goal) {
-            return goal.target == astra::UnitKind::zealot && goal.blocking;
+        [](const protodd::ProductionGoal& goal) {
+            return goal.target == protodd::UnitKind::zealot && goal.blocking;
         });
     expect(emergencyZealots != plan.goals.end(), "rush plan contains blocking zealots");
-    expect(std::ranges::any_of(plan.goals, [](const astra::ProductionGoal& goal) {
-               return goal.target == astra::UnitKind::shieldBattery && goal.blocking;
+    expect(std::ranges::any_of(plan.goals, [](const protodd::ProductionGoal& goal) {
+               return goal.target == protodd::UnitKind::shieldBattery && goal.blocking;
            }),
            "opening anti-ling response adds a blocking Shield Battery");
 
-    astra::GameState approaching = state;
+    protodd::GameState approaching = state;
     approaching.enemy.units.clear();
     for (int i = 0; i < 4; ++i) {
-        auto zergling = unit(130 + i, astra::UnitKind::zergling, false,
+        auto zergling = unit(130 + i, protodd::UnitKind::zergling, false,
                             {1180 + i * 8, 256});
         zergling.lastPosition = {1220 + i * 8, 256};
-        zergling.role = astra::UnitRole::groundArmy;
+        zergling.role = protodd::UnitRole::groundArmy;
         approaching.enemy.units.push_back(zergling);
     }
     for (int i = 0; i < 3; ++i) {
-        auto hatchery = unit(140 + i, astra::UnitKind::hatchery, false,
+        auto hatchery = unit(140 + i, protodd::UnitKind::hatchery, false,
                              {2400 + i * 160, 2400});
-        hatchery.role = astra::UnitRole::production;
+        hatchery.role = protodd::UnitRole::production;
         approaching.enemy.units.push_back(hatchery);
     }
-    astra::OpponentModel approachModel;
+    protodd::OpponentModel approachModel;
     approachModel.update(approaching);
     expect(approachModel.assessment().approachingCombatEnemies == 4 &&
                approachModel.assessment().approachingArmyValue > 0.0,
@@ -289,60 +289,60 @@ void testOpponentInferenceAndStrategy() {
            "scouted production is retained as an explicit capacity estimate");
 
     auto terranPressure = state;
-    terranPressure.enemy.race = astra::Race::terran;
+    terranPressure.enemy.race = protodd::Race::terran;
     terranPressure.enemy.units.clear();
     terranPressure.bases.push_back(
         {1, {256, 256}, {300, 260}, 8000, 5000, terranPressure.self.id,
          terranPressure.frame, true, false, 8, 1});
-    auto marine = unit(150, astra::UnitKind::marine, false, {320, 300});
-    marine.role = astra::UnitRole::groundArmy;
+    auto marine = unit(150, protodd::UnitKind::marine, false, {320, 300});
+    marine.role = protodd::UnitRole::groundArmy;
     marine.groundWeapon = {.damage = 6, .cooldown = 15, .maxRange = 128,
                            .targetsGround = true};
     terranPressure.enemy.units.push_back(marine);
     for (int id = 160; id < 172; ++id) {
-        auto defender = unit(id, astra::UnitKind::probe, true, {260, 260});
-        defender.role = astra::UnitRole::worker;
+        auto defender = unit(id, protodd::UnitKind::probe, true, {260, 260});
+        defender.role = protodd::UnitRole::worker;
         terranPressure.self.units.push_back(defender);
     }
-    astra::ThreatAssessment visiblePressure;
+    protodd::ThreatAssessment visiblePressure;
     visiblePressure.combatEnemiesNearMain = 1;
     const auto economicUnderAttack = strategy.plan(
-        terranPressure, visiblePressure, astra::OpeningStyle::economic);
-    expect(economicUnderAttack.posture == astra::Posture::defend &&
+        terranPressure, visiblePressure, protodd::OpeningStyle::economic);
+    expect(economicUnderAttack.posture == protodd::Posture::defend &&
                economicUnderAttack.desiredBases == 1 &&
                economicUnderAttack.desiredWorkers <= 14,
            "learned economic style cannot override visible main-base pressure");
 
-    astra::GameState workerRush;
+    protodd::GameState workerRush;
     workerRush.frame = 2 * 60 * 24;
     workerRush.self.id = 1;
     workerRush.enemy.id = 2;
-    workerRush.enemy.race = astra::Race::protoss;
-    auto remoteProbe = unit(1, astra::UnitKind::probe, true, {3000, 3000});
-    remoteProbe.role = astra::UnitRole::worker;
-    auto homeNexus = unit(2, astra::UnitKind::nexus, true, {256, 256});
-    homeNexus.role = astra::UnitRole::resourceDepot;
+    workerRush.enemy.race = protodd::Race::protoss;
+    auto remoteProbe = unit(1, protodd::UnitKind::probe, true, {3000, 3000});
+    remoteProbe.role = protodd::UnitRole::worker;
+    auto homeNexus = unit(2, protodd::UnitKind::nexus, true, {256, 256});
+    homeNexus.role = protodd::UnitRole::resourceDepot;
     workerRush.self.units = {remoteProbe, homeNexus};
     for (int i = 0; i < 4; ++i) {
         workerRush.enemy.units.push_back(
-            unit(20 + i, astra::UnitKind::probe, false, {300 + i * 12, 280}));
+            unit(20 + i, protodd::UnitKind::probe, false, {300 + i * 12, 280}));
     }
-    astra::OpponentModel workerModel;
+    protodd::OpponentModel workerModel;
     workerModel.update(workerRush);
-    expect(workerModel.mostLikelyPlan() == astra::EnemyPlan::workerRush &&
+    expect(workerModel.mostLikelyPlan() == protodd::EnemyPlan::workerRush &&
                workerModel.assessment().workerRush > 0.3,
            "worker rush inference anchors to the Nexus rather than unit ordering");
 
-    astra::GameState normalScout = workerRush;
+    protodd::GameState normalScout = workerRush;
     normalScout.enemy.units.resize(1);
-    astra::OpponentModel normalScoutModel;
+    protodd::OpponentModel normalScoutModel;
     normalScoutModel.update(normalScout);
-    expect(normalScoutModel.mostLikelyPlan() != astra::EnemyPlan::workerRush &&
+    expect(normalScoutModel.mostLikelyPlan() != protodd::EnemyPlan::workerRush &&
                normalScoutModel.assessment().workerRush < 0.3,
            "one scouting worker is not misclassified as a worker rush");
     const auto normalScoutPlan = strategy.plan(
         normalScout, normalScoutModel.assessment());
-    expect(normalScoutPlan.posture != astra::Posture::defend,
+    expect(normalScoutPlan.posture != protodd::Posture::defend,
            "one scouting worker does not force the matchup plan into emergency defense");
 
     for (auto& enemy : state.enemy.units) {
@@ -356,99 +356,99 @@ void testOpponentInferenceAndStrategy() {
     expect(model.assessment().aggression < 0.6,
            "remembered opening units age out of the active pressure estimate");
 
-    astra::GameState cannonRush = workerRush;
+    protodd::GameState cannonRush = workerRush;
     cannonRush.enemy.units.clear();
-    auto cannon = unit(80, astra::UnitKind::photonCannon, false, {480, 300});
+    auto cannon = unit(80, protodd::UnitKind::photonCannon, false, {480, 300});
     cannon.completed = false;
     cannon.buildProgress = 40;
     cannonRush.enemy.units.push_back(cannon);
-    astra::OpponentModel cannonModel;
+    protodd::OpponentModel cannonModel;
     cannonModel.update(cannonRush);
-    expect(cannonModel.mostLikelyPlan() == astra::EnemyPlan::staticContain,
+    expect(cannonModel.mostLikelyPlan() == protodd::EnemyPlan::staticContain,
            "nearby opening cannon classifies as a static contain");
     const auto containPlan = strategy.plan(cannonRush, cannonModel.assessment(),
-                                           astra::OpeningStyle::economic);
-    expect(containPlan.posture == astra::Posture::defend &&
+                                           protodd::OpeningStyle::economic);
+    expect(containPlan.posture == protodd::Posture::defend &&
                containPlan.desiredBases == 1 &&
                std::ranges::none_of(containPlan.goals,
-                                    [](const astra::ProductionGoal& candidate) {
-                                        return candidate.goal == astra::GoalKind::expand;
+                                    [](const protodd::ProductionGoal& candidate) {
+                                        return candidate.goal == protodd::GoalKind::expand;
                                     }),
            "static contain overrides learned greed and suppresses expansion");
 
-    astra::GameState adaptive;
+    protodd::GameState adaptive;
     adaptive.frame = 11 * 60 * 24;
     adaptive.self.id = 1;
-    adaptive.self.race = astra::Race::protoss;
+    adaptive.self.race = protodd::Race::protoss;
     adaptive.self.supplyUsed = 100;
     adaptive.self.supplyTotal = 150;
     adaptive.enemy.id = 2;
-    adaptive.enemy.race = astra::Race::zerg;
-    auto adaptiveNexus = unit(300, astra::UnitKind::nexus, true, {256, 256});
-    adaptiveNexus.role = astra::UnitRole::resourceDepot;
+    adaptive.enemy.race = protodd::Race::zerg;
+    auto adaptiveNexus = unit(300, protodd::UnitKind::nexus, true, {256, 256});
+    adaptiveNexus.role = protodd::UnitRole::resourceDepot;
     adaptive.self.units.push_back(adaptiveNexus);
     for (int i = 0; i < 8; ++i) {
-        auto hydralisk = unit(400 + i, astra::UnitKind::hydralisk, false,
+        auto hydralisk = unit(400 + i, protodd::UnitKind::hydralisk, false,
                               {1200 + i * 8, 1200});
-        hydralisk.role = astra::UnitRole::groundArmy;
+        hydralisk.role = protodd::UnitRole::groundArmy;
         hydralisk.lastSeen = adaptive.frame;
         adaptive.enemy.units.push_back(hydralisk);
     }
     for (int i = 0; i < 6; ++i) {
-        auto guardian = unit(500 + i, astra::UnitKind::guardian, false,
+        auto guardian = unit(500 + i, protodd::UnitKind::guardian, false,
                              {1300 + i * 8, 1250});
-        guardian.role = astra::UnitRole::airArmy;
+        guardian.role = protodd::UnitRole::airArmy;
         guardian.flying = true;
         guardian.lastSeen = adaptive.frame;
         adaptive.enemy.units.push_back(guardian);
     }
     const auto adaptivePlan = strategy.plan(adaptive, {});
-    expect(std::ranges::any_of(adaptivePlan.goals, [](const astra::ProductionGoal& goal) {
-               return goal.target == astra::UnitKind::reaver && goal.desiredCount >= 2;
+    expect(std::ranges::any_of(adaptivePlan.goals, [](const protodd::ProductionGoal& goal) {
+               return goal.target == protodd::UnitKind::reaver && goal.desiredCount >= 2;
            }),
            "observed hydralisk mass adds a reaver splash counter");
-    expect(std::ranges::any_of(adaptivePlan.goals, [](const astra::ProductionGoal& goal) {
-               return goal.target == astra::UnitKind::corsair && goal.desiredCount >= 7 &&
+    expect(std::ranges::any_of(adaptivePlan.goals, [](const protodd::ProductionGoal& goal) {
+               return goal.target == protodd::UnitKind::corsair && goal.desiredCount >= 7 &&
                       goal.blocking;
            }),
            "observed Zerg air mass increases blocking air-control production");
 }
 
 void testSupplyPlanning() {
-    astra::GameState state;
+    protodd::GameState state;
     state.self.id = 1;
-    state.self.race = astra::Race::protoss;
-    state.enemy.race = astra::Race::terran;
+    state.self.race = protodd::Race::protoss;
+    state.enemy.race = protodd::Race::terran;
     state.self.supplyUsed = 12;
     state.self.supplyTotal = 18;
-    auto nexus = unit(1, astra::UnitKind::nexus, true);
-    nexus.role = astra::UnitRole::resourceDepot;
+    auto nexus = unit(1, protodd::UnitKind::nexus, true);
+    nexus.role = protodd::UnitRole::resourceDepot;
     state.self.units.push_back(nexus);
 
-    astra::StrategyEngine strategy;
+    protodd::StrategyEngine strategy;
     const auto opening = strategy.plan(state, {});
     const auto pylonGoal = std::ranges::find(
-        opening.goals, astra::UnitKind::pylon, &astra::ProductionGoal::target);
+        opening.goals, protodd::UnitKind::pylon, &protodd::ProductionGoal::target);
     expect(pylonGoal != opening.goals.end() && pylonGoal->desiredCount == 1 &&
                pylonGoal->blocking,
            "opening supply logic reserves the first pylon before a supply block");
     state.self.minerals = 100;
-    astra::ResourceLedger openingLedger{state.self.minerals, state.self.gas};
-    const auto openingActions = astra::MacroPlanner{}.reconcile(
+    protodd::ResourceLedger openingLedger{state.self.minerals, state.self.gas};
+    const auto openingActions = protodd::MacroPlanner{}.reconcile(
         state, opening, openingLedger);
     expect(!openingActions.empty() &&
-               openingActions.front().action == astra::MacroActionKind::build &&
-               openingActions.front().target == astra::UnitKind::pylon &&
+               openingActions.front().action == protodd::MacroActionKind::build &&
+               openingActions.front().target == protodd::UnitKind::pylon &&
                openingActions.front().reserved,
            "live opening state turns the blocking pylon goal into the first command");
 
-    auto pendingPylon = unit(2, astra::UnitKind::pylon, true);
+    auto pendingPylon = unit(2, protodd::UnitKind::pylon, true);
     pendingPylon.completed = false;
     pendingPylon.buildProgress = 20;
     state.self.units.push_back(pendingPylon);
     const auto constructing = strategy.plan(state, {});
     const auto constructingGoal = std::ranges::find(
-        constructing.goals, astra::UnitKind::pylon, &astra::ProductionGoal::target);
+        constructing.goals, protodd::UnitKind::pylon, &protodd::ProductionGoal::target);
     expect(constructingGoal != constructing.goals.end() &&
                constructingGoal->desiredCount == 1,
            "pending pylon supply prevents a duplicate construction order");
@@ -456,44 +456,44 @@ void testSupplyPlanning() {
     state.self.supplyUsed = 40;
     state.self.supplyTotal = 60;
     state.self.units.pop_back();
-    state.self.units.push_back(unit(20, astra::UnitKind::pylon, true));
-    state.self.units.push_back(unit(21, astra::UnitKind::pylon, true));
+    state.self.units.push_back(unit(20, protodd::UnitKind::pylon, true));
+    state.self.units.push_back(unit(21, protodd::UnitKind::pylon, true));
     for (int id = 10; id < 14; ++id) {
-        state.self.units.push_back(unit(id, astra::UnitKind::gateway, true));
-        state.self.queuedUnits.push_back(astra::UnitKind::dragoon);
+        state.self.units.push_back(unit(id, protodd::UnitKind::gateway, true));
+        state.self.queuedUnits.push_back(protodd::UnitKind::dragoon);
     }
     const auto productionForecast = strategy.plan(state, {});
     const auto forecastPylon = std::ranges::find(
-        productionForecast.goals, astra::UnitKind::pylon,
-        &astra::ProductionGoal::target);
+        productionForecast.goals, protodd::UnitKind::pylon,
+        &protodd::ProductionGoal::target);
     expect(forecastPylon != productionForecast.goals.end() &&
                forecastPylon->desiredCount == 2,
            "supply forecast does not count in-production units twice when headroom is sufficient");
     state.self.supplyUsed = 52;
     const auto nextCycle = strategy.plan(state, {});
-    const auto nextPylon = std::ranges::find(nextCycle.goals, astra::UnitKind::pylon,
-                                            &astra::ProductionGoal::target);
+    const auto nextPylon = std::ranges::find(nextCycle.goals, protodd::UnitKind::pylon,
+                                            &protodd::ProductionGoal::target);
     expect(nextPylon != nextCycle.goals.end() && nextPylon->desiredCount == 3,
            "supply forecasting still funds the next production cycle before a block");
 
-    astra::GameState banked;
+    protodd::GameState banked;
     banked.frame = 4 * 60 * 24;
-    banked.self.race = astra::Race::protoss;
-    banked.enemy.race = astra::Race::terran;
+    banked.self.race = protodd::Race::protoss;
+    banked.enemy.race = protodd::Race::terran;
     banked.self.minerals = 700;
     banked.self.supplyUsed = 24;
     banked.self.supplyTotal = 34;
     banked.self.units = {
-        unit(30, astra::UnitKind::nexus, true),
-        unit(31, astra::UnitKind::pylon, true),
-        unit(32, astra::UnitKind::gateway, true),
+        unit(30, protodd::UnitKind::nexus, true),
+        unit(31, protodd::UnitKind::pylon, true),
+        unit(32, protodd::UnitKind::gateway, true),
     };
     banked.bases.push_back(
         {1, {128, 128}, {160, 128}, 8000, 5000, banked.self.id,
          banked.frame, true, false, 8, 1});
     const auto spendingPlan = strategy.plan(banked, {});
-    expect(std::ranges::any_of(spendingPlan.goals, [](const astra::ProductionGoal& goal) {
-               return goal.target == astra::UnitKind::gateway &&
+    expect(std::ranges::any_of(spendingPlan.goals, [](const protodd::ProductionGoal& goal) {
+               return goal.target == protodd::UnitKind::gateway &&
                       goal.desiredCount >= 2 && goal.priority == 62;
            }),
            "sustained mineral surplus adds production instead of banking indefinitely");
@@ -501,68 +501,71 @@ void testSupplyPlanning() {
     banked.frame = 5 * 60 * 24;
     banked.self.minerals = 0;
     for (int id = 33; id < 45; ++id) {
-        auto worker = unit(id, astra::UnitKind::probe, true);
-        worker.role = astra::UnitRole::worker;
+        auto worker = unit(id, protodd::UnitKind::probe, true);
+        worker.role = protodd::UnitRole::worker;
         banked.self.units.push_back(worker);
     }
+    banked.self.supplyUsed = 56;
+    for (int id = 60; id < 63; ++id)
+        banked.self.units.push_back(unit(id, protodd::UnitKind::dragoon, true));
     const auto expansionPlan = strategy.plan(banked, {});
     expect(expansionPlan.desiredBases >= 2,
-           "PvT observer expansion begins by the five-minute economic phase");
+           "PvT natural becomes due once the supply and Dragoon commitments are met");
     expect(std::ranges::any_of(
-               expansionPlan.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.goal == astra::GoalKind::expand && goal.blocking &&
+               expansionPlan.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.goal == protodd::GoalKind::expand && goal.blocking &&
                           goal.priority > 74;
                }),
            "safe due expansion reserves its bank ahead of routine Probe production");
 
-    astra::ThreatAssessment threatenedExpansion;
+    protodd::ThreatAssessment threatenedExpansion;
     threatenedExpansion.combatEnemiesNearMain = 4;
     threatenedExpansion.immediateGround = 0.8;
     const auto defensePlan = strategy.plan(banked, threatenedExpansion);
     expect(std::ranges::none_of(
-               defensePlan.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.goal == astra::GoalKind::expand && goal.blocking;
+               defensePlan.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.goal == protodd::GoalKind::expand && goal.blocking;
                }),
            "immediate pressure cancels expansion banking in favor of defenders");
 
     auto learnedPressure = threatenedExpansion;
     learnedPressure.combatEnemiesNearMain = 0;
     learnedPressure.immediateGround = 0.0;
-    learnedPressure.mostLikely = astra::EnemyPlan::fastRush;
+    learnedPressure.mostLikely = protodd::EnemyPlan::fastRush;
     const auto cautiousTransition = strategy.plan(banked, learnedPressure);
-    expect(cautiousTransition.posture == astra::Posture::hold &&
+    expect(cautiousTransition.posture == protodd::Posture::hold &&
                cautiousTransition.minimumAttackSize >= 14,
            "a learned rush keeps a decisive army on its defensive screen between waves");
 
     auto chainedExpansion = banked;
     chainedExpansion.frame = 11 * 60 * 24;
-    auto pendingNexus = unit(45, astra::UnitKind::nexus, true, {640, 640});
-    pendingNexus.role = astra::UnitRole::resourceDepot;
+    auto pendingNexus = unit(45, protodd::UnitKind::nexus, true, {640, 640});
+    pendingNexus.role = protodd::UnitRole::resourceDepot;
     pendingNexus.completed = false;
     chainedExpansion.self.units.push_back(pendingNexus);
     const auto chainedPlan = strategy.plan(chainedExpansion, {});
     expect(std::ranges::none_of(
-               chainedPlan.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.goal == astra::GoalKind::expand && goal.blocking &&
+               chainedPlan.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.goal == protodd::GoalKind::expand && goal.blocking &&
                           goal.desiredCount >= 3;
                }),
            "an unfinished expansion cannot immediately reserve a third Nexus");
 
-    astra::GameState throughput;
+    protodd::GameState throughput;
     throughput.frame = 4 * 60 * 24;
-    throughput.self.race = astra::Race::protoss;
-    throughput.enemy.race = astra::Race::protoss;
+    throughput.self.race = protodd::Race::protoss;
+    throughput.enemy.race = protodd::Race::protoss;
     throughput.self.supplyUsed = 40;
     throughput.self.supplyTotal = 50;
     throughput.self.units = {
-        unit(40, astra::UnitKind::nexus, true),
-        unit(41, astra::UnitKind::pylon, true),
-        unit(42, astra::UnitKind::gateway, true),
+        unit(40, protodd::UnitKind::nexus, true),
+        unit(41, protodd::UnitKind::pylon, true),
+        unit(42, protodd::UnitKind::gateway, true),
     };
-    throughput.self.units.front().role = astra::UnitRole::resourceDepot;
+    throughput.self.units.front().role = protodd::UnitRole::resourceDepot;
     for (int id = 50; id < 68; ++id) {
-        auto worker = unit(id, astra::UnitKind::probe, true);
-        worker.role = astra::UnitRole::worker;
+        auto worker = unit(id, protodd::UnitKind::probe, true);
+        worker.role = protodd::UnitRole::worker;
         throughput.self.units.push_back(worker);
     }
     throughput.bases.push_back(
@@ -570,171 +573,166 @@ void testSupplyPlanning() {
          throughput.frame, true, false, 8, 1});
     const auto throughputPlan = strategy.plan(throughput, {});
     expect(std::ranges::any_of(
-               throughputPlan.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::gateway &&
+               throughputPlan.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::gateway &&
                           goal.desiredCount >= 3 && goal.priority == 73;
                }),
            "saturated one-base economy proactively scales army throughput");
 
-    astra::ThreatAssessment productionThreat;
+    protodd::ThreatAssessment productionThreat;
     productionThreat.enemyProductionCapacity = 3.0;
     throughput.self.units.erase(throughput.self.units.begin() + 3,
                                 throughput.self.units.end());
     const auto parityPlan = strategy.plan(throughput, productionThreat);
     expect(std::ranges::any_of(
-               parityPlan.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::gateway &&
+               parityPlan.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::gateway &&
                           goal.desiredCount == 3 && goal.priority == 78;
                }),
            "scouted enemy production prevents an underbuilt one-base response");
 }
 
 void testStrategicDirector() {
-    astra::StrategicDirector director;
-    astra::GameState state;
+    protodd::StrategicDirector director;
+    protodd::GameState state;
     state.frame = 100;
-    astra::StrategicPlan pressure;
+    protodd::StrategicPlan pressure;
     pressure.name = "pressure";
-    pressure.posture = astra::Posture::pressure;
-    expect(director.stabilize(pressure, state, {}).posture == astra::Posture::pressure,
+    pressure.posture = protodd::Posture::pressure;
+    expect(director.stabilize(pressure, state, {}).posture == protodd::Posture::pressure,
            "strategic director accepts the initial map-level intent");
 
-    astra::StrategicPlan defense = pressure;
-    defense.posture = astra::Posture::defend;
-    astra::ThreatAssessment breach;
+    protodd::StrategicPlan defense = pressure;
+    defense.posture = protodd::Posture::defend;
+    protodd::ThreatAssessment breach;
     breach.combatEnemiesNearMain = 2;
     state.frame += 24;
-    expect(director.stabilize(defense, state, breach).posture == astra::Posture::defend,
+    expect(director.stabilize(defense, state, breach).posture == protodd::Posture::defend,
            "strategic emergencies override an attack immediately");
 
     state.frame += 4 * 24;
     const auto regrouping = director.stabilize(pressure, state, {});
-    expect(regrouping.posture == astra::Posture::defend &&
+    expect(regrouping.posture == protodd::Posture::defend &&
                regrouping.attackThreshold >= 1.40,
            "one clear observation cannot relaunch an army after base defense");
 
     state.frame += 5 * 24;
-    expect(director.stabilize(pressure, state, {}).posture == astra::Posture::pressure,
+    expect(director.stabilize(pressure, state, {}).posture == protodd::Posture::pressure,
            "sustained safety releases the regrouped army");
 }
 
 void testOpeningMilestones() {
-    astra::GameState state;
+    protodd::GameState state;
     state.self.id = 1;
-    state.self.race = astra::Race::protoss;
+    state.self.race = protodd::Race::protoss;
     state.enemy.id = 2;
-    state.enemy.race = astra::Race::terran;
+    state.enemy.race = protodd::Race::terran;
     state.self.supplyTotal = 34;
-    auto nexus = unit(1, astra::UnitKind::nexus, true);
-    nexus.role = astra::UnitRole::resourceDepot;
+    auto nexus = unit(1, protodd::UnitKind::nexus, true);
+    nexus.role = protodd::UnitRole::resourceDepot;
     state.self.units.push_back(nexus);
-    astra::StrategyEngine strategy;
+    protodd::StrategyEngine strategy;
 
     state.self.supplyUsed = 14;
     const auto beforeGateway = strategy.plan(state, {});
     const auto openingCannons = std::ranges::find_if(
-        beforeGateway.goals, [](const astra::ProductionGoal& goal) {
-            return goal.target == astra::UnitKind::photonCannon;
+        beforeGateway.goals, [](const protodd::ProductionGoal& goal) {
+            return goal.target == protodd::UnitKind::photonCannon;
         });
     const auto openingGateway = std::ranges::find_if(
-        beforeGateway.goals, [](const astra::ProductionGoal& goal) {
-            return goal.target == astra::UnitKind::gateway;
+        beforeGateway.goals, [](const protodd::ProductionGoal& goal) {
+            return goal.target == protodd::UnitKind::gateway;
         });
-    expect(std::ranges::any_of(beforeGateway.goals, [](const astra::ProductionGoal& goal) {
-               return goal.target == astra::UnitKind::forge && goal.blocking;
-           }) && std::ranges::any_of(
-               beforeGateway.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::photonCannon &&
-                          goal.desiredCount == 2 && goal.blocking;
-               }) && openingCannons != beforeGateway.goals.end() &&
-               openingGateway != beforeGateway.goals.end() &&
-               openingCannons->priority > openingGateway->priority,
-           "PvT establishes overlapping static safety before an unscouted bio rush");
-
-    state.self.supplyUsed = 16;
-    const auto gatewayTiming = strategy.plan(state, {});
-    expect(std::ranges::any_of(gatewayTiming.goals, [](const astra::ProductionGoal& goal) {
-               return goal.target == astra::UnitKind::gateway && goal.blocking;
-           }),
-           "eight-supply Gateway becomes a mandatory opening milestone");
+    expect(openingCannons == beforeGateway.goals.end() &&
+               openingGateway == beforeGateway.goals.end() && beforeGateway.desiredWorkers > 7,
+           "unscouted PvT grows its economy before the ten-supply Gateway");
 
     state.self.supplyUsed = 20;
-    const auto terranSafety = strategy.plan(state, {});
-    expect(std::ranges::any_of(terranSafety.goals, [](const astra::ProductionGoal& goal) {
-               return goal.target == astra::UnitKind::zealot && goal.blocking;
+    const auto gatewayTiming = strategy.plan(state, {});
+    expect(std::ranges::any_of(gatewayTiming.goals, [](const protodd::ProductionGoal& goal) {
+               return goal.target == protodd::UnitKind::gateway && goal.blocking;
            }),
-           "PvT banks one opening bodyguard before committing to dragoon tech");
+           "ten-supply Gateway becomes a mandatory opening milestone");
 
-    state.enemy.race = astra::Race::protoss;
+    state.self.supplyUsed = 20;
+    protodd::ThreatAssessment earlyBio;
+    earlyBio.combatEnemiesNearMain = 3;
+    const auto terranSafety = strategy.plan(state, earlyBio);
+    expect(std::ranges::any_of(terranSafety.goals, [](const protodd::ProductionGoal& goal) {
+               return goal.target == protodd::UnitKind::zealot && goal.blocking;
+           }),
+           "confirmed PvT pressure banks an opening bodyguard before dragoon tech");
+
+    state.enemy.race = protodd::Race::protoss;
     state.self.supplyUsed = 14;
     const auto zealotTiming = strategy.plan(state, {});
     expect(zealotTiming.desiredWorkers > 7 &&
-               std::ranges::none_of(zealotTiming.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::forge ||
-                          goal.target == astra::UnitKind::photonCannon;
+               std::ranges::none_of(zealotTiming.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::forge ||
+                          goal.target == protodd::UnitKind::photonCannon;
                }), "PvP keeps growing its opening income instead of buying blind static defense");
-    state.self.supplyUsed = 18;
+    state.self.supplyUsed = 20;
     const auto mobileOpening = strategy.plan(state, {});
-    expect(std::ranges::any_of(mobileOpening.goals, [](const astra::ProductionGoal& goal) {
-               return goal.target == astra::UnitKind::gateway && goal.blocking &&
+    expect(std::ranges::any_of(mobileOpening.goals, [](const protodd::ProductionGoal& goal) {
+               return goal.target == protodd::UnitKind::gateway && goal.blocking &&
                       goal.priority >= 100;
-           }), "PvP reserves its first Gateway at nine supply before routine spending");
+           }), "PvP reserves its first Gateway at ten supply before routine spending");
 
-    state.self.supplyUsed = 26;
-    state.self.units.push_back(unit(2, astra::UnitKind::gateway, true));
-    state.self.units.push_back(unit(3, astra::UnitKind::gateway, true));
-    state.self.units.push_back(unit(4, astra::UnitKind::zealot, true));
+    state.self.supplyUsed = 28;
+    state.self.units.push_back(unit(2, protodd::UnitKind::gateway, true));
+    state.self.units.push_back(unit(3, protodd::UnitKind::gateway, true));
+    state.self.units.push_back(unit(4, protodd::UnitKind::zealot, true));
     const auto coreTiming = strategy.plan(state, {});
-    expect(std::ranges::any_of(coreTiming.goals, [](const astra::ProductionGoal& goal) {
-               return goal.target == astra::UnitKind::cyberneticsCore && goal.blocking;
+    expect(std::ranges::any_of(coreTiming.goals, [](const protodd::ProductionGoal& goal) {
+               return goal.target == protodd::UnitKind::cyberneticsCore && goal.blocking;
            }),
-           "thirteen-supply Core becomes a mandatory opening milestone");
+           "fourteen-supply Core becomes a mandatory opening milestone");
     expect(coreTiming.desiredGasWorkers == 3,
            "gas mining starts before gas-dependent Dragoon technology");
     state.self.supplyUsed = 28;
     const auto rangeTiming = strategy.plan(state, {});
     const auto rangeGoal = std::ranges::find_if(
-        rangeTiming.goals, [](const astra::ProductionGoal& goal) {
-            return goal.technology == astra::TechnologyKind::singularityCharge;
+        rangeTiming.goals, [](const protodd::ProductionGoal& goal) {
+            return goal.technology == protodd::TechnologyKind::singularityCharge;
         });
-    expect(rangeGoal != rangeTiming.goals.end() && !rangeGoal->blocking,
-           "Dragoon range cannot freeze early army and production spending");
+    expect(rangeGoal == rangeTiming.goals.end() || !rangeGoal->blocking,
+           "normal PvP does not reserve range before its first Dragoon");
 
-    astra::ThreatAssessment baseBreach;
+    protodd::ThreatAssessment baseBreach;
     baseBreach.combatEnemiesNearMain = 3;
     const auto emergencyTiming = strategy.plan(state, baseBreach);
     expect(emergencyTiming.composition.size() == 1 &&
-               emergencyTiming.composition.front().kind == astra::UnitKind::zealot &&
+               emergencyTiming.composition.front().kind == protodd::UnitKind::zealot &&
                std::ranges::none_of(
-                   emergencyTiming.goals, [](const astra::ProductionGoal& goal) {
-                       return goal.target == astra::UnitKind::cyberneticsCore ||
+                   emergencyTiming.goals, [](const protodd::ProductionGoal& goal) {
+                       return goal.target == protodd::UnitKind::cyberneticsCore ||
                               goal.technology ==
-                                  astra::TechnologyKind::singularityCharge;
+                                  protodd::TechnologyKind::singularityCharge;
                    }),
            "PvP base breach cannot reserve tech ahead of continuous defenders");
 
     auto marineFlood = state;
-    marineFlood.enemy.race = astra::Race::terran;
+    marineFlood.enemy.race = protodd::Race::terran;
     marineFlood.frame = 6 * 60 * 24;
     const auto fortifiedTerran = strategy.plan(marineFlood, baseBreach);
     expect(std::ranges::any_of(
-               fortifiedTerran.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::photonCannon &&
+               fortifiedTerran.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::photonCannon &&
                           goal.desiredCount >= 4 && goal.priority > 100;
                }) && std::ranges::any_of(
-               fortifiedTerran.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::zealot &&
+               fortifiedTerran.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::zealot &&
                           goal.desiredCount >= 10 && goal.blocking;
                }),
            "sustained PvT bio pressure scales both static and mobile throughput");
     const auto emergencyGateway = std::ranges::find_if(
-        fortifiedTerran.goals, [](const astra::ProductionGoal& goal) {
-            return goal.target == astra::UnitKind::gateway &&
+        fortifiedTerran.goals, [](const protodd::ProductionGoal& goal) {
+            return goal.target == protodd::UnitKind::gateway &&
                    goal.desiredCount >= 2;
         });
     const auto sustainedZealots = std::ranges::find_if(
-        fortifiedTerran.goals, [](const astra::ProductionGoal& goal) {
-            return goal.target == astra::UnitKind::zealot &&
+        fortifiedTerran.goals, [](const protodd::ProductionGoal& goal) {
+            return goal.target == protodd::UnitKind::zealot &&
                    goal.desiredCount >= 10;
         });
     expect(emergencyGateway != fortifiedTerran.goals.end() &&
@@ -742,34 +740,34 @@ void testOpeningMilestones() {
                emergencyGateway->priority > sustainedZealots->priority,
            "PvT pressure adds production before repeatedly reserving individual bodies");
     marineFlood.self.units.push_back(
-        unit(9, astra::UnitKind::photonCannon, true));
+        unit(9, protodd::UnitKind::photonCannon, true));
     marineFlood.self.units.push_back(
-        unit(10, astra::UnitKind::photonCannon, true));
+        unit(10, protodd::UnitKind::photonCannon, true));
     marineFlood.self.units.push_back(
-        unit(11, astra::UnitKind::photonCannon, true));
+        unit(11, protodd::UnitKind::photonCannon, true));
     marineFlood.self.units.push_back(
-        unit(13, astra::UnitKind::photonCannon, true));
+        unit(13, protodd::UnitKind::photonCannon, true));
     marineFlood.self.units.push_back(
-        unit(12, astra::UnitKind::cyberneticsCore, true));
+        unit(12, protodd::UnitKind::cyberneticsCore, true));
     for (int id = 20; id < 27; ++id) {
         marineFlood.enemy.units.push_back(
-            unit(id, astra::UnitKind::marine, false, {320 + id * 4, 320}));
+            unit(id, protodd::UnitKind::marine, false, {320 + id * 4, 320}));
     }
     for (int id = 30; id < 33; ++id) {
         marineFlood.self.units.push_back(
-            unit(id, astra::UnitKind::zealot, true, {220 + id * 4, 220}));
+            unit(id, protodd::UnitKind::zealot, true, {220 + id * 4, 220}));
     }
     marineFlood.frame = 8 * 60 * 24;
     const auto antiBioTech = strategy.plan(marineFlood, baseBreach);
     expect(std::ranges::any_of(
-               antiBioTech.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::citadelOfAdun &&
+               antiBioTech.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::citadelOfAdun &&
                           goal.priority >= 99 && goal.blocking;
                }),
            "a completed PvT defensive screen converts its window into cloak tech");
     expect(std::ranges::any_of(
-               antiBioTech.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::dragoon &&
+               antiBioTech.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::dragoon &&
                           goal.desiredCount == 1 && goal.priority >= 104 &&
                           !goal.blocking;
                }),
@@ -778,53 +776,53 @@ void testOpeningMilestones() {
     gasReadyBioTech.self.gas = 50;
     const auto gasReadyBioPlan = strategy.plan(gasReadyBioTech, baseBreach);
     expect(std::ranges::any_of(
-               gasReadyBioPlan.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::dragoon &&
+               gasReadyBioPlan.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::dragoon &&
                           goal.desiredCount == 1 && goal.priority >= 104 &&
                           goal.blocking;
                }),
            "a powered defensive screen reserves its first Dragoon once gas is ready");
     expect(std::ranges::any_of(
-               antiBioTech.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::cyberneticsCore &&
+               antiBioTech.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::cyberneticsCore &&
                           goal.priority >= 99 && goal.blocking;
                }),
            "an established screen advances ranged tech after emergency production");
     expect(std::ranges::any_of(
-               antiBioTech.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::pylon &&
+               antiBioTech.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::pylon &&
                           goal.desiredCount >= 2 && goal.priority >= 102 &&
                           goal.blocking;
                }),
            "the PvT defensive shell receives redundant forward power");
     auto committedCloak = marineFlood;
-    std::erase_if(committedCloak.self.units, [](const astra::UnitSnapshot& candidate) {
-        return astra::isCombatUnit(candidate.kind);
+    std::erase_if(committedCloak.self.units, [](const protodd::UnitSnapshot& candidate) {
+        return protodd::isCombatUnit(candidate.kind);
     });
     committedCloak.self.units.push_back(
-        unit(38, astra::UnitKind::zealot, true));
+        unit(38, protodd::UnitKind::zealot, true));
     committedCloak.self.units.push_back(
-        unit(39, astra::UnitKind::citadelOfAdun, true));
+        unit(39, protodd::UnitKind::citadelOfAdun, true));
     const auto committedCloakPlan = strategy.plan(committedCloak, baseBreach);
     expect(std::ranges::any_of(
-               committedCloakPlan.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::templarArchives &&
+               committedCloakPlan.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::templarArchives &&
                           goal.priority >= 99 && goal.blocking;
                }),
            "an initiated cloak transition persists through frontline losses");
     auto stormState = marineFlood;
     for (int id = 33; id < 37; ++id) {
         stormState.self.units.push_back(
-            unit(id, astra::UnitKind::zealot, true, {220 + id * 4, 220}));
+            unit(id, protodd::UnitKind::zealot, true, {220 + id * 4, 220}));
     }
     const auto stormPlan = strategy.plan(stormState, baseBreach);
     const auto stormGoal = std::ranges::find_if(
-        stormPlan.goals, [](const astra::ProductionGoal& goal) {
-            return goal.technology == astra::TechnologyKind::psionicStorm;
+        stormPlan.goals, [](const protodd::ProductionGoal& goal) {
+            return goal.technology == protodd::TechnologyKind::psionicStorm;
         });
     const auto routineDragoon = std::ranges::find_if(
-        stormPlan.goals, [](const astra::ProductionGoal& goal) {
-            return goal.target == astra::UnitKind::dragoon &&
+        stormPlan.goals, [](const protodd::ProductionGoal& goal) {
+            return goal.target == protodd::UnitKind::dragoon &&
                    goal.desiredCount >= 8;
         });
     expect(stormGoal != stormPlan.goals.end() && stormGoal->blocking &&
@@ -833,24 +831,24 @@ void testOpeningMilestones() {
            "observed bio reserves Storm before unbounded Dragoon production");
 
     auto staticRecovery = marineFlood;
-    std::erase_if(staticRecovery.self.units, [](const astra::UnitSnapshot& candidate) {
-        return astra::isCombatUnit(candidate.kind);
+    std::erase_if(staticRecovery.self.units, [](const protodd::UnitSnapshot& candidate) {
+        return protodd::isCombatUnit(candidate.kind);
     });
     for (int id = 40; id < 45; ++id) {
-        auto probe = unit(id, astra::UnitKind::probe, true, {160 + id, 160});
-        probe.role = astra::UnitRole::worker;
+        auto probe = unit(id, protodd::UnitKind::probe, true, {160 + id, 160});
+        probe.role = protodd::UnitRole::worker;
         staticRecovery.self.units.push_back(probe);
     }
     const auto staticRecoveryPlan = strategy.plan(staticRecovery, baseBreach);
     expect(std::ranges::any_of(
-               staticRecoveryPlan.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::probe &&
+               staticRecoveryPlan.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::probe &&
                           goal.desiredCount >= 8 && goal.priority == 105 &&
                           goal.blocking;
                }),
            "three completed Cannons permit critical Probe recovery under pressure");
 
-    state.enemy.race = astra::Race::protoss;
+    state.enemy.race = protodd::Race::protoss;
     state.frame = 5 * 60 * 24;
     state.bases.push_back(
         {1, {128, 128}, {160, 128}, 8000, 5000, 1, state.frame,
@@ -859,74 +857,74 @@ void testOpeningMilestones() {
     expect(oneBasePlan.desiredBases == 1 && oneBasePlan.desiredWorkers <= 22,
            "one-base plans stop Probe production at a useful saturation cap");
 
-    state.enemy.race = astra::Race::zerg;
+    state.enemy.race = protodd::Race::zerg;
     state.self.supplyUsed = 20;
-    std::erase_if(state.self.units, [](const astra::UnitSnapshot& candidate) {
+    std::erase_if(state.self.units, [](const protodd::UnitSnapshot& candidate) {
         return candidate.id == 3;
     });
     const auto safePvZ = strategy.plan(state, {});
-    expect(std::ranges::any_of(safePvZ.goals, [](const astra::ProductionGoal& goal) {
-               return goal.target == astra::UnitKind::gateway &&
+    expect(std::ranges::any_of(safePvZ.goals, [](const protodd::ProductionGoal& goal) {
+               return goal.target == protodd::UnitKind::gateway &&
                       goal.desiredCount >= 2 && goal.blocking;
            }),
            "PvZ secures two-gate throughput before exposing the economy");
-    expect(std::ranges::any_of(safePvZ.goals, [](const astra::ProductionGoal& goal) {
-               return goal.target == astra::UnitKind::forge && goal.blocking;
+    expect(std::ranges::any_of(safePvZ.goals, [](const protodd::ProductionGoal& goal) {
+               return goal.target == protodd::UnitKind::forge && goal.blocking;
            }) &&
                std::ranges::any_of(
-                   safePvZ.goals, [](const astra::ProductionGoal& goal) {
-                       return goal.target == astra::UnitKind::photonCannon &&
+                   safePvZ.goals, [](const protodd::ProductionGoal& goal) {
+                       return goal.target == protodd::UnitKind::photonCannon &&
                               goal.desiredCount >= 1 && goal.blocking;
                    }),
            "PvZ establishes a fortified anchor before exposing its economy");
 
-    astra::GameState poolFirst;
+    protodd::GameState poolFirst;
     poolFirst.self.id = 1;
-    poolFirst.self.race = astra::Race::protoss;
+    poolFirst.self.race = protodd::Race::protoss;
     poolFirst.enemy.id = 2;
-    poolFirst.enemy.race = astra::Race::zerg;
+    poolFirst.enemy.race = protodd::Race::zerg;
     poolFirst.self.supplyUsed = 14;
     poolFirst.self.supplyTotal = 18;
-    auto poolNexus = unit(80, astra::UnitKind::nexus, true, {128, 128});
-    poolNexus.role = astra::UnitRole::resourceDepot;
+    auto poolNexus = unit(80, protodd::UnitKind::nexus, true, {128, 128});
+    poolNexus.role = protodd::UnitRole::resourceDepot;
     poolFirst.self.units.push_back(poolNexus);
     for (int id = 81; id < 88; ++id) {
-        auto poolProbe = unit(id, astra::UnitKind::probe, true, {128, 128});
-        poolProbe.role = astra::UnitRole::worker;
+        auto poolProbe = unit(id, protodd::UnitKind::probe, true, {128, 128});
+        poolProbe.role = protodd::UnitRole::worker;
         poolFirst.self.units.push_back(poolProbe);
     }
     const auto poolFirstPlan = strategy.plan(poolFirst, {});
     expect(poolFirstPlan.desiredWorkers == 8 &&
                std::ranges::any_of(
-                   poolFirstPlan.goals, [](const astra::ProductionGoal& goal) {
-                       return goal.target == astra::UnitKind::gateway &&
+                   poolFirstPlan.goals, [](const protodd::ProductionGoal& goal) {
+                       return goal.target == protodd::UnitKind::gateway &&
                               goal.blocking;
                    }),
            "pool-first-safe opening banks a Gateway before resuming Probe growth");
 
-    astra::ThreatAssessment earlyZergThreat;
+    protodd::ThreatAssessment earlyZergThreat;
     earlyZergThreat.immediateGround = 0.35;
     earlyZergThreat.combatEnemiesNearMain = 6;
     const auto pressuredPoolFirstPlan = strategy.plan(poolFirst, earlyZergThreat);
     expect(std::ranges::any_of(
-               pressuredPoolFirstPlan.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::photonCannon &&
+               pressuredPoolFirstPlan.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::photonCannon &&
                           goal.desiredCount >= 2 && goal.priority == 100;
                }),
            "confirmed early Zerg pressure immediately doubles static coverage");
 
     auto fortifiedPoolFirst = poolFirst;
     fortifiedPoolFirst.self.units.push_back(
-        unit(90, astra::UnitKind::forge, true, {160, 160}));
+        unit(90, protodd::UnitKind::forge, true, {160, 160}));
     fortifiedPoolFirst.self.units.push_back(
-        unit(91, astra::UnitKind::photonCannon, true, {180, 160}));
+        unit(91, protodd::UnitKind::photonCannon, true, {180, 160}));
     fortifiedPoolFirst.self.units.push_back(
-        unit(92, astra::UnitKind::photonCannon, true, {200, 160}));
+        unit(92, protodd::UnitKind::photonCannon, true, {200, 160}));
     const auto recoveryBehindCannons = strategy.plan(
         fortifiedPoolFirst, earlyZergThreat);
     expect(std::ranges::any_of(
-               recoveryBehindCannons.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::probe &&
+               recoveryBehindCannons.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::probe &&
                           goal.desiredCount >= 10 && goal.priority == 100 &&
                           goal.blocking;
                }),
@@ -934,30 +932,30 @@ void testOpeningMilestones() {
 }
 
 void testStrategicTargeting() {
-    astra::GameState state;
+    protodd::GameState state;
     state.self.id = 1;
-    state.self.race = astra::Race::protoss;
+    state.self.race = protodd::Race::protoss;
     state.enemy.id = 2;
-    state.enemy.race = astra::Race::terran;
+    state.enemy.race = protodd::Race::terran;
     state.bases = {
         {1, {256, 256}, {280, 256}, 8000, 5000, 1, 100, true, false},
         {2, {1800, 1800}, {1760, 1800}, 8000, 5000, -1, 0, true, false},
     };
-    auto nexus = unit(1, astra::UnitKind::nexus, true, {256, 256});
-    nexus.role = astra::UnitRole::resourceDepot;
+    auto nexus = unit(1, protodd::UnitKind::nexus, true, {256, 256});
+    nexus.role = protodd::UnitRole::resourceDepot;
     state.self.units.push_back(nexus);
 
-    astra::StrategyEngine strategy;
+    protodd::StrategyEngine strategy;
     const auto search = strategy.plan(state, {});
-    expect(search.attackTarget == astra::Position{1800, 1800},
+    expect(search.attackTarget == protodd::Position{1800, 1800},
            "unknown enemy search excludes our owned start location");
     expect(search.rallyPoint != nexus.position &&
-               astra::distance(search.rallyPoint, nexus.position) > 128.0 &&
-               astra::distance(search.rallyPoint, search.attackTarget) <
-                   astra::distance(nexus.position, search.attackTarget),
+               protodd::distance(search.rallyPoint, nexus.position) > 128.0 &&
+               protodd::distance(search.rallyPoint, search.attackTarget) <
+                   protodd::distance(nexus.position, search.attackTarget),
            "defensive rally screens the mineral line toward the enemy approach");
 
-    auto hiddenTech = unit(20, astra::UnitKind::factory, false, {1500, 1400});
+    auto hiddenTech = unit(20, protodd::UnitKind::factory, false, {1500, 1400});
     hiddenTech.visible = false;
     state.enemy.units.push_back(hiddenTech);
     const auto cleanup = strategy.plan(state, {});
@@ -966,26 +964,26 @@ void testStrategicTargeting() {
 }
 
 void testEconomicRecovery() {
-    astra::GameState state;
+    protodd::GameState state;
     state.frame = 10 * 60 * 24;
     state.self.id = 1;
-    state.self.race = astra::Race::protoss;
+    state.self.race = protodd::Race::protoss;
     state.enemy.id = 2;
-    state.enemy.race = astra::Race::terran;
+    state.enemy.race = protodd::Race::terran;
     state.self.supplyUsed = 30;
     state.self.supplyTotal = 50;
     state.bases.push_back(
         {1, {256, 256}, {280, 260}, 6000, 5000, -1, 0, true, false, 8, 1});
     for (int id = 1; id <= 5; ++id) {
-        auto probe = unit(id, astra::UnitKind::probe, true, {256 + id * 4, 256});
-        probe.role = astra::UnitRole::worker;
+        auto probe = unit(id, protodd::UnitKind::probe, true, {256 + id * 4, 256});
+        probe.role = protodd::UnitRole::worker;
         state.self.units.push_back(probe);
     }
-    astra::StrategyEngine strategy;
+    protodd::StrategyEngine strategy;
     const auto lostMain = strategy.plan(state, {});
-    expect(lostMain.posture == astra::Posture::recover &&
-               std::ranges::any_of(lostMain.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::nexus && goal.blocking &&
+    expect(lostMain.posture == protodd::Posture::recover &&
+               std::ranges::any_of(lostMain.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::nexus && goal.blocking &&
                           goal.priority == 100;
                }),
            "surviving workers trigger an emergency Nexus rebuild");
@@ -993,140 +991,140 @@ void testEconomicRecovery() {
     state.self.units.clear();
     state.bases.clear();
     for (int id = 1; id <= 3; ++id) {
-        auto nexus = unit(id, astra::UnitKind::nexus, true, {id * 400, 256});
-        nexus.role = astra::UnitRole::resourceDepot;
+        auto nexus = unit(id, protodd::UnitKind::nexus, true, {id * 400, 256});
+        nexus.role = protodd::UnitRole::resourceDepot;
         state.self.units.push_back(nexus);
         state.bases.push_back(
             {id, {id * 400, 256}, {id * 400 + 30, 256}, 0, 0, 1, 0,
              id == 1, false, 0, 1});
     }
     for (int id = 10; id < 30; ++id) {
-        auto probe = unit(id, astra::UnitKind::probe, true);
-        probe.role = astra::UnitRole::worker;
+        auto probe = unit(id, protodd::UnitKind::probe, true);
+        probe.role = protodd::UnitRole::worker;
         state.self.units.push_back(probe);
     }
     const auto depleted = strategy.plan(state, {});
     expect(depleted.desiredBases >= 4 &&
-               std::ranges::any_of(depleted.goals, [](const astra::ProductionGoal& goal) {
-                   return goal.target == astra::UnitKind::nexus &&
+               std::ranges::any_of(depleted.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::nexus &&
                           goal.desiredCount >= 4 && goal.blocking;
                }),
            "mined-out Nexuses do not prevent replacement expansion");
 
-    auto disabledGateway = unit(50, astra::UnitKind::gateway, true);
+    auto disabledGateway = unit(50, protodd::UnitKind::gateway, true);
     disabledGateway.powered = false;
     state.self.units.push_back(disabledGateway);
     const auto repower = strategy.plan(state, {});
-    expect(std::ranges::any_of(repower.goals, [](const astra::ProductionGoal& goal) {
-               return goal.target == astra::UnitKind::pylon && goal.priority == 98 &&
+    expect(std::ranges::any_of(repower.goals, [](const protodd::ProductionGoal& goal) {
+               return goal.target == protodd::UnitKind::pylon && goal.priority == 98 &&
                       goal.blocking;
            }),
            "unpowered production triggers mandatory local repowering");
 }
 
 void testMacroReservations() {
-    astra::GameState state;
+    protodd::GameState state;
     state.self.minerals = 200;
-    astra::StrategicPlan plan;
+    protodd::StrategicPlan plan;
     plan.goals = {
-        {astra::GoalKind::build, astra::UnitKind::pylon, 1, 100, true, "supply"},
-        {astra::GoalKind::build, astra::UnitKind::gateway, 1, 90, false, "production"},
+        {protodd::GoalKind::build, protodd::UnitKind::pylon, 1, 100, true, "supply"},
+        {protodd::GoalKind::build, protodd::UnitKind::gateway, 1, 90, false, "production"},
     };
-    astra::ResourceLedger ledger{state.self.minerals, 0};
-    astra::MacroPlanner planner;
+    protodd::ResourceLedger ledger{state.self.minerals, 0};
+    protodd::MacroPlanner planner;
     const auto actions = planner.reconcile(state, plan, ledger);
     expect(actions.size() == 1, "only affordable macro goal is emitted");
-    expect(actions.front().target == astra::UnitKind::pylon && actions.front().reserved,
+    expect(actions.front().target == protodd::UnitKind::pylon && actions.front().reserved,
            "higher-priority pylon reserves first");
     expect(ledger.freeMinerals() == 100, "resource reservation is explicit");
 
-    state.self.units.push_back(unit(1, astra::UnitKind::pylon, true));
-    state.self.units.push_back(unit(2, astra::UnitKind::nexus, true));
-    astra::StrategicPlan emergency;
+    state.self.units.push_back(unit(1, protodd::UnitKind::pylon, true));
+    state.self.units.push_back(unit(2, protodd::UnitKind::nexus, true));
+    protodd::StrategicPlan emergency;
     emergency.goals = {
-        {astra::GoalKind::build, astra::UnitKind::gateway, 1, 100, true, "emergency"},
-        {astra::GoalKind::train, astra::UnitKind::probe, 1, 50, false, "worker"},
+        {protodd::GoalKind::build, protodd::UnitKind::gateway, 1, 100, true, "emergency"},
+        {protodd::GoalKind::train, protodd::UnitKind::probe, 1, 50, false, "worker"},
     };
-    astra::ResourceLedger poor{100, 0};
+    protodd::ResourceLedger poor{100, 0};
     const auto waiting = planner.reconcile(state, emergency, poor);
     expect(waiting.size() == 2 &&
-               std::ranges::any_of(waiting, [](const astra::MacroAction& action) {
-                   return action.target == astra::UnitKind::probe && action.reserved &&
+               std::ranges::any_of(waiting, [](const protodd::MacroAction& action) {
+                   return action.target == protodd::UnitKind::probe && action.reserved &&
                           action.executable;
                }),
            "unaffordable structural goals preserve continuous worker production");
     expect(poor.freeMinerals() == 0 && poor.reservedMinerals == 100,
            "blocking reservation plus the worker cycle accounts for the full bank");
 
-    astra::GameState queuedState;
+    protodd::GameState queuedState;
     queuedState.self.minerals = 50;
-    queuedState.self.units.push_back(unit(2, astra::UnitKind::nexus, true));
-    queuedState.self.queuedUnits.push_back(astra::UnitKind::probe);
-    astra::StrategicPlan queuedPlan;
+    queuedState.self.units.push_back(unit(2, protodd::UnitKind::nexus, true));
+    queuedState.self.queuedUnits.push_back(protodd::UnitKind::probe);
+    protodd::StrategicPlan queuedPlan;
     queuedPlan.goals = {
-        {astra::GoalKind::train, astra::UnitKind::probe, 1, 80, false, "worker"},
+        {protodd::GoalKind::train, protodd::UnitKind::probe, 1, 80, false, "worker"},
     };
-    astra::ResourceLedger queuedLedger{50, 0};
+    protodd::ResourceLedger queuedLedger{50, 0};
     expect(planner.reconcile(queuedState, queuedPlan, queuedLedger).empty(),
            "queued production counts toward macro targets");
 
-    astra::GameState duplicateState;
+    protodd::GameState duplicateState;
     duplicateState.self.minerals = 800;
-    duplicateState.self.units.push_back(unit(3, astra::UnitKind::nexus, true));
-    astra::StrategicPlan duplicatePlan;
+    duplicateState.self.units.push_back(unit(3, protodd::UnitKind::nexus, true));
+    protodd::StrategicPlan duplicatePlan;
     duplicatePlan.goals = {
-        {astra::GoalKind::expand, astra::UnitKind::nexus, 2, 90, false, "expand"},
-        {astra::GoalKind::expand, astra::UnitKind::nexus, 2, 70, false, "economic style"},
+        {protodd::GoalKind::expand, protodd::UnitKind::nexus, 2, 90, false, "expand"},
+        {protodd::GoalKind::expand, protodd::UnitKind::nexus, 2, 70, false, "economic style"},
     };
-    astra::ResourceLedger duplicateLedger{800, 0};
+    protodd::ResourceLedger duplicateLedger{800, 0};
     const auto expansions = planner.reconcile(duplicateState, duplicatePlan, duplicateLedger);
-    expect(expansions.size() == 1 && expansions.front().target == astra::UnitKind::nexus,
+    expect(expansions.size() == 1 && expansions.front().target == protodd::UnitKind::nexus,
            "overlapping strategic goals reserve only one missing structure");
 
     // Saving for a long-horizon expansion must not suppress the next Probe.
     // The Nexus reservation protects the bank, but leaves one worker cycle
     // available until the full 400-mineral cost can actually be issued.
-    astra::GameState expansionMacroState;
+    protodd::GameState expansionMacroState;
     expansionMacroState.self.minerals = 136;
     expansionMacroState.self.supplyTotal = 82;
     expansionMacroState.self.supplyUsed = 76;
-    expansionMacroState.self.units = {unit(4, astra::UnitKind::nexus, true)};
-    astra::StrategicPlan expansionMacroPlan;
+    expansionMacroState.self.units = {unit(4, protodd::UnitKind::nexus, true)};
+    protodd::StrategicPlan expansionMacroPlan;
     expansionMacroPlan.goals = {
-        {astra::GoalKind::expand, astra::UnitKind::nexus, 2, 95, true,
+        {protodd::GoalKind::expand, protodd::UnitKind::nexus, 2, 95, true,
          "safe natural"},
-        {astra::GoalKind::train, astra::UnitKind::probe, 22, 93, false,
+        {protodd::GoalKind::train, protodd::UnitKind::probe, 22, 93, false,
          "continuous workers"},
     };
-    astra::ResourceLedger expansionMacroLedger{136, 0};
+    protodd::ResourceLedger expansionMacroLedger{136, 0};
     const auto expansionMacro = planner.reconcile(
         expansionMacroState, expansionMacroPlan, expansionMacroLedger);
-    expect(std::ranges::any_of(expansionMacro, [](const astra::MacroAction& action) {
-               return action.target == astra::UnitKind::probe && action.reserved &&
+    expect(std::ranges::any_of(expansionMacro, [](const protodd::MacroAction& action) {
+               return action.target == protodd::UnitKind::probe && action.reserved &&
                       action.executable;
            }),
            "a pending expansion leaves one mineral cycle for continuous Probe production");
 
-    astra::GameState techMacroState;
+    protodd::GameState techMacroState;
     techMacroState.self.minerals = 120;
     techMacroState.self.supplyTotal = 34;
     techMacroState.self.supplyUsed = 20;
     techMacroState.self.units = {
-        unit(5, astra::UnitKind::nexus, true),
-        unit(6, astra::UnitKind::pylon, true),
-        unit(7, astra::UnitKind::gateway, true),
+        unit(5, protodd::UnitKind::nexus, true),
+        unit(6, protodd::UnitKind::pylon, true),
+        unit(7, protodd::UnitKind::gateway, true),
     };
-    astra::StrategicPlan techMacroPlan;
+    protodd::StrategicPlan techMacroPlan;
     techMacroPlan.goals = {
-        {astra::GoalKind::build, astra::UnitKind::cyberneticsCore, 1, 95, true,
+        {protodd::GoalKind::build, protodd::UnitKind::cyberneticsCore, 1, 95, true,
          "ranged transition"},
-        {astra::GoalKind::train, astra::UnitKind::probe, 18, 93, false,
+        {protodd::GoalKind::train, protodd::UnitKind::probe, 18, 93, false,
          "continuous workers"},
     };
-    astra::ResourceLedger techMacroLedger{120, 0};
+    protodd::ResourceLedger techMacroLedger{120, 0};
     const auto techMacro = planner.reconcile(techMacroState, techMacroPlan, techMacroLedger);
-    expect(std::ranges::any_of(techMacro, [](const astra::MacroAction& action) {
-               return action.target == astra::UnitKind::probe && action.reserved &&
+    expect(std::ranges::any_of(techMacro, [](const protodd::MacroAction& action) {
+               return action.target == protodd::UnitKind::probe && action.reserved &&
                       action.executable;
            }),
            "a pending tech transition leaves one mineral cycle for continuous Probe production");
@@ -1134,217 +1132,217 @@ void testMacroReservations() {
     // An active melee emergency must fund its static anchor before another
     // Probe or Battery can consume the bank.  Otherwise a 120-mineral bank
     // can oscillate below the 150-mineral Forge cost indefinitely.
-    astra::GameState urgentAnchorState;
+    protodd::GameState urgentAnchorState;
     urgentAnchorState.self.minerals = 120;
     urgentAnchorState.self.supplyTotal = 66;
     urgentAnchorState.self.supplyUsed = 30;
     urgentAnchorState.self.units = {
-        unit(8, astra::UnitKind::nexus, true),
-        unit(9, astra::UnitKind::pylon, true),
-        unit(10, astra::UnitKind::gateway, true),
+        unit(8, protodd::UnitKind::nexus, true),
+        unit(9, protodd::UnitKind::pylon, true),
+        unit(10, protodd::UnitKind::gateway, true),
     };
-    astra::StrategicPlan urgentAnchorPlan;
+    protodd::StrategicPlan urgentAnchorPlan;
     urgentAnchorPlan.goals = {
-        {astra::GoalKind::build, astra::UnitKind::forge, 1, 112, true,
+        {protodd::GoalKind::build, protodd::UnitKind::forge, 1, 112, true,
          "anchor the mineral line"},
-        {astra::GoalKind::train, astra::UnitKind::probe, 20, 93, false,
+        {protodd::GoalKind::train, protodd::UnitKind::probe, 20, 93, false,
          "keep workers producing"},
     };
-    astra::ResourceLedger urgentAnchorLedger{120, 0};
+    protodd::ResourceLedger urgentAnchorLedger{120, 0};
     const auto urgentAnchor = planner.reconcile(
         urgentAnchorState, urgentAnchorPlan, urgentAnchorLedger);
-    expect(std::ranges::none_of(urgentAnchor, [](const astra::MacroAction& action) {
-               return action.target == astra::UnitKind::probe && action.reserved &&
+    expect(std::ranges::none_of(urgentAnchor, [](const protodd::MacroAction& action) {
+               return action.target == protodd::UnitKind::probe && action.reserved &&
                       action.executable;
            }) && urgentAnchorLedger.freeMinerals() == 0,
            "urgent static anchors take the current bank before worker refills");
 
-    astra::GameState blockedDuplicateState;
+    protodd::GameState blockedDuplicateState;
     blockedDuplicateState.self.minerals = 100;
     blockedDuplicateState.self.units = {
-        unit(30, astra::UnitKind::pylon, true),
-        unit(31, astra::UnitKind::gateway, true),
+        unit(30, protodd::UnitKind::pylon, true),
+        unit(31, protodd::UnitKind::gateway, true),
     };
-    astra::StrategicPlan blockedDuplicatePlan;
+    protodd::StrategicPlan blockedDuplicatePlan;
     blockedDuplicatePlan.goals = {
-        {astra::GoalKind::build, astra::UnitKind::cyberneticsCore, 1, 95, true,
+        {protodd::GoalKind::build, protodd::UnitKind::cyberneticsCore, 1, 95, true,
          "first core goal"},
-        {astra::GoalKind::build, astra::UnitKind::cyberneticsCore, 1, 90, true,
+        {protodd::GoalKind::build, protodd::UnitKind::cyberneticsCore, 1, 90, true,
          "overlapping core goal"},
     };
-    astra::ResourceLedger blockedDuplicateLedger{100, 0};
+    protodd::ResourceLedger blockedDuplicateLedger{100, 0};
     const auto blockedCoreActions = planner.reconcile(
         blockedDuplicateState, blockedDuplicatePlan, blockedDuplicateLedger);
     expect(blockedCoreActions.size() == 1 &&
-               blockedCoreActions.front().target == astra::UnitKind::cyberneticsCore,
+               blockedCoreActions.front().target == protodd::UnitKind::cyberneticsCore,
            "unaffordable blocking goals are deduplicated in one macro pass");
 
-    astra::GameState busyProducerState;
+    protodd::GameState busyProducerState;
     busyProducerState.self.minerals = 250;
     busyProducerState.self.units = {
-        unit(35, astra::UnitKind::pylon, true),
-        unit(36, astra::UnitKind::gateway, true),
+        unit(35, protodd::UnitKind::pylon, true),
+        unit(36, protodd::UnitKind::gateway, true),
     };
-    busyProducerState.self.queuedUnits = {astra::UnitKind::zealot};
-    astra::StrategicPlan busyProducerPlan;
+    busyProducerState.self.queuedUnits = {protodd::UnitKind::zealot};
+    protodd::StrategicPlan busyProducerPlan;
     busyProducerPlan.goals = {
-        {astra::GoalKind::train, astra::UnitKind::zealot, 3, 98, true,
+        {protodd::GoalKind::train, protodd::UnitKind::zealot, 3, 98, true,
          "more defenders"},
-        {astra::GoalKind::build, astra::UnitKind::gateway, 2, 97, true,
+        {protodd::GoalKind::build, protodd::UnitKind::gateway, 2, 97, true,
          "increase throughput"},
     };
-    astra::ResourceLedger busyProducerLedger{250, 0};
+    protodd::ResourceLedger busyProducerLedger{250, 0};
     const auto busyProducerActions = planner.reconcile(
         busyProducerState, busyProducerPlan, busyProducerLedger);
     expect(busyProducerActions.size() == 1 &&
-               busyProducerActions.front().target == astra::UnitKind::gateway &&
+               busyProducerActions.front().target == protodd::UnitKind::gateway &&
                busyProducerActions.front().reserved,
            "busy producers do not reserve queued units ahead of new throughput");
 
     busyProducerState.self.queuedUnits.clear();
-    busyProducerState.self.busyProducers = {astra::UnitKind::gateway};
-    astra::ResourceLedger latencyBusyLedger{250, 0};
+    busyProducerState.self.busyProducers = {protodd::UnitKind::gateway};
+    protodd::ResourceLedger latencyBusyLedger{250, 0};
     const auto latencyBusyActions = planner.reconcile(
         busyProducerState, busyProducerPlan, latencyBusyLedger);
     expect(latencyBusyActions.size() == 1 &&
-               latencyBusyActions.front().target == astra::UnitKind::gateway,
+               latencyBusyActions.front().target == protodd::UnitKind::gateway,
            "isTraining occupancy closes the BWAPI queue-visibility latency gap");
 
-    astra::GameState techState;
+    protodd::GameState techState;
     techState.self.minerals = 100;
-    astra::StrategicPlan techPlan;
+    protodd::StrategicPlan techPlan;
     techPlan.goals = {
-        {astra::GoalKind::train, astra::UnitKind::dragoon, 1, 90, false, "tech unit"},
+        {protodd::GoalKind::train, protodd::UnitKind::dragoon, 1, 90, false, "tech unit"},
     };
-    astra::ResourceLedger techLedger{100, 0};
+    protodd::ResourceLedger techLedger{100, 0};
     const auto techActions = planner.reconcile(techState, techPlan, techLedger);
-    expect(techActions.size() == 1 && techActions.front().target == astra::UnitKind::pylon,
+    expect(techActions.size() == 1 && techActions.front().target == protodd::UnitKind::pylon,
            "unreachable unit goals build the next missing prerequisite first");
 
-    astra::GameState pendingPrerequisite;
+    protodd::GameState pendingPrerequisite;
     pendingPrerequisite.self.minerals = 150;
-    auto unfinishedPylon = unit(38, astra::UnitKind::pylon, true);
+    auto unfinishedPylon = unit(38, protodd::UnitKind::pylon, true);
     unfinishedPylon.completed = false;
     pendingPrerequisite.self.units.push_back(unfinishedPylon);
-    astra::StrategicPlan pendingPrerequisitePlan;
+    protodd::StrategicPlan pendingPrerequisitePlan;
     pendingPrerequisitePlan.goals = {
-        {astra::GoalKind::train, astra::UnitKind::zealot, 1, 99, true,
+        {protodd::GoalKind::train, protodd::UnitKind::zealot, 1, 99, true,
          "opening defender"},
     };
-    astra::ResourceLedger pendingPrerequisiteLedger{150, 0};
+    protodd::ResourceLedger pendingPrerequisiteLedger{150, 0};
     const auto chainedActions = planner.reconcile(
         pendingPrerequisite, pendingPrerequisitePlan, pendingPrerequisiteLedger);
     expect(chainedActions.size() == 1 && chainedActions.front().reserved &&
-               chainedActions.front().action == astra::MacroActionKind::build &&
-               chainedActions.front().target == astra::UnitKind::gateway,
+               chainedActions.front().action == protodd::MacroActionKind::build &&
+               chainedActions.front().target == protodd::UnitKind::gateway,
            "an in-progress Pylon advances reservation to the Gateway, not an impossible Zealot");
 
-    astra::GameState finishingGateway;
+    protodd::GameState finishingGateway;
     finishingGateway.self.minerals = 150;
-    auto incompleteGateway = unit(39, astra::UnitKind::gateway, true);
+    auto incompleteGateway = unit(39, protodd::UnitKind::gateway, true);
     incompleteGateway.completed = false;
     finishingGateway.self.units.push_back(incompleteGateway);
     finishingGateway.self.units.push_back(
-        unit(40, astra::UnitKind::nexus, true));
-    astra::StrategicPlan finishingGatewayPlan;
+        unit(40, protodd::UnitKind::nexus, true));
+    protodd::StrategicPlan finishingGatewayPlan;
     finishingGatewayPlan.goals = {
-        {astra::GoalKind::train, astra::UnitKind::zealot, 1, 99, true,
+        {protodd::GoalKind::train, protodd::UnitKind::zealot, 1, 99, true,
          "reserve first defender"},
-        {astra::GoalKind::train, astra::UnitKind::probe, 1, 74, false,
+        {protodd::GoalKind::train, protodd::UnitKind::probe, 1, 74, false,
          "spend safe surplus"},
     };
-    astra::ResourceLedger finishingGatewayLedger{150, 0};
+    protodd::ResourceLedger finishingGatewayLedger{150, 0};
     const auto finishingGatewayActions = planner.reconcile(
         finishingGateway, finishingGatewayPlan, finishingGatewayLedger);
     expect(finishingGatewayActions.size() == 2 &&
-               finishingGatewayActions.front().target == astra::UnitKind::zealot &&
+               finishingGatewayActions.front().target == protodd::UnitKind::zealot &&
                finishingGatewayActions.front().reserved &&
                !finishingGatewayActions.front().executable &&
-               finishingGatewayActions.back().target == astra::UnitKind::probe &&
+               finishingGatewayActions.back().target == protodd::UnitKind::probe &&
                finishingGatewayActions.back().reserved &&
                finishingGatewayActions.back().executable,
            "future unit reservation does not block executable surplus production");
 
-    astra::GameState compositionState;
+    protodd::GameState compositionState;
     compositionState.self.minerals = 125;
     compositionState.self.gas = 50;
     compositionState.self.supplyTotal = 20;
     compositionState.self.units = {
-        unit(4, astra::UnitKind::gateway, true),
-        unit(5, astra::UnitKind::cyberneticsCore, true),
+        unit(4, protodd::UnitKind::gateway, true),
+        unit(5, protodd::UnitKind::cyberneticsCore, true),
     };
-    astra::StrategicPlan compositionPlan;
-    compositionPlan.composition = {{astra::UnitKind::dragoon, 1.0}};
-    astra::ResourceLedger compositionLedger{125, 50};
+    protodd::StrategicPlan compositionPlan;
+    compositionPlan.composition = {{protodd::UnitKind::dragoon, 1.0}};
+    protodd::ResourceLedger compositionLedger{125, 50};
     const auto compositionActions = planner.reconcile(
         compositionState, compositionPlan, compositionLedger);
     expect(compositionActions.size() == 1 &&
-               compositionActions.front().target == astra::UnitKind::dragoon,
+               compositionActions.front().target == protodd::UnitKind::dragoon,
            "remaining resources continuously reinforce the planned composition");
 
     compositionState.self.minerals = 100;
     compositionState.self.gas = 0;
     compositionPlan.composition = {
-        {astra::UnitKind::dragoon, 0.9}, {astra::UnitKind::zealot, 0.1},
+        {protodd::UnitKind::dragoon, 0.9}, {protodd::UnitKind::zealot, 0.1},
     };
-    astra::ResourceLedger fallbackLedger{100, 0};
+    protodd::ResourceLedger fallbackLedger{100, 0};
     const auto fallbackActions = planner.reconcile(
         compositionState, compositionPlan, fallbackLedger);
     expect(fallbackActions.size() == 1 &&
-               fallbackActions.front().target == astra::UnitKind::zealot,
+               fallbackActions.front().target == protodd::UnitKind::zealot,
            "composition production falls back instead of idling on an unaffordable unit");
 
-    astra::GameState parallelProduction;
+    protodd::GameState parallelProduction;
     parallelProduction.self.minerals = 300;
     parallelProduction.self.supplyTotal = 40;
     parallelProduction.self.units = {
-        unit(20, astra::UnitKind::gateway, true),
-        unit(21, astra::UnitKind::gateway, true),
-        unit(22, astra::UnitKind::gateway, true),
+        unit(20, protodd::UnitKind::gateway, true),
+        unit(21, protodd::UnitKind::gateway, true),
+        unit(22, protodd::UnitKind::gateway, true),
     };
-    astra::StrategicPlan parallelPlan;
-    parallelPlan.composition = {{astra::UnitKind::zealot, 1.0}};
-    astra::ResourceLedger parallelLedger{300, 0};
+    protodd::StrategicPlan parallelPlan;
+    parallelPlan.composition = {{protodd::UnitKind::zealot, 1.0}};
+    protodd::ResourceLedger parallelLedger{300, 0};
     const auto parallelActions = planner.reconcile(
         parallelProduction, parallelPlan, parallelLedger);
     expect(parallelActions.size() == 3 &&
-               std::ranges::all_of(parallelActions, [](const astra::MacroAction& action) {
-                   return action.action == astra::MacroActionKind::train &&
-                          action.target == astra::UnitKind::zealot && action.reserved;
+               std::ranges::all_of(parallelActions, [](const protodd::MacroAction& action) {
+                   return action.action == protodd::MacroActionKind::train &&
+                          action.target == protodd::UnitKind::zealot && action.reserved;
                }),
            "one macro pass fills every affordable idle Gateway");
 
-    parallelProduction.self.queuedUnits.push_back(astra::UnitKind::zealot);
-    astra::ResourceLedger partlyBusyLedger{300, 0};
+    parallelProduction.self.queuedUnits.push_back(protodd::UnitKind::zealot);
+    protodd::ResourceLedger partlyBusyLedger{300, 0};
     expect(planner.reconcile(parallelProduction, parallelPlan, partlyBusyLedger).size() == 2,
            "existing queues consume producer slots before parallel pumping");
 
     parallelProduction.self.queuedUnits.clear();
     parallelProduction.self.supplyUsed = 36;
-    astra::ResourceLedger supplyBoundLedger{300, 0};
+    protodd::ResourceLedger supplyBoundLedger{300, 0};
     expect(planner.reconcile(parallelProduction, parallelPlan, supplyBoundLedger).size() == 1,
            "parallel pumping never overcommits the remaining supply");
 
-    astra::GameState upgradeState;
+    protodd::GameState upgradeState;
     upgradeState.self.minerals = 150;
     upgradeState.self.gas = 150;
-    upgradeState.self.units.push_back(unit(8, astra::UnitKind::cyberneticsCore, true));
-    astra::StrategicPlan upgradePlan;
+    upgradeState.self.units.push_back(unit(8, protodd::UnitKind::cyberneticsCore, true));
+    protodd::StrategicPlan upgradePlan;
     upgradePlan.goals = {
-        {astra::GoalKind::upgrade, astra::UnitKind::unknown, 1, 95, true,
-         "dragoon range", astra::TechnologyKind::singularityCharge},
+        {protodd::GoalKind::upgrade, protodd::UnitKind::unknown, 1, 95, true,
+         "dragoon range", protodd::TechnologyKind::singularityCharge},
     };
-    astra::ResourceLedger upgradeLedger{150, 150};
+    protodd::ResourceLedger upgradeLedger{150, 150};
     const auto upgradeActions = planner.reconcile(upgradeState, upgradePlan, upgradeLedger);
     expect(upgradeActions.size() == 1 && upgradeActions.front().reserved &&
-               upgradeActions.front().action == astra::MacroActionKind::upgrade &&
+               upgradeActions.front().action == protodd::MacroActionKind::upgrade &&
                upgradeActions.front().technology ==
-                   astra::TechnologyKind::singularityCharge,
+                   protodd::TechnologyKind::singularityCharge,
            "strategic upgrades reserve resources as executable macro actions");
 
     upgradeState.self.technologies.push_back(
-        {astra::TechnologyKind::singularityCharge, 0, true});
-    astra::ResourceLedger duplicateUpgradeLedger{150, 150};
+        {protodd::TechnologyKind::singularityCharge, 0, true});
+    protodd::ResourceLedger duplicateUpgradeLedger{150, 150};
     expect(planner.reconcile(upgradeState, upgradePlan, duplicateUpgradeLedger).empty(),
            "in-progress technology is never issued twice");
 
@@ -1352,86 +1350,86 @@ void testMacroReservations() {
     upgradeState.self.minerals = 100;
     upgradeState.self.gas = 0;
     upgradePlan.goals.push_back(
-        {astra::GoalKind::train, astra::UnitKind::probe, 1, 30, false, "worker"});
-    astra::ResourceLedger savingLedger{100, 0};
+        {protodd::GoalKind::train, protodd::UnitKind::probe, 1, 30, false, "worker"});
+    protodd::ResourceLedger savingLedger{100, 0};
     const auto savingActions = planner.reconcile(upgradeState, upgradePlan, savingLedger);
     expect(savingActions.size() == 1 && !savingActions.front().reserved &&
                savingActions.front().technology ==
-                   astra::TechnologyKind::singularityCharge,
+                   protodd::TechnologyKind::singularityCharge,
            "mandatory technology preserves its bank instead of leaking to cheap production");
 
-    upgradeState.self.units.push_back(unit(9, astra::UnitKind::nexus, true));
+    upgradeState.self.units.push_back(unit(9, protodd::UnitKind::nexus, true));
     upgradeState.self.minerals = 250;
-    astra::ResourceLedger surplusLedger{250, 0};
+    protodd::ResourceLedger surplusLedger{250, 0};
     const auto surplusActions = planner.reconcile(upgradeState, upgradePlan, surplusLedger);
-    expect(std::ranges::any_of(surplusActions, [](const astra::MacroAction& action) {
-               return action.target == astra::UnitKind::probe && action.reserved;
+    expect(std::ranges::any_of(surplusActions, [](const protodd::MacroAction& action) {
+               return action.target == protodd::UnitKind::probe && action.reserved;
            }) && surplusLedger.reservedMinerals == 200,
            "gas-starved technology protects its cost while surplus minerals keep probes flowing");
 
-    astra::GameState supplyInvariant;
+    protodd::GameState supplyInvariant;
     supplyInvariant.self.id = 1;
-    supplyInvariant.self.race = astra::Race::protoss;
+    supplyInvariant.self.race = protodd::Race::protoss;
     supplyInvariant.self.minerals = 100;
     supplyInvariant.self.supplyUsed = 12;
     supplyInvariant.self.supplyTotal = 18;
-    supplyInvariant.self.units.push_back(unit(40, astra::UnitKind::nexus, true));
-    astra::ResourceLedger supplyLedger{100, 0};
+    supplyInvariant.self.units.push_back(unit(40, protodd::UnitKind::nexus, true));
+    protodd::ResourceLedger supplyLedger{100, 0};
     const auto protectedSupply = planner.reconcile(supplyInvariant, {}, supplyLedger);
     expect(protectedSupply.size() == 1 && protectedSupply.front().reserved &&
                protectedSupply.front().blocksLowerPriority &&
-               protectedSupply.front().target == astra::UnitKind::pylon,
+               protectedSupply.front().target == protodd::UnitKind::pylon,
            "macro safety layer prevents a supply deadlock even with an empty strategy");
 
-    auto pendingSupply = unit(41, astra::UnitKind::pylon, true);
+    auto pendingSupply = unit(41, protodd::UnitKind::pylon, true);
     pendingSupply.completed = false;
     supplyInvariant.self.units.push_back(pendingSupply);
-    astra::ResourceLedger pendingSupplyLedger{100, 0};
+    protodd::ResourceLedger pendingSupplyLedger{100, 0};
     expect(planner.reconcile(supplyInvariant, {}, pendingSupplyLedger).empty(),
            "supply invariant does not duplicate an in-progress pylon");
 }
 
 void testOpponentLearning() {
-    astra::OpponentHistory history;
+    protodd::OpponentHistory history;
     history.parse(
         "Bot,Map,standard,8,2\n"
         "Bot,Map,aggressive,2,8\n"
         "Bot,Map,economic,3,7\n"
         "Bot,Map,deceptive,1,9\n");
-    expect(history.choose("Bot", "Map", 7) == astra::OpeningStyle::standard,
+    expect(history.choose("Bot", "Map", 7) == protodd::OpeningStyle::standard,
            "UCB learning exploits clearly successful opening");
-    history.record("Bot", "Map", astra::OpeningStyle::standard, true);
+    history.record("Bot", "Map", protodd::OpeningStyle::standard, true);
     const auto encoded = history.serialize();
-    astra::OpponentHistory restored;
+    protodd::OpponentHistory restored;
     restored.parse(encoded);
-    expect(restored.lookup("Bot", "Map", astra::OpeningStyle::standard).wins == 9,
+    expect(restored.lookup("Bot", "Map", protodd::OpeningStyle::standard).wins == 9,
            "opponent history round-trips through tournament CSV");
 
     restored.merge("Bot,Map,standard,11,2\nBot,Map,aggressive,1,4\n");
-    expect(restored.lookup("Bot", "Map", astra::OpeningStyle::standard).wins == 11 &&
-               restored.lookup("Bot", "Map", astra::OpeningStyle::standard).losses == 2 &&
-               restored.lookup("Bot", "Map", astra::OpeningStyle::aggressive).losses == 8,
+    expect(restored.lookup("Bot", "Map", protodd::OpeningStyle::standard).wins == 11 &&
+               restored.lookup("Bot", "Map", protodd::OpeningStyle::standard).losses == 2 &&
+               restored.lookup("Bot", "Map", protodd::OpeningStyle::aggressive).losses == 8,
            "read and write learning snapshots merge without losing cumulative results");
 
-    astra::OpponentHistory fresh;
+    protodd::OpponentHistory fresh;
     const auto exploration = fresh.choose("NewBot", "Map", 3);
-    expect(exploration == astra::OpeningStyle::standard,
+    expect(exploration == protodd::OpeningStyle::standard,
            "fresh opponent starts from the robust baseline opening");
-    fresh.record("NewBot", "Map", astra::OpeningStyle::standard, true);
-    expect(fresh.choose("NewBot", "Map", 3) != astra::OpeningStyle::standard,
+    fresh.record("NewBot", "Map", protodd::OpeningStyle::standard, true);
+    expect(fresh.choose("NewBot", "Map", 3) != protodd::OpeningStyle::standard,
            "learning explores an untried style after collecting baseline evidence");
 }
 
 void testInfluenceAndCombat() {
-    astra::GameState state;
+    protodd::GameState state;
     state.mapWidthPixels = 1024;
     state.mapHeightPixels = 1024;
-    auto enemy = unit(20, astra::UnitKind::hydralisk, false, {512, 512});
-    enemy.role = astra::UnitRole::groundArmy;
+    auto enemy = unit(20, protodd::UnitKind::hydralisk, false, {512, 512});
+    enemy.role = protodd::UnitRole::groundArmy;
     enemy.groundWeapon = {.damage = 10, .cooldown = 15, .maxRange = 128,
                           .targetsGround = true};
     state.enemy.units.push_back(enemy);
-    astra::InfluenceMap influence;
+    protodd::InfluenceMap influence;
     influence.update(state);
     expect(influence.at({512, 512}).groundThreat > 0.0F,
            "enemy weapon contributes local ground threat");
@@ -1444,16 +1442,16 @@ void testInfluenceAndCombat() {
     expect(influence.at({512, 512}).groundThreat < 0.01F,
            "stale mobile enemies decay out of the fog-of-war threat field");
     auto cannon = staleState.enemy.units.front();
-    cannon.kind = astra::UnitKind::photonCannon;
-    cannon.role = astra::UnitRole::staticDefense;
+    cannon.kind = protodd::UnitKind::photonCannon;
+    cannon.role = protodd::UnitRole::staticDefense;
     staleState.enemy.units = {cannon};
     influence.update(staleState);
     expect(influence.at({512, 512}).groundThreat > 0.0F,
            "remembered static defenses persist until their tile is cleared");
 
     auto detectorState = state;
-    auto observer = unit(22, astra::UnitKind::observer, false, {512, 512});
-    observer.role = astra::UnitRole::detector;
+    auto observer = unit(22, protodd::UnitKind::observer, false, {512, 512});
+    observer.role = protodd::UnitRole::detector;
     observer.flying = true;
     observer.sightRange = 11 * 32;
     detectorState.enemy.units = {observer};
@@ -1461,19 +1459,19 @@ void testInfluenceAndCombat() {
     expect(influence.at({800, 512}).detection > 0.0F,
            "mobile detection field uses the observer's real sight radius");
 
-    std::vector<astra::UnitSnapshot> friendly;
+    std::vector<protodd::UnitSnapshot> friendly;
     for (int i = 0; i < 4; ++i) {
-        auto dragoon = unit(30 + i, astra::UnitKind::dragoon, true, {400, 400 + i * 8});
-        dragoon.role = astra::UnitRole::groundArmy;
+        auto dragoon = unit(30 + i, protodd::UnitKind::dragoon, true, {400, 400 + i * 8});
+        dragoon.role = protodd::UnitRole::groundArmy;
         dragoon.shields = 80;
         dragoon.maxShields = 80;
         dragoon.groundWeapon = {.damage = 20, .cooldown = 30, .maxRange = 192,
                                 .targetsGround = true};
         friendly.push_back(dragoon);
     }
-    astra::CombatEvaluator evaluator;
+    protodd::CombatEvaluator evaluator;
     const auto estimate = evaluator.evaluate(friendly, state.enemy.units, 1.1, 0.1);
-    expect(estimate.decision == astra::FightDecision::engage,
+    expect(estimate.decision == protodd::FightDecision::engage,
            "overwhelming dragoon force elects to engage");
     expect(estimate.simulatedEnemyRemaining < 0.001,
            "bounded combat simulation predicts lethal focus-fire volleys");
@@ -1482,7 +1480,7 @@ void testInfluenceAndCombat() {
 
     auto hallucination = enemy;
     hallucination.hallucination = true;
-    const std::vector<astra::UnitSnapshot> hallucinations{hallucination};
+    const std::vector<protodd::UnitSnapshot> hallucinations{hallucination};
     const auto hallucinationEstimate = evaluator.evaluate(
         friendly, hallucinations, 1.1, 0.0);
     expect(hallucinationEstimate.enemyPower == 0.0 &&
@@ -1492,34 +1490,34 @@ void testInfluenceAndCombat() {
     auto wounded = enemy;
     wounded.id = 21;
     wounded.hitPoints = 10;
-    const std::vector<astra::UnitSnapshot> targetChoices{wounded, enemy};
-    const astra::TargetAllocation lethalVolley[]{
+    const std::vector<protodd::UnitSnapshot> targetChoices{wounded, enemy};
+    const protodd::TargetAllocation lethalVolley[]{
         {wounded.id, 20},
     };
     expect(evaluator.selectTarget(friendly.front(), targetChoices, lethalVolley)->id == enemy.id,
            "focus fire redirects once a target has lethal committed damage");
 
-    auto firstCorsair = unit(70, astra::UnitKind::corsair, true, {400, 400});
-    firstCorsair.role = astra::UnitRole::airArmy;
+    auto firstCorsair = unit(70, protodd::UnitKind::corsair, true, {400, 400});
+    firstCorsair.role = protodd::UnitRole::airArmy;
     firstCorsair.flying = true;
     firstCorsair.airWeapon = {.damage = 5, .cooldown = 8, .maxRange = 160,
                               .targetsAir = true, .hits = 2};
     auto secondCorsair = firstCorsair;
     secondCorsair.id = 71;
-    auto firstScourge = unit(72, astra::UnitKind::scourge, false, {450, 400});
-    firstScourge.role = astra::UnitRole::airArmy;
+    auto firstScourge = unit(72, protodd::UnitKind::scourge, false, {450, 400});
+    firstScourge.role = protodd::UnitRole::airArmy;
     firstScourge.flying = true;
     firstScourge.hitPoints = 8;
     firstScourge.maxHitPoints = 25;
     auto secondScourge = firstScourge;
     secondScourge.id = 73;
     secondScourge.position = {455, 405};
-    const std::vector<astra::UnitSnapshot> corsairs{firstCorsair, secondCorsair};
-    const std::vector<astra::UnitSnapshot> scourge{firstScourge, secondScourge};
-    astra::CombatEstimate volleyEstimate;
-    volleyEstimate.decision = astra::FightDecision::engage;
-    astra::InfluenceMap volleyInfluence;
-    astra::TacticalController volleyTactics;
+    const std::vector<protodd::UnitSnapshot> corsairs{firstCorsair, secondCorsair};
+    const std::vector<protodd::UnitSnapshot> scourge{firstScourge, secondScourge};
+    protodd::CombatEstimate volleyEstimate;
+    volleyEstimate.decision = protodd::FightDecision::engage;
+    protodd::InfluenceMap volleyInfluence;
+    protodd::TacticalController volleyTactics;
     const auto volleyOrders = volleyTactics.control(
         corsairs, scourge, volleyEstimate, {900, 900}, {100, 100}, volleyInfluence);
     expect(volleyOrders.size() == 2 &&
@@ -1529,17 +1527,17 @@ void testInfluenceAndCombat() {
     auto explosiveAttacker = friendly.front();
     explosiveAttacker.groundWeapon = {
         .damage = 100, .cooldown = 1000, .maxRange = 192,
-        .damageType = astra::DamageType::explosive, .targetsGround = true,
+        .damageType = protodd::DamageType::explosive, .targetsGround = true,
     };
     auto smallTarget = enemy;
     smallTarget.hitPoints = 100;
     smallTarget.maxHitPoints = 100;
-    smallTarget.size = astra::UnitSize::small;
+    smallTarget.size = protodd::UnitSize::small;
     auto largeTarget = smallTarget;
-    largeTarget.size = astra::UnitSize::large;
-    const std::vector<astra::UnitSnapshot> oneAttacker{explosiveAttacker};
-    const std::vector<astra::UnitSnapshot> smallForce{smallTarget};
-    const std::vector<astra::UnitSnapshot> largeForce{largeTarget};
+    largeTarget.size = protodd::UnitSize::large;
+    const std::vector<protodd::UnitSnapshot> oneAttacker{explosiveAttacker};
+    const std::vector<protodd::UnitSnapshot> smallForce{smallTarget};
+    const std::vector<protodd::UnitSnapshot> largeForce{largeTarget};
     const auto versusSmall = evaluator.evaluate(oneAttacker, smallForce, 1.0, 0.0);
     const auto versusLarge = evaluator.evaluate(oneAttacker, largeForce, 1.0, 0.0);
     expect(versusSmall.simulatedEnemyRemaining > versusLarge.simulatedEnemyRemaining,
@@ -1550,8 +1548,8 @@ void testInfluenceAndCombat() {
                               .targetsGround = true, .hits = 1};
     auto multiHit = singleHit;
     multiHit.groundWeapon.hits = 4;
-    const std::vector<astra::UnitSnapshot> singleHitForce{singleHit};
-    const std::vector<astra::UnitSnapshot> multiHitForce{multiHit};
+    const std::vector<protodd::UnitSnapshot> singleHitForce{singleHit};
+    const std::vector<protodd::UnitSnapshot> multiHitForce{multiHit};
     const auto singleHitEstimate = evaluator.evaluate(
         singleHitForce, smallForce, 1.0, 0.0, false);
     const auto multiHitEstimate = evaluator.evaluate(
@@ -1567,9 +1565,9 @@ void testInfluenceAndCombat() {
     auto oneLargeHit = fourSmallHits;
     oneLargeHit.groundWeapon.damage = 24;
     oneLargeHit.groundWeapon.hits = 1;
-    const std::vector<astra::UnitSnapshot> armoredForce{armoredTarget};
-    const std::vector<astra::UnitSnapshot> smallHitsForce{fourSmallHits};
-    const std::vector<astra::UnitSnapshot> largeHitForce{oneLargeHit};
+    const std::vector<protodd::UnitSnapshot> armoredForce{armoredTarget};
+    const std::vector<protodd::UnitSnapshot> smallHitsForce{fourSmallHits};
+    const std::vector<protodd::UnitSnapshot> largeHitForce{oneLargeHit};
     const auto smallHitsEstimate = evaluator.evaluate(
         smallHitsForce, armoredForce, 1.0, 0.0);
     const auto largeHitEstimate = evaluator.evaluate(
@@ -1581,25 +1579,25 @@ void testInfluenceAndCombat() {
     auto kiter = friendly.front();
     kiter.position = {200, 200};
     kiter.weaponCooldown = 10;
-    auto melee = unit(50, astra::UnitKind::zergling, false, {250, 200});
-    melee.role = astra::UnitRole::groundArmy;
+    auto melee = unit(50, protodd::UnitKind::zergling, false, {250, 200});
+    melee.role = protodd::UnitRole::groundArmy;
     melee.groundWeapon = {.damage = 5, .cooldown = 8, .maxRange = 32,
                           .targetsGround = true};
-    astra::CombatEstimate kiteEstimate;
-    kiteEstimate.decision = astra::FightDecision::kite;
-    astra::InfluenceMap emptyInfluence;
-    astra::TacticalController tactics;
-    const std::vector<astra::UnitSnapshot> kitingForce{kiter};
-    const std::vector<astra::UnitSnapshot> meleeForce{melee};
+    protodd::CombatEstimate kiteEstimate;
+    kiteEstimate.decision = protodd::FightDecision::kite;
+    protodd::InfluenceMap emptyInfluence;
+    protodd::TacticalController tactics;
+    const std::vector<protodd::UnitSnapshot> kitingForce{kiter};
+    const std::vector<protodd::UnitSnapshot> meleeForce{melee};
     const auto kiteOrders = tactics.control(
         kitingForce, meleeForce, kiteEstimate, {900, 900}, {100, 200}, emptyInfluence);
-    expect(kiteOrders.size() == 1 && kiteOrders.front().type == astra::CommandType::move &&
+    expect(kiteOrders.size() == 1 && kiteOrders.front().type == protodd::CommandType::move &&
                kiteOrders.front().targetPosition.x < kiter.position.x,
            "ranged cooldown micro steps directly away from a nearby melee threat");
 
     auto firing = kiter;
     firing.attackFrame = true;
-    const std::vector<astra::UnitSnapshot> firingForce{firing};
+    const std::vector<protodd::UnitSnapshot> firingForce{firing};
     expect(tactics.control(firingForce, meleeForce, kiteEstimate,
                            {900, 900}, {100, 200}, emptyInfluence).empty(),
            "attack-frame protection does not cancel a committed volley");
@@ -1611,11 +1609,11 @@ void testInfluenceAndCombat() {
     auto equalLocked = equalFirst;
     equalLocked.id = 81;
     lockedAttacker.orderTargetId = equalLocked.id;
-    const std::vector<astra::UnitSnapshot> equalTargets{equalFirst, equalLocked};
+    const std::vector<protodd::UnitSnapshot> equalTargets{equalFirst, equalLocked};
     expect(evaluator.selectTarget(lockedAttacker, equalTargets)->id == equalLocked.id,
            "equal-value focus fire retains the current target instead of oscillating");
 
-    auto zealotDefender = unit(82, astra::UnitKind::zealot, true, {200, 200});
+    auto zealotDefender = unit(82, protodd::UnitKind::zealot, true, {200, 200});
     zealotDefender.groundWeapon = {.damage = 8, .cooldown = 22, .maxRange = 32,
                                    .targetsGround = true, .hits = 2};
     auto nearbyLing = melee;
@@ -1625,13 +1623,13 @@ void testInfluenceAndCombat() {
     distantLing.id = 84;
     distantLing.position = {700, 200};
     distantLing.hitPoints = 1;
-    const std::vector<astra::UnitSnapshot> splitRush{distantLing, nearbyLing};
+    const std::vector<protodd::UnitSnapshot> splitRush{distantLing, nearbyLing};
     expect(evaluator.selectTarget(zealotDefender, splitRush)->id == nearbyLing.id,
            "melee defenders do not chase a tempting distant target out of the base");
 
-    auto templar = unit(60, astra::UnitKind::highTemplar, true, {600, 500});
-    templar.role = astra::UnitRole::spellcaster;
-    const std::vector<astra::UnitSnapshot> casters{templar};
+    auto templar = unit(60, protodd::UnitKind::highTemplar, true, {600, 500});
+    templar.role = protodd::UnitRole::spellcaster;
+    const std::vector<protodd::UnitSnapshot> casters{templar};
     const auto casterOrders = tactics.control(
         casters, meleeForce, estimate, {900, 900}, {100, 100}, emptyInfluence, {400, 400});
     expect(casterOrders.size() == 1 && casterOrders.front().source == "spellcaster-screen",
@@ -1640,66 +1638,66 @@ void testInfluenceAndCombat() {
     auto stormTemplar = templar;
     stormTemplar.energy = 100;
     stormTemplar.position = {500, 500};
-    std::vector<astra::UnitSnapshot> stormTargets;
+    std::vector<protodd::UnitSnapshot> stormTargets;
     for (int i = 0; i < 4; ++i) {
-        auto marine = unit(90 + i, astra::UnitKind::marine, false,
+        auto marine = unit(90 + i, protodd::UnitKind::marine, false,
                            {650 + i * 12, 500 + (i % 2) * 12});
-        marine.role = astra::UnitRole::groundArmy;
+        marine.role = protodd::UnitRole::groundArmy;
         stormTargets.push_back(marine);
     }
-    const std::vector<astra::UnitSnapshot> stormCasters{stormTemplar};
+    const std::vector<protodd::UnitSnapshot> stormCasters{stormTemplar};
     const auto stormOrders = tactics.control(
         stormCasters, stormTargets, estimate, {900, 900}, {100, 100},
         emptyInfluence, {500, 500}, 2, true);
     expect(stormOrders.size() == 1 &&
-               stormOrders.front().type == astra::CommandType::useTech &&
-               stormOrders.front().technology == astra::TechnologyKind::psionicStorm,
+               stormOrders.front().type == protodd::CommandType::useTech &&
+               stormOrders.front().technology == protodd::TechnologyKind::psionicStorm,
            "researched High Templar cast safe high-value Psionic Storms tactically");
 
-    auto friendlyDragoon = unit(95, astra::UnitKind::dragoon, true,
+    auto friendlyDragoon = unit(95, protodd::UnitKind::dragoon, true,
                                 stormTargets.front().position);
-    const std::vector<astra::UnitSnapshot> unsafeCasters{stormTemplar, friendlyDragoon};
+    const std::vector<protodd::UnitSnapshot> unsafeCasters{stormTemplar, friendlyDragoon};
     const auto unsafeStorm = tactics.control(
         unsafeCasters, stormTargets, estimate, {900, 900}, {100, 100},
         emptyInfluence, {500, 500}, 2, true);
-    expect(std::ranges::none_of(unsafeStorm, [](const astra::Command& command) {
-               return command.type == astra::CommandType::useTech;
+    expect(std::ranges::none_of(unsafeStorm, [](const protodd::Command& command) {
+               return command.type == protodd::CommandType::useTech;
            }),
            "storm targeting rejects clusters with excessive friendly fire");
 
-    astra::EngagementTracker engagement;
-    expect(engagement.stabilize(77, astra::FightDecision::engage, 1.3, 1.2, 100) ==
-               astra::FightDecision::engage,
+    protodd::EngagementTracker engagement;
+    expect(engagement.stabilize(77, protodd::FightDecision::engage, 1.3, 1.2, 100) ==
+               protodd::FightDecision::engage,
            "first local combat estimate establishes a squad decision");
-    expect(engagement.stabilize(77, astra::FightDecision::kite, 1.0, 1.2, 102) ==
-               astra::FightDecision::engage &&
-               engagement.stabilize(77, astra::FightDecision::kite, 1.0, 1.2, 104) ==
-                   astra::FightDecision::engage &&
-               engagement.stabilize(77, astra::FightDecision::kite, 1.0, 1.2, 106) ==
-                   astra::FightDecision::kite,
+    expect(engagement.stabilize(77, protodd::FightDecision::kite, 1.0, 1.2, 102) ==
+               protodd::FightDecision::engage &&
+               engagement.stabilize(77, protodd::FightDecision::kite, 1.0, 1.2, 104) ==
+                   protodd::FightDecision::engage &&
+               engagement.stabilize(77, protodd::FightDecision::kite, 1.0, 1.2, 106) ==
+                   protodd::FightDecision::kite,
            "borderline simulation noise cannot reverse a squad on one frame");
-    expect(engagement.stabilize(77, astra::FightDecision::retreat, 0.4, 1.2, 108) ==
-               astra::FightDecision::retreat,
+    expect(engagement.stabilize(77, protodd::FightDecision::retreat, 0.4, 1.2, 108) ==
+               protodd::FightDecision::retreat,
            "catastrophic local odds bypass combat hysteresis immediately");
 }
 
 void testCommandArbitration() {
-    astra::CommandBus bus;
+    protodd::CommandBus bus;
     bus.beginFrame(100, 2);
-    bus.submit({7, astra::CommandType::move, -1, {400, 400},
-                astra::UnitKind::unknown, 20, 0, "patrol"});
-    bus.submit({7, astra::CommandType::attackUnit, 9, {-1, -1},
-                astra::UnitKind::unknown, 80, 0, "combat"});
-    bus.submit({7, astra::CommandType::recharge, 10, {-1, -1},
-                astra::UnitKind::shieldBattery, 95, 0, "recharge"});
+    bus.submit({7, protodd::CommandType::move, -1, {400, 400},
+                protodd::UnitKind::unknown, 20, 0, "patrol"});
+    bus.submit({7, protodd::CommandType::attackUnit, 9, {-1, -1},
+                protodd::UnitKind::unknown, 80, 0, "combat"});
+    bus.submit({7, protodd::CommandType::recharge, 10, {-1, -1},
+                protodd::UnitKind::shieldBattery, 95, 0, "recharge"});
     auto selected = bus.finalize();
-    expect(selected.size() == 1 && selected.front().type == astra::CommandType::recharge,
+    expect(selected.size() == 1 && selected.front().type == protodd::CommandType::recharge,
            "shield preservation can override a routine attack per actor");
 
     bus.clear();
     bus.beginFrame(100, 2);
-    bus.submit({7, astra::CommandType::attackUnit, 9, {-1, -1},
-                astra::UnitKind::unknown, 80, 0, "combat"});
+    bus.submit({7, protodd::CommandType::attackUnit, 9, {-1, -1},
+                protodd::UnitKind::unknown, 80, 0, "combat"});
     selected = bus.finalize();
     bus.markIssued(selected.front());
 
@@ -1723,8 +1721,8 @@ void testCommandArbitration() {
     for (int cycle = 0; cycle < 2; ++cycle) {
         bus.beginFrame(200 + cycle, 0);
         for (int actor = 1; actor <= 4; ++actor) {
-            bus.submit({actor, astra::CommandType::move, -1, {actor * 32, 100},
-                        astra::UnitKind::unknown, 50, 0, "budget"});
+            bus.submit({actor, protodd::CommandType::move, -1, {actor * 32, 100},
+                        protodd::UnitKind::unknown, 50, 0, "budget"});
         }
         const auto budgeted = bus.finalize(2);
         expect(budgeted.size() == 2, "combat command budget is enforced");
@@ -1739,18 +1737,18 @@ void testCommandArbitration() {
 }
 
 void testFrameBudget() {
-    astra::FrameBudget budget;
-    expect(budget.load(100) == astra::RuntimeLoad::normal,
+    protodd::FrameBudget budget;
+    expect(budget.load(100) == protodd::RuntimeLoad::normal,
            "frame budget begins at full quality");
     budget.record(100, 30000);
-    expect(budget.load(101) == astra::RuntimeLoad::reduced &&
+    expect(budget.load(101) == protodd::RuntimeLoad::reduced &&
                !budget.allowSimulation(101) &&
                budget.expensiveCadenceMultiplier(101) == 2,
            "slow frame temporarily sheds expensive optional work");
-    expect(budget.load(400) == astra::RuntimeLoad::normal,
+    expect(budget.load(400) == protodd::RuntimeLoad::normal,
            "quality automatically recovers after the cooldown window");
     budget.record(500, 56000);
-    expect(budget.load(501) == astra::RuntimeLoad::emergency &&
+    expect(budget.load(501) == protodd::RuntimeLoad::emergency &&
                budget.combatCommandLimit(501) == 40U &&
                budget.navigationInterval(501) == 96,
            "dangerous frame time enters the emergency budget");
@@ -1759,19 +1757,19 @@ void testFrameBudget() {
 }
 
 void testWorkersAndScouts() {
-    const std::vector<astra::MineralPatchCandidate> unbalancedPatches{
+    const std::vector<protodd::MineralPatchCandidate> unbalancedPatches{
         {10, {300, 256}, 2}, {11, {340, 256}, 0}, {12, {380, 256}, 1},
     };
-    expect(astra::selectMineralPatch(unbalancedPatches, {340, 256}, {256, 256}, 10) == 11,
+    expect(protodd::selectMineralPatch(unbalancedPatches, {340, 256}, {256, 256}, 10) == 11,
            "mineral assignment fills the least-saturated patch first");
-    const std::vector<astra::MineralPatchCandidate> balancedPatches{
+    const std::vector<protodd::MineralPatchCandidate> balancedPatches{
         {10, {300, 256}, 1}, {11, {340, 256}, 1}, {12, {380, 256}, 1},
     };
-    expect(astra::selectMineralPatch(balancedPatches, {340, 256}, {256, 256}, 12) == 12,
+    expect(protodd::selectMineralPatch(balancedPatches, {340, 256}, {256, 256}, 12) == 12,
            "balanced mineral assignment retains its current patch");
 
-    astra::MineralAllocator mineralAllocator;
-    std::vector<astra::MineralWorker> miningWorkers;
+    protodd::MineralAllocator mineralAllocator;
+    std::vector<protodd::MineralWorker> miningWorkers;
     for (int i = 0; i < 6; ++i) {
         miningWorkers.push_back({i, {256, 256}, {340, 256}, 10 + i % 3});
     }
@@ -1786,7 +1784,7 @@ void testWorkersAndScouts() {
     const auto afterWorkerLoss = mineralAllocator.assign(miningWorkers, balancedPatches);
     expect(!afterWorkerLoss.contains(0) && afterWorkerLoss.size() == 5,
            "dead or reassigned workers release their mineral reservations");
-    const std::vector<astra::MineralPatchCandidate> depletedPatches{
+    const std::vector<protodd::MineralPatchCandidate> depletedPatches{
         {11, {340, 256}, 0}, {12, {380, 256}, 0},
     };
     const auto afterDepletion = mineralAllocator.assign(miningWorkers, depletedPatches);
@@ -1797,7 +1795,7 @@ void testWorkersAndScouts() {
     expect(!mineralAllocator.assign(miningWorkers, depletedPatches).contains(miningWorkers.front().id),
            "an explicit base transfer cannot retain a patch at the old base");
 
-    astra::GameState state;
+    protodd::GameState state;
     state.frame = 5000;
     state.mapWidthPixels = 2048;
     state.mapHeightPixels = 2048;
@@ -1806,27 +1804,27 @@ void testWorkersAndScouts() {
     state.bases.push_back({1, {256, 256}, {300, 260}, 8000, 5000, 1, 4000,
                            true, false, 8, 1});
     state.bases.push_back({2, {1700, 1700}, {1680, 1700}, 8000, 5000, -1, 0, true, false});
-    auto probe = unit(5, astra::UnitKind::probe, true, {260, 260});
-    probe.role = astra::UnitRole::worker;
+    auto probe = unit(5, protodd::UnitKind::probe, true, {260, 260});
+    probe.role = protodd::UnitRole::worker;
     state.self.units.push_back(probe);
-    auto observer = unit(6, astra::UnitKind::observer, true, {300, 300});
+    auto observer = unit(6, protodd::UnitKind::observer, true, {300, 300});
     observer.flying = true;
-    observer.role = astra::UnitRole::detector;
+    observer.role = protodd::UnitRole::detector;
     state.self.units.push_back(observer);
-    state.self.units.push_back(unit(7, astra::UnitKind::assimilator, true, {320, 256}));
+    state.self.units.push_back(unit(7, protodd::UnitKind::assimilator, true, {320, 256}));
     for (int i = 0; i < 8; ++i) {
         auto miner = probe;
         miner.id = 20 + i;
         state.self.units.push_back(miner);
     }
 
-    astra::InfluenceMap influence;
+    protodd::InfluenceMap influence;
     influence.update(state);
-    astra::StrategicPlan plan;
+    protodd::StrategicPlan plan;
     plan.desiredGasWorkers = 1;
-    astra::WorkerManager workers;
+    protodd::WorkerManager workers;
     const auto assignments = workers.assign(state, plan, influence);
-    expect(assignments.size() == 9 && assignments.front().job == astra::WorkerJob::gas,
+    expect(assignments.size() == 9 && assignments.front().job == protodd::WorkerJob::gas,
            "gas policy assigns requested worker count");
 
     auto gasState = state;
@@ -1836,10 +1834,10 @@ void testWorkersAndScouts() {
     existingGasProbe.orderTargetId = 7;
     gasState.self.units.push_back(existingGasProbe);
     const auto stableGas = workers.assign(gasState, plan, influence);
-    expect(std::ranges::any_of(stableGas, [](const astra::WorkerAssignment& assignment) {
-               return assignment.worker == 8 && assignment.job == astra::WorkerJob::gas;
-           }) && std::ranges::none_of(stableGas, [](const astra::WorkerAssignment& assignment) {
-               return assignment.worker == 5 && assignment.job == astra::WorkerJob::gas;
+    expect(std::ranges::any_of(stableGas, [](const protodd::WorkerAssignment& assignment) {
+               return assignment.worker == 8 && assignment.job == protodd::WorkerJob::gas;
+           }) && std::ranges::none_of(stableGas, [](const protodd::WorkerAssignment& assignment) {
+               return assignment.worker == 5 && assignment.job == protodd::WorkerJob::gas;
            }),
            "gas rebalance preserves an existing refinery worker instead of oscillating jobs");
 
@@ -1847,39 +1845,39 @@ void testWorkersAndScouts() {
     gasState.self.units.back().gatheringGas = true;
     gasState.self.units.back().carryingResources = true;
     const auto returningGas = workers.assign(gasState, plan, influence);
-    expect(std::ranges::any_of(returningGas, [](const astra::WorkerAssignment& assignment) {
-               return assignment.worker == 8 && assignment.job == astra::WorkerJob::gas;
-           }) && std::ranges::none_of(returningGas, [](const astra::WorkerAssignment& assignment) {
-               return assignment.worker == 5 && assignment.job == astra::WorkerJob::gas;
+    expect(std::ranges::any_of(returningGas, [](const protodd::WorkerAssignment& assignment) {
+               return assignment.worker == 8 && assignment.job == protodd::WorkerJob::gas;
+           }) && std::ranges::none_of(returningGas, [](const protodd::WorkerAssignment& assignment) {
+               return assignment.worker == 5 && assignment.job == protodd::WorkerJob::gas;
            }), "a gas worker returning cargo retains its refinery slot instead of pulling in a mineral worker");
 
     gasState.self.minerals = 50;
     gasState.self.gas = 400;
-    plan.posture = astra::Posture::defend;
+    plan.posture = protodd::Posture::defend;
     const auto mineralRecovery = workers.assign(gasState, plan, influence);
     expect(std::ranges::none_of(
-               mineralRecovery, [](const astra::WorkerAssignment& assignment) {
-                   return assignment.job == astra::WorkerJob::gas;
+               mineralRecovery, [](const protodd::WorkerAssignment& assignment) {
+                   return assignment.job == protodd::WorkerJob::gas;
                }),
            "mineral-starved defense releases gas workers after a sufficient gas bank");
-    plan.posture = astra::Posture::hold;
+    plan.posture = protodd::Posture::hold;
     auto assembling = workers.assign(gasState, plan, influence);
-    expect(std::ranges::none_of(assembling, [](const astra::WorkerAssignment& assignment) {
-               return assignment.job == astra::WorkerJob::gas;
+    expect(std::ranges::none_of(assembling, [](const protodd::WorkerAssignment& assignment) {
+               return assignment.job == protodd::WorkerJob::gas;
            }), "one-base assembly spends its excess gas bank while redirecting mining to minerals");
     gasState.self.gas = 250;
     assembling = workers.assign(gasState, plan, influence);
-    expect(std::ranges::any_of(assembling, [](const astra::WorkerAssignment& assignment) {
-               return assignment.job == astra::WorkerJob::gas;
+    expect(std::ranges::any_of(assembling, [](const protodd::WorkerAssignment& assignment) {
+               return assignment.job == protodd::WorkerJob::gas;
            }), "gas collection resumes when the assembly buffer has been spent");
     auto raided = gasState;
-    raided.self.units = {existingGasProbe, unit(7, astra::UnitKind::assimilator, true, {320, 256})};
+    raided.self.units = {existingGasProbe, unit(7, protodd::UnitKind::assimilator, true, {320, 256})};
     raided.self.gas = 0;
     const auto lastWorker = workers.assign(raided, plan, influence);
-    expect(lastWorker.size() == 1 && lastWorker.front().job == astra::WorkerJob::minerals,
+    expect(lastWorker.size() == 1 && lastWorker.front().job == protodd::WorkerJob::minerals,
            "the last worker mines minerals to rebuild the economy even with an empty gas bank");
 
-    astra::GameState militiaState;
+    protodd::GameState militiaState;
     militiaState.frame = 4 * 60 * 24;
     militiaState.self.id = 1;
     militiaState.enemy.id = 2;
@@ -1888,30 +1886,30 @@ void testWorkersAndScouts() {
     militiaState.bases.push_back(
         {1, {256, 256}, {300, 260}, 8000, 5000, 1, 0, true, false, 8, 1});
     for (int i = 0; i < 10; ++i) {
-        auto defender = unit(100 + i, astra::UnitKind::probe, true,
+        auto defender = unit(100 + i, protodd::UnitKind::probe, true,
                              {240 + i * 8, 260});
-        defender.role = astra::UnitRole::worker;
+        defender.role = protodd::UnitRole::worker;
         militiaState.self.units.push_back(defender);
     }
-    auto tank = unit(200, astra::UnitKind::siegeTank, false, {400, 260});
-    tank.role = astra::UnitRole::groundArmy;
+    auto tank = unit(200, protodd::UnitKind::siegeTank, false, {400, 260});
+    tank.role = protodd::UnitRole::groundArmy;
     tank.groundWeapon = {.damage = 70, .cooldown = 75, .maxRange = 384,
                          .targetsGround = true};
     militiaState.enemy.units.push_back(tank);
-    astra::InfluenceMap militiaInfluence;
+    protodd::InfluenceMap militiaInfluence;
     militiaInfluence.update(militiaState);
     const auto tankResponse = workers.assign(militiaState, {}, militiaInfluence);
-    expect(std::ranges::none_of(tankResponse, [](const astra::WorkerAssignment& assignment) {
-               return assignment.job == astra::WorkerJob::defend;
+    expect(std::ranges::none_of(tankResponse, [](const protodd::WorkerAssignment& assignment) {
+               return assignment.job == protodd::WorkerJob::defend;
            }),
            "worker militia never charges a siege tank");
 
-    auto marineThreat = unit(207, astra::UnitKind::marine, false, {360, 260});
-    marineThreat.role = astra::UnitRole::groundArmy;
+    auto marineThreat = unit(207, protodd::UnitKind::marine, false, {360, 260});
+    marineThreat.role = protodd::UnitRole::groundArmy;
     marineThreat.groundWeapon = {.damage = 6, .cooldown = 15, .maxRange = 128,
                                  .targetsGround = true};
-    auto cannonScreen = unit(208, astra::UnitKind::photonCannon, true, {300, 300});
-    cannonScreen.role = astra::UnitRole::staticDefense;
+    auto cannonScreen = unit(208, protodd::UnitKind::photonCannon, true, {300, 300});
+    cannonScreen.role = protodd::UnitRole::staticDefense;
     cannonScreen.groundWeapon = {.damage = 20, .cooldown = 22, .maxRange = 224,
                                  .targetsGround = true};
     militiaState.self.units.push_back(cannonScreen);
@@ -1920,28 +1918,28 @@ void testWorkersAndScouts() {
     const auto screenedMarineResponse = workers.assign(
         militiaState, {}, militiaInfluence);
     expect(std::ranges::none_of(
-               screenedMarineResponse, [](const astra::WorkerAssignment& assignment) {
-                   return assignment.job == astra::WorkerJob::defend;
+               screenedMarineResponse, [](const protodd::WorkerAssignment& assignment) {
+                   return assignment.job == protodd::WorkerJob::defend;
                }) && std::ranges::any_of(
-               screenedMarineResponse, [](const astra::WorkerAssignment& assignment) {
-                   return assignment.job == astra::WorkerJob::evacuate;
+               screenedMarineResponse, [](const protodd::WorkerAssignment& assignment) {
+                   return assignment.job == protodd::WorkerJob::evacuate;
                }),
            "Probes mineral-walk behind a completed static screen instead of charging Marines");
     militiaState.self.units.pop_back();
 
-    auto loneScout = unit(202, astra::UnitKind::probe, false, {350, 260});
-    loneScout.role = astra::UnitRole::worker;
+    auto loneScout = unit(202, protodd::UnitKind::probe, false, {350, 260});
+    loneScout.role = protodd::UnitRole::worker;
     militiaState.enemy.units = {loneScout};
     militiaInfluence.update(militiaState);
     const auto scoutResponse = workers.assign(militiaState, {}, militiaInfluence);
     expect(std::ranges::none_of(
-               scoutResponse, [](const astra::WorkerAssignment& assignment) {
-                   return assignment.job == astra::WorkerJob::defend;
+               scoutResponse, [](const protodd::WorkerAssignment& assignment) {
+                   return assignment.job == protodd::WorkerJob::defend;
                }),
            "one enemy scout does not pull a Probe away from mining");
 
-    auto zealotThreat = unit(203, astra::UnitKind::zealot, false, {300, 260});
-    zealotThreat.role = astra::UnitRole::groundArmy;
+    auto zealotThreat = unit(203, protodd::UnitKind::zealot, false, {300, 260});
+    zealotThreat.role = protodd::UnitRole::groundArmy;
     zealotThreat.groundWeapon = {.damage = 16, .cooldown = 22, .maxRange = 32,
                                  .targetsGround = true, .hits = 2};
     militiaState.enemy.units = {zealotThreat};
@@ -1950,9 +1948,9 @@ void testWorkersAndScouts() {
     militiaInfluence.update(militiaState);
     const auto woundedResponse = workers.assign(militiaState, {}, militiaInfluence);
     expect(std::ranges::any_of(
-               woundedResponse, [zealotThreat](const astra::WorkerAssignment& assignment) {
+               woundedResponse, [zealotThreat](const protodd::WorkerAssignment& assignment) {
                    return assignment.worker == 100 &&
-                          assignment.job == astra::WorkerJob::evacuate &&
+                          assignment.job == protodd::WorkerJob::evacuate &&
                           assignment.targetUnit == zealotThreat.id;
                }),
            "a Probe wounded by melee pressure disengages after the first hit");
@@ -1960,10 +1958,10 @@ void testWorkersAndScouts() {
     militiaState.self.units.front().hitPoints = 100;
 
     for (auto& worker : militiaState.self.units) {
-        if (worker.kind == astra::UnitKind::probe) worker.carryingResources = true;
+        if (worker.kind == protodd::UnitKind::probe) worker.carryingResources = true;
     }
-    auto firstLing = unit(204, astra::UnitKind::zergling, false, {300, 252});
-    firstLing.role = astra::UnitRole::groundArmy;
+    auto firstLing = unit(204, protodd::UnitKind::zergling, false, {300, 252});
+    firstLing.role = protodd::UnitRole::groundArmy;
     firstLing.groundWeapon = {.damage = 5, .cooldown = 8, .maxRange = 32,
                               .targetsGround = true};
     auto secondLing = firstLing;
@@ -1972,11 +1970,11 @@ void testWorkersAndScouts() {
     militiaState.enemy.units = {firstLing, secondLing};
     militiaInfluence.update(militiaState);
     const auto cargoMilitia = workers.assign(militiaState, {}, militiaInfluence);
-    expect(std::ranges::count(cargoMilitia, astra::WorkerJob::defend,
-                              &astra::WorkerAssignment::job) == 4,
+    expect(std::ranges::count(cargoMilitia, protodd::WorkerJob::defend,
+                              &protodd::WorkerAssignment::job) == 4,
            "mineral-carrying Probes still join an emergency anti-ling surround");
     for (auto& worker : militiaState.self.units) {
-        if (worker.kind == astra::UnitKind::probe) worker.carryingResources = false;
+        if (worker.kind == protodd::UnitKind::probe) worker.carryingResources = false;
     }
 
     auto secondZealot = zealotThreat;
@@ -1985,8 +1983,8 @@ void testWorkersAndScouts() {
     militiaState.enemy.units = {zealotThreat, secondZealot};
     militiaInfluence.update(militiaState);
     const auto zealotMilitia = workers.assign(militiaState, {}, militiaInfluence);
-    expect(std::ranges::count(zealotMilitia, astra::WorkerJob::defend,
-                              &astra::WorkerAssignment::job) == 6,
+    expect(std::ranges::count(zealotMilitia, protodd::WorkerJob::defend,
+                              &protodd::WorkerAssignment::job) == 6,
            "a melee breach commits enough healthy Probes to form a surround");
 
     // Once a real mobile screen is already trading with a three-Zealot wave,
@@ -2003,8 +2001,8 @@ void testWorkersAndScouts() {
     auto screenZealotThree = screenZealot;
     screenZealotThree.id = 212;
     screenZealotThree.position = {368, 260};
-    auto screenUnit = unit(213, astra::UnitKind::zealot, true, {328, 260});
-    screenUnit.role = astra::UnitRole::groundArmy;
+    auto screenUnit = unit(213, protodd::UnitKind::zealot, true, {328, 260});
+    screenUnit.role = protodd::UnitRole::groundArmy;
     auto screenUnitTwo = screenUnit;
     screenUnitTwo.id = 214;
     screenUnitTwo.position = {344, 260};
@@ -2013,209 +2011,209 @@ void testWorkersAndScouts() {
     militiaState.enemy.units = {screenZealot, screenZealotTwo, screenZealotThree};
     militiaInfluence.update(militiaState);
     const auto evacuatedScreen = workers.assign(militiaState, {}, militiaInfluence);
-    expect(std::ranges::count(evacuatedScreen, astra::WorkerJob::evacuate,
-                               &astra::WorkerAssignment::job) >= 2 &&
-               std::ranges::count(evacuatedScreen, astra::WorkerJob::evacuate,
-                                  &astra::WorkerAssignment::job) <= 4 &&
+    expect(std::ranges::count(evacuatedScreen, protodd::WorkerJob::evacuate,
+                               &protodd::WorkerAssignment::job) >= 2 &&
+               std::ranges::count(evacuatedScreen, protodd::WorkerJob::evacuate,
+                                  &protodd::WorkerAssignment::job) <= 4 &&
                std::ranges::none_of(
-                   evacuatedScreen, [](const astra::WorkerAssignment& assignment) {
-                       return assignment.job == astra::WorkerJob::defend;
+                   evacuatedScreen, [](const protodd::WorkerAssignment& assignment) {
+                       return assignment.job == protodd::WorkerJob::defend;
                    }),
            "a screened three-Zealot wave evacuates only the exposed edge while keeping a mining floor");
 
     militiaState.self.units.erase(
         std::remove_if(militiaState.self.units.begin(), militiaState.self.units.end(),
-                       [](const astra::UnitSnapshot& candidate) {
+                       [](const protodd::UnitSnapshot& candidate) {
                            return candidate.id == 213 || candidate.id == 214;
                        }),
         militiaState.self.units.end());
     militiaState.frame = 4 * 60 * 24;
 
-    auto proxyCannon = unit(201, astra::UnitKind::photonCannon, false, {420, 280});
+    auto proxyCannon = unit(201, protodd::UnitKind::photonCannon, false, {420, 280});
     proxyCannon.completed = false;
     proxyCannon.buildProgress = 35;
     militiaState.enemy.units = {loneScout};
     militiaState.enemy.units.push_back(proxyCannon);
     militiaInfluence.update(militiaState);
     const auto cannonResponse = workers.assign(militiaState, {}, militiaInfluence);
-    expect(std::ranges::count(cannonResponse, astra::WorkerJob::defend,
-                              &astra::WorkerAssignment::job) == 4 &&
-               std::ranges::all_of(cannonResponse, [](const astra::WorkerAssignment& assignment) {
-                   return assignment.job != astra::WorkerJob::defend ||
+    expect(std::ranges::count(cannonResponse, protodd::WorkerJob::defend,
+                              &protodd::WorkerAssignment::job) == 4 &&
+               std::ranges::all_of(cannonResponse, [](const protodd::WorkerAssignment& assignment) {
+                   return assignment.job != protodd::WorkerJob::defend ||
                           assignment.targetUnit == 201;
                }),
            "four healthy Probes focus an unfinished proxy cannon");
 
-    const astra::UnitId reservedProbe[]{probe.id};
+    const protodd::UnitId reservedProbe[]{probe.id};
     const auto leased = workers.assign(state, plan, influence, reservedProbe);
     expect(leased.size() == 9 && leased.front().worker == probe.id &&
-               leased.front().job == astra::WorkerJob::build,
+               leased.front().job == protodd::WorkerJob::build,
            "leased scout or builder probe cannot be reclaimed by mining");
 
-    astra::GameState openingScoutState;
+    protodd::GameState openingScoutState;
     openingScoutState.frame = 120;
     openingScoutState.self.units.push_back(probe);
-    expect(astra::selectOpeningWorkerScout(openingScoutState) == -1,
+    expect(protodd::selectOpeningWorkerScout(openingScoutState) == -1,
            "worker scouting waits until the opening pylon has started");
     openingScoutState.self.units.push_back(
-        unit(8, astra::UnitKind::pylon, true, {300, 300}));
-    expect(astra::selectOpeningWorkerScout(openingScoutState, {}, reservedProbe) == -1,
+        unit(8, protodd::UnitKind::pylon, true, {300, 300}));
+    expect(protodd::selectOpeningWorkerScout(openingScoutState, {}, reservedProbe) == -1,
            "worker scouting never overwrites a reserved builder order");
     auto alternateProbe = probe;
     alternateProbe.id = 9;
     openingScoutState.self.units.push_back(alternateProbe);
-    expect(astra::selectOpeningWorkerScout(openingScoutState, {}, reservedProbe) == 9,
+    expect(protodd::selectOpeningWorkerScout(openingScoutState, {}, reservedProbe) == 9,
            "worker scouting selects a non-builder after pylon construction begins");
-    auto knownEnemyMain = unit(10, astra::UnitKind::commandCenter, false, {1600, 1600});
-    knownEnemyMain.role = astra::UnitRole::resourceDepot;
+    auto knownEnemyMain = unit(10, protodd::UnitKind::commandCenter, false, {1600, 1600});
+    knownEnemyMain.role = protodd::UnitRole::resourceDepot;
     openingScoutState.enemy.units.push_back(knownEnemyMain);
-    expect(astra::selectOpeningWorkerScout(openingScoutState) == -1,
+    expect(protodd::selectOpeningWorkerScout(openingScoutState) == -1,
            "worker scouting stops once the enemy main has been located");
 
-    astra::GameState noNexus;
+    protodd::GameState noNexus;
     noNexus.self.id = 1;
     noNexus.mapWidthPixels = 2048;
     noNexus.mapHeightPixels = 2048;
     noNexus.bases.push_back(
         {1, {256, 256}, {300, 260}, 6000, 5000, -1, 0, true, false, 8, 1});
-    auto survivor = unit(70, astra::UnitKind::probe, true, {260, 260});
-    survivor.role = astra::UnitRole::worker;
+    auto survivor = unit(70, protodd::UnitKind::probe, true, {260, 260});
+    survivor.role = protodd::UnitRole::worker;
     noNexus.self.units.push_back(survivor);
-    astra::InfluenceMap recoveryInfluence;
+    protodd::InfluenceMap recoveryInfluence;
     recoveryInfluence.update(noNexus);
     const auto recoveryMining = workers.assign(noNexus, {}, recoveryInfluence);
     expect(recoveryMining.size() == 1 &&
-               recoveryMining.front().job == astra::WorkerJob::minerals,
+               recoveryMining.front().job == protodd::WorkerJob::minerals,
            "surviving Probes keep mining while a replacement Nexus is built");
 
     const auto scoutState = state;
     state.bases[1].ownerId = 1;
     state.bases[1].mineralPatches = 8;
     for (int i = 0; i < 16; ++i) {
-        auto extra = unit(20 + i, astra::UnitKind::probe, true, {260 + i, 270});
-        extra.role = astra::UnitRole::worker;
+        auto extra = unit(20 + i, protodd::UnitKind::probe, true, {260 + i, 270});
+        extra.role = protodd::UnitRole::worker;
         state.self.units.push_back(extra);
     }
     plan.desiredGasWorkers = 0;
     const auto balanced = workers.assign(state, plan, influence);
-    expect(std::ranges::any_of(balanced, [](const astra::WorkerAssignment& assignment) {
-               return assignment.job == astra::WorkerJob::transfer && assignment.baseId == 2;
+    expect(std::ranges::any_of(balanced, [](const protodd::WorkerAssignment& assignment) {
+               return assignment.job == protodd::WorkerJob::transfer && assignment.baseId == 2;
            }),
            "oversaturated mineral lines transfer workers to an owned expansion");
 
-    const astra::UnitId scouts[]{6};
-    astra::ScoutManager scouting;
+    const protodd::UnitId scouts[]{6};
+    protodd::ScoutManager scouting;
     const auto orders = scouting.assign(scoutState, scouts, influence, {});
-    expect(orders.size() == 1 && orders.front().target == astra::Position{1700, 1700},
+    expect(orders.size() == 1 && orders.front().target == protodd::Position{1700, 1700},
            "scout prioritizes stale unexplored start location");
 
-    astra::GameState riskState;
+    protodd::GameState riskState;
     riskState.mapWidthPixels = 2048;
     riskState.mapHeightPixels = 2048;
     riskState.self.id = 1;
     riskState.enemy.id = 2;
-    auto riskProbe = unit(300, astra::UnitKind::probe, true, {128, 128});
-    riskProbe.role = astra::UnitRole::worker;
+    auto riskProbe = unit(300, protodd::UnitKind::probe, true, {128, 128});
+    riskProbe.role = protodd::UnitRole::worker;
     riskState.self.units.push_back(riskProbe);
     riskState.bases.push_back(
         {3, {900, 128}, {900, 128}, 8000, 0, -1, 0, false, false, 8, 0});
     riskState.bases.push_back(
         {4, {128, 1800}, {128, 1800}, 8000, 0, -1, 0, false, false, 8, 0});
-    auto corridorTank = unit(301, astra::UnitKind::siegeTank, false, {520, 128});
-    corridorTank.role = astra::UnitRole::groundArmy;
+    auto corridorTank = unit(301, protodd::UnitKind::siegeTank, false, {520, 128});
+    corridorTank.role = protodd::UnitRole::groundArmy;
     corridorTank.groundWeapon = {.damage = 70, .cooldown = 75, .maxRange = 384,
                                  .targetsGround = true};
     riskState.enemy.units.push_back(corridorTank);
-    astra::InfluenceMap riskInfluence;
+    protodd::InfluenceMap riskInfluence;
     riskInfluence.update(riskState);
-    astra::ScoutManager riskScouting;
-    const astra::UnitId riskScoutIds[]{300};
+    protodd::ScoutManager riskScouting;
+    const protodd::UnitId riskScoutIds[]{300};
     const auto safeProbeOrder = riskScouting.assign(riskState, riskScoutIds,
                                                     riskInfluence, {});
     expect(safeProbeOrder.size() == 1 &&
-               safeProbeOrder.front().target == astra::Position{128, 1800},
+               safeProbeOrder.front().target == protodd::Position{128, 1800},
            "ground scout rejects a shorter route through siege-tank influence");
 
-    riskState.self.units.front().kind = astra::UnitKind::observer;
-    riskState.self.units.front().role = astra::UnitRole::detector;
+    riskState.self.units.front().kind = protodd::UnitKind::observer;
+    riskState.self.units.front().role = protodd::UnitRole::detector;
     riskState.self.units.front().flying = true;
     riskScouting.reset();
     const auto flyingOrder = riskScouting.assign(riskState, riskScoutIds,
                                                  riskInfluence, {});
     expect(flyingOrder.size() == 1 &&
-               flyingOrder.front().target == astra::Position{520, 128} &&
-               flyingOrder.front().purpose == astra::ScoutPurpose::watchArmy,
+               flyingOrder.front().target == protodd::Position{520, 128} &&
+               flyingOrder.front().purpose == protodd::ScoutPurpose::watchArmy,
            "flying scout ignores ground-only danger and shadows the army");
 }
 
 void testLocalSquadsAndDetection() {
-    astra::GameState state;
+    protodd::GameState state;
     state.mapWidthPixels = 2048;
     state.mapHeightPixels = 2048;
     state.self.id = 1;
     state.enemy.id = 2;
     state.bases.push_back({1, {256, 256}, {300, 260}, 8000, 5000, 1, 0, true, false});
 
-    std::vector<astra::UnitSnapshot> friendly;
+    std::vector<protodd::UnitSnapshot> friendly;
     for (int i = 0; i < 6; ++i) {
-        auto dragoon = unit(10 + i, astra::UnitKind::dragoon, true,
-                            i < 3 ? astra::Position{300 + i * 24, 300}
-                                  : astra::Position{1500 + i * 24, 1500});
-        dragoon.role = astra::UnitRole::groundArmy;
+        auto dragoon = unit(10 + i, protodd::UnitKind::dragoon, true,
+                            i < 3 ? protodd::Position{300 + i * 24, 300}
+                                  : protodd::Position{1500 + i * 24, 1500});
+        dragoon.role = protodd::UnitRole::groundArmy;
         dragoon.groundWeapon = {.damage = 20, .cooldown = 30, .maxRange = 192,
                                 .targetsGround = true};
         friendly.push_back(dragoon);
     }
-    auto lurker = unit(90, astra::UnitKind::lurker, false, {380, 320});
-    lurker.role = astra::UnitRole::groundArmy;
+    auto lurker = unit(90, protodd::UnitKind::lurker, false, {380, 320});
+    lurker.role = protodd::UnitRole::groundArmy;
     lurker.burrowed = true;
     lurker.detected = false;
     lurker.groundWeapon = {.damage = 20, .cooldown = 37, .maxRange = 192,
                            .targetsGround = true};
-    const std::vector<astra::UnitSnapshot> enemy{lurker};
+    const std::vector<protodd::UnitSnapshot> enemy{lurker};
 
-    astra::StrategicPlan plan;
+    protodd::StrategicPlan plan;
     plan.rallyPoint = {256, 256};
     plan.attackTarget = {1800, 1800};
-    astra::SquadPlanner planner;
+    protodd::SquadPlanner planner;
     auto squads = planner.form(state, friendly, enemy, plan, {256, 256});
-    const auto defense = std::ranges::find_if(squads, [](const astra::Squad& squad) {
-        return squad.role == astra::SquadRole::baseDefense;
+    const auto defense = std::ranges::find_if(squads, [](const protodd::Squad& squad) {
+        return squad.role == protodd::SquadRole::baseDefense;
     });
     expect(defense != squads.end() && defense->needsDetection,
            "cloaked base threat creates detection-aware defense squad");
     expect(defense != squads.end() &&
-               astra::distance(defense->retreat, state.bases.front().mineralLine) >
-                   astra::distance(state.bases.front().center,
+               protodd::distance(defense->retreat, state.bases.front().mineralLine) >
+                   protodd::distance(state.bases.front().center,
                                    state.bases.front().mineralLine) &&
                defense->requiredRatio < 0.6,
            "base defense screens on the safe side of the economy instead of retreating through workers");
 
     auto breachedDefense = *defense;
-    auto visibleLing = unit(91, astra::UnitKind::zergling, false,
+    auto visibleLing = unit(91, protodd::UnitKind::zergling, false,
                             breachedDefense.retreat);
-    visibleLing.role = astra::UnitRole::groundArmy;
+    visibleLing.role = protodd::UnitRole::groundArmy;
     visibleLing.groundWeapon = {.damage = 5, .cooldown = 8, .maxRange = 32,
                                 .targetsGround = true};
     breachedDefense.enemies = {visibleLing};
-    expect(astra::SquadPlanner::mustHoldDefensiveScreen(breachedDefense),
+    expect(protodd::SquadPlanner::mustHoldDefensiveScreen(breachedDefense),
            "base defenders stop retreating once melee attackers breach the economy screen");
     breachedDefense.retreat = {600, 500};
     breachedDefense.defense = {{600, 500}, 256, {350, 500}};
     visibleLing.position = {180, 500};
     breachedDefense.enemies = {visibleLing};
-    expect(astra::SquadPlanner::mustHoldDefensiveScreen(breachedDefense),
+    expect(protodd::SquadPlanner::mustHoldDefensiveScreen(breachedDefense),
            "a mineral-line breach triggers a stand even outside the forward retreat anchor");
     visibleLing.position = {1800, 1800};
     breachedDefense.enemies = {visibleLing};
-    expect(!astra::SquadPlanner::mustHoldDefensiveScreen(breachedDefense),
+    expect(!protodd::SquadPlanner::mustHoldDefensiveScreen(breachedDefense),
            "base defenders can still disengage before a distant threat reaches the economy");
 
-    std::vector<astra::UnitSnapshot> heavyThreats;
+    std::vector<protodd::UnitSnapshot> heavyThreats;
     for (int i = 0; i < 3; ++i) {
-        auto tank = unit(110 + i, astra::UnitKind::siegeTank, false,
+        auto tank = unit(110 + i, protodd::UnitKind::siegeTank, false,
                          {400 + i * 24, 320});
-        tank.role = astra::UnitRole::groundArmy;
+        tank.role = protodd::UnitRole::groundArmy;
         tank.groundWeapon = {.damage = 70, .cooldown = 75, .maxRange = 384,
                              .targetsGround = true};
         heavyThreats.push_back(tank);
@@ -2223,40 +2221,40 @@ void testLocalSquadsAndDetection() {
     const auto heavyDefense = planner.form(
         state, friendly, heavyThreats, plan, {256, 256});
     const auto committed = std::ranges::find_if(
-        heavyDefense, [](const astra::Squad& squad) {
-            return squad.role == astra::SquadRole::baseDefense;
+        heavyDefense, [](const protodd::Squad& squad) {
+            return squad.role == protodd::SquadRole::baseDefense;
         });
     expect(committed != heavyDefense.end() && committed->units.size() == friendly.size(),
            "base defense commits enough army value to answer heavy units, not a fixed headcount");
 
-    auto observer = unit(100, astra::UnitKind::observer, true, {200, 200});
+    auto observer = unit(100, protodd::UnitKind::observer, true, {200, 200});
     observer.flying = true;
-    observer.role = astra::UnitRole::detector;
+    observer.role = protodd::UnitRole::detector;
     state.self.units.push_back(observer);
-    astra::InfluenceMap influence;
+    protodd::InfluenceMap influence;
     influence.update(state);
     const auto escorts = planner.detectorEscorts(state, squads, influence);
     expect(!escorts.empty() && escorts.front().actor == observer.id,
            "observer is assigned to highest-priority detection squad");
 
-    auto localCannon = unit(101, astra::UnitKind::photonCannon, true, {280, 280});
-    localCannon.role = astra::UnitRole::staticDefense;
+    auto localCannon = unit(101, protodd::UnitKind::photonCannon, true, {280, 280});
+    localCannon.role = protodd::UnitRole::staticDefense;
     localCannon.groundWeapon = {.damage = 20, .cooldown = 22, .maxRange = 224,
                                 .targetsGround = true};
     friendly.push_back(localCannon);
     squads = planner.form(state, friendly, {}, plan, {256, 256});
-    const auto mainGroups = std::ranges::count_if(squads, [](const astra::Squad& squad) {
-        return squad.role == astra::SquadRole::mainArmy;
+    const auto mainGroups = std::ranges::count_if(squads, [](const protodd::Squad& squad) {
+        return squad.role == protodd::SquadRole::mainArmy;
     });
     expect(mainGroups == 2 && std::ranges::none_of(
-               squads, [](const astra::Squad& squad) {
-                   return std::ranges::any_of(squad.units, [](const astra::UnitSnapshot& member) {
-                       return astra::isStaticDefense(member.kind);
+               squads, [](const protodd::Squad& squad) {
+                   return std::ranges::any_of(squad.units, [](const protodd::UnitSnapshot& member) {
+                       return protodd::isStaticDefense(member.kind);
                    });
                }),
            "static defenses cannot glue disconnected mobile armies into one squad");
 
-    const auto* vanguard = astra::SquadPlanner::selectVanguard(squads, plan.attackTarget);
+    const auto* vanguard = protodd::SquadPlanner::selectVanguard(squads, plan.attackTarget);
     expect(vanguard != nullptr && vanguard->center.x > 1000,
            "the strongest forward mobile component becomes the reinforcement vanguard");
 
@@ -2272,24 +2270,24 @@ void testLocalSquadsAndDetection() {
 }
 
 void testTransportMissions() {
-    astra::GameState state;
+    protodd::GameState state;
     state.mapWidthPixels = 2048;
     state.mapHeightPixels = 2048;
-    auto shuttle = unit(200, astra::UnitKind::shuttle, true, {100, 100});
+    auto shuttle = unit(200, protodd::UnitKind::shuttle, true, {100, 100});
     shuttle.flying = true;
-    shuttle.role = astra::UnitRole::transport;
+    shuttle.role = protodd::UnitRole::transport;
     shuttle.cargoSpace = 8;
-    auto reaver = unit(201, astra::UnitKind::reaver, true, {300, 100});
-    reaver.role = astra::UnitRole::groundArmy;
+    auto reaver = unit(201, protodd::UnitKind::reaver, true, {300, 100});
+    reaver.role = protodd::UnitRole::groundArmy;
     state.self.units = {shuttle, reaver};
-    astra::InfluenceMap influence;
+    protodd::InfluenceMap influence;
     influence.update(state);
-    astra::TransportController transports;
+    protodd::TransportController transports;
 
     auto orders = transports.control(state, {1000, 100}, {100, 100}, influence);
-    expect(std::ranges::any_of(orders, [](const astra::Command& command) {
+    expect(std::ranges::any_of(orders, [](const protodd::Command& command) {
                return command.actor == 200 && command.source == "shuttle-rendezvous";
-           }) && std::ranges::any_of(orders, [](const astra::Command& command) {
+           }) && std::ranges::any_of(orders, [](const protodd::Command& command) {
                return command.actor == 201 && command.source == "reaver-rendezvous";
            }),
            "shuttle and reaver rendezvous under persistent mission ownership");
@@ -2297,8 +2295,8 @@ void testTransportMissions() {
     state.frame = 1;
     state.self.units[1].position = {150, 100};
     orders = transports.control(state, {1000, 100}, {100, 100}, influence);
-    expect(std::ranges::any_of(orders, [](const astra::Command& command) {
-               return command.type == astra::CommandType::load && command.targetUnit == 201;
+    expect(std::ranges::any_of(orders, [](const protodd::Command& command) {
+               return command.type == protodd::CommandType::load && command.targetUnit == 201;
            }),
            "nearby reaver receives a transport load command");
 
@@ -2307,7 +2305,7 @@ void testTransportMissions() {
     state.self.units[1].transportId = 200;
     state.self.units[1].position = state.self.units[0].position;
     orders = transports.control(state, {1000, 100}, {100, 100}, influence);
-    expect(std::ranges::any_of(orders, [](const astra::Command& command) {
+    expect(std::ranges::any_of(orders, [](const protodd::Command& command) {
                return command.source == "shuttle-attack-route";
            }),
            "loaded shuttle begins its threat-aware attack transit");
@@ -2316,8 +2314,8 @@ void testTransportMissions() {
     state.self.units[0].position = {900, 100};
     state.self.units[1].position = {900, 100};
     orders = transports.control(state, {1000, 100}, {100, 100}, influence);
-    expect(std::ranges::any_of(orders, [](const astra::Command& command) {
-               return command.type == astra::CommandType::unload &&
+    expect(std::ranges::any_of(orders, [](const protodd::Command& command) {
+               return command.type == protodd::CommandType::unload &&
                       command.source == "reaver-drop";
            }),
            "shuttle unloads the reaver at the mission objective");
@@ -2328,8 +2326,8 @@ void testTransportMissions() {
     static_cast<void>(transports.control(state, {1000, 100}, {100, 100}, influence));
     state.frame = 4 + 7 * 24;
     orders = transports.control(state, {1000, 100}, {100, 100}, influence);
-    expect(std::ranges::any_of(orders, [](const astra::Command& command) {
-               return command.type == astra::CommandType::load &&
+    expect(std::ranges::any_of(orders, [](const protodd::Command& command) {
+               return command.type == protodd::CommandType::load &&
                       command.source == "reaver-extract";
            }),
            "drop mission extracts its reaver after the bounded firing window");
@@ -2338,7 +2336,7 @@ void testTransportMissions() {
 }  // namespace
 
 void testCompetitionRegressions() {
-    using namespace astra;
+    using namespace protodd;
     auto attacker = unit(1, UnitKind::dragoon, true, {100, 100});
     attacker.groundWeapon = {.damage = 20, .cooldown = 30, .maxRange = 192,
                             .damageType = DamageType::explosive, .targetsGround = true};
@@ -2571,7 +2569,7 @@ void testCompetitionRegressions() {
     ResourceLedger mirrorLedger{250, 0};
     const auto mirrorActions = MacroPlanner{}.reconcile(mirror, mirrorPlan, mirrorLedger);
     expect(std::ranges::any_of(mirrorActions, [](const MacroAction& action) {
-               return action.target == UnitKind::probe && action.reserved && action.priority == 104;
+               return action.target == UnitKind::probe && action.reserved && action.priority >= 104;
            }) && std::ranges::any_of(mirrorActions, [](const MacroAction& action) {
                return action.target == UnitKind::shieldBattery && action.reserved;
            }), "a held mirror rush funds worker recovery and Battery before endless Zealot replacement");
@@ -2597,7 +2595,7 @@ void testCompetitionRegressions() {
 }
 
 void testEconomicTargeting() {
-    using namespace astra;
+    using namespace protodd;
     Squad squad;
     auto attacker = unit(1, UnitKind::zealot, true, {500, 500});
     attacker.groundWeapon = {.damage = 8, .cooldown = 22, .maxRange = 32,
@@ -2639,7 +2637,7 @@ void testEconomicTargeting() {
 }
 
 void testReserveCounterattack() {
-    using namespace astra;
+    using namespace protodd;
     Squad reserves;
     reserves.role = SquadRole::mainArmy;
     for (int i = 0; i < 14; ++i) {
@@ -2684,7 +2682,7 @@ void testReserveCounterattack() {
 }
 
 void testRangedDefense() {
-    using namespace astra;
+    using namespace protodd;
     const DefenseArea area{{500, 500}, 320};
     auto defender = unit(1, UnitKind::zealot, true, {500, 500});
     defender.groundWeapon = {.damage = 8, .cooldown = 22, .maxRange = 32,
@@ -2881,7 +2879,7 @@ void testRangedDefense() {
 }
 
 void testBananaBrainMacroRegressions() {
-    using namespace astra;
+    using namespace protodd;
     expect(trainingSlotAvailable(false, 0, 0, 6, false), "idle Nexus accepts a Probe");
     expect(trainingSlotAvailable(true, 1, 4, 6, false),
            "next Probe is scheduled before the active Probe finishes within latency");
@@ -3064,7 +3062,219 @@ void testBananaBrainMacroRegressions() {
                }), "a real breach cancels growth and caps workers to the remaining base");
 }
 
+void testReportImprovements() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 4 * 60 * 24;
+    state.self.id = 1;
+    state.enemy.id = 2;
+    state.self.race = Race::protoss;
+    state.enemy.race = Race::terran;
+    state.self.supplyUsed = 56;
+    state.self.supplyTotal = 100;
+    state.self.units = {unit(1, UnitKind::nexus, true, {512, 512}),
+        unit(2, UnitKind::pylon, true), unit(3, UnitKind::gateway, true),
+        unit(4, UnitKind::cyberneticsCore, true), unit(5, UnitKind::assimilator, true)};
+    state.self.units.front().role = UnitRole::resourceDepot;
+    for (int i = 0; i < 16; ++i) {
+        auto probe = unit(100 + i, UnitKind::probe, true, {512, 560});
+        probe.role = UnitRole::worker;
+        state.self.units.push_back(probe);
+    }
+    state.bases = {{1, {512, 512}, {512, 560}, 8000, 5000, 1, 0, true, false, 8, 1},
+        {2, {2500, 2500}, {2500, 2550}, 8000, 5000, 2, state.frame, true, false, 8, 1},
+        {3, {1900, 2500}, {1900, 2550}, 8000, 5000, -1, state.frame, false, false, 8, 1}};
+    StrategyEngine strategy;
+    auto plan = strategy.plan(state, {});
+    expect(plan.desiredBases == 1 && plan.desiredWorkers > 7 &&
+        std::ranges::none_of(plan.goals, [](const ProductionGoal& goal) {
+            return goal.target == UnitKind::forge || goal.target == UnitKind::photonCannon;
+        }), "normal PvT preserves income and waits for its army before the Nexus");
+    for (int i = 0; i < 3; ++i) state.self.units.push_back(unit(200 + i, UnitKind::dragoon, true));
+    plan = strategy.plan(state, {});
+    expect(plan.desiredBases == 2, "28 supply and three completed Dragoons unlock the natural");
+    ThreatAssessment pressure;
+    pressure.combatEnemiesNearMain = 3;
+    pressure.immediateGround = 0.8;
+    plan = strategy.plan(state, pressure);
+    expect(plan.desiredBases == 1 && plan.prioritizeReinforcements,
+           "observed pressure cancels the natural and enables the reinforcement budget");
+
+    state.enemy.race = Race::protoss;
+    state.self.supplyUsed = 52;
+    plan = strategy.plan(state, {});
+    expect(plan.name.find("3-Gate Robo") != std::string::npos &&
+        std::ranges::any_of(plan.goals, [](const ProductionGoal& goal) {
+            return goal.target == UnitKind::roboticsFacility && goal.blocking;
+        }), "quiet PvP commits to Robotics at its supply checkpoint");
+    auto robo = unit(6, UnitKind::roboticsFacility, true);
+    robo.completed = false;
+    state.self.units.push_back(robo);
+    state.self.supplyUsed = 58;
+    plan = strategy.plan(state, {});
+    expect(std::ranges::any_of(plan.goals, [](const ProductionGoal& goal) {
+        return goal.target == UnitKind::gateway && goal.desiredCount == 3 && goal.blocking;
+    }), "committed Robotics unlocks three-Gateway production without a phase cursor");
+
+    state.self.units.pop_back();
+    state.self.units.push_back(unit(7, UnitKind::gateway, true));
+    StrategicPlan budget;
+    budget.prioritizeReinforcements = true;
+    budget.goals = {{GoalKind::build, UnitKind::roboticsSupportBay, 1, 120, true, "optional splash"}};
+    ResourceLedger bank{350, 100};
+    MacroPlanner macro;
+    auto actions = macro.reconcile(state, budget, bank);
+    expect(std::ranges::count_if(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::dragoon && action.reserved && action.executable;
+    }) == 2, "two usable Gateways receive a reinforcement cycle before optional tech");
+    expect(bank.reservedMinerals <= bank.minerals && bank.reservedGas <= bank.gas,
+           "defensive reservations never double-spend resources");
+    auto cannon = unit(50, UnitKind::photonCannon, true);
+    cannon.completed = false;
+    state.self.units.push_back(cannon);
+    budget.goals.push_back({GoalKind::build, UnitKind::photonCannon, 3, 118, true, "static screen"});
+    bank = {350, 100};
+    actions = macro.reconcile(state, budget, bank);
+    expect(std::ranges::count_if(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::dragoon && action.reserved;
+    }) == 2, "a warping Cannon releases the bank for mobile reinforcements");
+    budget.goals.pop_back();
+    state.self.units.pop_back();
+    state.self.busyProducers = {UnitKind::gateway};
+    state.self.units.back().powered = false;
+    bank = {350, 100};
+    actions = macro.reconcile(state, budget, bank);
+    expect(std::ranges::none_of(actions, [](const MacroAction& action) {
+        return action.reason == "protect a defensive reinforcement cycle";
+    }), "busy and unpowered Gateways cannot hoard a reinforcement budget");
+    state.self.busyProducers.clear();
+    state.self.units.back().powered = true;
+    bank = {250, 0};
+    actions = macro.reconcile(state, budget, bank);
+    expect(std::ranges::count_if(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::zealot && action.reserved;
+    }) == 2, "gas-starved defense fields mineral units rather than reserving impossible Dragoons");
+    budget.requireMobileDetection = true;
+    budget.goals.push_back({GoalKind::train, UnitKind::observer, 1, 100, true, "urgent detection"});
+    bank = {300, 250};
+    actions = macro.reconcile(state, budget, bank);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::roboticsFacility && action.reserved && action.priority >= 124;
+    }), "urgent detection prerequisites survive the reinforcement budget");
+    bank = {450, 200};
+    actions = macro.reconcile(state, budget, bank);
+    expect(std::ranges::count_if(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::zealot && action.reserved;
+    }) == 2, "detection consuming the gas budget still leaves both Gateways able to reinforce");
+
+    auto established = state;
+    for (int i = 0; i < 6; ++i)
+        established.self.units.push_back(unit(700 + i, UnitKind::dragoon, true));
+    established.self.units.push_back(unit(710, UnitKind::templarArchives, true));
+    StrategicPlan stormPlan;
+    stormPlan.prioritizeReinforcements = true;
+    stormPlan.goals = {{GoalKind::research, UnitKind::unknown, 1, 100, true,
+                       "counter observed bio mass", TechnologyKind::psionicStorm}};
+    bank = {325, 250};
+    actions = macro.reconcile(established, stormPlan, bank);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.technology == TechnologyKind::psionicStorm && action.reserved;
+    }) && std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::dragoon && action.reserved;
+    }), "an established frontline funds required Storm while still reinforcing from the surplus");
+    established.self.technologies.push_back({TechnologyKind::psionicStorm, 1, false});
+    stormPlan.goals.push_back({GoalKind::train, UnitKind::highTemplar, 4, 98, false, "Storm support"});
+    bank = {325, 250};
+    actions = macro.reconcile(established, stormPlan, bank);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::highTemplar && action.reserved;
+    }) && std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::dragoon && action.reserved;
+    }), "reinforcement reservations leave a Gateway slot for the first usable Storm caster");
+
+    auto enemyDepot = unit(500, UnitKind::nexus, false, {2500, 2500});
+    enemyDepot.role = UnitRole::resourceDepot;
+    state.enemy.units = {enemyDepot};
+    ScoutManager scouts;
+    const UnitId reserved[]{100};
+    const auto workerScout = scouts.selectWorkerScout(state, {}, {}, reserved);
+    expect(workerScout >= 0 && workerScout != 100,
+           "follow-up worker scout rechecks a known enemy without stealing the builder");
+    ++state.frame;
+    expect(scouts.selectWorkerScout(state, {}, {}, reserved) == workerScout,
+           "follow-up scout keeps its worker assignment");
+    expect(scouts.selectWorkerScout(state, pressure, {}, reserved) == -1,
+           "a base breach releases the follow-up worker scout");
+    ++state.frame;
+    expect(scouts.selectWorkerScout(state, {}, {}, reserved) == -1,
+           "an interrupted scout is not replaced every callback");
+    state.frame += 46 * 24;
+    expect(scouts.selectWorkerScout(state, {}, {}, reserved) >= 0,
+           "follow-up scouting resumes after its cooldown when the economy is safe");
+    state.frame += 46 * 24;
+    expect(scouts.selectWorkerScout(state, {}, {}, reserved) == -1,
+           "worker scouting has a bounded mission duration");
+
+    OpponentModel model;
+    model.update(state);
+    expect(!model.assessment().enemyNaturalCheckedEmpty,
+           "seeing a base center is not proof that its full depot footprint is empty");
+    const auto priorPressure = model.probability(EnemyPlan::heavyPressure);
+    state.bases.back().lastConfirmedEmpty = state.frame;
+    ++state.frame;
+    model.update(state);
+    expect(model.assessment().enemyNaturalCheckedEmpty &&
+           model.probability(EnemyPlan::heavyPressure) > priorPressure,
+           "fresh confirmed-empty natural modestly raises one-base pressure belief");
+    state.frame += 46 * 24;
+    model.update(state);
+    expect(!model.assessment().enemyNaturalCheckedEmpty, "negative scouting evidence expires");
+
+    Squad squad;
+    squad.center = {1000, 1000};
+    squad.objective = {1800, 1000};
+    squad.retreat = {512, 512};
+    squad.needsDetection = true;
+    auto dragoon = unit(600, UnitKind::dragoon, true, squad.center);
+    squad.units = {dragoon};
+    auto observer = unit(601, UnitKind::observer, true, {512, 512});
+    observer.sightRange = 288;
+    observer.flying = true;
+    state.self.units.push_back(observer);
+    expect(!SquadPlanner::mobileDetectionReady(state, squad),
+           "an Observer at home cannot authorize a distant army advance");
+    state.self.units.back().position = {1020, 1000};
+    expect(SquadPlanner::mobileDetectionReady(state, squad),
+           "healthy Observer covering the army and next step releases the advance");
+    state.self.units.back().disabled = true;
+    expect(!SquadPlanner::mobileDetectionReady(state, squad),
+           "disabled detectors do not satisfy mission coverage");
+    state.self.units.back().kind = UnitKind::photonCannon;
+    state.self.units.back().disabled = false;
+    expect(!SquadPlanner::mobileDetectionReady(state, squad),
+           "static detection cannot authorize an offensive ground mission");
+    CombatEstimate estimate;
+    estimate.decision = FightDecision::engage;
+    estimate.advanceBlocked = true;
+    InfluenceMap influence;
+    state.mapWidthPixels = 4096;
+    state.mapHeightPixels = 4096;
+    influence.update(state);
+    auto woundedEscort = unit(650, UnitKind::observer, true, squad.center);
+    woundedEscort.hitPoints = 1;
+    state.self.units.push_back(woundedEscort);
+    state.self.units.push_back(unit(651, UnitKind::observer, true, {512, 512}));
+    const auto escorts = SquadPlanner{}.detectorEscorts(state, std::span<const Squad>(&squad, 1), influence);
+    expect(!escorts.empty() && escorts.front().actor == 651,
+           "a healthy backup replaces a closer Observer that cannot satisfy mission readiness");
+    const auto orders = TacticalController{}.control(squad.units, {}, estimate,
+        squad.objective, squad.retreat, influence, squad.center, 0, false);
+    expect(!orders.empty() && orders.front().type == CommandType::hold,
+           "a favorable fight estimate cannot bypass missing mobile detection");
+}
+
 int main() {
+    testReportImprovements();
     testBananaBrainMacroRegressions();
     testReserveCounterattack();
     testEconomicTargeting();
@@ -3093,6 +3303,6 @@ int main() {
         std::cerr << failures << " test(s) failed\n";
         return EXIT_FAILURE;
     }
-    std::cout << "All Astra core tests passed\n";
+    std::cout << "All Protodd core tests passed\n";
     return EXIT_SUCCESS;
 }

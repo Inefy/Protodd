@@ -4,7 +4,7 @@
 #include <cmath>
 #include <cstdint>
 
-namespace astra {
+namespace protodd {
 
 struct Position {
     int x{};
@@ -57,4 +57,4 @@ struct BuildingFootprint {
     };
 }
 
-}  // namespace astra
+}  // namespace protodd

@@ -1,8 +1,8 @@
-#include "astra/GameState.hpp"
+#include "protodd/GameState.hpp"
 
 #include <algorithm>
 
-namespace astra {
+namespace protodd {
 
 void UnitSnapshot::inheritObservationHistory(const UnitSnapshot& previous) noexcept {
     lastPosition = previous.position;
@@ -50,4 +50,4 @@ std::optional<UnitSnapshot> GameState::findUnit(const UnitId id) const {
     return findIn(enemy.units);
 }
 
-}  // namespace astra
+}  // namespace protodd

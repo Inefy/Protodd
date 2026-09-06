@@ -1,10 +1,10 @@
-#include "astra/CommandBus.hpp"
+#include "protodd/CommandBus.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
 
-namespace astra {
+namespace protodd {
 
 void CommandBus::beginFrame(const Frame frame, const int latencyFrames) {
     frame_ = frame;
@@ -105,4 +105,4 @@ bool CommandBus::redundant(const Command& command) const {
            command.targetKind == previous.command.targetKind && samePosition;
 }
 
-}  // namespace astra
+}  // namespace protodd

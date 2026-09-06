@@ -21,7 +21,7 @@ broad competition benchmark remain outstanding.
 
 The Zerg run recorded no runtime threshold overruns or caught errors. The
 reserve-counterattack guard first activated at frame 17,445; pressure cleared,
-the plan returned to Harass, and Astra expanded before completing the win.
+the plan returned to Harass, and Protodd expanded before completing the win.
 This resolves the stalled v14 sample, which remained unfinished beyond frame
 57,960. The Zerg trace reached 30 Probes, but its late Core/Dragoon transition
 still exposes an opening that needs broader testing against ranged pressure.
@@ -35,13 +35,13 @@ increase in win rate.
 
 The Terran run recorded no runtime overruns or caught errors and reached 37
 Probes. At frame 17,640, three Dark Templar were attacking near the enemy main,
-the posture was Pressure, and Astra had started its second Nexus. This game
+the posture was Pressure, and Protodd had started its second Nexus. This game
 did not activate the reserve-counterattack guard; the covert-advance behavior
 provided the breakout. Core completion was first observed at frame 7,920 and
 the first Dragoon at frame 9,000, so the slow fortified opening remains a
 limitation even though this opponent was defeated.
 
-All four tests request seed `1788550258`, reset Astra's learning, and use the
+All four tests request seed `1788550258`, reset Protodd's learning, and use the
 same frozen DLL. Opponent learning and internal randomness can still vary;
 these are individual diagnostic games, not a win-rate estimate. The harness
 records package/map hashes, observed seeds, and authoritative pre-cleanup
@@ -129,7 +129,7 @@ between runs even when the requested seed and package are the same.
 
 ## September 4 strength-audit candidate
 
-- DLL: `build/tournament/Release/AstraBot.dll`
+- DLL: `build/tournament/Release/Protodd.dll`
 - Frozen copy: `build/strength-audit/candidate-v5-evidence.dll`
 - SHA-256: `E73EE818DFBC130B1CCAE7A588C62EF221C7AA1B3067366A883B375E452A6E88`
 - Target: Release, Win32, BWAPI 4.4.0
@@ -200,11 +200,11 @@ local ladder and run with its published AI configuration/pretraining files.
 Its BWAPI 4.4.0 DLL hash is
 `2EBEDF82DEBDDEF43C5F5213C4BEA6351F3697F111AE62333A0D489C97AE91B2`.
 The manifest records every AI component hash. No BananaBrain implementation
-is included in Astra or its source package.
+is included in Protodd or its source package.
 
-At frame 10,800, Astra had one base, 12 Probes, eight completed Zealots, and
+At frame 10,800, Protodd had one base, 12 Probes, eight completed Zealots, and
 its first Dragoon still in production. BananaBrain had several visible
-Dragoons applying pressure. Astra lost the mobile army, then its workers and
+Dragoons applying pressure. Protodd lost the mobile army, then its workers and
 static defenses; a Reaver was also visible during the final breakthrough.
 The loss completed normally with a 2.766-ms peak callback and no threshold
 overruns. This was a playing-strength failure, not a recorded timeout or crash.
@@ -227,10 +227,10 @@ The previously tested DLL had SHA-256
 It was loaded in a two-process BWAPI Local PC game against
 the UAlbertaBot Zerg module on `(2)Benzene.scx`. This avoids treating a
 Tournament Manager launch failure as a game result: both StarCraft processes
-entered the match, Astra produced live state records, and the opponent used
+entered the match, Protodd produced live state records, and the opponent used
 its race-specific Zerg module.
 
-Result: **AstraBot win at frame 15,688**.
+Result: **Protodd win at frame 15,688**.
 
 Relevant trace milestones:
 

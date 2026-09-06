@@ -1,7 +1,7 @@
-#include "AstraModule.hpp"
+#include "ProtoddModule.hpp"
 
-#include "astra/Technology.hpp"
-#include "astra/UnitCatalog.hpp"
+#include "protodd/Technology.hpp"
+#include "protodd/UnitCatalog.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -10,6 +10,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <string>
+#include <string_view>
 
 namespace {
 
@@ -29,11 +31,74 @@ std::string readFile(const std::filesystem::path& path) {
                  : std::string{};
 }
 
+int countUnits(
+    const std::span<const protodd::UnitSnapshot> units,
+    const protodd::UnitKind kind,
+    const bool completedOnly = false,
+    const bool visibleOnly = false) {
+    return static_cast<int>(std::ranges::count_if(
+        units, [kind, completedOnly, visibleOnly](const protodd::UnitSnapshot& unit) {
+            return unit.kind == kind && (!completedOnly || unit.completed) &&
+                   (!visibleOnly || unit.visible);
+        }));
+}
+
+std::string csvSafe(const std::string_view value) {
+    std::string result(value);
+    for (auto& character : result) {
+        if (character == ',' || character == '\n' || character == '\r') character = ';';
+    }
+    return result;
+}
+
+std::string composition(
+    const std::span<const protodd::UnitSnapshot> units,
+    const bool includeVisibility) {
+    std::string result;
+    for (auto raw = 0; raw < static_cast<int>(protodd::UnitKind::count); ++raw) {
+        const auto kind = static_cast<protodd::UnitKind>(raw);
+        const auto total = countUnits(units, kind);
+        if (total == 0) continue;
+        if (!result.empty()) result += ';';
+        result += protodd::unitStats(kind).name;
+        result += '=' + std::to_string(total);
+        result += '/' + std::to_string(countUnits(units, kind, true));
+        if (includeVisibility) {
+            result += '/' + std::to_string(countUnits(units, kind, false, true));
+        }
+    }
+    return result;
+}
+
+std::string goalSummary(const std::vector<protodd::ProductionGoal>& goals) {
+    std::string result;
+    for (std::size_t index = 0; index < goals.size() && index < 12; ++index) {
+        if (!result.empty()) result += ';';
+        const auto& goal = goals[index];
+        result += std::to_string(static_cast<int>(goal.goal));
+        result += ':';
+        result += protodd::unitStats(goal.target).name;
+        result += ':';
+        result += std::to_string(goal.desiredCount);
+        result += ':';
+        result += std::to_string(goal.priority);
+        result += ':';
+        result += goal.blocking ? 'B' : 'O';
+        result += ':';
+        result += csvSafe(goal.reason);
+        if (goal.technology != protodd::TechnologyKind::none) {
+            result += ':';
+            result += std::to_string(static_cast<int>(goal.technology));
+        }
+    }
+    return result;
+}
+
 }  // namespace
 
-namespace astra::bwapi {
+namespace protodd::bwapi {
 
-void AstraModule::onStart() {
+void ProtoddModule::onStart() {
     BWAPI::Broodwar->setCommandOptimizationLevel(2);
     BWAPI::Broodwar->setLatCom(true);
     bridge_.onStart();
@@ -53,6 +118,35 @@ void AstraModule::onStart() {
     navigationSignatures_.clear();
     navigationRefresh_ = -1;
     firstCounterattackFrame_ = -1;
+    firstEnemyContactFrame_ = -1;
+    firstBaseBreachFrame_ = -1;
+    firstCoreFrame_ = -1;
+    firstDragoonFrame_ = -1;
+    firstRangeFrame_ = -1;
+    firstExpansionFrame_ = -1;
+    firstArmyZeroFrame_ = -1;
+    firstNexusLossFrame_ = -1;
+    firstAttackFrame_ = -1;
+    lastTelemetryFrame_ = -1;
+    lastEventFrame_ = -1;
+    lastArmyCount_ = -1;
+    lastProbeCount_ = -1;
+    lastNexusCount_ = -1;
+    lastCompletedNexusCount_ = -1;
+    lastEnemyVisibleArmy_ = -1;
+    maxArmyCount_ = 0;
+    maxProbeCount_ = 0;
+    maxNexusCount_ = 0;
+    maxEnemyVisibleArmy_ = 0;
+    peakMinerals_ = 0;
+    peakGas_ = 0;
+    telemetrySamples_ = 0;
+    supplyBlockSamples_ = 0;
+    highBankSamples_ = 0;
+    planChanges_ = 0;
+    postureChanges_ = 0;
+    lastPlanName_.clear();
+    lastPosture_ = Posture::hold;
     maintenanceMineralReserve_ = 0;
     maintenanceGasReserve_ = 0;
 
@@ -65,7 +159,7 @@ void AstraModule::onStart() {
     history_.merge(readFile(std::filesystem::path("bwapi-data/write") / historyFile));
     openingStyle_ = history_.choose(opponentName_, mapName_,
                                     stableSeed(opponentName_ + "|" + mapName_));
-    log_.open("bwapi-data/write/AstraBot.log", std::ios::app);
+    log_.open("bwapi-data/write/Protodd.log", std::ios::app);
     if (log_) {
         log_ << "START," << BWAPI::Broodwar->mapName() << ','
              << opponentName_ << ',' << openingStyleName(openingStyle_) << '\n';
@@ -74,7 +168,8 @@ void AstraModule::onStart() {
     }
 }
 
-void AstraModule::onEnd(const bool winner) {
+void ProtoddModule::onEnd(const bool winner) {
+    sampleTelemetry();
     history_.record(opponentName_, mapName_, openingStyle_, winner);
     std::ofstream historyOutput(std::filesystem::path("bwapi-data/write") /
                                     OpponentHistory::filename(opponentName_),
@@ -85,12 +180,36 @@ void AstraModule::onEnd(const bool winner) {
         log_ << "PERF_SUMMARY," << runtime.samples << ',' << runtime.movingAverageMs << ','
              << runtime.peakMs << ',' << runtime.over42ms << ',' << runtime.over55ms << ','
              << runtime.overOneSecond << ',' << runtime.overTenSeconds << '\n';
+        log_ << "SUMMARY,won=" << (winner ? 1 : 0)
+             << ",frames=" << state_.frame
+             << ",samples=" << telemetrySamples_
+             << ",maxArmy=" << maxArmyCount_
+             << ",maxProbes=" << maxProbeCount_
+             << ",maxNexuses=" << maxNexusCount_
+             << ",maxEnemyVisibleArmy=" << maxEnemyVisibleArmy_
+             << ",peakMinerals=" << peakMinerals_
+             << ",peakGas=" << peakGas_
+             << ",firstEnemyContact=" << firstEnemyContactFrame_
+             << ",firstBaseBreach=" << firstBaseBreachFrame_
+             << ",firstCore=" << firstCoreFrame_
+             << ",firstDragoon=" << firstDragoonFrame_
+             << ",firstRange=" << firstRangeFrame_
+             << ",firstExpansion=" << firstExpansionFrame_
+             << ",firstCounterattack=" << firstCounterattackFrame_
+             << ",firstAttack=" << firstAttackFrame_
+             << ",firstArmyZero=" << firstArmyZeroFrame_
+             << ",firstNexusLoss=" << firstNexusLossFrame_
+             << ",supplyBlockSamples=" << supplyBlockSamples_
+             << ",highBankSamples=" << highBankSamples_
+             << ",planChanges=" << planChanges_
+             << ",postureChanges=" << postureChanges_
+             << '\n';
         log_ << "END," << (winner ? "win" : "loss") << ',' << state_.frame << '\n';
         log_.flush();
     }
 }
 
-void AstraModule::onFrame() {
+void ProtoddModule::onFrame() {
     const auto started = std::chrono::steady_clock::now();
     try {
         runFrame();
@@ -119,14 +238,14 @@ void AstraModule::onFrame() {
     }
 }
 
-void AstraModule::runFrame() {
+void ProtoddModule::runFrame() {
     if (BWAPI::Broodwar->isReplay() || BWAPI::Broodwar->isPaused() ||
         BWAPI::Broodwar->self() == nullptr || BWAPI::Broodwar->enemy() == nullptr) {
         return;
     }
     state_ = bridge_.observe();
     if (state_.self.race != Race::protoss) {
-        BWAPI::Broodwar->drawTextScreen(8, 8, "AstraBot requires Protoss");
+        BWAPI::Broodwar->drawTextScreen(8, 8, "Protodd requires Protoss");
         return;
     }
 
@@ -153,29 +272,30 @@ void AstraModule::runFrame() {
     if (state_.frame % 24 == 5) {
         bridge_.runMaintenance(maintenanceMineralReserve_, maintenanceGasReserve_);
     }
-    if (state_.frame % (24 * 15) == 0) logDecision();
+    if (state_.frame % 24 == 0) sampleTelemetry();
+    if (state_.frame % (24 * 5) == 0) logDecision();
 
     if (frameBudget_.load(state_.frame) == RuntimeLoad::normal) {
         bridge_.drawDebug(plan_, opponent_.assessment(), fight_);
     }
 }
 
-void AstraModule::onUnitDiscover(const BWAPI::Unit unit) { bridge_.remember(unit); }
-void AstraModule::onUnitShow(const BWAPI::Unit unit) { bridge_.remember(unit); }
-void AstraModule::onUnitDestroy(const BWAPI::Unit unit) { bridge_.forget(unit); }
-void AstraModule::onUnitMorph(const BWAPI::Unit unit) { bridge_.remember(unit); }
-void AstraModule::onUnitRenegade(const BWAPI::Unit unit) {
+void ProtoddModule::onUnitDiscover(const BWAPI::Unit unit) { bridge_.remember(unit); }
+void ProtoddModule::onUnitShow(const BWAPI::Unit unit) { bridge_.remember(unit); }
+void ProtoddModule::onUnitDestroy(const BWAPI::Unit unit) { bridge_.forget(unit); }
+void ProtoddModule::onUnitMorph(const BWAPI::Unit unit) { bridge_.remember(unit); }
+void ProtoddModule::onUnitRenegade(const BWAPI::Unit unit) {
     bridge_.forget(unit);
     bridge_.remember(unit);
 }
 
-void AstraModule::updateStrategy() {
+void ProtoddModule::updateStrategy() {
     plan_ = strategicDirector_.stabilize(
         strategy_.plan(state_, opponent_.assessment(), openingStyle_),
         state_, opponent_.assessment());
 }
 
-void AstraModule::updateMacro() {
+void ProtoddModule::updateMacro() {
     ResourceLedger ledger{state_.self.minerals, state_.self.gas};
     const auto actions = macro_.reconcile(state_, plan_, ledger);
     maintenanceMineralReserve_ = 0;
@@ -189,7 +309,7 @@ void AstraModule::updateMacro() {
     bridge_.executeMacro(actions, plan_, leasedScouts_);
 }
 
-void AstraModule::updateWorkers() {
+void ProtoddModule::updateWorkers() {
     auto reserved = bridge_.reservedBuilders();
     reserved.insert(reserved.end(), leasedScouts_.begin(), leasedScouts_.end());
     std::ranges::sort(reserved);
@@ -198,7 +318,7 @@ void AstraModule::updateWorkers() {
     bridge_.executeWorkers(assignments);
 }
 
-void AstraModule::updateScouting() {
+void ProtoddModule::updateScouting() {
     const auto previousLeases = leasedScouts_;
     const auto reservedBuilders = bridge_.reservedBuilders();
     leasedScouts_.clear();
@@ -218,8 +338,8 @@ void AstraModule::updateScouting() {
         // never steal a Probe that macro has ordered to construct a building:
         // a frame-3 scout order used to cancel the opening pylon order issued
         // on frame 1, leaving the economy supply-blocked with a large bank.
-        const auto probe = selectOpeningWorkerScout(
-            state_, previousLeases, reservedBuilders);
+        const auto probe = scouts_.selectWorkerScout(
+            state_, opponent_.assessment(), previousLeases, reservedBuilders);
         if (probe >= 0) available.push_back(probe);
     }
     const auto orders = scouts_.assign(state_, available, influence_,
@@ -228,7 +348,7 @@ void AstraModule::updateScouting() {
     bridge_.executeScouts(orders);
 }
 
-void AstraModule::updateCombat(
+void ProtoddModule::updateCombat(
     const bool runSimulation,
     const int navigationInterval,
     const std::size_t commandLimit) {
@@ -338,7 +458,9 @@ void AstraModule::updateCombat(
         if (SquadPlanner::mustHoldDefensiveScreen(squad)) {
             estimate.decision = FightDecision::engage;
         }
-        if (SquadPlanner::canCounterattack(squad, estimate, plan_)) {
+        estimate.advanceBlocked = squad.role != SquadRole::baseDefense &&
+            !SquadPlanner::mobileDetectionReady(state_, squad);
+        if (!estimate.advanceBlocked && SquadPlanner::canCounterattack(squad, estimate, plan_)) {
             // A global defense response must not trap an independently strong
             // reserve army while the allocated defenders protect the base.
             defense = {};
@@ -380,7 +502,7 @@ void AstraModule::updateCombat(
     }
 }
 
-std::vector<UnitSnapshot> AstraModule::combatUnits(const bool ours) const {
+std::vector<UnitSnapshot> ProtoddModule::combatUnits(const bool ours) const {
     const auto& source = ours ? state_.self.units : state_.enemy.units;
     std::vector<UnitSnapshot> result;
     for (const auto& unit : source) {
@@ -392,12 +514,114 @@ std::vector<UnitSnapshot> AstraModule::combatUnits(const bool ours) const {
     return result;
 }
 
-Position AstraModule::retreatPoint() const {
+Position ProtoddModule::retreatPoint() const {
     const auto nexus = std::ranges::find(state_.self.units, UnitKind::nexus, &UnitSnapshot::kind);
     return nexus != state_.self.units.end() ? nexus->position : plan_.rallyPoint;
 }
 
-void AstraModule::logDecision() {
+void ProtoddModule::sampleTelemetry() {
+    if (!log_ || state_.frame == lastTelemetryFrame_) return;
+    lastTelemetryFrame_ = state_.frame;
+
+    const auto army = static_cast<int>(std::ranges::count_if(
+        state_.self.units, [](const UnitSnapshot& unit) {
+            return unit.completed && isCombatUnit(unit.kind) && !unit.flying;
+        }));
+    const auto probes = countUnits(state_.self.units, UnitKind::probe);
+    const auto nexuses = countUnits(state_.self.units, UnitKind::nexus);
+    const auto completedNexuses = countUnits(state_.self.units, UnitKind::nexus, true);
+    const auto visibleEnemyArmy = static_cast<int>(std::ranges::count_if(
+        state_.enemy.units, [](const UnitSnapshot& unit) {
+            return unit.visible && unit.completed && isCombatUnit(unit.kind);
+        }));
+    const auto& threat = opponent_.assessment();
+    const auto emit = [this](const std::string_view kind, const std::string_view value) {
+        if (log_) log_ << "EVENT," << state_.frame << ',' << kind << ',' << csvSafe(value) << '\n';
+    };
+    const auto emitFrame = [&emit](const std::string_view kind, const Frame frame) {
+        if (frame >= 0) emit(kind, std::to_string(frame));
+    };
+
+    ++telemetrySamples_;
+    maxArmyCount_ = std::max(maxArmyCount_, army);
+    maxProbeCount_ = std::max(maxProbeCount_, probes);
+    maxNexusCount_ = std::max(maxNexusCount_, nexuses);
+    maxEnemyVisibleArmy_ = std::max(maxEnemyVisibleArmy_, visibleEnemyArmy);
+    peakMinerals_ = std::max(peakMinerals_, state_.self.minerals);
+    peakGas_ = std::max(peakGas_, state_.self.gas);
+    if (state_.self.supplyTotal > 0 && state_.self.supplyUsed >= state_.self.supplyTotal) {
+        ++supplyBlockSamples_;
+    }
+    if (state_.frame >= 7200 && state_.self.minerals >= 800) ++highBankSamples_;
+
+    if (visibleEnemyArmy > 0 && firstEnemyContactFrame_ < 0) {
+        firstEnemyContactFrame_ = state_.frame;
+        emitFrame("enemy-contact", firstEnemyContactFrame_);
+    }
+    if (threat.combatEnemiesNearMain > 0 && firstBaseBreachFrame_ < 0) {
+        firstBaseBreachFrame_ = state_.frame;
+        emitFrame("base-breach", firstBaseBreachFrame_);
+    }
+    if (countUnits(state_.self.units, UnitKind::cyberneticsCore, true) > 0 &&
+        firstCoreFrame_ < 0) {
+        firstCoreFrame_ = state_.frame;
+        emitFrame("core-complete", firstCoreFrame_);
+    }
+    if (countUnits(state_.self.units, UnitKind::dragoon, true) > 0 && firstDragoonFrame_ < 0) {
+        firstDragoonFrame_ = state_.frame;
+        emitFrame("dragoon-complete", firstDragoonFrame_);
+    }
+    if (technologyLevel(state_.self, TechnologyKind::singularityCharge) > 0 &&
+        firstRangeFrame_ < 0) {
+        firstRangeFrame_ = state_.frame;
+        emitFrame("range-complete", firstRangeFrame_);
+    }
+    if (nexuses >= 2 && firstExpansionFrame_ < 0) {
+        firstExpansionFrame_ = state_.frame;
+        emitFrame("second-nexus", firstExpansionFrame_);
+    }
+    if (firstAttackFrame_ < 0 &&
+        (plan_.posture == Posture::pressure || plan_.posture == Posture::attack ||
+         plan_.posture == Posture::harass)) {
+        firstAttackFrame_ = state_.frame;
+        emitFrame("attack-posture", firstAttackFrame_);
+    }
+    if (army == 0 && maxArmyCount_ >= 4 && firstArmyZeroFrame_ < 0) {
+        firstArmyZeroFrame_ = state_.frame;
+        emitFrame("army-zero", firstArmyZeroFrame_);
+    }
+    if (lastCompletedNexusCount_ > 0 && completedNexuses == 0 && firstNexusLossFrame_ < 0) {
+        firstNexusLossFrame_ = state_.frame;
+        emitFrame("nexus-loss", firstNexusLossFrame_);
+    }
+    if (firstCounterattackFrame_ >= 0 && lastEventFrame_ != firstCounterattackFrame_) {
+        lastEventFrame_ = firstCounterattackFrame_;
+        emitFrame("counterattack", firstCounterattackFrame_);
+    }
+    if (lastPlanName_.empty()) {
+        lastPlanName_ = plan_.name;
+        lastPosture_ = plan_.posture;
+    } else {
+        if (plan_.name != lastPlanName_) {
+            ++planChanges_;
+            emit("plan-change", plan_.name);
+            lastPlanName_ = plan_.name;
+        }
+        if (plan_.posture != lastPosture_) {
+            ++postureChanges_;
+            emit("posture-change", postureName(plan_.posture));
+            lastPosture_ = plan_.posture;
+        }
+    }
+
+    lastArmyCount_ = army;
+    lastProbeCount_ = probes;
+    lastNexusCount_ = nexuses;
+    lastCompletedNexusCount_ = completedNexuses;
+    lastEnemyVisibleArmy_ = visibleEnemyArmy;
+}
+
+void ProtoddModule::logDecision() {
     if (!log_) return;
     const auto countUnits = [this](const UnitKind kind, const bool completedOnly) {
         return std::ranges::count_if(state_.self.units, [kind, completedOnly](const auto& unit) {
@@ -423,6 +647,7 @@ void AstraModule::logDecision() {
     const auto completedSupportBays = countUnits(UnitKind::roboticsSupportBay, true);
     const auto observatories = countUnits(UnitKind::observatory, false);
     const auto completedObservatories = countUnits(UnitKind::observatory, true);
+    const auto completedNexuses = countUnits(UnitKind::nexus, true);
     const auto darkTemplar = countUnits(UnitKind::darkTemplar, true);
     const auto highTemplar = countUnits(UnitKind::highTemplar, true);
     const auto stormReady =
@@ -437,6 +662,19 @@ void AstraModule::logDecision() {
         });
     ResourceLedger diagnosticLedger{state_.self.minerals, state_.self.gas};
     const auto diagnosticActions = macro_.reconcile(state_, plan_, diagnosticLedger);
+    const auto& threat = opponent_.assessment();
+    const auto workerGas = std::ranges::count_if(
+        state_.self.units, [](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::probe && unit.gatheringGas;
+        });
+    const auto workerCarrying = std::ranges::count_if(
+        state_.self.units, [](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::probe && unit.carryingResources;
+        });
+    const auto workerUnderAttack = std::ranges::count_if(
+        state_.self.units, [](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::probe && unit.underAttack;
+        });
     log_ << "STATE," << state_.frame << ',' << plan_.name << ','
          << postureName(plan_.posture) << ','
          << enemyPlanName(opponent_.assessment().mostLikely) << ','
@@ -544,8 +782,32 @@ void AstraModule::logDecision() {
         if (index > 0) log_ << ';';
         log_ << unitStats(state_.self.queuedUnits[index]).name;
     }
+    log_ << ",bases=" << nexuses << '/' << completedNexuses
+         << ",desiredBases=" << plan_.desiredBases
+         << ",desiredWorkers=" << plan_.desiredWorkers
+         << ",desiredGas=" << plan_.desiredGasWorkers
+         << ",attackRatio=" << plan_.attackThreshold
+         << ",threat=" << threat.immediateGround << '/' << threat.combatEnemiesNearMain
+         << '/' << threat.approachingCombatEnemies << '/' << threat.estimatedArmyValue
+         << '/' << threat.approachingArmyValue << '/' << threat.enemyProductionCapacity
+         << ",enemyComp=" << composition(state_.enemy.units, true)
+         << ",selfComp=" << composition(state_.self.units, false)
+         << ",workersStatus=" << workerGas << '/' << workerCarrying << '/' << workerUnderAttack
+         << ",ledger=" << diagnosticLedger.freeMinerals() << '/'
+         << diagnosticLedger.freeGas() << '/' << diagnosticLedger.reservedMinerals << '/'
+         << diagnosticLedger.reservedGas
+         << ",goals=" << goalSummary(plan_.goals)
+         << ",actionDetail=";
+    for (std::size_t index = 0; index < diagnosticActions.size() && index < 12; ++index) {
+        if (index > 0) log_ << ';';
+        const auto& action = diagnosticActions[index];
+        log_ << static_cast<int>(action.action) << ':' << unitStats(action.target).name << ':'
+             << action.priority << ':' << action.minerals << ':' << action.gas << ':'
+             << (!action.reserved ? 'W' : (action.executable ? 'R' : 'H')) << ':'
+             << csvSafe(action.reason);
+    }
     log_ << '\n';
     log_.flush();
 }
 
-}  // namespace astra::bwapi
+}  // namespace protodd::bwapi

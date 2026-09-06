@@ -1,15 +1,15 @@
 #pragma once
 
-#include "astra/CommandBus.hpp"
-#include "astra/GameState.hpp"
-#include "astra/InfluenceMap.hpp"
+#include "protodd/CommandBus.hpp"
+#include "protodd/GameState.hpp"
+#include "protodd/InfluenceMap.hpp"
 
 #include <cstdint>
 #include <span>
 #include <unordered_map>
 #include <vector>
 
-namespace astra {
+namespace protodd {
 
 // Edge-to-edge weapon distance and per-volley damage, shared by targeting and
 // simulation. Remaining durability permits shields to deplete during a fight.
@@ -27,6 +27,7 @@ struct CombatEstimate {
     double simulatedFriendlyRemaining{};
     double simulatedEnemyRemaining{};
     FightDecision decision{FightDecision::retreat};
+    bool advanceBlocked{};
 };
 
 struct TargetAllocation {
@@ -110,4 +111,4 @@ public:
         DefenseArea defense = {}) const;
 };
 
-}  // namespace astra
+}  // namespace protodd

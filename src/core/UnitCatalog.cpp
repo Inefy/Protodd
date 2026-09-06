@@ -1,8 +1,8 @@
-#include "astra/UnitCatalog.hpp"
+#include "protodd/UnitCatalog.hpp"
 
 #include <array>
 
-namespace astra {
+namespace protodd {
 namespace {
 
 constexpr UnitStats unknown{"Unknown", 0, 0, 0, 0, 0.0, false, false, false};
@@ -207,4 +207,4 @@ std::span<const UnitKind> unitPrerequisites(const UnitKind kind) noexcept {
     }
 }
 
-}  // namespace astra
+}  // namespace protodd
