@@ -165,7 +165,12 @@ std::vector<Squad> SquadPlanner::form(
         // Screen on the side of the Nexus opposite the mineral line. A losing
         // defender should not drag melee units through the worker economy.
         defense.retreat = defensiveScreen(state, *threatenedBase);
-        defense.defense = {threatenedBase->center, 448, threatenedBase->center};
+        // Pull the mobile screen far enough forward to meet a rush before it
+        // reaches the mineral line.  The old 448-pixel ring left a small gap
+        // where incoming Zealots were visible but every defender was still
+        // ordered back to the Nexus; that let the first contact happen on top
+        // of workers.  Static support keeps its tighter weapon-radius area.
+        defense.defense = {threatenedBase->center, 600, threatenedBase->center};
         if (!staticSupport.empty()) {
             // Fight within the actual weapons' support instead of assuming
             // every point around a Nexus is covered by rear-placed Cannons.
@@ -198,6 +203,49 @@ std::vector<Squad> SquadPlanner::form(
         defense.enemies = localEnemies(enemy, defense.units, defense.objective, 900);
         defense.needsDetection = std::ranges::any_of(defense.enemies, detectionThreat);
         result.push_back(std::move(defense));
+    }
+
+    // Keep a small home guard while a sizeable army is moving across the
+    // map. Without this reserve, a cleared perimeter immediately sends every
+    // fighter toward the enemy and a hidden reinforcement wave can walk into
+    // the Nexus before the next threat snapshot forms a defense squad.
+    if (threats.empty() &&
+        (plan.posture == Posture::pressure || plan.posture == Posture::attack)) {
+        const auto* homeBase = nearestOwnedBase(state, fallbackRetreat);
+        if (homeBase != nullptr) {
+            std::vector<UnitSnapshot> candidates;
+            for (const auto& unit : friendly) {
+                if (assigned.contains(unit.id) || !unit.completed || unit.disabled ||
+                    isStaticDefense(unit.kind) || !isCombatUnit(unit.kind) ||
+                    (unitStats(unit.kind).requiresPsi && !unit.powered)) {
+                    continue;
+                }
+                candidates.push_back(unit);
+            }
+            std::ranges::sort(candidates, [homeBase](const UnitSnapshot& left,
+                                                      const UnitSnapshot& right) {
+                const auto leftDistance = distanceSquared(left.position, homeBase->center);
+                const auto rightDistance = distanceSquared(right.position, homeBase->center);
+                if (leftDistance != rightDistance) return leftDistance < rightDistance;
+                return left.id < right.id;
+            });
+            const auto guardCount = std::min<std::size_t>(4, candidates.size());
+            if (guardCount > 0) {
+                Squad guard;
+                guard.id = nextId++;
+                guard.role = SquadRole::baseDefense;
+                guard.objective = homeBase->center;
+                guard.retreat = defensiveScreen(state, *homeBase);
+                guard.defense = {homeBase->center, 448, homeBase->center};
+                guard.requiredRatio = 1.15;
+                guard.units.assign(candidates.begin(), candidates.begin() + guardCount);
+                for (const auto& unit : guard.units) assigned.insert(unit.id);
+                finishSquad(guard);
+                guard.enemies = localEnemies(enemy, guard.units, guard.objective, 900);
+                guard.needsDetection = std::ranges::any_of(guard.enemies, detectionThreat);
+                result.push_back(std::move(guard));
+            }
+        }
     }
 
     std::vector<UnitSnapshot> harassment;

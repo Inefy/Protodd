@@ -224,6 +224,42 @@ StrategicPlan StrategyEngine::plan(
     // direct evidence of an all-in at our main.
     addSafetyReactions(result, threat);
 
+    const auto visibleGroundContact = std::ranges::any_of(
+        state.enemy.units, [&home](const UnitSnapshot& enemy) {
+            return enemy.visible && enemy.completed && !enemy.flying &&
+                   isCombatUnit(enemy.kind) && enemy.position.valid() &&
+                   (!home.valid() || distanceSquared(home, enemy.position) <=
+                                       800 * 800);
+        });
+    const auto visibleProtossContact = state.enemy.race == Race::protoss &&
+        std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& enemy) {
+            return enemy.visible && enemy.completed && !enemy.flying &&
+                   isCombatUnit(enemy.kind) && enemy.position.valid();
+        });
+    const auto forwardCounter = visibleProtossContact &&
+        state.frame >= 7 * 60 * 24 && state.frame < 11 * 60 * 24 &&
+        count(state, UnitKind::zealot, true) >= 6 &&
+        count(state, UnitKind::dragoon, true) >= 2 &&
+        threat.combatEnemiesNearMain == 0 &&
+        !visibleGroundContact &&
+        !hardBreachAtMain(state) &&
+        result.posture != Posture::recover &&
+        threat.workerRush <= 0.30;
+    if (forwardCounter) {
+        // The safety pass may have converted a perimeter sighting back to
+        // Defend. If the army is still outside the hard-breach radius, keep
+        // the mobile screen fighting in the midfield instead of donating it
+        // to a mineral-line surround.
+        result.posture = Posture::pressure;
+        result.attackThreshold = std::min(result.attackThreshold, 1.30);
+        result.minimumAttackSize = std::min(result.minimumAttackSize, 8);
+        if (mapAttackTarget.valid()) {
+            result.attackTarget = mapAttackTarget;
+            result.rallyPoint = mapAttackTarget;
+        }
+        result.name += " [post-safety forward counter]";
+    }
+
     result.desiredBases = std::min(result.desiredBases, result.maximumBases);
 
     // Never keep producing workers for bases that the current plan has
@@ -632,7 +668,10 @@ StrategicPlan StrategyEngine::planPvP(
             return unit.kind == UnitKind::gateway && unit.completed;
         }) >= 2;
     const auto earlyMeleeAnchor = minute(state) >= 3 && minute(state) < 5 &&
-                                  !rangedOpening && zealotsReady >= 2;
+                                  !rangedOpening && zealotsReady >= 2 &&
+                                  (threat.combatEnemiesNearMain > 0 ||
+                                   threat.approachingArmyValue >= 2.0 ||
+                                   threat.mostLikely == EnemyPlan::fastRush);
     const auto home = ourMain(state);
     const auto visibleGroundContact = std::ranges::any_of(
         state.enemy.units, [&home](const UnitSnapshot& enemy) {
@@ -643,6 +682,11 @@ StrategicPlan StrategyEngine::planPvP(
     const auto earlyMeleeScreen = zealotsReady >= 2 || rangedOpening;
     const auto mobileOpening = zealotsReady + dragoonsReady +
                                count(state, UnitKind::reaver, true);
+    const auto earlyTechWindow = state.frame >= 4 * 60 * 24 &&
+                                 zealotsReady >= 4 &&
+                                 threat.combatEnemiesNearMain == 0 &&
+                                 !visibleGroundContact &&
+                                 !activeApproach(state, threat);
     if (dragoonsReady >= 4) {
         result.attackThreshold = 1.22;
         result.minimumAttackSize = 8;
@@ -665,6 +709,18 @@ StrategicPlan StrategyEngine::planPvP(
         result.desiredBases = std::min(result.desiredBases, 2);
     }
     if (minute(state) < 10 && mobileOpening < 10) {
+        result.desiredBases = 1;
+        result.maximumBases = std::max(1, count(state, UnitKind::nexus));
+    }
+    // Do not buy a second Nexus before the mirror's first splash-tech window
+    // is secured.  A quiet map can make the expansion heuristic look safe,
+    // but BananaBrain's delayed Dragoon wave punishes the lost 400 minerals;
+    // finish Robotics, Support Bay, and one Reaver before expanding.
+    const auto firstReaverTechReady =
+        count(state, UnitKind::roboticsFacility, true) > 0 &&
+        count(state, UnitKind::roboticsSupportBay, true) > 0 &&
+        count(state, UnitKind::reaver, true) > 0;
+    if (minute(state) < 10 && !firstReaverTechReady) {
         result.desiredBases = 1;
         result.maximumBases = std::max(1, count(state, UnitKind::nexus));
     }
@@ -695,7 +751,8 @@ StrategicPlan StrategyEngine::planPvP(
         goal(result, GoalKind::build, UnitKind::assimilator, 1, 101,
              "opening gas before the Core completes", true);
     }
-    if (count(state, UnitKind::gateway) > 0) {
+    if (count(state, UnitKind::gateway) > 0 &&
+        count(state, UnitKind::gateway) < 2) {
         // Do not spend the opening Core's minerals while a single Gateway has
         // produced only one body. Two early Zealots give the Probe line time
         // to survive the first mirror contact and let the second Gateway
@@ -709,25 +766,31 @@ StrategicPlan StrategyEngine::planPvP(
         const auto reaverOnline = count(state, UnitKind::reaver, true) > 0;
         const auto gatewayTarget = supplyAtLeast(state, 10) ?
                                        (!roboticsInPlay || !reaverOnline ? 2 :
-                                        (minute(state) < 7 ? 2 :
-                                         (minute(state) < 9 ? 3 : 4))) : 1;
+                                        (minute(state) < 12 ? 3 : 4)) : 1;
         goal(result, GoalKind::build, UnitKind::gateway, gatewayTarget, 97,
              "nine-supply gateway into two-gate control",
              count(state, UnitKind::gateway) < gatewayTarget && gatewayTarget <= 2);
-    }
-    if (supplyAtLeast(state, 10)) {
-        goal(result, GoalKind::train, UnitKind::zealot, 1, 98,
-             "bank the first defender while the gateway completes", true);
     }
     if (count(state, UnitKind::gateway) >= 2) {
         // Keep both early Gateways on melee bodies long enough to contest a
         // mirror flood. Transitioning at three Zealots left BananaBrain's
         // first wave unopposed while the Core consumed the bank.
+        const auto earlyZealotTarget =
+            count(state, UnitKind::roboticsFacility) > 0
+                ? ((!rangedOpening && state.frame < 10 * 60 * 24 &&
+                    (threat.mostLikely == EnemyPlan::fastRush ||
+                     threat.uncertainty > 0.85)) ? 8 :
+                   (minute(state) < 6 ? 6 : 3))
+                : 4;
         goal(result, GoalKind::train, UnitKind::zealot,
-             minute(state) < 6 ? 6 : 3, 96,
+             earlyZealotTarget, 96,
              "fill secured opening production with defenders",
              count(state, UnitKind::zealot) < 2);
-        if (count(state, UnitKind::zealot) >= 2) {
+        const auto batteryEvidence = rangedOpening ||
+            threat.combatEnemiesNearMain > 0 ||
+            threat.approachingArmyValue >= 2.0 ||
+            count(state, UnitKind::cyberneticsCore) > 0;
+        if (count(state, UnitKind::zealot) >= 2 && batteryEvidence) {
             goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 93,
                  "sustain the two-gate defensive screen");
         }
@@ -744,10 +807,39 @@ StrategicPlan StrategyEngine::planPvP(
         // pressure wave and let the six-minute Cannon fallback execute.
         goal(result, GoalKind::build, UnitKind::forge, 1, 95,
              "early mirror Forge insurance", false);
-        if (count(state, UnitKind::forge) > 0) {
+        if (count(state, UnitKind::forge) > 0 && !rangedOpening) {
             goal(result, GoalKind::build, UnitKind::photonCannon, 1, 94,
                  "one early Cannon behind the Forge insurance", false);
         }
+    }
+    const auto stabilizingMeleeAnchor = state.frame >= 5 * 60 * 24 &&
+                                        state.frame < 8 * 60 * 24 &&
+                                        zealotsReady >= 6 &&
+                                        !visibleGroundContact &&
+                                        !hardBreachAtMain(state) &&
+                                        (threat.mostLikely == EnemyPlan::fastRush ||
+                                         threat.uncertainty > 0.85 ||
+                                         count(state, UnitKind::cyberneticsCore) > 0);
+    if (stabilizingMeleeAnchor) {
+        // A hidden two-gate flood can cross the map before it becomes visible
+        // at the mineral line. Once six Zealots and the first Core bank are
+        // secured, reserve one Forge/Cannon without buying the old blind
+        // two-Cannon opening. This gives the home screen time to finish while
+        // Robotics and the first Reaver remain the primary tech plan.
+        goal(result, GoalKind::build, UnitKind::forge, 1, 94,
+             "stabilize the six-Zealot mirror screen", false);
+        if (count(state, UnitKind::forge) > 0) {
+            goal(result, GoalKind::build, UnitKind::photonCannon, 1, 93,
+                 "single Cannon behind the six-Zealot screen", false);
+        }
+    }
+    if (state.frame >= 6 * 60 * 24 && state.frame < 9 * 60 * 24 &&
+        count(state, UnitKind::forge) > 0 && cannonsReady < 2) {
+        // One Cannon buys the opening time; a second one before nine minutes
+        // keeps a Dragoon-heavy push from deleting the mineral line while the
+        // Core and Robotics chain finishes.  This is still capped at two.
+        goal(result, GoalKind::build, UnitKind::photonCannon, 2, 94,
+             "second Cannon before the ranged pressure window", false);
     }
     if (supplyAtLeast(state, 12)) {
         const auto quietTechWindow = state.frame >= 5 * 60 * 24 &&
@@ -764,7 +856,8 @@ StrategicPlan StrategyEngine::planPvP(
                                         (count(state, UnitKind::zealot) >= 4 &&
                                          (rangedOpening || cannonsReady >= 1 ||
                                           count(state, UnitKind::photonCannon) >= 1 ||
-                                          quietTechWindow || screenedTechWindow)));
+                                          quietTechWindow || screenedTechWindow ||
+                                          earlyTechWindow)));
         goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 98,
              "dragoon access after opening production", productionSecured);
     }
@@ -790,11 +883,10 @@ StrategicPlan StrategyEngine::planPvP(
     // Reserve the Support Bay as soon as the Robotics Facility is underway.
     // Waiting until the facility is complete lets routine Gateway production
     // consume the exact 150 minerals/100 gas needed for the first Reaver.
-    const auto supportNeeded = state.frame >= 6 * 60 * 24 &&
+    const auto supportNeeded = state.frame >= 4 * 60 * 24 &&
                                count(state, UnitKind::roboticsFacility) > 0 &&
-                               count(state, UnitKind::roboticsSupportBay) == 0 &&
-                               dragoonsReady >= 1;
-    const auto roboticsNeeded = state.frame >= 6 * 60 * 24 &&
+                               count(state, UnitKind::roboticsSupportBay) == 0;
+    const auto roboticsNeeded = state.frame >= 4 * 60 * 24 &&
                                 count(state, UnitKind::cyberneticsCore, true) > 0 &&
                                 count(state, UnitKind::roboticsFacility) == 0 &&
                                 zealotsReady >= 4;
@@ -850,8 +942,21 @@ StrategicPlan StrategyEngine::planPvP(
         // One early Reaver changes the first Dragoon contact; do not wait for
         // the later composition filler to notice that the Robotics Facility
         // is idle.
-        goal(result, GoalKind::train, UnitKind::reaver, 1, 105,
-             "anti-Dragoon splash before the first full attack wave", true);
+        goal(result, GoalKind::train, UnitKind::reaver, 2, 105,
+             "two-Reaver splash before the first full attack wave", true);
+    }
+
+    // Robotics is already the normal PvP splash-tech checkpoint.  Attach an
+    // Observatory to that same checkpoint instead of waiting for three
+    // Dragoons or a fully observed cloak alarm: a hidden Dark Templar can
+    // arrive during the Robotics/Support build window, before the reactive
+    // branch has any chance to finish detection.  The lower priority leaves
+    // the first Reaver reservation ahead of routine Observer production.
+    if (count(state, UnitKind::roboticsFacility, true) > 0) {
+        goal(result, GoalKind::build, UnitKind::observatory, 1, 90,
+             "early PvP detection alongside Robotics", false);
+        goal(result, GoalKind::train, UnitKind::observer, 1, 89,
+             "early Observer for hidden Protoss tech", true);
     }
 
     if (minute(state) >= 8) {
@@ -868,9 +973,12 @@ StrategicPlan StrategyEngine::planPvP(
 
     const auto evidencedMeleeRush = minute(state) < 8 && !rangedOpening &&
                                     (twoGateOpening ||
-                                     threat.mostLikely == EnemyPlan::fastRush ||
-                                     threat.combatEnemiesNearMain > 0 ||
-                                     threat.approachingArmyValue >= 2.0);
+                                     hardBreachAtMain(state) ||
+                                     // If the mobile screen has already been
+                                     // thinned below four Zealots, add a static
+                                     // anchor before the next wave arrives.
+                                     (threat.combatEnemiesNearMain > 0 &&
+                                      zealotsReady < 4));
     if (evidencedMeleeRush) {
         // A Forge is expensive, so only open this branch after direct mirror
         // evidence. It gives the two-gate screen one static anchor without
@@ -889,9 +997,23 @@ StrategicPlan StrategyEngine::planPvP(
     // not pay the blind Forge tax, but a four-Zealot flood cannot walk through
     // an entirely unanchored mineral line.
     const auto rushStaticNeeded = minute(state) < 8 && !rangedOpening &&
-                                   (threat.mostLikely == EnemyPlan::fastRush ||
-                                    threat.combatEnemiesNearMain > 0 ||
-                                    threat.approachingArmyValue >= 2.0);
+                                   (hardBreachAtMain(state) ||
+                                    (threat.combatEnemiesNearMain > 0 &&
+                                     zealotsReady < 4));
+    const auto preserveEarlyCore = state.frame >= 4 * 60 * 24 &&
+                                   zealotsReady >= 4 &&
+                                   !hardBreachAtMain(state) &&
+                                   // A FastRush that is still outside the
+                                   // hard-breach radius is exactly the narrow
+                                   // window where starting the Core saves a
+                                   // full Robotics/Observer cycle.  Waiting
+                                   // for the first completed Cannon pushed
+                                   // detection past the DT arrival in the
+                                   // live mirror trace; the mobile Zealot
+                                   // screen already buys this checkpoint.
+                                   (cannonsReady >= 1 ||
+                                    state.frame >= 5 * 60 * 24 ||
+                                    threat.mostLikely == EnemyPlan::fastRush);
 
     if (threat.combatEnemiesNearMain > 0 || activeApproach(state, threat) ||
         visibleGroundContact ||
@@ -902,8 +1024,10 @@ StrategicPlan StrategyEngine::planPvP(
         result.desiredWorkers = std::min(result.desiredWorkers, canTransition ? 22 : 12);
         const auto meleeOnlyEmergency = rushStaticNeeded &&
                                         dragoonsReady < 2 &&
-                                        !(cannonsReady >= 2 && zealotsReady >= 2);
-        if ((count(state, UnitKind::cyberneticsCore) == 0 && !canTransition) ||
+                                        !(cannonsReady >= 2 && zealotsReady >= 2) &&
+                                        !preserveEarlyCore;
+        if ((count(state, UnitKind::cyberneticsCore) == 0 && !canTransition &&
+             !preserveEarlyCore) ||
             meleeOnlyEmergency) {
             result.desiredGasWorkers = 0;
             result.goals.erase(
@@ -930,7 +1054,24 @@ StrategicPlan StrategyEngine::planPvP(
                      "restore gas after the destroyed ranged-tech core", true);
             }
         }
+        if (preserveEarlyCore && count(state, UnitKind::cyberneticsCore) == 0) {
+            // Four Zealots and no hard breach are enough to start the ranged
+            // transition. Do not let the emergency branch erase this goal
+            // while a mirror rush is merely approaching the wall.
+            result.desiredGasWorkers = std::max(3, result.desiredGasWorkers);
+            goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 113,
+                 "start ranged tech behind the four-Zealot screen", true);
+            goal(result, GoalKind::build, UnitKind::assimilator, 1, 112,
+                 "feed the protected early Core", true);
+        }
         const auto rushCannonTarget =
+            count(state, UnitKind::cyberneticsCore, true) == 0 ? 2 :
+            // Once the Core is complete, the next 200 minerals must go into
+            // Robotics/Observer access.  A third Cannon here repeatedly
+            // starved the blocking Robotics goal in the live DT trace; two
+            // completed Cannons are enough to keep the Zealot screen from
+            // walking through while splash tech comes online.
+            count(state, UnitKind::roboticsFacility) == 0 ? 2 :
             state.self.minerals >= 800 ? 4 :
             (state.frame >= 5 * 60 * 24 &&
              (state.self.minerals >= 200 || zealotsReady >= 4)) ? 3 : 2;
@@ -940,11 +1081,18 @@ StrategicPlan StrategyEngine::planPvP(
             goal(result, GoalKind::build, UnitKind::photonCannon, rushCannonTarget, 111,
                  "overlap the emergency mineral-line anchor", true);
         }
-        const auto lateRangedStatic = state.frame >= 6 * 60 * 24 &&
-                                      (threat.combatEnemiesNearMain > 0 ||
-                                       visibleGroundContact ||
-                                       threat.mostLikely == EnemyPlan::heavyPressure) &&
-                                      dragoonsReady >= 2 && cannonsReady < 2;
+    const auto lateRangedStatic = state.frame >= 6 * 60 * 24 &&
+                                   (threat.combatEnemiesNearMain > 0 ||
+                                        visibleGroundContact ||
+                                        threat.mostLikely == EnemyPlan::heavyPressure) &&
+                                      dragoonsReady >= 2 && cannonsReady < 2 &&
+                                      // When the threat is cloaked, the
+                                      // Observatory/Observer chain is the
+                                      // urgent resource sink.  Letting this
+                                      // generic ranged-pressure branch outrank
+                                      // it repeatedly delayed detection until
+                                      // the mineral line was already lost.
+                                      !cloakedThreat;
         if (lateRangedStatic) {
             goal(result, GoalKind::build, UnitKind::forge, 1, 110,
                  "restore a home anchor against the ranged push", true);
@@ -959,10 +1107,14 @@ StrategicPlan StrategyEngine::planPvP(
                 return enemy.visible && enemy.completed && !enemy.flying &&
                        isCombatUnit(enemy.kind) && enemy.position.valid();
             });
-        const auto forwardMeleeScreen = !rangedOpening && visibleMeleeContact &&
-                                        !directBreach;
-        result.attackThreshold = forwardRangedScreen ? 1.22 : 1.50;
-        result.minimumAttackSize = forwardRangedScreen ? 8 : 14;
+        const auto forwardMeleeScreen = visibleMeleeContact && !directBreach &&
+                                        !visibleGroundContact &&
+                                        mobileOpening >= 8 &&
+                                        (!rangedOpening || zealotsReady >= 8);
+        result.attackThreshold = forwardRangedScreen ? 1.22 :
+                                 (forwardMeleeScreen ? 1.32 : 1.50);
+        result.minimumAttackSize = (forwardRangedScreen || forwardMeleeScreen)
+                                       ? 8 : 14;
         if (forwardRangedScreen || forwardMeleeScreen) {
             result.posture = Posture::pressure;
             const auto homePosition = ourMain(state);
@@ -995,7 +1147,10 @@ StrategicPlan StrategyEngine::planPvP(
             }
         }
         if (count(state, UnitKind::forge) > 0) {
-            goal(result, GoalKind::build, UnitKind::photonCannon, 3, 101,
+            const auto emergencyCannonTarget =
+                count(state, UnitKind::cyberneticsCore, true) > 0 ? 3 : 2;
+            goal(result, GoalKind::build, UnitKind::photonCannon,
+                 emergencyCannonTarget, 101,
                  "reinforce an existing static defense investment", true);
         }
         goal(result, GoalKind::build, UnitKind::gateway, 2, 100,
@@ -1094,7 +1249,7 @@ StrategicPlan StrategyEngine::planPvP(
         // breach branch above must retain control once contact is established.
         const auto hardBreach = hardBreachAtMain(state);
         if (!mobileRushOpening && state.frame >= 4 * 60 * 24 &&
-            mobileOpening >= 2 && !hardBreach) {
+            mobileOpening >= 2 && !hardBreach && !visibleGroundContact) {
             result.posture = Posture::pressure;
             if (home.valid()) {
                 const auto nearest = std::ranges::min_element(
@@ -1180,8 +1335,49 @@ StrategicPlan StrategyEngine::planPvP(
         state.enemy.units, [&home](const UnitSnapshot& enemy) {
             return enemy.visible && enemy.completed && !enemy.flying &&
                    isCombatUnit(enemy.kind) && enemy.position.valid() &&
-                   (!home.valid() || distanceSquared(home, enemy.position) <= 960 * 960);
+            (!home.valid() || distanceSquared(home, enemy.position) <= 960 * 960);
         });
+    const auto earlyTimingAttack = state.frame >= 8 * 60 * 24 + 12 * 24 &&
+                                   state.frame < 11 * 60 * 24 &&
+                                   mobileOpening >= 8 && !visibleEnemyArmy &&
+                                   !visibleArmyNearHome && !directBreach &&
+                                   threat.mostLikely != EnemyPlan::fastRush &&
+                                   (threat.mostLikely == EnemyPlan::unknown ||
+                                    threat.uncertainty > 0.90);
+    if (earlyTimingAttack) {
+        // When the map is empty, a compact Zealot/Dragoon/Reaver group should
+        // hit production before BananaBrain can bank a second wave. The home
+        // guard formed by SquadPlanner keeps this from becoming an all-in.
+        result.posture = Posture::attack;
+        result.attackThreshold = std::min(result.attackThreshold, 1.20);
+        result.minimumAttackSize = std::min(result.minimumAttackSize, 10);
+        const auto target = enemyMain(state);
+        if (target.valid()) {
+            result.attackTarget = target;
+            result.rallyPoint = target;
+        }
+        result.name += " [empty-map timing attack]";
+    }
+    const auto reaverTimingStrike = state.frame >= 9 * 60 * 24 &&
+                                    state.frame < 13 * 60 * 24 &&
+                                    count(state, UnitKind::reaver, true) >= 1 &&
+                                    mobileOpening >= 12 &&
+                                    threat.mostLikely != EnemyPlan::heavyPressure &&
+                                    threat.combatEnemiesNearMain == 0 &&
+                                    !visibleArmyNearHome && !visibleEnemyArmy &&
+                                    !directBreach && enemyMain(state).valid();
+    if (reaverTimingStrike) {
+        // Once the first Reaver is ready, a compact timing attack is safer
+        // than parking the army until BananaBrain's next wave is complete.
+        // Keep this window bounded and require a clear home so an all-in never
+        // overrides the emergency defense branch.
+        result.posture = Posture::attack;
+        result.attackThreshold = std::min(result.attackThreshold, 1.12);
+        result.minimumAttackSize = std::min(result.minimumAttackSize, 10);
+        result.attackTarget = enemyMain(state);
+        result.rallyPoint = result.attackTarget;
+        result.name += " [Reaver timing strike]";
+    }
     const auto counterPushWindow = state.frame >= 8 * 60 * 24 &&
                                    mobileOpening >= 16 && !directBreach &&
                                    !visibleArmyNearHome &&
@@ -1198,15 +1394,21 @@ StrategicPlan StrategyEngine::planPvP(
         }
         result.name += " [counter-push advantage]";
     }
-    if ((roboticsNeeded || supportNeeded) && threat.combatEnemiesNearMain == 0 &&
-        !hardBreachAtMain(state)) {
+    if ((roboticsNeeded || supportNeeded) && !hardBreachAtMain(state)) {
         // Protect the Robotics -> Support Bay sequence from composition filler.
         // A brief pause is cheaper than entering the first Reaver fight with
         // an empty gas/mineral bank; direct pressure keeps the normal
         // defensive queue in control.
+        const auto preserveDragoonScreen = supportNeeded && dragoonsReady < 6;
+        const auto preserveMeleeScreen = !rangedOpening &&
+                                         state.frame < 10 * 60 * 24 &&
+                                         zealotsReady < 8 &&
+                                         (threat.uncertainty > 0.85 ||
+                                          threat.mostLikely == EnemyPlan::fastRush);
         result.goals.erase(
             std::remove_if(result.goals.begin(), result.goals.end(),
-                           [](const ProductionGoal& candidate) {
+                           [preserveDragoonScreen, preserveMeleeScreen](
+                               const ProductionGoal& candidate) {
                                if (candidate.target == UnitKind::gateway &&
                                    candidate.goal == GoalKind::build &&
                                    candidate.priority < 106) {
@@ -1214,8 +1416,8 @@ StrategicPlan StrategyEngine::planPvP(
                                }
                                if (candidate.goal != GoalKind::train) return false;
                                switch (candidate.target) {
-                                   case UnitKind::zealot:
-                                   case UnitKind::dragoon:
+                                   case UnitKind::zealot: return !preserveMeleeScreen;
+                                   case UnitKind::dragoon: return !preserveDragoonScreen;
                                    case UnitKind::reaver:
                                    case UnitKind::highTemplar:
                                    case UnitKind::darkTemplar:
@@ -1314,8 +1516,7 @@ void StrategyEngine::addInfrastructure(
           count(state, UnitKind::roboticsFacility) == 0 &&
           count(state, UnitKind::zealot, true) >= 4) ||
          (count(state, UnitKind::roboticsFacility) > 0 &&
-          count(state, UnitKind::roboticsSupportBay) == 0 &&
-          count(state, UnitKind::dragoon, true) >= 1));
+          count(state, UnitKind::roboticsSupportBay) == 0));
     // A one-base mirror with a healthy bank can sustain four Gateways. The
     // old three-Gateway ceiling left minerals idle while the opponent's
     // production kept scaling, even after our army had stabilized the main.

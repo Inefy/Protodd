@@ -25,7 +25,9 @@ foreach ($path in @($runtimeA, $runtimeB, $archiveRoot)) {
         throw "Direct-match paths must stay inside $buildPrefix"
     }
 }
-if (Get-Process -Name StarCraft -ErrorAction SilentlyContinue) {
+$baselineStarCraftIds = @(Get-Process -Name StarCraft -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty Id)
+if ($baselineStarCraftIds.Count -gt 0) {
     throw "Refusing to start: a StarCraft process is already running"
 }
 if ($Label -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
@@ -198,10 +200,30 @@ log_path = bwapi-data/logs
 [System.IO.File]::WriteAllText((Join-Path $runtimeB "bwapi-data/bwapi.ini"), $joinIni)
 
 $launched = @()
+function Get-TrackedStarCraftIds {
+    $ids = @($script:launched)
+    # StarCraft can fork a child after the injection wrapper was sampled. Only
+    # include processes created after this match started and never touch a
+    # pre-existing game owned by the user.
+    $ids += @(Get-Process -Name StarCraft -ErrorAction SilentlyContinue |
+        Where-Object {
+            $fresh = $false
+            try {
+                $startTime = $_.StartTime
+                $fresh = $null -ne $startTime -and
+                         $startTime.ToUniversalTime() -ge $script:startedAtUtc
+            } catch {
+                $fresh = $false
+            }
+            $script:baselineStarCraftIds -notcontains $_.Id -and $fresh
+        } |
+        Select-Object -ExpandProperty Id)
+    @($ids | Sort-Object -Unique)
+}
 function Close-LaunchedStarCraft {
     # Never use AppActivate or SendKeys here: focus can change while a game
     # exits, sending Alt+F4/Enter to an unrelated application or Windows.
-    foreach ($id in $script:launched) {
+    foreach ($id in @(Get-TrackedStarCraftIds)) {
         $process = Get-Process -Id $id -ErrorAction SilentlyContinue
         if (-not $process -or $process.ProcessName -ne 'StarCraft') { continue }
         [void]$process.CloseMainWindow()
@@ -210,7 +232,7 @@ function Close-LaunchedStarCraft {
     $gracePeriod = [DateTime]::UtcNow.AddSeconds(3)
     while ([DateTime]::UtcNow -lt $gracePeriod) {
         $remaining = @(
-            foreach ($id in $script:launched) {
+            foreach ($id in @(Get-TrackedStarCraftIds)) {
                 $process = Get-Process -Id $id -ErrorAction SilentlyContinue
                 if ($process -and $process.ProcessName -eq 'StarCraft') { $process }
             }
@@ -219,7 +241,7 @@ function Close-LaunchedStarCraft {
         Start-Sleep -Milliseconds 200
     }
 
-    foreach ($id in $script:launched) {
+    foreach ($id in @(Get-TrackedStarCraftIds)) {
         $process = Get-Process -Id $id -ErrorAction SilentlyContinue
         if (-not $process -or $process.ProcessName -ne 'StarCraft') { continue }
         Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
@@ -229,18 +251,19 @@ function Close-LaunchedStarCraft {
 $logPath = Join-Path $writeRoot "AstraBot.log"
 $result = $null
 $traceBeforeCleanup = ""
-$startedUtc = [DateTime]::UtcNow.ToString('o')
+$script:startedAtUtc = [DateTime]::UtcNow
+$startedUtc = $script:startedAtUtc.ToString('o')
 try {
     Start-Process -FilePath (Join-Path $runtimeA "injectory_x86.exe") `
         -ArgumentList '--launch','StarCraft.exe','--inject','bwapi-data\BWAPI.dll','wmode.dll' `
         -WorkingDirectory $runtimeA -WindowStyle Hidden
     Start-Sleep -Seconds 3
-    $launched = @(Get-Process -Name StarCraft -ErrorAction Stop | Select-Object -ExpandProperty Id)
+    $launched += @(Get-Process -Name StarCraft -ErrorAction Stop | Select-Object -ExpandProperty Id)
     Start-Process -FilePath (Join-Path $runtimeB "injectory_x86.exe") `
         -ArgumentList '--launch','StarCraft.exe','--inject','bwapi-data\BWAPI.dll','wmode.dll' `
         -WorkingDirectory $runtimeB -WindowStyle Hidden
     Start-Sleep -Seconds 3
-    $launched = @(Get-Process -Name StarCraft -ErrorAction Stop | Select-Object -ExpandProperty Id)
+    $launched += @(Get-Process -Name StarCraft -ErrorAction Stop | Select-Object -ExpandProperty Id)
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {

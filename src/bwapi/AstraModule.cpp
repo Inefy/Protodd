@@ -394,6 +394,12 @@ void AstraModule::logDecision() {
     const auto dragoons = countUnits(UnitKind::dragoon, false);
     const auto completedDragoons = countUnits(UnitKind::dragoon, true);
     const auto reavers = countUnits(UnitKind::reaver, false);
+    const auto robotics = countUnits(UnitKind::roboticsFacility, false);
+    const auto completedRobotics = countUnits(UnitKind::roboticsFacility, true);
+    const auto supportBays = countUnits(UnitKind::roboticsSupportBay, false);
+    const auto completedSupportBays = countUnits(UnitKind::roboticsSupportBay, true);
+    const auto observatories = countUnits(UnitKind::observatory, false);
+    const auto completedObservatories = countUnits(UnitKind::observatory, true);
     const auto darkTemplar = countUnits(UnitKind::darkTemplar, true);
     const auto highTemplar = countUnits(UnitKind::highTemplar, true);
     const auto stormReady =
@@ -422,7 +428,11 @@ void AstraModule::logDecision() {
          << completedCannons << ",batteries=" << batteries
          << ",zealots=" << zealots << '/' << completedZealots
          << ",dragoons=" << dragoons << '/' << completedDragoons
-         << ",reavers=" << reavers << ",dt=" << darkTemplar
+         << ",reavers=" << reavers
+         << ",robotics=" << robotics << '/' << completedRobotics
+         << ",support=" << supportBays << '/' << completedSupportBays
+         << ",observatory=" << observatories << '/' << completedObservatories
+         << ",dt=" << darkTemplar
          << ",ht=" << highTemplar << ",storm=" << (stormReady ? 1 : 0)
          << ",army=" << mobileArmy
          << ",enemyVisibleArmy=" << visibleEnemyArmy
