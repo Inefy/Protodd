@@ -4,6 +4,7 @@
 #include "astra/UnitCatalog.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <unordered_map>
 
 namespace astra {
@@ -47,6 +48,15 @@ int usableProducers(const GameState& state, const UnitKind kind) {
 
 }  // namespace
 
+bool trainingSlotAvailable(const bool active, const int queueSize,
+                           const int remainingFrames, const int latencyFrames,
+                           const bool recentTrainCommand) noexcept {
+    if (recentTrainCommand) return false;
+    if (!active && queueSize == 0) return true;
+    return queueSize == 1 && remainingFrames > 0 &&
+           remainingFrames <= std::max(0, latencyFrames);
+}
+
 bool ResourceLedger::canReserve(const int mineralCost, const int gasCost) const noexcept {
     return freeMinerals() >= mineralCost && freeGas() >= gasCost;
 }
@@ -73,8 +83,127 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     std::vector<MacroAction> actions;
     std::vector<ProductionGoal> goals = plan.goals;
     actions.reserve(goals.size() + 1U);
+
+    // A non-monotonic frame is a new synthetic game/test context (and the
+    // bridge's onStart also resets this in live play). Never carry a stale
+    // structure demand across that boundary. Macro reconciliation itself is
+    // latency-aware and runs on increasing frames, so an equal frame is safe
+    // to treat as a fresh snapshot as well.
+    if (lastFrame_ >= state.frame) pendingGoals_.clear();
+    lastFrame_ = state.frame;
+
+    // Keep only a bounded, actionable history.  Existing structures clear the
+    // demand immediately; otherwise it survives brief scouting/plan churn.
+    std::erase_if(pendingGoals_, [&state](const PendingGoal& pending) {
+        const auto existing = countExisting(state, pending.target);
+        return existing >= pending.desiredCount || pending.lastRequested < 0 ||
+               state.frame < pending.lastRequested ||
+               state.frame - pending.lastRequested > 30 * 24;
+    });
+    // An explicit lower/cancelled demand supersedes memory. Expansions must
+    // obey today's safety decision immediately, even during the grace period.
+    std::erase_if(pendingGoals_, [&plan](const PendingGoal& pending) {
+        return (pending.goal == GoalKind::expand &&
+                (plan.desiredBases < pending.desiredCount ||
+                 std::ranges::none_of(plan.goals, [&pending](const ProductionGoal& goal) {
+                     return goal.goal == GoalKind::expand && goal.blocking &&
+                            goal.desiredCount >= pending.desiredCount;
+                 }))) ||
+               std::ranges::any_of(plan.goals, [&pending](const ProductionGoal& goal) {
+                   return goal.goal == pending.goal && goal.target == pending.target &&
+                          (!goal.blocking || goal.desiredCount < pending.desiredCount);
+               });
+    });
+    for (const auto& pending : pendingGoals_) {
+        const auto alreadyRequested = std::ranges::any_of(
+            goals, [&pending](const ProductionGoal& candidate) {
+                return candidate.goal == pending.goal &&
+                       candidate.target == pending.target;
+            });
+        if (alreadyRequested) continue;
+        goals.push_back({pending.goal, pending.target, pending.desiredCount,
+                         pending.priority, true, pending.reason});
+    }
+
+    // Strategy is assembled from several independent signals (opening
+    // recognizer, emergency response, infrastructure, and learned style).
+    // Coalesce equivalent structure/technology requests before reservation.
+    // Training demand is limited separately by available producer slots.
+    std::vector<ProductionGoal> mergedGoals;
+    mergedGoals.reserve(goals.size());
+    for (const auto& candidate : goals) {
+        // Train goals are intentionally not merged: one demand can fill one
+        // idle Gateway/Nexus, while a second independent train goal can fill a
+        // second producer in the same pass.  Structure/expansion/research
+        // requests, on the other hand, have a single strategic checkpoint and
+        // must be coalesced to avoid duplicate buildings.
+        const auto existing = candidate.goal == GoalKind::train
+                                  ? mergedGoals.end()
+                                  : std::ranges::find_if(
+                                        mergedGoals, [&candidate](const ProductionGoal& prior) {
+                                            return prior.goal == candidate.goal &&
+                                                   prior.target == candidate.target &&
+                                                   prior.technology == candidate.technology;
+                                        });
+        if (existing == mergedGoals.end()) {
+            mergedGoals.push_back(candidate);
+            continue;
+        }
+        if (candidate.priority > existing->priority) {
+            existing->reason = candidate.reason;
+        }
+        existing->desiredCount = std::max(existing->desiredCount,
+                                          candidate.desiredCount);
+        existing->priority = std::max(existing->priority, candidate.priority);
+        existing->blocking = existing->blocking || candidate.blocking;
+    }
+    goals = std::move(mergedGoals);
     std::unordered_map<UnitKind, int> planned;
     std::unordered_map<UnitKind, int> committedProducers;
+    // A blocking Pylon is a supply deadline, not a license to idle the
+    // Nexus.  Before the game is within four supply of the cap, let a Probe
+    // spend an otherwise-unaffordable Pylon's current mineral shortfall and
+    // start the Pylon on the next pass.  This mirrors Stardust's forward
+    // resource schedule: protect a future deadline without sacrificing
+    // continuous worker production in the present frame.
+    const auto protectBlocking = [&ledger, &state](
+                                    const UnitKind target,
+                                    const int minerals,
+                                    const int gas,
+                                    const int priority) {
+        const auto supplyRoom = state.self.supplyTotal - state.self.supplyUsed;
+        if (target == UnitKind::pylon && supplyRoom > 4) return;
+        // A high-priority Forge/Cannon in an active emergency is a hard
+        // checkpoint, not a long-horizon reservation.  Leaving the worker
+        // cycle available here lets a Probe or Battery consume the exact
+        // minerals needed to cross the 150-mineral Forge threshold, so the
+        // plan can wait forever while the melee wave is already at the main.
+        // Reserve the entire current bank for this narrow static anchor;
+        // worker production resumes as soon as the structure starts.
+        const auto urgentStaticAnchor =
+            (target == UnitKind::forge || target == UnitKind::photonCannon) &&
+            priority >= 110;
+        if (urgentStaticAnchor) {
+            ledger.protect(minerals, gas);
+            return;
+        }
+        // A pending expansion or tech chain is a long-horizon reservation.
+        // Keeping every currently available mineral behind it can silently
+        // stop the worker queue: the worker goal is lower priority, so it
+        // never gets a 50-mineral reservation and the income that would
+        // complete the transition disappears. Leave one worker cycle
+        // available while the bank is below the target cost; once the full
+        // cost is actually available the structure can reserve and issue.
+        const auto leavesWorkerCycle = target == UnitKind::unknown ||
+                                       (target != UnitKind::pylon && isBuilding(target));
+        if (leavesWorkerCycle) {
+            const auto workerCycle = 50;
+            const auto protectable = std::max(0, ledger.freeMinerals() - workerCycle);
+            ledger.protect(std::min(minerals, protectable), gas);
+            return;
+        }
+        ledger.protect(minerals, gas);
+    };
     auto plannedSupply = state.self.supplyUsed;
     for (const auto& technology : state.self.technologies) {
         if (technology.inProgress) {
@@ -88,18 +217,41 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     if (state.self.race == Race::protoss && state.self.supplyTotal > 0 &&
         state.self.supplyTotal < 400) {
         const auto pylons = countExisting(state, UnitKind::pylon);
-        const auto pylonInProgress = std::ranges::any_of(
+        const auto pendingPylons = static_cast<int>(std::ranges::count_if(
             state.self.units, [](const UnitSnapshot& unit) {
                 return unit.kind == UnitKind::pylon && !unit.completed;
-            });
+            })) + static_cast<int>(std::ranges::count(state.self.queuedUnits, UnitKind::pylon));
         const auto activeProducers = countCompleted(state, UnitKind::nexus) +
                                      countCompleted(state, UnitKind::gateway) +
                                      countCompleted(state, UnitKind::roboticsFacility) +
                                      countCompleted(state, UnitKind::stargate);
-        const auto safetyMargin = std::clamp(2 + activeProducers * 2, 4, 16);
-        const auto remaining = state.self.supplyTotal - state.self.supplyUsed;
+        // Forecast consumption until a new Pylon can finish, including a
+        // short builder trip. Normalize composition within each producer type.
+        std::unordered_map<UnitKind, double> weights;
+        std::unordered_map<UnitKind, double> rates;
+        for (const auto& target : plan.composition) {
+            const auto producer = producerFor(target.kind);
+            const auto& stats = unitStats(target.kind);
+            if (producer == UnitKind::unknown || stats.buildTime <= 0 || target.weight <= 0) continue;
+            weights[producer] += target.weight;
+            rates[producer] += target.weight * stats.supply / stats.buildTime;
+        }
+        double supplyPerFrame = 0.0;
+        for (const auto& [producer, weight] : weights) {
+            supplyPerFrame += usableProducers(state, producer) * rates[producer] / weight;
+        }
+        if (countExisting(state, UnitKind::probe) < plan.desiredWorkers) {
+            const auto& probe = unitStats(UnitKind::probe);
+            supplyPerFrame += usableProducers(state, UnitKind::nexus) *
+                              static_cast<double>(probe.supply) / probe.buildTime;
+        }
+        const auto forecast = static_cast<int>(std::ceil(
+            supplyPerFrame * (unitStats(UnitKind::pylon).buildTime + 96)));
+        const auto safetyMargin = std::max(std::clamp(2 + activeProducers * 2, 4, 16), forecast);
+        const auto remaining = state.self.supplyTotal + pendingPylons * 16 - state.self.supplyUsed;
         const auto openingDeadline = pylons == 0 && state.self.supplyUsed >= 12;
-        if (!pylonInProgress && (openingDeadline || remaining <= safetyMargin)) {
+        if (state.self.supplyTotal + pendingPylons * 16 < 400 &&
+            ((openingDeadline && pendingPylons == 0) || remaining <= safetyMargin)) {
             goals.push_back({GoalKind::build, UnitKind::pylon, pylons + 1, 110, true,
                              "operational supply invariant"});
         }
@@ -122,7 +274,17 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             if (countCompleted(state, stats.producer) == 0) {
                 const auto nested = nextMissingPrerequisite(state, stats.producer);
                 const auto prerequisite = nested != UnitKind::unknown ? nested : stats.producer;
-                if (countExisting(state, prerequisite) + planned[prerequisite] == 0) {
+                // Optional research must not invent an opening prerequisite.
+                // For example, a low-priority Dragoon range goal used to
+                // reserve a Cybernetics Core before the PvP planner had
+                // recognized the opponent's two-Gateway melee line.  That
+                // consumed the exact mineral window needed by a Forge and
+                // left the bot with neither static defense nor a deliberate
+                // Core checkpoint.  Blocking tech goals still materialize
+                // their prerequisite chain; non-blocking goals wait for the
+                // strategic planner to request the structure explicitly.
+                if (goal.blocking &&
+                    countExisting(state, prerequisite) + planned[prerequisite] == 0) {
                     const auto& unit = unitStats(prerequisite);
                     MacroAction action{
                         MacroActionKind::build, prerequisite, goal.priority,
@@ -134,7 +296,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                     actions.push_back(std::move(action));
                     ++planned[prerequisite];
                     if (goal.blocking && !actions.back().reserved) {
-                        ledger.protect(unit.minerals, unit.gas);
+                        protectBlocking(prerequisite, unit.minerals, unit.gas,
+                                        goal.priority);
                     }
                 } else if (goal.blocking) {
                     MacroAction waiting{
@@ -146,7 +309,10 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                     waiting.reserved = ledger.reserve(minerals, gas);
                     waiting.executable = false;
                     actions.push_back(std::move(waiting));
-                    if (!actions.back().reserved) ledger.protect(minerals, gas);
+                    if (!actions.back().reserved) {
+                        protectBlocking(UnitKind::unknown, minerals, gas,
+                                        goal.priority);
+                    }
                 }
                 continue;
             }
@@ -165,7 +331,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             if (action.reserved || goal.blocking) ++committedProducers[stats.producer];
             if (action.reserved || goal.blocking) actions.push_back(std::move(action));
             if (goal.blocking && !actions.back().reserved) {
-                ledger.protect(minerals, gas);
+                protectBlocking(UnitKind::unknown, minerals, gas,
+                                goal.priority);
             }
             continue;
         }
@@ -203,7 +370,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                     ++planned[prerequisite];
                 }
                 if (goal.blocking && !actions.back().reserved) {
-                    ledger.protect(stats.minerals, stats.gas);
+                    protectBlocking(prerequisite, stats.minerals, stats.gas,
+                                    goal.priority);
                 }
             } else if (goal.blocking) {
                 // The prerequisite already exists but is incomplete. Reserve
@@ -220,7 +388,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                 actions.push_back(std::move(waiting));
                 ++planned[goal.target];
                 if (!actions.back().reserved) {
-                    ledger.protect(target.minerals, target.gas);
+                    protectBlocking(goal.target, target.minerals, target.gas,
+                                    goal.priority);
                 }
             }
             continue;
@@ -251,7 +420,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         // its mineral bank without freezing probes or other mineral-only work
         // paid for from the true surplus.
         if (goal.blocking && !actions.back().reserved) {
-            ledger.protect(stats.minerals, stats.gas);
+            protectBlocking(goal.target, stats.minerals, stats.gas,
+                            goal.priority);
         }
     }
 
@@ -325,6 +495,41 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         }
         return left.priority > right.priority;
     });
+
+    // Record blocking structure demands that still need a future pass.  This
+    // includes both resource-starved and placement-starved actions; the BWAPI
+    // bridge owns retry timing while the planner owns strategic persistence.
+    // Do not refresh requests injected from memory or they will never expire.
+    for (const auto& candidate : plan.goals) {
+        if (!candidate.blocking ||
+            (candidate.goal != GoalKind::build && candidate.goal != GoalKind::expand)) {
+            continue;
+        }
+        if (countExisting(state, candidate.target) >= candidate.desiredCount) continue;
+        const auto existing = std::ranges::find_if(
+            pendingGoals_, [&candidate](const PendingGoal& pending) {
+                return pending.goal == candidate.goal &&
+                       pending.target == candidate.target;
+            });
+        if (existing == pendingGoals_.end()) {
+            pendingGoals_.push_back({candidate.goal, candidate.target,
+                                     candidate.desiredCount, candidate.priority,
+                                     candidate.reason, state.frame});
+        } else {
+            if (existing->lastRequested == state.frame) {
+                // Several strategic signals may renew the same checkpoint.
+                // Preserve the strongest explicit request from this frame.
+                existing->desiredCount = std::max(existing->desiredCount, candidate.desiredCount);
+                if (candidate.priority > existing->priority) existing->reason = candidate.reason;
+                existing->priority = std::max(existing->priority, candidate.priority);
+            } else {
+                existing->desiredCount = candidate.desiredCount;
+                existing->priority = candidate.priority;
+                existing->reason = candidate.reason;
+            }
+            existing->lastRequested = state.frame;
+        }
+    }
     return actions;
 }
 

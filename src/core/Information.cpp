@@ -220,6 +220,23 @@ void OpponentModel::update(const GameState& state) {
     }
     evidence[index(EnemyPlan::cloakedTech)] += cloakUnits * 2.2;
 
+    // Stardust's PvP recognizer does not wait for the first Dark Templar to
+    // walk into the mineral line.  It treats the production/tech gap as
+    // evidence: after two Gateways are established, a Protoss opponent that
+    // has produced no Dragoons/Reavers by the midgame is likely investing in
+    // covert tech or another delayed tech transition.  This is intentionally
+    // a soft prior (not a declaration of DT) so the strategy can keep normal
+    // Zealot-rush responses while reserving detection a few minutes earlier.
+    if (enemyRace_ == Race::protoss && minutes >= 5.5 && minutes < 11.0) {
+        const auto enemyGateways = count(state, UnitKind::gateway);
+        const auto enemyRanged = count(state, UnitKind::dragoon) +
+                                 count(state, UnitKind::reaver);
+        if (enemyGateways >= 2 && enemyRanged == 0) {
+            evidence[index(EnemyPlan::cloakedTech)] += 2.2;
+            evidence[index(EnemyPlan::fastTech)] += 0.8;
+        }
+    }
+
     // These features already include remembered observations. Multiplying
     // them into yesterday's posterior counted one visible Zealot as hundreds
     // of independent confirmations and eventually declared a certain rush.

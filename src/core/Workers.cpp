@@ -32,6 +32,11 @@ int militiaDemand(const UnitSnapshot& enemy, const Frame frame) {
     // arrive, never a general answer to ranged or high-tier armies.
     if (frame < 7 * 60 * 24 && enemy.kind == UnitKind::zergling) return 2;
     if (frame < 6 * 60 * 24 && enemy.kind == UnitKind::zealot) return 3;
+    // A detected Dark Templar is still a short-range melee unit, and it can
+    // erase the entire mineral line after the mobile screen has been traded
+    // away.  Treat it like a small emergency surround target rather than
+    // allowing healthy Probes to keep mining underneath the cloak alarm.
+    if (enemy.kind == UnitKind::darkTemplar && frame < 16 * 60 * 24) return 3;
     if (frame < 5 * 60 * 24 && enemy.kind == UnitKind::marine) return 1;
     return 0;
 }
@@ -216,6 +221,30 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                               threatId, escape, 98});
             continue;
         }
+
+        // An undetected DT cannot be a militia target. Only workers within
+        // its approach radius escape; safe workers keep the detection funded.
+        const auto cloakedNearBase = std::ranges::min_element(
+            state.enemy.units, {}, [worker](const UnitSnapshot& enemy) {
+                return enemy.visible && enemy.position.valid() &&
+                               enemy.kind == UnitKind::darkTemplar &&
+                               !enemy.detected
+                           ? distanceSquared(enemy.position, worker->position)
+                           : std::numeric_limits<int>::max();
+            });
+        if (safeBase != nullptr && cloakedNearBase != state.enemy.units.end() &&
+            cloakedNearBase->visible && cloakedNearBase->position.valid() &&
+            cloakedNearBase->kind == UnitKind::darkTemplar &&
+            !cloakedNearBase->detected &&
+            distanceSquared(worker->position, cloakedNearBase->position) <= 160 * 160) {
+            const Position away{2 * worker->position.x - cloakedNearBase->position.x,
+                                2 * worker->position.y - cloakedNearBase->position.y};
+            const auto escape = influence.safestStep(
+                worker->position, away, false);
+            result.push_back({worker->id, WorkerJob::evacuate, safeBase->id,
+                              cloakedNearBase->id, escape, 99});
+            continue;
+        }
         available.push_back(worker);
     }
 
@@ -231,26 +260,27 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         state.enemy.units, [&ownedBases](const UnitSnapshot& enemy) {
             return enemy.visible && isWorker(enemy.kind) && enemy.position.valid() &&
                    std::ranges::any_of(ownedBases, [&enemy](const BaseSnapshot* base) {
-                       return distanceSquared(enemy.position, base->center) < 512 * 512;
+            return distanceSquared(enemy.position, base->center) < 640 * 640;
                    });
         });
     for (const auto& enemy : state.enemy.units) {
         const auto demand = militiaDemand(enemy, state.frame);
-        if (demand == 0 || !enemy.position.valid()) continue;
+        // A militia time limit must not also switch off worker protection.
+        const auto meleeDanger = enemy.visible && enemy.completed && !enemy.hallucination &&
+                                 (enemy.kind == UnitKind::zealot || enemy.kind == UnitKind::zergling ||
+                                  enemy.kind == UnitKind::darkTemplar);
+        if ((demand == 0 && !meleeDanger) || !enemy.position.valid()) continue;
         // Probes cannot close on ranged bio efficiently. Once a Cannon/Battery
         // screen exists, charging Marines only donates the economy and blocks
         // the combat units that should be using that screen.
         if (enemy.kind == UnitKind::marine && hasCompletedStaticScreen) continue;
         if (isWorker(enemy.kind) && localEnemyWorkers < 3) continue;
         if (std::ranges::any_of(ownedBases, [&enemy](const BaseSnapshot* base) {
-                return distanceSquared(enemy.position, base->center) < 512 * 512;
+            return distanceSquared(enemy.position, base->center) < 640 * 640;
             })) {
             baseThreats.push_back({&enemy, demand});
         }
     }
-    const auto requestedDefenders = std::accumulate(
-        baseThreats.begin(), baseThreats.end(), 0,
-        [](const int total, const MilitiaTarget& target) { return total + target.demand; });
     const auto localArmy = std::ranges::count_if(
         state.self.units, [&baseThreats](const UnitSnapshot& unit) {
             return unit.completed && isCombatUnit(unit.kind) && !unit.flying &&
@@ -258,10 +288,107 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                        return distanceSquared(unit.position, target.unit->position) < 576 * 576;
                    });
         });
+    // Do not turn a defended mineral line into a second melee squad.  The
+    // previous demand calculation sent up to eight Probes into every visible
+    // Zealot wave even when four-to-six Zealots/Dragoons were already in
+    // contact.  Those workers were then lost, the mineral income collapsed,
+    // and the next reinforcement cycle never arrived.  Keep militia as a
+    // true last resort: it becomes eligible again if the mobile screen has
+    // been wiped down to one or fewer nearby combat units.
+    const auto requestedDefenders = std::accumulate(
+        baseThreats.begin(), baseThreats.end(), 0,
+        [localArmy](const int total, const MilitiaTarget& target) {
+            const auto melee = target.unit->kind == UnitKind::zealot ||
+                               target.unit->kind == UnitKind::zergling ||
+                               target.unit->kind == UnitKind::darkTemplar;
+            return total + (melee && localArmy >= 2 ? 0 : target.demand);
+        });
+    // Protect workers close to melee even after militia recruitment expires.
+    // The adapter mineral-walks toward safer patches and balances their load.
+    const auto visibleMeleeThreats = std::ranges::count_if(
+        baseThreats, [](const MilitiaTarget& target) {
+            return target.unit->kind == UnitKind::zealot ||
+                   target.unit->kind == UnitKind::zergling ||
+                   target.unit->kind == UnitKind::darkTemplar;
+        });
+    // Do not wait for a perfect two-unit surround before moving the workers.
+    // In live games the first Zealot often occupies the home screen while the
+    // second and third are still crossing the ramp; by the time localArmy
+    // reaches two, the mineral line has already been trapped.  After five
+    // minutes, even one visible melee unit is enough evidence to evacuate if
+    // only one of our mobile units is nearby.  The local-army check keeps a
+    // healthy screen mining while it can actually contest the contact.
+    const auto evacuationScreen = localArmy >= 2 ||
+                                  (state.frame >= 5 * 60 * 24 &&
+                                   visibleMeleeThreats >= 1 &&
+                                   localArmy <= 1);
+    if (evacuationScreen && safeBase != nullptr) {
+        const UnitSnapshot* closestMelee = nullptr;
+        auto closestDistance = std::numeric_limits<int>::max();
+        for (const auto& target : baseThreats) {
+            const auto melee = target.unit->kind == UnitKind::zealot ||
+                               target.unit->kind == UnitKind::zergling ||
+                               target.unit->kind == UnitKind::darkTemplar;
+            if (!melee) continue;
+            const auto toBase = distanceSquared(target.unit->position, safeBase->center);
+            if (toBase < closestDistance) {
+                closestDistance = toBase;
+                closestMelee = target.unit;
+            }
+        }
+        if (closestMelee != nullptr && closestDistance <= 640 * 640) {
+            // Evacuate only the exposed edge of the line.  A full-line
+            // evacuation looks safe for one frame but strands the bot with no
+            // minerals for replacement Zealots, Cannons, or Robotics.  Keep
+            // a mining floor behind the mobile screen, just as Stardust's
+            // worker manager does while its vanguard holds the ramp.
+            const auto keepMining = localArmy >= 2 ? 6 : 4;
+            auto evacuationBudget = std::max(
+                0, static_cast<int>(available.size()) - keepMining);
+            for (auto worker = available.begin(); worker != available.end();) {
+                if (evacuationBudget <= 0) break;
+                // Select the danger for this worker, not the unit nearest
+                // the safest base. Distant perimeter sightings leave mining alone.
+                const UnitSnapshot* workerThreat = nullptr;
+                auto workerThreatDistance = 160 * 160 + 1;
+                for (const auto& target : baseThreats) {
+                    if (target.unit->kind != UnitKind::zealot &&
+                        target.unit->kind != UnitKind::zergling &&
+                        target.unit->kind != UnitKind::darkTemplar) continue;
+                    const auto separation = distanceSquared((*worker)->position, target.unit->position);
+                    if (separation < workerThreatDistance) {
+                        workerThreatDistance = separation;
+                        workerThreat = target.unit;
+                    }
+                }
+                if (workerThreat == nullptr) {
+                    ++worker;
+                    continue;
+                }
+                // A mineral-line target is not an escape target: on Python the
+                // safest patch is often still inside the Zealot's path. Move
+                // directly away from the closest attacker and let the BWAPI
+                // adapter resume mining only after separation is restored.
+                const Position away{
+                    (*worker)->position.x +
+                        ((*worker)->position.x - workerThreat->position.x),
+                    (*worker)->position.y +
+                        ((*worker)->position.y - workerThreat->position.y),
+                };
+                const auto escape = influence.safestStep(
+                    (*worker)->position, away, false);
+                result.push_back({(*worker)->id, WorkerJob::evacuate, safeBase->id,
+                                  workerThreat->id, escape, 97});
+                worker = available.erase(worker);
+                --evacuationBudget;
+            }
+        }
+    }
     const auto meleeBreach = std::ranges::any_of(
         baseThreats, [&ownedBases](const MilitiaTarget& target) {
             if (target.unit->kind != UnitKind::zealot &&
-                target.unit->kind != UnitKind::zergling) {
+                target.unit->kind != UnitKind::zergling &&
+                target.unit->kind != UnitKind::darkTemplar) {
                 return false;
             }
             return std::ranges::any_of(ownedBases, [&target](const BaseSnapshot* base) {
@@ -292,8 +419,15 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                 if (target.demand <= 0) continue;
                 if (!isBuilding(target.unit->kind)) {
                     const auto isMelee = target.unit->groundWeapon.maxRange <= 32;
+                    // Once a melee threat is inside the base perimeter, a
+                    // Probe that is still mining can reach it before the
+                    // mineral line is erased.  The old 320px gate left the
+                    // militia idle while a Zealot pack fought the last
+                    // standing Zealots just outside the Nexus; use a wider
+                    // 640px contact window for short-range attackers while
+                    // keeping ranged units on their weapon-range leash.
                     const auto contactRange = isMelee
-                                                  ? 320
+                                                  ? 640
                                                   : target.unit->groundWeapon.maxRange + 128;
                     if (distanceSquared((*worker)->position, target.unit->position) >
                         contactRange * contactRange) {

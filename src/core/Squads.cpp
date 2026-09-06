@@ -229,7 +229,15 @@ std::vector<Squad> SquadPlanner::form(
                 if (leftDistance != rightDistance) return leftDistance < rightDistance;
                 return left.id < right.id;
             });
-            const auto guardCount = std::min<std::size_t>(4, candidates.size());
+            // Keep a reserve, but do not let the home guard consume the whole
+            // first pressure wave once the strategy has explicitly declared a
+            // compact timing.  Before that checkpoint the larger four-unit
+            // guard is still needed to absorb a real Zealot flood; releasing
+            // it early made the worker line die while only three defenders
+            // were present.  Two bodies cover the Nexus after the strategy
+            // lowers its attack size and commits the remaining group forward.
+            const auto guardLimit = plan.minimumAttackSize <= 8 ? 2U : 4U;
+            const auto guardCount = std::min<std::size_t>(guardLimit, candidates.size());
             if (guardCount > 0) {
                 Squad guard;
                 guard.id = nextId++;

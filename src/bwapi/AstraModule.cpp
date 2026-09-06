@@ -135,7 +135,12 @@ void AstraModule::runFrame() {
     if (state_.frame % (8 * cadence) == 0) influence_.update(state_);
     if (state_.frame % (12 * cadence) == 0) opponent_.update(state_);
     if (state_.frame % 24 == 0 || plan_.goals.empty()) updateStrategy();
-    if (state_.frame % 6 == 1) updateMacro();
+    // Macro is cheap and producer idleness is time-sensitive: a Nexus or
+    // Gateway should receive its next queue item within a latency-sized
+    // window, not after the old quarter-second cadence.  Reconcile every
+    // three frames while keeping the more expensive strategy/scouting loops
+    // staggered below.
+    if (state_.frame % 3 == 1) updateMacro();
     if (state_.frame % 12 == 2) updateWorkers();
     if (state_.frame % (24 * cadence) == 3) updateScouting();
     const auto combatCadence = std::max(1, state_.latencyFrames) *
@@ -254,12 +259,30 @@ void AstraModule::updateCombat(
         auto requiredRatio = squad.requiredRatio;
         auto objective = squad.objective;
         auto defense = squad.defense;
+        // Squad formation keeps a permissive base-defense ratio so the
+        // planner can always create a last-stand detachment.  Outside the
+        // hard-breach ring, however, a growing wave should make that
+        // detachment fall back to its static screen instead of trading every
+        // mobile unit at the edge of the mineral line.  mustHoldDefensiveScreen
+        // below still overrides this when contact reaches the last stand.
+        if (squad.role == SquadRole::baseDefense &&
+            !SquadPlanner::mustHoldDefensiveScreen(squad)) {
+            requiredRatio = std::max(requiredRatio,
+                                     plan_.posture == Posture::defend ? 1.25 : 1.05);
+        }
         if (squad.role == SquadRole::mainArmy) {
-            if (!aggressive ||
-                (vanguard == &squad &&
-                 squad.units.size() <
-                     static_cast<std::size_t>(std::max(1, plan_.minimumAttackSize)))) {
-                requiredRatio = 0.88;
+            const auto undersizedVanguard =
+                vanguard == &squad &&
+                squad.units.size() <
+                    static_cast<std::size_t>(std::max(1, plan_.minimumAttackSize));
+            if (!aggressive || undersizedVanguard) {
+                // A small squad may move toward its rally point, but it must
+                // not accept an equal-size fight on the way there. The old
+                // 0.88 ratio made a five-Zealot vanguard engage four-to-six
+                // enemy Zealots before the next reinforcement arrived.
+                requiredRatio = squad.enemies.empty()
+                                    ? 0.88
+                                    : (undersizedVanguard ? 1.18 : 1.05);
                 objective = plan_.rallyPoint;
                 defense = SquadPlanner::defensiveArea(state_, plan_.rallyPoint);
             } else if (vanguard != nullptr && vanguard != &squad &&

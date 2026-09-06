@@ -1041,6 +1041,7 @@ void testMacroReservations() {
     expect(ledger.freeMinerals() == 100, "resource reservation is explicit");
 
     state.self.units.push_back(unit(1, astra::UnitKind::pylon, true));
+    state.self.units.push_back(unit(2, astra::UnitKind::nexus, true));
     astra::StrategicPlan emergency;
     emergency.goals = {
         {astra::GoalKind::build, astra::UnitKind::gateway, 1, 100, true, "emergency"},
@@ -1048,10 +1049,14 @@ void testMacroReservations() {
     };
     astra::ResourceLedger poor{100, 0};
     const auto waiting = planner.reconcile(state, emergency, poor);
-    expect(waiting.size() == 1 && !waiting.front().reserved,
-           "unaffordable blocking goal prevents lower-priority spending");
+    expect(waiting.size() == 2 &&
+               std::ranges::any_of(waiting, [](const astra::MacroAction& action) {
+                   return action.target == astra::UnitKind::probe && action.reserved &&
+                          action.executable;
+               }),
+           "unaffordable structural goals preserve continuous worker production");
     expect(poor.freeMinerals() == 0 && poor.reservedMinerals == 100,
-           "blocking reservation protects the available partial bank");
+           "blocking reservation plus the worker cycle accounts for the full bank");
 
     astra::GameState queuedState;
     queuedState.self.minerals = 50;
@@ -1077,6 +1082,82 @@ void testMacroReservations() {
     const auto expansions = planner.reconcile(duplicateState, duplicatePlan, duplicateLedger);
     expect(expansions.size() == 1 && expansions.front().target == astra::UnitKind::nexus,
            "overlapping strategic goals reserve only one missing structure");
+
+    // Saving for a long-horizon expansion must not suppress the next Probe.
+    // The Nexus reservation protects the bank, but leaves one worker cycle
+    // available until the full 400-mineral cost can actually be issued.
+    astra::GameState expansionMacroState;
+    expansionMacroState.self.minerals = 136;
+    expansionMacroState.self.supplyTotal = 82;
+    expansionMacroState.self.supplyUsed = 76;
+    expansionMacroState.self.units = {unit(4, astra::UnitKind::nexus, true)};
+    astra::StrategicPlan expansionMacroPlan;
+    expansionMacroPlan.goals = {
+        {astra::GoalKind::expand, astra::UnitKind::nexus, 2, 95, true,
+         "safe natural"},
+        {astra::GoalKind::train, astra::UnitKind::probe, 22, 93, false,
+         "continuous workers"},
+    };
+    astra::ResourceLedger expansionMacroLedger{136, 0};
+    const auto expansionMacro = planner.reconcile(
+        expansionMacroState, expansionMacroPlan, expansionMacroLedger);
+    expect(std::ranges::any_of(expansionMacro, [](const astra::MacroAction& action) {
+               return action.target == astra::UnitKind::probe && action.reserved &&
+                      action.executable;
+           }),
+           "a pending expansion leaves one mineral cycle for continuous Probe production");
+
+    astra::GameState techMacroState;
+    techMacroState.self.minerals = 120;
+    techMacroState.self.supplyTotal = 34;
+    techMacroState.self.supplyUsed = 20;
+    techMacroState.self.units = {
+        unit(5, astra::UnitKind::nexus, true),
+        unit(6, astra::UnitKind::pylon, true),
+        unit(7, astra::UnitKind::gateway, true),
+    };
+    astra::StrategicPlan techMacroPlan;
+    techMacroPlan.goals = {
+        {astra::GoalKind::build, astra::UnitKind::cyberneticsCore, 1, 95, true,
+         "ranged transition"},
+        {astra::GoalKind::train, astra::UnitKind::probe, 18, 93, false,
+         "continuous workers"},
+    };
+    astra::ResourceLedger techMacroLedger{120, 0};
+    const auto techMacro = planner.reconcile(techMacroState, techMacroPlan, techMacroLedger);
+    expect(std::ranges::any_of(techMacro, [](const astra::MacroAction& action) {
+               return action.target == astra::UnitKind::probe && action.reserved &&
+                      action.executable;
+           }),
+           "a pending tech transition leaves one mineral cycle for continuous Probe production");
+
+    // An active melee emergency must fund its static anchor before another
+    // Probe or Battery can consume the bank.  Otherwise a 120-mineral bank
+    // can oscillate below the 150-mineral Forge cost indefinitely.
+    astra::GameState urgentAnchorState;
+    urgentAnchorState.self.minerals = 120;
+    urgentAnchorState.self.supplyTotal = 66;
+    urgentAnchorState.self.supplyUsed = 30;
+    urgentAnchorState.self.units = {
+        unit(8, astra::UnitKind::nexus, true),
+        unit(9, astra::UnitKind::pylon, true),
+        unit(10, astra::UnitKind::gateway, true),
+    };
+    astra::StrategicPlan urgentAnchorPlan;
+    urgentAnchorPlan.goals = {
+        {astra::GoalKind::build, astra::UnitKind::forge, 1, 112, true,
+         "anchor the mineral line"},
+        {astra::GoalKind::train, astra::UnitKind::probe, 20, 93, false,
+         "keep workers producing"},
+    };
+    astra::ResourceLedger urgentAnchorLedger{120, 0};
+    const auto urgentAnchor = planner.reconcile(
+        urgentAnchorState, urgentAnchorPlan, urgentAnchorLedger);
+    expect(std::ranges::none_of(urgentAnchor, [](const astra::MacroAction& action) {
+               return action.target == astra::UnitKind::probe && action.reserved &&
+                      action.executable;
+           }) && urgentAnchorLedger.freeMinerals() == 0,
+           "urgent static anchors take the current bank before worker refills");
 
     astra::GameState blockedDuplicateState;
     blockedDuplicateState.self.minerals = 100;
@@ -1907,6 +1988,48 @@ void testWorkersAndScouts() {
     expect(std::ranges::count(zealotMilitia, astra::WorkerJob::defend,
                               &astra::WorkerAssignment::job) == 6,
            "a melee breach commits enough healthy Probes to form a surround");
+
+    // Once a real mobile screen is already trading with a three-Zealot wave,
+    // the economy should mineral-walk away instead of waiting for the last
+    // Probe to become militia.  This is deliberately just before the six
+    // minute militia-demand cutoff, matching the live opening pressure window.
+    militiaState.frame = 5 * 60 * 24 + 12 * 24;
+    auto screenZealot = zealotThreat;
+    screenZealot.id = 210;
+    screenZealot.position = {336, 260};
+    auto screenZealotTwo = screenZealot;
+    screenZealotTwo.id = 211;
+    screenZealotTwo.position = {352, 260};
+    auto screenZealotThree = screenZealot;
+    screenZealotThree.id = 212;
+    screenZealotThree.position = {368, 260};
+    auto screenUnit = unit(213, astra::UnitKind::zealot, true, {328, 260});
+    screenUnit.role = astra::UnitRole::groundArmy;
+    auto screenUnitTwo = screenUnit;
+    screenUnitTwo.id = 214;
+    screenUnitTwo.position = {344, 260};
+    militiaState.self.units.push_back(screenUnit);
+    militiaState.self.units.push_back(screenUnitTwo);
+    militiaState.enemy.units = {screenZealot, screenZealotTwo, screenZealotThree};
+    militiaInfluence.update(militiaState);
+    const auto evacuatedScreen = workers.assign(militiaState, {}, militiaInfluence);
+    expect(std::ranges::count(evacuatedScreen, astra::WorkerJob::evacuate,
+                               &astra::WorkerAssignment::job) >= 2 &&
+               std::ranges::count(evacuatedScreen, astra::WorkerJob::evacuate,
+                                  &astra::WorkerAssignment::job) <= 4 &&
+               std::ranges::none_of(
+                   evacuatedScreen, [](const astra::WorkerAssignment& assignment) {
+                       return assignment.job == astra::WorkerJob::defend;
+                   }),
+           "a screened three-Zealot wave evacuates only the exposed edge while keeping a mining floor");
+
+    militiaState.self.units.erase(
+        std::remove_if(militiaState.self.units.begin(), militiaState.self.units.end(),
+                       [](const astra::UnitSnapshot& candidate) {
+                           return candidate.id == 213 || candidate.id == 214;
+                       }),
+        militiaState.self.units.end());
+    militiaState.frame = 4 * 60 * 24;
 
     auto proxyCannon = unit(201, astra::UnitKind::photonCannon, false, {420, 280});
     proxyCannon.completed = false;
@@ -2757,7 +2880,192 @@ void testRangedDefense() {
            }), "observed ranged tech changes the double-Gateway response back to mobile counters");
 }
 
+void testBananaBrainMacroRegressions() {
+    using namespace astra;
+    expect(trainingSlotAvailable(false, 0, 0, 6, false), "idle Nexus accepts a Probe");
+    expect(trainingSlotAvailable(true, 1, 4, 6, false),
+           "next Probe is scheduled before the active Probe finishes within latency");
+    expect(!trainingSlotAvailable(true, 1, 7, 6, false) &&
+               !trainingSlotAvailable(true, 2, 4, 6, false) &&
+               !trainingSlotAvailable(false, 0, 0, 6, true),
+           "early, duplicate queued, and unacknowledged train commands cannot spend twice");
+
+    GameState state;
+    state.frame = 100;
+    state.self.units = {unit(1, UnitKind::nexus, true), unit(2, UnitKind::pylon, true)};
+    StrategicPlan request;
+    request.goals = {{GoalKind::build, UnitKind::forge, 1, 110, true, "temporary threat"}};
+    MacroPlanner planner;
+    ResourceLedger emptyBank{};
+    expect(!planner.reconcile(state, request, emptyBank).empty(), "record a deferred structure");
+    for (state.frame = 124; state.frame <= 820; state.frame += 24) {
+        ResourceLedger bank{};
+        expect(!planner.reconcile(state, {}, bank).empty(), "deferred structure survives brief plan churn");
+    }
+    state.frame = 844;
+    ResourceLedger expiredBank{};
+    expect(planner.reconcile(state, {}, expiredBank).empty(),
+           "repeated reconciliation cannot renew an abandoned structure forever");
+
+    state.frame = 850;
+    request.goals.push_back({GoalKind::build, UnitKind::forge, 1, 60, true, "routine forge"});
+    MacroPlanner duplicatePlanner;
+    ResourceLedger renewedBank{};
+    (void)duplicatePlanner.reconcile(state, request, renewedBank);
+    state.frame = 853;
+    ResourceLedger rememberedBank{};
+    const auto remembered = duplicatePlanner.reconcile(state, {}, rememberedBank);
+    expect(remembered.size() == 1 && remembered.front().priority == 110,
+           "duplicate explicit requests remember the strongest current checkpoint");
+
+    request.desiredBases = 2;
+    request.goals = {{GoalKind::expand, UnitKind::nexus, 2, 120, true, "safe natural"}};
+    state.frame = 900;
+    ResourceLedger expansionBank{};
+    (void)planner.reconcile(state, request, expansionBank);
+    state.frame = 903;
+    StrategicPlan emergency;
+    emergency.posture = Posture::defend;
+    ResourceLedger emergencyBank{400, 0};
+    expect(planner.reconcile(state, emergency, emergencyBank).empty() &&
+               emergencyBank.reservedMinerals == 0,
+           "new defense cancels an unstarted expansion reservation immediately");
+
+    state.self.units.push_back(unit(3, UnitKind::cyberneticsCore, true));
+    state.self.units.push_back(unit(4, UnitKind::citadelOfAdun, true));
+    request.goals = {
+        {GoalKind::upgrade, UnitKind::unknown, 1, 100, false, "range", TechnologyKind::singularityCharge},
+        {GoalKind::upgrade, UnitKind::unknown, 1, 90, false, "speed", TechnologyKind::legEnhancements}};
+    ResourceLedger upgradeBank{1000, 1000};
+    auto actions = MacroPlanner{}.reconcile(state, request, upgradeBank);
+    expect(std::ranges::count_if(actions, [](const MacroAction& action) {
+               return action.reserved && action.technology != TechnologyKind::none;
+           }) == 2, "distinct upgrades survive demand merging and use separate producers");
+
+    state.self.race = Race::protoss;
+    state.self.supplyTotal = 100;
+    state.self.supplyUsed = 80;
+    for (int i = 0; i < 8; ++i) state.self.units.push_back(unit(10 + i, UnitKind::gateway, true));
+    request.goals.clear();
+    request.desiredWorkers = 22;
+    request.composition = {{UnitKind::zealot, 1.0}};
+    ResourceLedger supplyBank{100, 0};
+    actions = MacroPlanner{}.reconcile(state, request, supplyBank);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+               return action.target == UnitKind::pylon && action.reserved;
+           }), "eight Gateways forecast supply beyond the old fixed sixteen-supply buffer");
+    auto pendingPylon = unit(30, UnitKind::pylon, true);
+    pendingPylon.completed = false;
+    state.self.units.push_back(pendingPylon);
+    ResourceLedger pendingBank{100, 0};
+    actions = MacroPlanner{}.reconcile(state, request, pendingBank);
+    expect(std::ranges::none_of(actions, [](const MacroAction& action) {
+               return action.target == UnitKind::pylon;
+           }), "forecast credits a pending Pylon instead of buying redundant supply");
+
+    GameState workersState;
+    workersState.frame = 13 * 60 * 24;
+    workersState.self.id = 1;
+    workersState.enemy.id = 2;
+    workersState.bases = {{1, {512, 512}, {512, 560}, 8000, 5000, 1}};
+    for (int i = 0; i < 10; ++i) {
+        auto probe = unit(100 + i, UnitKind::probe, true, {512 + i * 4, 560});
+        probe.role = UnitRole::worker;
+        workersState.self.units.push_back(probe);
+    }
+    auto dt = unit(200, UnitKind::darkTemplar, false, {1600, 512});
+    dt.detected = false;
+    dt.groundWeapon = {.damage = 40, .cooldown = 30, .maxRange = 32, .targetsGround = true};
+    workersState.enemy.units = {dt};
+    InfluenceMap influence;
+    influence.update(workersState);
+    const WorkerManager workers;
+    auto assignments = workers.assign(workersState, {}, influence);
+    expect(std::ranges::all_of(assignments, [](const WorkerAssignment& assignment) {
+               return assignment.job == WorkerJob::minerals;
+           }), "a distant undetected DT does not evacuate a safe mineral line");
+    workersState.enemy.units.front().position = {540, 560};
+    influence.update(workersState);
+    assignments = workers.assign(workersState, {}, influence);
+    expect(std::ranges::any_of(assignments, [](const WorkerAssignment& assignment) {
+               return assignment.job == WorkerJob::evacuate;
+           }), "nearby undetected DT still triggers escape");
+    workersState.enemy.units.front().position = {1000, 560};
+    influence.update(workersState);
+    assignments = workers.assign(workersState, {}, influence);
+    expect(std::ranges::all_of(assignments, [](const WorkerAssignment& assignment) {
+               return assignment.job == WorkerJob::minerals;
+           }), "workers resume mining once separation is restored even while a DT remains visible");
+    workersState.enemy.units.front().kind = UnitKind::zealot;
+    workersState.enemy.units.front().detected = true;
+    workersState.enemy.units.front().position = {540, 560};
+    influence.update(workersState);
+    assignments = workers.assign(workersState, {}, influence);
+    expect(std::ranges::any_of(assignments, [](const WorkerAssignment& assignment) {
+               return assignment.job == WorkerJob::evacuate;
+           }), "melee worker protection still works after the opening militia cutoff");
+
+    GameState economy;
+    economy.frame = 12 * 60 * 24;
+    economy.self.id = 1;
+    economy.self.race = Race::protoss;
+    economy.enemy.id = 2;
+    economy.enemy.race = Race::protoss;
+    economy.self.supplyUsed = 64;
+    economy.self.supplyTotal = 100;
+    economy.self.minerals = 450;
+    economy.self.units = {
+        unit(1, UnitKind::nexus, true, {512, 512}),
+        unit(2, UnitKind::pylon, true), unit(3, UnitKind::gateway, true),
+        unit(4, UnitKind::cyberneticsCore, true), unit(5, UnitKind::roboticsFacility, true),
+        unit(6, UnitKind::observatory, true), unit(7, UnitKind::roboticsSupportBay, true),
+        unit(8, UnitKind::observer, true)};
+    economy.self.units.front().role = UnitRole::resourceDepot;
+    economy.bases = {{1, {512, 512}, {512, 560}, 8000, 5000, 1, 0, true, false, 8, 1},
+                     {2, {1800, 512}, {1800, 560}, 8000, 5000, -1, 0, false, false, 8, 1}};
+    for (int i = 0; i < 20; ++i) {
+        auto probe = unit(100 + i, UnitKind::probe, true, {512, 560});
+        probe.role = UnitRole::worker;
+        economy.self.units.push_back(probe);
+    }
+    for (int i = 0; i < 6; ++i) {
+        auto dragoon = unit(200 + i, UnitKind::dragoon, true, {700, 512});
+        dragoon.role = UnitRole::groundArmy;
+        economy.self.units.push_back(dragoon);
+    }
+    auto perimeter = unit(300, UnitKind::dragoon, false, {1200, 512});
+    perimeter.role = UnitRole::groundArmy;
+    economy.enemy.units = {perimeter};
+    const auto growth = StrategyEngine{}.plan(economy, {});
+    expect(growth.posture == Posture::defend && growth.desiredBases == 2 && growth.desiredWorkers <= 22 &&
+               std::ranges::any_of(growth.goals, [](const ProductionGoal& goal) {
+                   return goal.goal == GoalKind::expand && goal.desiredCount == 2 && goal.blocking;
+           }), "a saturated guarded economy can bank a natural without launching an attack");
+    economy.enemy.units.clear();
+    const auto savingNatural = StrategyEngine{}.plan(economy, {});
+    expect(savingNatural.desiredBases >= 2 && savingNatural.desiredWorkers <= 22,
+           "planning a natural cannot overproduce workers for an unstarted Nexus");
+    auto warpingNexus = unit(400, UnitKind::nexus, true, {1800, 512});
+    warpingNexus.completed = false;
+    warpingNexus.role = UnitRole::resourceDepot;
+    economy.self.units.push_back(warpingNexus);
+    const auto growingNatural = StrategyEngine{}.plan(economy, {});
+    expect(growingNatural.desiredWorkers > 22 && growingNatural.desiredWorkers <= 44,
+           "an actual warping Nexus releases the next base's worker growth");
+    economy.self.units.pop_back();
+    economy.enemy.units = {perimeter};
+    ThreatAssessment breach;
+    breach.combatEnemiesNearMain = 1;
+    economy.enemy.units.front().position = {600, 512};
+    const auto defense = StrategyEngine{}.plan(economy, breach);
+    expect(defense.desiredBases == 1 && defense.desiredWorkers <= 22 &&
+               std::ranges::none_of(defense.goals, [](const ProductionGoal& goal) {
+                   return goal.goal == GoalKind::expand && goal.desiredCount > 1;
+               }), "a real breach cancels growth and caps workers to the remaining base");
+}
+
 int main() {
+    testBananaBrainMacroRegressions();
     testReserveCounterattack();
     testEconomicTargeting();
     testRangedDefense();

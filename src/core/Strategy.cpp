@@ -187,6 +187,22 @@ bool hardBreachAtMain(const GameState& state) noexcept {
         });
 }
 
+bool defensiveExpansionWindow(const GameState& state, const ThreatAssessment& threat) {
+    // Holding an army at home and growing the economy are separate decisions.
+    // Keep the rush/contain/detection vetoes, but don't require an attack order
+    // before spending a saturated mineral line's income on another base.
+    if (state.frame < 6 * 60 * 24 || hardBreachAtMain(state) ||
+        threat.combatEnemiesNearMain > 0 || activeApproach(state, threat) ||
+        threat.immediateGround > 0.45 || threat.workerRush > 0.30 ||
+        threat.proxy + threat.staticContain > 0.34 ||
+        (threat.cloak > 0.28 && count(state, UnitKind::observer, true) == 0)) return false;
+    const auto mobileArmy = std::ranges::count_if(state.self.units, [](const UnitSnapshot& unit) {
+        return unit.completed && !unit.hallucination && !isBuilding(unit.kind) &&
+               isCombatUnit(unit.kind) && !isWorker(unit.kind);
+    });
+    return mobileArmy >= 6;
+}
+
 }  // namespace
 
 StrategicPlan StrategyEngine::plan(
@@ -262,18 +278,18 @@ StrategicPlan StrategyEngine::plan(
 
     result.desiredBases = std::min(result.desiredBases, result.maximumBases);
 
-    // Never keep producing workers for bases that the current plan has
-    // explicitly postponed. This bounds one-base saturation while preserving
-    // enough workers to fund production and a prompt expansion.
-    result.desiredWorkers = std::min(
-        result.desiredWorkers, std::max(14, result.desiredBases * 22));
-
     // Infrastructure must follow the final intent: a safety reaction or an
     // opening style can change the economy after the matchup plan is made.
-    if (result.posture == Posture::defend) {
+    if (result.posture == Posture::defend && !defensiveExpansionWindow(state, threat)) {
         const auto existingBases = std::max(1, count(state, UnitKind::nexus));
         result.desiredBases = std::min(result.desiredBases, existingBases);
     }
+    // Grow into a paid-for Nexus while it warps in, not into an expansion
+    // that is merely desired. Otherwise repeated hold/pressure transitions
+    // train two bases' workers on one mineral line and consume its Nexus bank.
+    const auto committedBases = count(state, UnitKind::nexus);
+    result.desiredWorkers = std::min(
+        result.desiredWorkers, std::max(14, committedBases * 22));
     for (auto& objective : result.goals) {
         if (objective.goal == GoalKind::expand) {
             objective.desiredCount = std::min(objective.desiredCount, result.desiredBases);
@@ -631,6 +647,30 @@ StrategicPlan StrategyEngine::planPvP(
             return tech || (rangedArmy &&
                            (unit.visible || state.frame - unit.lastSeen <= 90 * 24));
         });
+    const auto enemyGatewayCount = static_cast<int>(std::ranges::count_if(
+        state.enemy.units, [](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::gateway;
+        }));
+    const auto enemyRangedCount = recentEnemyCount(state, UnitKind::dragoon) +
+                                  recentEnemyCount(state, UnitKind::reaver);
+    // A two-Gateway mirror that still has no ranged units after the first
+    // five-and-a-half minutes is the same production/tech gap Stardust uses
+    // to recognize a likely DT transition.  Keep this as a soft suspicion:
+    // it raises detection priority and protects the mineral line, but does
+    // not replace the direct rush evidence or force an all-in response.
+    const auto suspectedCovertTech = state.enemy.race == Race::protoss &&
+                                     state.frame >= 4 * 60 * 24 + 12 * 24 &&
+                                     state.frame < 11 * 60 * 24 &&
+                                     enemyGatewayCount >= 2 &&
+                                     enemyRangedCount == 0;
+    const auto enemyCoreScouted = std::ranges::any_of(
+        state.enemy.units, [](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::cyberneticsCore;
+        });
+    const auto enemyCoreFinished = std::ranges::any_of(
+        state.enemy.units, [](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::cyberneticsCore && unit.completed;
+        });
     // In a melee-only mirror the first five minutes are decided by Gateway
     // throughput, not by an early gas bank. Three gas workers can remove
     // roughly one Zealot's minerals before the first flood arrives; keep gas
@@ -641,8 +681,45 @@ StrategicPlan StrategyEngine::planPvP(
                    (unit.kind == UnitKind::cyberneticsCore ||
                     unit.kind == UnitKind::roboticsFacility ||
                     unit.kind == UnitKind::dragoon ||
-                    unit.kind == UnitKind::reaver);
+                   unit.kind == UnitKind::reaver);
         });
+    // A Gateway-only Protoss opening is the actionable fork for the first
+    // static checkpoint.  Once one enemy Gateway is known, stop the second
+    // wave at three Zealots long enough to bank the 150 minerals for Forge;
+    // otherwise the two-Gateway queue consumes the entire bank and the Forge
+    // remains theoretical until the rush is already in the main.
+    const auto openingForgeSignal =
+        state.enemy.race == Race::protoss &&
+        state.frame >= 2 * 60 * 24 + 36 * 24 &&
+        state.frame < 6 * 60 * 24 && enemyGatewayCount >= 1 &&
+        enemyRangedCount == 0 && !visibleRangedOpening;
+    // `rangedOpening` is intentionally persistent: once a Core or Robotics
+    // Facility has been scouted it should continue to unlock our own tech.
+    // It must not, however, erase the melee response when the remembered
+    // building is hidden and the enemy is still producing only Zealots. Keep
+    // a separate, current-pressure signal for opening defense decisions.
+    const auto meleeOnlyOpening = enemyGatewayCount >= 2 &&
+                                  enemyRangedCount == 0 &&
+                                  !visibleRangedOpening &&
+                                  (threat.mostLikely == EnemyPlan::fastRush ||
+                                   threat.combatEnemiesNearMain > 0 ||
+                                   threat.approachingArmyValue >= 1.5 ||
+                                   !rangedOpening);
+    // The threat label is intentionally allowed to cool when scouting data
+    // disappears, but an army already touching the mineral line must not
+    // lose its response on the next planning pass.  Stardust keeps an active
+    // play/contain state until the engagement is resolved; mirror that with a
+    // current-contact signal that supplements (rather than replaces) the
+    // persistent two-Gateway opening memory.
+    const auto visibleMeleeContactNow = std::ranges::any_of(
+        state.enemy.units, [](const UnitSnapshot& enemy) {
+            return enemy.visible && enemy.completed && !enemy.flying &&
+                   (enemy.kind == UnitKind::zealot || enemy.kind == UnitKind::darkTemplar) &&
+                   enemy.position.valid();
+        });
+    const auto currentMeleeRush = meleeOnlyOpening || visibleMeleeContactNow ||
+                                  (threat.mostLikely == EnemyPlan::fastRush &&
+                                   threat.approachingArmyValue >= 1.5);
     if (!visibleRangedOpening && state.frame >= 2 * 60 * 24 &&
         state.frame < 4 * 60 * 24) {
         result.desiredGasWorkers = 0;
@@ -663,12 +740,9 @@ StrategicPlan StrategyEngine::planPvP(
     // response does not strand a surviving army with an unusable bank.
     const auto coreLost = count(state, UnitKind::cyberneticsCore) == 0 &&
                           count(state, UnitKind::dragoon) > 0;
-    const auto twoGateOpening = minute(state) < 8 && !rangedOpening &&
-        std::ranges::count_if(state.enemy.units, [](const UnitSnapshot& unit) {
-            return unit.kind == UnitKind::gateway && unit.completed;
-        }) >= 2;
+    const auto twoGateOpening = minute(state) < 8 && currentMeleeRush;
     const auto earlyMeleeAnchor = minute(state) >= 3 && minute(state) < 5 &&
-                                  !rangedOpening && zealotsReady >= 2 &&
+                                  currentMeleeRush && zealotsReady >= 2 &&
                                   (threat.combatEnemiesNearMain > 0 ||
                                    threat.approachingArmyValue >= 2.0 ||
                                    threat.mostLikely == EnemyPlan::fastRush);
@@ -712,15 +786,68 @@ StrategicPlan StrategyEngine::planPvP(
         result.desiredBases = 1;
         result.maximumBases = std::max(1, count(state, UnitKind::nexus));
     }
-    // Do not buy a second Nexus before the mirror's first splash-tech window
-    // is secured.  A quiet map can make the expansion heuristic look safe,
-    // but BananaBrain's delayed Dragoon wave punishes the lost 400 minerals;
-    // finish Robotics, Support Bay, and one Reaver before expanding.
+    // Do not buy a second Nexus during an unresolved opening fight. Once the
+    // home screen is stable, however, expansion and splash tech must overlap:
+    // waiting for a completed Reaver before taking the natural is exactly the
+    // one-base turtle that lets BananaBrain bank an unanswerable Dragoon wave.
     const auto firstReaverTechReady =
         count(state, UnitKind::roboticsFacility, true) > 0 &&
         count(state, UnitKind::roboticsSupportBay, true) > 0 &&
         count(state, UnitKind::reaver, true) > 0;
-    if (minute(state) < 10 && !firstReaverTechReady) {
+    // A two-Cannon/two-Zealot screen is already a real defensive economy when
+    // the enemy army is outside the home perimeter.  Do not let the old
+    // "wait for Reaver" gate turn a stable one-base hold into a permanent
+    // turtle while the opponent takes its natural and third bases.
+    const auto workers = countRole(state, UnitRole::worker);
+    const auto noVisibleGroundContact = std::ranges::none_of(
+        state.enemy.units, [](const UnitSnapshot& enemy) {
+            return enemy.visible && enemy.completed && !enemy.flying &&
+                   isCombatUnit(enemy.kind) && enemy.position.valid();
+        });
+    // Stardust's economic transition is a state change, not a clocked Nexus:
+    // once the home screen is complete and the map is quiet, start banking
+    // before the opponent's midgame wave can make the one-base hold
+    // permanent.  The five-minute branch is deliberately evidence-gated so
+    // it cannot run during a visible rush, breach, or covert-tech alarm.
+    const auto earlyStableCounter = state.frame >= 5 * 60 * 24 &&
+                                    state.frame < 8 * 60 * 24 &&
+                                    cannonsReady >= 2 && zealotsReady >= 5 &&
+                                    workers >= 16 && noVisibleGroundContact &&
+                                    threat.combatEnemiesNearMain == 0 &&
+                                    !activeApproach(state, threat) &&
+                                    threat.immediateGround <= 0.35 &&
+                                    !hardBreachAtMain(state) &&
+                                    threat.cloak <= 0.20 &&
+                                    threat.mostLikely != EnemyPlan::fastRush;
+    const auto stableTechCounter = state.frame >= 6 * 60 * 24 &&
+                                   state.frame < 13 * 60 * 24 &&
+                                   workers >= 18 && zealotsReady >= 6 &&
+                                   cannonsReady >= 1 &&
+                                   count(state, UnitKind::cyberneticsCore, true) > 0 &&
+                                   noVisibleGroundContact &&
+                                   threat.combatEnemiesNearMain == 0 &&
+                                   !activeApproach(state, threat) &&
+                                   threat.immediateGround <= 0.55 &&
+                                   !hardBreachAtMain(state) &&
+                                   threat.cloak <= 0.20 &&
+                                   threat.mostLikely != EnemyPlan::fastRush;
+    const auto economicCounterWindow =
+        earlyStableCounter ||
+        stableTechCounter ||
+        (minute(state) >= 6 && cannonsReady >= 2 && zealotsReady >= 2 &&
+         workers >= 12 && threat.combatEnemiesNearMain == 0 &&
+         !activeApproach(state, threat) && threat.immediateGround <= 0.45 &&
+         !hardBreachAtMain(state) && threat.cloak <= 0.20);
+    if (economicCounterWindow) {
+        result.desiredBases = std::max(result.desiredBases, 2);
+        result.maximumBases = std::max(result.maximumBases, 2);
+        result.posture = Posture::pressure;
+        result.attackThreshold = std::min(result.attackThreshold, 1.35);
+        result.minimumAttackSize = std::min(result.minimumAttackSize, 8);
+        result.name += " [economic counter-window]";
+        if (stableTechCounter) result.name += " [stable two-base transition]";
+    }
+    if (minute(state) < 10 && !firstReaverTechReady && !economicCounterWindow) {
         result.desiredBases = 1;
         result.maximumBases = std::max(1, count(state, UnitKind::nexus));
     }
@@ -767,7 +894,17 @@ StrategicPlan StrategyEngine::planPvP(
         const auto gatewayTarget = supplyAtLeast(state, 10) ?
                                        (!roboticsInPlay || !reaverOnline ? 2 :
                                         (minute(state) < 12 ? 3 : 4)) : 1;
-        goal(result, GoalKind::build, UnitKind::gateway, gatewayTarget, 97,
+        // BananaBrain's opening is a live production race, not just a tech
+        // race.  When the first Gateway exists but the second one has not
+        // started, let that throughput checkpoint outrank optional Core/
+        // Dragoon prerequisites until the early production pair is secured.
+        // The old priority (97) let the generic Dragoon goal materialize a
+        // Core first, leaving one Gateway and one Zealot when the rush arrived.
+        const auto earlyGatewayPriority = state.frame < 5 * 60 * 24 &&
+                                          count(state, UnitKind::gateway) < 2 &&
+                                          !visibleRangedOpening ? 115 : 97;
+        goal(result, GoalKind::build, UnitKind::gateway, gatewayTarget,
+             earlyGatewayPriority,
              "nine-supply gateway into two-gate control",
              count(state, UnitKind::gateway) < gatewayTarget && gatewayTarget <= 2);
     }
@@ -777,20 +914,45 @@ StrategicPlan StrategyEngine::planPvP(
         // first wave unopposed while the Core consumed the bank.
         const auto earlyZealotTarget =
             count(state, UnitKind::roboticsFacility) > 0
-                ? ((!rangedOpening && state.frame < 10 * 60 * 24 &&
+                ? ((currentMeleeRush && state.frame < 10 * 60 * 24 &&
                     (threat.mostLikely == EnemyPlan::fastRush ||
                      threat.uncertainty > 0.85)) ? 8 :
                    (minute(state) < 6 ? 6 : 3))
-                : 4;
+                : (currentMeleeRush && state.frame >= 4 * 60 * 24
+                       ? (count(state, UnitKind::forge) > 0 ? 6 : 5)
+                       : (openingForgeSignal && count(state, UnitKind::forge) == 0 ? 3 : 4));
         goal(result, GoalKind::train, UnitKind::zealot,
              earlyZealotTarget, 96,
              "fill secured opening production with defenders",
              count(state, UnitKind::zealot) < 2);
-        const auto batteryEvidence = rangedOpening ||
+        const auto batteryRangedEvidence = visibleRangedOpening ||
+            enemyRangedCount > 0 ||
+            (rangedOpening && threat.mostLikely != EnemyPlan::fastRush);
+        const auto batteryEvidence = batteryRangedEvidence ||
             threat.combatEnemiesNearMain > 0 ||
-            threat.approachingArmyValue >= 2.0 ||
-            count(state, UnitKind::cyberneticsCore) > 0;
-        if (count(state, UnitKind::zealot) >= 2 && batteryEvidence) {
+            threat.approachingArmyValue >= 2.0;
+        // Against a melee-only two-Gateway line, the first Battery is a
+        // lower-value mineral sink than the Forge/Cannon checkpoint.  If the
+        // Battery starts while the Forge is still missing, it can consume the
+        // entire 100-mineral margin that would otherwise start the static
+        // anchor before contact.  Ranged openings keep the Battery path.
+        const auto meleeAnchorPending = currentMeleeRush &&
+                                        count(state, UnitKind::forge) == 0 &&
+                                        cannonsReady == 0 &&
+                                        // Four Zealots are the minimum mobile
+                                        // escort, not proof that a static
+                                        // anchor is no longer needed.  Keep
+                                        // the Battery out of the bank until
+                                        // the six-body checkpoint or Forge
+                                        // completion, whichever comes first.
+                                        count(state, UnitKind::zealot) < 6;
+        if (count(state, UnitKind::zealot) >= 2 && batteryEvidence &&
+            !meleeAnchorPending &&
+            // A Battery is sustain, not the first emergency anchor. Keep its
+            // 100 minerals behind a Cannon investment or the Core so it
+            // cannot delay both static defense and ranged transition.
+            (cannonsReady >= 1 || count(state, UnitKind::photonCannon) > 0 ||
+             count(state, UnitKind::cyberneticsCore) > 0)) {
             goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 93,
                  "sustain the two-gate defensive screen");
         }
@@ -807,16 +969,55 @@ StrategicPlan StrategyEngine::planPvP(
         // pressure wave and let the six-minute Cannon fallback execute.
         goal(result, GoalKind::build, UnitKind::forge, 1, 95,
              "early mirror Forge insurance", false);
-        if (count(state, UnitKind::forge) > 0 && !rangedOpening) {
-            goal(result, GoalKind::build, UnitKind::photonCannon, 1, 94,
-                 "one early Cannon behind the Forge insurance", false);
+        if (count(state, UnitKind::forge) > 0 && currentMeleeRush) {
+            // Overlap the second Cannon once a rush is actually approaching;
+            // waiting for the first structure to finish lets the attacker
+            // focus it down before the next anchor can even start.
+            const auto earlyCannonTarget =
+                threat.mostLikely == EnemyPlan::fastRush || visibleGroundContact ||
+                        threat.approachingArmyValue >= 2.0
+                    ? 2
+                    : 1;
+            goal(result, GoalKind::build, UnitKind::photonCannon,
+                 earlyCannonTarget, 94,
+                 "early Cannon screen behind the Forge insurance", false);
         }
+    }
+    // A remembered first Gateway with no Core, Dragoon, or Reaver by the
+    // 2:36 mark is useful information even when the enemy army is
+    // still hidden. BananaBrain's two-Gateway/DT lines often keep the second
+    // production structure out of the worker scout's vision; waiting for the
+    // FastRush label then leaves no mineral window for a Forge. Stage one
+    // blocking Forge insurance once two Zealots are fielded. The reservation
+    // is allowed to wait behind the current bank, but it prevents a routine
+    // Probe/Dragoon spend from consuming the exact 150 minerals needed to
+    // start the anchor on the next macro pass.
+    const auto staticFirstOpening = state.frame >= 3 * 60 * 24 &&
+                                    state.frame < 6 * 60 * 24 &&
+                                    count(state, UnitKind::gateway) >= 2 &&
+                                    enemyGatewayCount >= 1 &&
+                                    enemyRangedCount == 0 &&
+                                    !visibleRangedOpening &&
+                                    count(state, UnitKind::forge) == 0 &&
+                                    cannonsReady == 0;
+    const auto hiddenMeleeTechSignal = staticFirstOpening || openingForgeSignal ||
+                                       (state.frame >= 6 * 60 * 24 &&
+                                        state.frame < 8 * 60 * 24 &&
+                                        enemyGatewayCount >= 1 &&
+                                        enemyRangedCount == 0 &&
+                                        !visibleRangedOpening &&
+                                        zealotsReady >= 1);
+    if (hiddenMeleeTechSignal) {
+        goal(result, GoalKind::build, UnitKind::forge, 1, 118,
+             "insurance Forge for an unscouted melee transition", true);
+        result.name += " [melee-tech insurance]";
     }
     const auto stabilizingMeleeAnchor = state.frame >= 5 * 60 * 24 &&
                                         state.frame < 8 * 60 * 24 &&
                                         zealotsReady >= 6 &&
-                                        !visibleGroundContact &&
                                         !hardBreachAtMain(state) &&
+                                        (!visibleGroundContact ||
+                                         threat.mostLikely == EnemyPlan::fastRush) &&
                                         (threat.mostLikely == EnemyPlan::fastRush ||
                                          threat.uncertainty > 0.85 ||
                                          count(state, UnitKind::cyberneticsCore) > 0);
@@ -851,18 +1052,49 @@ StrategicPlan StrategyEngine::planPvP(
                                         threat.combatEnemiesNearMain == 0 &&
                                         !visibleGroundContact &&
                                         zealotsReady >= 6;
-        const auto productionSecured = count(state, UnitKind::gateway) >= 1 &&
-                                       (state.frame < 2 * 60 * 24 ||
+    // A scouted two-Gateway mirror is already enough evidence to start the
+    // ranged transition behind two Zealots.  Waiting for four completed
+    // Zealots made the Core a reaction to the first flood instead of a
+    // production checkpoint, which in turn pushed Robotics/Observer past the
+    // hidden-tech timing.  Keep the ordinary quiet-window predicates, but let
+    // the observed double-production line unlock the Core earlier.
+    const auto earlyMirrorTech = twoGateOpening &&
+                                 state.frame >= 3 * 60 * 24 + 24 * 24 &&
+                                 zealotsReady >= 2 &&
+                                 threat.combatEnemiesNearMain == 0 &&
+                                 !hardBreachAtMain(state);
+    // In an unscouted mirror, do not let the optional range prerequisite
+    // pull a 200-mineral Core through the queue before the first melee/static
+    // checkpoint.  Four minutes is still an early Core timing, but it leaves
+    // the hidden two-Gateway branch one complete Forge window.  Confirmed
+    // ranged tech, a Cannon, or synthetic frame-zero unit tests bypass this
+    // delay.
+    const auto coreTimingWindow = !staticFirstOpening &&
+                                  (rangedOpening || enemyCoreScouted ||
+                                   cannonsReady >= 1 || state.frame == 0 ||
+                                   state.frame >= 4 * 60 * 24);
+    const auto productionSecured = coreTimingWindow &&
+                                   count(state, UnitKind::gateway) >= 1 &&
+                                   (state.frame < 2 * 60 * 24 ||
                                         (count(state, UnitKind::zealot) >= 4 &&
                                          (rangedOpening || cannonsReady >= 1 ||
                                           count(state, UnitKind::photonCannon) >= 1 ||
                                           quietTechWindow || screenedTechWindow ||
-                                          earlyTechWindow)));
+                                          earlyTechWindow)) ||
+                                    earlyMirrorTech);
         goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 98,
              "dragoon access after opening production", productionSecured);
     }
     if (supplyAtLeast(state, 14)) {
-        if (earlyMeleeScreen) {
+        // Do not let a filler Dragoon goal invent its own Cybernetics Core in
+        // the opening.  A generic prerequisite chain cannot see the PvP
+        // production checkpoint, so it used to spend 200 minerals on the
+        // Core while the second Gateway was still waiting.  The explicit
+        // Core goal below (or a known ranged opening) owns this transition.
+        const auto rangedProductionUnlocked =
+            count(state, UnitKind::cyberneticsCore) > 0 || rangedOpening ||
+            cannonsReady >= 2;
+        if (earlyMeleeScreen && rangedProductionUnlocked) {
             goal(result, GoalKind::train, UnitKind::dragoon,
                  std::max(4, minute(state) * 2), 91, "core PvP army");
         }
@@ -885,14 +1117,54 @@ StrategicPlan StrategyEngine::planPvP(
     // consume the exact 150 minerals/100 gas needed for the first Reaver.
     const auto supportNeeded = state.frame >= 4 * 60 * 24 &&
                                count(state, UnitKind::roboticsFacility) > 0 &&
+                               // In a normal ranged mirror, Support Bay can
+                               // build in parallel with the Observatory. Only
+                               // serialize it behind detection when the
+                               // persistent covert-tech recognizer is active.
+                               (!suspectedCovertTech ||
+                                count(state, UnitKind::observatory, true) > 0) &&
                                count(state, UnitKind::roboticsSupportBay) == 0;
+    const auto recentDarkTemplar = recentEnemyCount(state, UnitKind::darkTemplar);
+    // Stardust keeps a confirmed melee all-in separate from a covert-tech
+    // hypothesis.  Do the same here: during a FastRush, do not let a soft
+    // "two Gateways/no ranged units" prior pull the bank into Robotics before
+    // the first Cannon is online.  A seen/recent Dark Templar still bypasses
+    // this hold immediately.
+    const auto holdTechForMeleeRush = currentMeleeRush &&
+                                      threat.mostLikely == EnemyPlan::fastRush &&
+                                      minute(state) < 8 && cannonsReady == 0 &&
+                                      zealotsReady < 6 && recentDarkTemplar == 0;
+    // Stardust treats a completed Core as a production checkpoint, not as a
+    // reason to keep filling Gateways indefinitely.  Once the first mobile
+    // screen or one Cannon is online, start Robotics immediately; otherwise
+    // a lost Zealot can make the old four-body predicate false for the entire
+    // next pressure cycle and leave the Core idle while the opponent adds
+    // ranged production or covert tech.
+    const auto earlyDetectionCheckpoint = state.frame >= 4 * 60 * 24 + 12 * 24 &&
+                                          count(state, UnitKind::cyberneticsCore, true) > 0 &&
+                                          count(state, UnitKind::roboticsFacility) == 0 &&
+                                          !hardBreachAtMain(state) &&
+                                          !holdTechForMeleeRush &&
+                                          (suspectedCovertTech ||
+                                           (state.frame >= 6 * 60 * 24 &&
+                                            threat.mostLikely != EnemyPlan::fastRush &&
+                                            threat.combatEnemiesNearMain == 0 &&
+                                            count(state, UnitKind::zealot) >= 3));
+    const auto roboticsCheckpoint = state.frame >= 6 * 60 * 24 &&
+                                    count(state, UnitKind::cyberneticsCore, true) > 0 &&
+                                    (zealotsReady >= 3 || cannonsReady >= 1 ||
+                                     enemyCoreScouted || enemyCoreFinished);
     const auto roboticsNeeded = state.frame >= 4 * 60 * 24 &&
                                 count(state, UnitKind::cyberneticsCore, true) > 0 &&
                                 count(state, UnitKind::roboticsFacility) == 0 &&
-                                zealotsReady >= 4;
+                                !holdTechForMeleeRush &&
+                                (earlyDetectionCheckpoint || zealotsReady >= 4 || roboticsCheckpoint ||
+                                 (cannonsReady >= 2 &&
+                                  (!enemyCoreScouted || enemyCoreFinished)));
     if (roboticsNeeded) {
         result.desiredGasWorkers = std::max(3, result.desiredGasWorkers);
-        goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 104,
+        goal(result, GoalKind::build, UnitKind::roboticsFacility, 1,
+             earlyDetectionCheckpoint ? 116 : 104,
              "reserve the first Reaver tech window", true);
     }
     if (supportNeeded) {
@@ -904,9 +1176,11 @@ StrategicPlan StrategyEngine::planPvP(
              "early Reaver splash against the mirror army", true);
     }
     const auto cloakedThreat =
-        threat.cloak > 0.28 || threat.mostLikely == EnemyPlan::cloakedTech ||
-        recentEnemyCount(state, UnitKind::darkTemplar) > 0;
-    if (cloakedThreat && count(state, UnitKind::cyberneticsCore, true) > 0) {
+        threat.cloak > 0.20 || threat.mostLikely == EnemyPlan::cloakedTech ||
+        recentEnemyCount(state, UnitKind::darkTemplar) > 0 ||
+        suspectedCovertTech;
+    if (cloakedThreat && count(state, UnitKind::cyberneticsCore, true) > 0 &&
+        (!holdTechForMeleeRush || recentDarkTemplar > 0)) {
         // A Protoss Dark Templar line can end an otherwise stable two-Cannon
         // defense before the normal three-Dragoon trigger asks for Robotics.
         // Reserve the detection chain as soon as the assessment turns covert,
@@ -919,6 +1193,7 @@ StrategicPlan StrategyEngine::planPvP(
              "unlock an Observer against Dark Templar", true);
         goal(result, GoalKind::train, UnitKind::observer, 1, 106,
              "field the first emergency Observer", true);
+        if (suspectedCovertTech) result.name += " [suspected covert tech]";
         if (count(state, UnitKind::observer, true) == 0) {
             // Do not send an undetected army across the map into a DT line.
             // Hold the home perimeter, add a static detector, and resume
@@ -950,13 +1225,24 @@ StrategicPlan StrategyEngine::planPvP(
     // Observatory to that same checkpoint instead of waiting for three
     // Dragoons or a fully observed cloak alarm: a hidden Dark Templar can
     // arrive during the Robotics/Support build window, before the reactive
-    // branch has any chance to finish detection.  The lower priority leaves
-    // the first Reaver reservation ahead of routine Observer production.
-    if (count(state, UnitKind::roboticsFacility, true) > 0) {
-        goal(result, GoalKind::build, UnitKind::observatory, 1, 90,
-             "early PvP detection alongside Robotics", false);
-        goal(result, GoalKind::train, UnitKind::observer, 1, 89,
-             "early Observer for hidden Protoss tech", true);
+    // branch has any chance to finish detection.  Detection is deliberately
+    // ahead of the Support Bay here; a delayed Reaver is recoverable, while a
+    // first Observer that starts after the DT wave has entered the mineral
+    // line is not.
+    if (count(state, UnitKind::roboticsFacility) > 0) {
+        // Reserve detection as soon as Robotics is underway, not only after
+        // its long build timer completes.  A hidden DT line can arrive during
+        // that timer; waiting for a completed facility delayed Observatory
+        // and Observer until after the first cloak wave in direct matches.
+        const auto observatoryPriority =
+            count(state, UnitKind::observatory) == 0 ? 111 : 108;
+        goal(result, GoalKind::build, UnitKind::observatory, 1,
+             observatoryPriority,
+             "early PvP detection before splash support", true);
+        if (count(state, UnitKind::observatory, true) > 0) {
+            goal(result, GoalKind::train, UnitKind::observer, 1, 107,
+                 "field the first Observer before the hidden-tech timing", true);
+        }
     }
 
     if (minute(state) >= 8) {
@@ -971,12 +1257,13 @@ StrategicPlan StrategyEngine::planPvP(
                        "improve reaver breakpoints");
     }
 
-    const auto evidencedMeleeRush = minute(state) < 8 && !rangedOpening &&
+    const auto evidencedMeleeRush = minute(state) < 8 && currentMeleeRush &&
                                     (twoGateOpening ||
                                      hardBreachAtMain(state) ||
                                      // If the mobile screen has already been
-                                     // thinned below four Zealots, add a static
-                                     // anchor before the next wave arrives.
+                                     // thinned below four completed Zealots,
+                                     // add one static anchor before the next
+                                     // wave arrives.
                                      (threat.combatEnemiesNearMain > 0 &&
                                       zealotsReady < 4));
     if (evidencedMeleeRush) {
@@ -996,38 +1283,104 @@ StrategicPlan StrategyEngine::planPvP(
     // tech cycle. This branch is evidence-gated, so an ordinary mirror does
     // not pay the blind Forge tax, but a four-Zealot flood cannot walk through
     // an entirely unanchored mineral line.
-    const auto rushStaticNeeded = minute(state) < 8 && !rangedOpening &&
+    const auto rushStaticNeeded = minute(state) < 8 && currentMeleeRush &&
+                                   // A visible melee pack inside the home
+                                   // perimeter is already actionable evidence;
+                                   // waiting for BWAPI's narrower hard-breach
+                                   // ring left the emergency Forge at a low
+                                   // priority until the Probe line was gone.
                                    (hardBreachAtMain(state) ||
-                                    (threat.combatEnemiesNearMain > 0 &&
-                                     zealotsReady < 4));
-    const auto preserveEarlyCore = state.frame >= 4 * 60 * 24 &&
-                                   zealotsReady >= 4 &&
-                                   !hardBreachAtMain(state) &&
-                                   // A FastRush that is still outside the
-                                   // hard-breach radius is exactly the narrow
-                                   // window where starting the Core saves a
-                                   // full Robotics/Observer cycle.  Waiting
-                                   // for the first completed Cannon pushed
-                                   // detection past the DT arrival in the
-                                   // live mirror trace; the mobile Zealot
-                                   // screen already buys this checkpoint.
-                                   (cannonsReady >= 1 ||
-                                    state.frame >= 5 * 60 * 24 ||
-                                    threat.mostLikely == EnemyPlan::fastRush);
+                                    visibleGroundContact ||
+                                     threat.combatEnemiesNearMain > 0 ||
+                                     threat.approachingArmyValue >= 2.0);
+    // A Cannon under construction is already a committed static investment:
+    // its minerals are gone and a Probe is tied up. Treat it as an anchor
+    // checkpoint for the ranged transition instead of waiting for the long
+    // Cannon timer to finish.
+    const auto cannonInvestment = count(state, UnitKind::photonCannon) > 0;
+    // A long Cannon build is not yet a safe mineral-line screen. Do not spend
+    // the next 200 minerals on Core while the first anchor is incomplete
+    // unless the mobile screen has reached six Zealots.
+    const auto staticCheckpoint = cannonsReady >= 1 ||
+                                  (cannonInvestment && zealotsReady >= 6);
+    const auto preserveEarlyCore =
+        state.frame >= 4 * 60 * 24 &&
+        // A FastRush that is still outside the hard-breach radius is exactly
+        // the narrow window where starting the Core saves a full
+        // Robotics/Observer cycle. Once one Cannon is complete, keep that
+        // checkpoint even if the front line briefly touches the Nexus: the
+        // old Zealot-only predicate erased the Core after one combat loss and
+        // left the bot permanently melee-only.
+        (zealotsReady >= 4 && !hardBreachAtMain(state) && staticCheckpoint);
+    const auto preserveCoreBehindCannon =
+        // Once a Cannon has actually been started, do not let the emergency
+        // melee branch erase the Core until the static screen is finished.
+        // The old six-minute gate was too late: on a committed rush the bot
+        // could reach five Zealots plus an unfinished Cannon, repeatedly
+        // cancel the Core, and die before Dragoons/Observers came online.
+        state.frame >= 4 * 60 * 24 && staticCheckpoint && zealotsReady >= 4;
 
-    if (threat.combatEnemiesNearMain > 0 || activeApproach(state, threat) ||
-        visibleGroundContact ||
-        (minute(state) < 8 && threat.aggression > 0.6)) {
+    // A visible army just outside the 448px emergency ring is the midfield,
+    // not the mineral line.  Stardust keeps a stable vanguard there so the
+    // opponent cannot walk from the edge of vision to the Nexus for free.
+    // Treat this as a pressure contact when our compact screen can contest it;
+    // only a hard breach or a clearly superior approach should collapse the
+    // whole plan back to Defend.
+    const auto midfieldVisibleCount = static_cast<int>(std::ranges::count_if(
+        state.enemy.units, [](const UnitSnapshot& enemy) {
+            return enemy.visible && enemy.completed && !enemy.flying &&
+                   isCombatUnit(enemy.kind) && enemy.position.valid();
+        }));
+    const auto midfieldContestable = midfieldVisibleCount <=
+                                     mobileOpening + cannonsReady;
+    const auto midfieldContact = visibleGroundContact &&
+                                 !hardBreachAtMain(state) &&
+                                 threat.combatEnemiesNearMain == 0 &&
+                                 mobileOpening >= 5 &&
+                                 (zealotsReady >= 5 || cannonsReady >= 1) &&
+                                 !cloakedThreat &&
+                                 (threat.immediateGround <= 0.55 ||
+                                  (midfieldContestable &&
+                                   threat.immediateGround <= 0.80));
+    if (midfieldContact) {
+        result.posture = Posture::pressure;
+        result.attackThreshold = std::min(result.attackThreshold, 1.35);
+        result.minimumAttackSize = std::min(result.minimumAttackSize, 6);
+        const auto nearest = std::ranges::min_element(
+            state.enemy.units, {}, [&home](const UnitSnapshot& enemy) {
+                return enemy.visible && enemy.completed && !enemy.flying &&
+                               isCombatUnit(enemy.kind) && enemy.position.valid()
+                           ? distanceSquared(home, enemy.position)
+                           : std::numeric_limits<int>::max();
+            });
+        if (nearest != state.enemy.units.end() && nearest->position.valid()) {
+            result.rallyPoint = moveToward(home, nearest->position, 320.0);
+        }
+        result.name += " [midfield pressure]";
+    }
+
+    if (threat.combatEnemiesNearMain > 0 ||
+        (activeApproach(state, threat) && !midfieldContact) ||
+        (visibleGroundContact && !midfieldContact) ||
+        (minute(state) < 8 && threat.aggression > 0.6 && !midfieldContact)) {
         result.name = "PvP two-gate emergency defense";
         result.posture = Posture::defend;
         result.desiredBases = 1;
         result.desiredWorkers = std::min(result.desiredWorkers, canTransition ? 22 : 12);
         const auto meleeOnlyEmergency = rushStaticNeeded &&
                                         dragoonsReady < 2 &&
-                                        !(cannonsReady >= 2 && zealotsReady >= 2) &&
-                                        !preserveEarlyCore;
+                                        // One completed Cannon is already a
+                                        // meaningful static checkpoint.  Do
+                                        // not keep erasing Robotics after the
+                                        // wall exists: that left a completed
+                                        // Core idle until the DT wave was on
+                                        // top of the mineral line.
+                                        cannonsReady == 0 &&
+                                        zealotsReady < 6 &&
+                                        !preserveEarlyCore &&
+                                        !preserveCoreBehindCannon;
         if ((count(state, UnitKind::cyberneticsCore) == 0 && !canTransition &&
-             !preserveEarlyCore) ||
+             !preserveEarlyCore && !preserveCoreBehindCannon) ||
             meleeOnlyEmergency) {
             result.desiredGasWorkers = 0;
             result.goals.erase(
@@ -1054,7 +1407,8 @@ StrategicPlan StrategyEngine::planPvP(
                      "restore gas after the destroyed ranged-tech core", true);
             }
         }
-        if (preserveEarlyCore && count(state, UnitKind::cyberneticsCore) == 0) {
+        if ((preserveEarlyCore || preserveCoreBehindCannon) &&
+            count(state, UnitKind::cyberneticsCore) == 0) {
             // Four Zealots and no hard breach are enough to start the ranged
             // transition. Do not let the emergency branch erase this goal
             // while a mirror rush is merely approaching the wall.
@@ -1064,17 +1418,27 @@ StrategicPlan StrategyEngine::planPvP(
             goal(result, GoalKind::build, UnitKind::assimilator, 1, 112,
                  "feed the protected early Core", true);
         }
+        const auto widenRushScreen =
+            hardBreachAtMain(state) ||
+            (cannonsReady >= 1 &&
+             (visibleGroundContact || threat.combatEnemiesNearMain > 0 ||
+              threat.approachingArmyValue >= 2.0));
+        const auto secondCannonSafe = workers >= 14 || zealotsReady >= 6 ||
+                                      hardBreachAtMain(state);
         const auto rushCannonTarget =
-            count(state, UnitKind::cyberneticsCore, true) == 0 ? 2 :
-            // Once the Core is complete, the next 200 minerals must go into
-            // Robotics/Observer access.  A third Cannon here repeatedly
-            // starved the blocking Robotics goal in the live DT trace; two
-            // completed Cannons are enough to keep the Zealot screen from
-            // walking through while splash tech comes online.
-            count(state, UnitKind::roboticsFacility) == 0 ? 2 :
-            state.self.minerals >= 800 ? 4 :
-            (state.frame >= 5 * 60 * 24 &&
-             (state.self.minerals >= 200 || zealotsReady >= 4)) ? 3 : 2;
+            // One Cannon is the pre-contact insurance anchor.  Once that
+            // anchor is complete and the approaching melee pack is visible,
+            // overlap a second before the first structure is focused down;
+            // waiting for a literal hard breach loses the wall and the Probe
+            // line in the same engagement.
+            !widenRushScreen ? 1 :
+            // One Cannon plus the mobile screen is the right emergency
+            // trade while the Core is missing. Starting two long Cannon
+            // builds at once delayed the Core until eight minutes and let a
+            // Dragoon/DT transition scale uncontested.
+            count(state, UnitKind::cyberneticsCore, true) == 0 ? 1 :
+            count(state, UnitKind::roboticsFacility) == 0 ? (secondCannonSafe ? 2 : 1) :
+            state.self.minerals >= 800 ? 4 : 3;
         if (rushStaticNeeded && cannonsReady < rushCannonTarget) {
             goal(result, GoalKind::build, UnitKind::forge, 1, 112,
                  "anchor the mineral line against observed Zealot pressure", true);
@@ -1110,7 +1474,7 @@ StrategicPlan StrategyEngine::planPvP(
         const auto forwardMeleeScreen = visibleMeleeContact && !directBreach &&
                                         !visibleGroundContact &&
                                         mobileOpening >= 8 &&
-                                        (!rangedOpening || zealotsReady >= 8);
+                                        (!currentMeleeRush || zealotsReady >= 8);
         result.attackThreshold = forwardRangedScreen ? 1.22 :
                                  (forwardMeleeScreen ? 1.32 : 1.50);
         result.minimumAttackSize = (forwardRangedScreen || forwardMeleeScreen)
@@ -1139,7 +1503,18 @@ StrategicPlan StrategyEngine::planPvP(
                  "field one mobile defender before adding more structures", true);
         }
         if (cannonsReady >= 2 || zealotsReady >= 2) {
-            goal(result, GoalKind::train, UnitKind::probe, cannonsReady >= 2 ? 10 : 12, 104,
+            // Income is a live invariant during the hold. Once the line drops
+            // below fourteen workers, queue the next Probe ahead of optional
+            // Core/Cannon waits; otherwise those blocking goals can reserve
+            // the entire bank and turn a recoverable raid into a zero-worker
+            // death spiral.
+            const auto probePriority = workers < 14 &&
+                                       state.enemy.race == Race::protoss &&
+                                       visibleGroundContact
+                                           ? 123
+                                           : 104;
+            goal(result, GoalKind::train, UnitKind::probe, cannonsReady >= 2 ? 10 : 12,
+                 probePriority,
                  "fund sustained mirror defense behind the Cannon screen", true);
             if (count(state, UnitKind::gateway, true) > 0) {
                 goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 103,
@@ -1147,16 +1522,34 @@ StrategicPlan StrategyEngine::planPvP(
             }
         }
         if (count(state, UnitKind::forge) > 0) {
-            const auto emergencyCannonTarget =
+        const auto emergencyCannonTarget =
+                workers < 8 ? cannonsReady :
+                cannonsReady >= 2 ? 2 :
+                !hardBreachAtMain(state) ? 1 :
                 count(state, UnitKind::cyberneticsCore, true) > 0 ? 3 : 2;
-            goal(result, GoalKind::build, UnitKind::photonCannon,
-                 emergencyCannonTarget, 101,
-                 "reinforce an existing static defense investment", true);
+        goal(result, GoalKind::build, UnitKind::photonCannon,
+             emergencyCannonTarget, 101,
+             "reinforce an existing static defense investment", true);
         }
         goal(result, GoalKind::build, UnitKind::gateway, 2, 100,
              "guarantee two-gate defensive throughput", true);
-        goal(result, GoalKind::train, UnitKind::zealot, 8, 99,
+        const auto emergencyMeleeTarget = cannonsReady >= 2 &&
+                                                  count(state, UnitKind::cyberneticsCore, true) > 0 &&
+                                                  (!enemyCoreScouted || enemyCoreFinished)
+                                              ? 4
+                                              : 8;
+        goal(result, GoalKind::train, UnitKind::zealot, emergencyMeleeTarget, 99,
              "continuously reinforce against opening pressure", true);
+        const auto directMeleePressure = currentMeleeRush &&
+            (threat.combatEnemiesNearMain > 0 || visibleGroundContact ||
+             hardBreachAtMain(state));
+        if (directMeleePressure) {
+            // A completed Core must not turn the only free Gateway into a
+            // Dragoon while Zealots are fighting at the mineral line.  Keep
+            // the emergency composition melee-only until the rush is cleared
+            // or the two-Cannon screen can safely absorb the transition.
+            result.composition = {{UnitKind::zealot, 1.0}};
+        }
         goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 97,
              "defensive sustain", true);
     }
@@ -1172,7 +1565,11 @@ StrategicPlan StrategyEngine::planPvP(
         goal(result, GoalKind::build, UnitKind::assimilator, 1, 102,
              "fund the ranged transition before repeated melee replacement", true);
         const auto gasReady = state.self.gas >= 50;
-        if (earlyMeleeScreen) {
+        const auto meleePressure = currentMeleeRush &&
+            (threat.combatEnemiesNearMain > 0 || visibleGroundContact ||
+             hardBreachAtMain(state));
+        if (earlyMeleeScreen &&
+            (!meleePressure || zealotsReady >= 6 || cannonsReady >= 2)) {
             goal(result, GoalKind::train, UnitKind::dragoon, 4, 101,
                  "establish a ranged defensive core", gasReady);
         }
@@ -1207,16 +1604,44 @@ StrategicPlan StrategyEngine::planPvP(
         // anchor must begin as soon as 150 minerals are available; leaving
         // three Probes on gas here delayed it until the mineral line was
         // already lost in the live rush trace.
-        result.desiredGasWorkers = 0;
-        // The first response window is too short for a Forge plus two
-        // Cannons, but waiting for the third completed Zealot lets the Forge
-        // finish only after the flood reaches the mineral line. Keep the
-        // first two bodies mobile, then start one Cannon early; the second
-        // Cannon is a follow-up once the mobile screen has four bodies.
-        const auto mobileRushOpening = state.frame < 5 * 60 * 24 &&
-                                       zealotsReady < 2;
+        const auto gasTransitionWindow = state.frame >= 3 * 60 * 24 + 24 * 24 &&
+                                         zealotsReady >= 2 &&
+                                         threat.combatEnemiesNearMain == 0 &&
+                                         !hardBreachAtMain(state);
+        result.desiredGasWorkers = gasTransitionWindow ? 3 : 0;
+        // The first response window is too short for a Forge plus a Cannon
+        // while the mobile screen is still tiny. Keep four bodies mobile
+        // before paying the Forge tax; that gives the Probe line a real
+        // escort and lets the first Cannon finish behind the screen instead
+        // of being surrounded during construction.
+        const auto mobileRushOpening = state.frame < 4 * 60 * 24 &&
+                                       zealotsReady < 4;
+        // A covert-tech suspicion is normally enough to reserve Robotics and
+        // detection before the first visible ranged unit.  It must not win
+        // over a current two-Gateway melee opening, though: in the live
+        // mirror trace the suspicion was raised one planning pass before
+        // FastRush was recognized, so the Forge was skipped at 150 minerals
+        // and the later Cannon could not finish before contact.  The
+        // melee-only signal is deliberately current and takes precedence.
+        const auto detectionFirst = earlyDetectionCheckpoint &&
+                                     !currentMeleeRush &&
+                                     !hardBreachAtMain(state);
         if (mobileRushOpening) {
-            std::erase_if(result.goals, [](const ProductionGoal& candidate) {
+            // Keep the early hidden-melee insurance Forge alive once the
+            // rush label catches up.  The old cleanup erased every static
+            // goal in this window, so a two-Gateway opponent could trigger
+            // the exact frame where the Forge became affordable and leave
+            // us with no Cannon path at all.  Only the insurance Forge is
+            // preserved; Cannons and Batteries still wait for the mobile
+            // screen as intended.
+            const auto preserveEmergencyForge = hiddenMeleeTechSignal ||
+                                                 rushStaticNeeded;
+            std::erase_if(result.goals, [preserveEmergencyForge](
+                              const ProductionGoal& candidate) {
+                if (candidate.target == UnitKind::forge &&
+                    preserveEmergencyForge) {
+                    return false;
+                }
                 return candidate.target == UnitKind::forge ||
                        candidate.target == UnitKind::photonCannon ||
                        candidate.target == UnitKind::shieldBattery;
@@ -1232,13 +1657,26 @@ StrategicPlan StrategyEngine::planPvP(
             result.desiredGasWorkers = 3;
             goal(result, GoalKind::train, UnitKind::zealot, 2, 105,
                  "field a mobile screen against scouted double production", true);
-            goal(result, GoalKind::build, UnitKind::forge, 1, 112,
-                 "prepare a static answer to scouted melee production", true);
-            const auto staticCannonTarget = state.frame >= 6 * 60 * 24 ||
-                                            zealotsReady >= 4 ? 2 : 1;
-            goal(result, GoalKind::build, UnitKind::photonCannon,
-                 staticCannonTarget, 111,
-                 "support the mobile army against a melee flood", true);
+            if (!detectionFirst) {
+                goal(result, GoalKind::build, UnitKind::forge, 1, 112,
+                     "prepare a static answer to scouted melee production", true);
+            }
+            // One Cannon is enough to stabilize a mobile-first opening. Only
+            // buy the second mineral sink when the army is actually moving
+            // toward the main (or a hard breach is already present); a timer
+            // alone made the bot spend the exact minerals needed for the Core
+            // and Robotics transition while BananaBrain's army grew.
+            const auto staticCannonTarget =
+                (hardBreachAtMain(state) || threat.immediateGround > 0.25 ||
+                 threat.approachingArmyValue >= 4.0) &&
+                        (state.frame >= 6 * 60 * 24 || zealotsReady >= 4)
+                    ? 2
+                    : 1;
+            if (!detectionFirst || staticCannonTarget > 0) {
+                goal(result, GoalKind::build, UnitKind::photonCannon,
+                     detectionFirst ? std::min(1, staticCannonTarget) : staticCannonTarget,
+                     111, "support the mobile army against a melee flood", true);
+            }
         }
 
         // Once the first ranged screen is online, meet a suspected flood in
@@ -1267,6 +1705,64 @@ StrategicPlan StrategyEngine::planPvP(
             }
             result.name += " [forward intercept]";
         }
+
+        // A compact pressure group is still useful before the full ranged
+        // army exists.  Stardust locks an attack/contain target once the map
+        // is quiet and its home screen is stable; mirror that behavior here
+        // instead of leaving four-to-six Zealots parked at the Nexus until a
+        // fourteen-unit threshold becomes reachable.  Require two completed
+        // Cannons (or an Observer) while covert tech is suspected so this is
+        // not a blind march into an undetected DT line.
+        const auto perimeterEnemyCount = static_cast<int>(std::ranges::count_if(
+            state.enemy.units, [&home](const UnitSnapshot& enemy) {
+                return enemy.visible && enemy.completed && !enemy.flying &&
+                       isCombatUnit(enemy.kind) && enemy.position.valid() &&
+                       (!home.valid() || distanceSquared(home, enemy.position) <=
+                                             900 * 900);
+            }));
+        const auto safeVisibleContact = visibleGroundContact &&
+                                        cannonsReady >= 2 &&
+                                        perimeterEnemyCount <= std::max(2, mobileOpening / 2);
+        const auto compactMeleeTiming = state.frame >= 5 * 60 * 24 &&
+                                        state.frame < 11 * 60 * 24 &&
+                                        mobileOpening >= 4 &&
+                                        (cannonsReady >= 2 ||
+                                         count(state, UnitKind::observer, true) > 0) &&
+                                        !hardBreach &&
+                                        (!visibleGroundContact || safeVisibleContact) &&
+                                        threat.combatEnemiesNearMain == 0 &&
+                                        threat.immediateGround <= 0.35 &&
+                                        (threat.uncertainty >= 0.90 ||
+                                         threat.mostLikely == EnemyPlan::fastExpand);
+        if (compactMeleeTiming) {
+            result.posture = Posture::pressure;
+            result.attackThreshold = std::min(result.attackThreshold, 1.22);
+            result.minimumAttackSize = std::min(result.minimumAttackSize, 4);
+            const auto target = enemyMain(state);
+            if (target.valid()) {
+                result.attackTarget = target;
+                result.rallyPoint = target;
+            }
+            result.name += " [compact melee timing]";
+        }
+
+        // A remembered enemy Core is useful for our tech schedule, but it is
+        // not evidence that the current fight is ranged.  While the opponent
+        // still has no recent Dragoon/Reaver and our static anchor is missing,
+        // keep every Gateway on Zealots.  Otherwise the generic transition
+        // goal can spend the exact 125 gas/ minerals on a Dragoon while the
+        // first melee wave is already crossing the map.
+        if (currentMeleeRush && zealotsReady < 6 && cannonsReady == 0) {
+            result.composition = {{UnitKind::zealot, 1.0}};
+            result.goals.erase(
+                std::remove_if(result.goals.begin(), result.goals.end(),
+                               [](const ProductionGoal& candidate) {
+                                   return candidate.goal == GoalKind::train &&
+                                          candidate.target == UnitKind::dragoon &&
+                                          candidate.priority < 114;
+                               }),
+                result.goals.end());
+        }
     }
 
     const auto visibleEnemyArmy = std::ranges::any_of(
@@ -1274,7 +1770,7 @@ StrategicPlan StrategyEngine::planPvP(
             return enemy.visible && enemy.completed && !enemy.flying &&
                    isCombatUnit(enemy.kind);
         });
-    const auto earlyMeleeStrike = !rangedOpening &&
+    const auto earlyMeleeStrike = currentMeleeRush &&
                                   state.frame >= 4 * 60 * 24 &&
                                   state.frame < 8 * 60 * 24 &&
                                   mobileOpening >= 4 &&
@@ -1394,13 +1890,41 @@ StrategicPlan StrategyEngine::planPvP(
         }
         result.name += " [counter-push advantage]";
     }
-    if ((roboticsNeeded || supportNeeded) && !hardBreachAtMain(state)) {
+    // A defended main is not a reason to stay on one base forever. Once the
+    // first Robotics/Observer chain and a three-Cannon shell are complete, a
+    // healthy 18-worker economy can start the natural even while a small
+    // enemy group remains on the perimeter. Require a local power edge and no
+    // hard breach so this is a controlled Stardust-style phase transition,
+    // not a blind Nexus during an all-in.
+    const auto defensiveEconomyWindow = state.frame >= 10 * 60 * 24 &&
+                                        workers >= 18 && mobileOpening >= 10 &&
+                                        count(state, UnitKind::photonCannon, true) >= 3 &&
+                                        count(state, UnitKind::cyberneticsCore, true) > 0 &&
+                                        count(state, UnitKind::roboticsFacility, true) > 0 &&
+                                        count(state, UnitKind::observatory, true) > 0 &&
+                                        !directBreach &&
+                                        threat.combatEnemiesNearMain <= 2 &&
+                                        (!activeApproach(state, threat) ||
+                                         ownMobilePower >= visibleEnemyPower * 1.30) &&
+                                        threat.immediateGround <= 0.55 &&
+                                        (visibleEnemyPower <= 0.1 ||
+                                         ownMobilePower >= visibleEnemyPower * 1.20);
+    if (defensiveEconomyWindow) {
+        result.desiredBases = std::max(result.desiredBases, 2);
+        result.maximumBases = std::max(result.maximumBases, 2);
+        result.posture = Posture::pressure;
+        result.attackThreshold = std::min(result.attackThreshold, 1.30);
+        result.minimumAttackSize = std::min(result.minimumAttackSize, 10);
+        result.name += " [defensive economic transition]";
+    }
+    if ((roboticsNeeded || supportNeeded) && !hardBreachAtMain(state) &&
+        !economicCounterWindow) {
         // Protect the Robotics -> Support Bay sequence from composition filler.
         // A brief pause is cheaper than entering the first Reaver fight with
         // an empty gas/mineral bank; direct pressure keeps the normal
         // defensive queue in control.
         const auto preserveDragoonScreen = supportNeeded && dragoonsReady < 6;
-        const auto preserveMeleeScreen = !rangedOpening &&
+        const auto preserveMeleeScreen = currentMeleeRush &&
                                          state.frame < 10 * 60 * 24 &&
                                          zealotsReady < 8 &&
                                          (threat.uncertainty > 0.85 ||
@@ -1475,7 +1999,25 @@ void StrategyEngine::addInfrastructure(
     const auto projectedUsed = state.self.supplyUsed;
     const auto supplyNeeded = projectedSupply < 400 &&
                               projectedSupply - projectedUsed <= desiredBuffer;
-    const auto desiredPylons = std::max(bases, pylons + (supplyNeeded ? 1 : 0));
+    const auto expansionDue = plan.desiredBases > bases;
+    const auto expansionReady = bases == completedBases &&
+                                 workers >= bases * 12;
+    const auto defensiveGrowth = plan.posture == Posture::defend &&
+                                 defensiveExpansionWindow(state, threat);
+    const auto expansionBanking = expansionDue && expansionReady &&
+                                  (plan.posture != Posture::defend || defensiveGrowth) &&
+                                  plan.posture != Posture::recover &&
+                                  threat.combatEnemiesNearMain == 0 &&
+                                  !activeApproach(state, threat) &&
+                                  threat.immediateGround <= 0.45 &&
+                                  !hardBreachAtMain(state);
+    // When the natural is already a safe strategic goal, hold one small
+    // supply margin instead of buying a Pylon ahead of the 400-mineral Nexus.
+    // The old priority ordering spent the bank on a fifth Pylon at 76/82
+    // supply, then restarted the save on every macro pass, so the expansion
+    // never reached the command threshold before the next pressure wave.
+    const auto desiredPylons = std::max(
+        bases, pylons + (supplyNeeded && !expansionBanking ? 1 : 0));
     const auto openingPylonDeadline = pylons == 0 &&
                                       (state.self.supplyUsed >= 12 ||
                                        state.frame >= 45 * 24);
@@ -1489,18 +2031,25 @@ void StrategyEngine::addInfrastructure(
     // for another base and the main is clear, reserve its full cost ahead of
     // routine workers, tech, and composition fills. Direct pressure cancels
     // the reservation immediately so a Nexus never starves emergency units.
-    const auto expansionDue = plan.desiredBases > bases;
-    const auto expansionReady = bases == completedBases &&
-                                workers >= bases * 12;
     const auto expansionSafe = expansionDue && expansionReady &&
-                               plan.posture != Posture::defend &&
+                               (plan.posture != Posture::defend || defensiveGrowth) &&
                                plan.posture != Posture::recover &&
                                threat.combatEnemiesNearMain == 0 &&
                                !activeApproach(state, threat) &&
                                threat.immediateGround <= 0.45;
-    if (plan.posture != Posture::defend) {
+    if (plan.posture != Posture::defend || defensiveGrowth) {
+        // In a stable counter-window the Nexus is the strategic play, not a
+        // low-priority suggestion.  Robotics/Observer and Gateway filler
+        // goals can otherwise reserve every mineral ahead of it, leaving a
+        // permanently waiting expansion even with a 3k bank.  Match the
+        // Stardust-style phase transition by reserving the natural before
+        // optional tech/composition spends; emergency posture still cancels
+        // the reservation through expansionSafe.
+        const auto expansionPriority =
+            expansionSafe && (plan.posture == Posture::pressure || defensiveGrowth) ? 120 :
+            (expansionSafe ? 95 : 65);
         goal(plan, GoalKind::expand, UnitKind::nexus, plan.desiredBases,
-             expansionSafe ? 95 : 65, "match economic phase", expansionSafe);
+             expansionPriority, "match economic phase", expansionSafe);
     }
     if (plan.desiredGasWorkers > 0) {
         goal(plan, GoalKind::build, UnitKind::assimilator, bases, 80, "fund technology");
