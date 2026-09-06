@@ -41,6 +41,8 @@ struct StrategicPlan {
     Position attackTarget{-1, -1};
     std::vector<ProductionGoal> goals;
     std::vector<CompositionTarget> composition;
+    // Explicit matchup safety constraints survive style and recovery modifiers.
+    int maximumBases{8};
 };
 
 class StrategyEngine {

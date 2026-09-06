@@ -62,9 +62,9 @@ private:
     std::vector<UnitId> detectorEscorts_;
     std::vector<UnitId> leasedScouts_;
     std::vector<Position> advanceWaypoints_;
-    std::vector<Position> retreatWaypoints_;
     std::vector<std::uint64_t> navigationSignatures_;
     Frame navigationRefresh_{-1};
+    Frame firstCounterattackFrame_{-1};
     int maintenanceMineralReserve_{};
     int maintenanceGasReserve_{};
     Frame lastErrorFrame_{-1000};

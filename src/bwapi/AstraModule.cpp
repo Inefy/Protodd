@@ -50,9 +50,9 @@ void AstraModule::onStart() {
     detectorEscorts_.clear();
     leasedScouts_.clear();
     advanceWaypoints_.clear();
-    retreatWaypoints_.clear();
     navigationSignatures_.clear();
     navigationRefresh_ = -1;
+    firstCounterattackFrame_ = -1;
     maintenanceMineralReserve_ = 0;
     maintenanceGasReserve_ = 0;
 
@@ -198,13 +198,11 @@ void AstraModule::updateScouting() {
     const auto reservedBuilders = bridge_.reservedBuilders();
     leasedScouts_.clear();
     std::vector<UnitId> available;
-    auto observersSeen = 0;
     for (const auto& unit : state_.self.units) {
-        if (unit.kind == UnitKind::observer) {
+        if (unit.kind == UnitKind::observer && unit.completed) {
             if (std::ranges::find(detectorEscorts_, unit.id) != detectorEscorts_.end()) continue;
-            // Keep the first observer attached to the main army. Additional
-            // observers perform high-value scouting passes.
-            if (++observersSeen == 1) continue;
+            // Combat has already leased the escort. Reserving another first
+            // observer here left a two-Observer build with no active scout.
             available.push_back(unit.id);
         } else if (unit.kind == UnitKind::corsair && available.empty()) {
             available.push_back(unit.id);
@@ -242,7 +240,6 @@ void AstraModule::updateCombat(
                                                navigationInterval;
     if (resetNavigation) {
         advanceWaypoints_.assign(formed.size(), {-1, -1});
-        retreatWaypoints_.assign(formed.size(), {-1, -1});
         navigationSignatures_.assign(formed.size(), 0);
     }
     if (periodicNavigationRefresh) {
@@ -256,6 +253,7 @@ void AstraModule::updateCombat(
         const auto& squad = formed[squadIndex];
         auto requiredRatio = squad.requiredRatio;
         auto objective = squad.objective;
+        auto defense = squad.defense;
         if (squad.role == SquadRole::mainArmy) {
             if (!aggressive ||
                 (vanguard == &squad &&
@@ -263,6 +261,7 @@ void AstraModule::updateCombat(
                      static_cast<std::size_t>(std::max(1, plan_.minimumAttackSize)))) {
                 requiredRatio = 0.88;
                 objective = plan_.rallyPoint;
+                defense = SquadPlanner::defensiveArea(state_, plan_.rallyPoint);
             } else if (vanguard != nullptr && vanguard != &squad &&
                        squad.enemies.empty()) {
                 // Detached reinforcements join the strongest mobile component
@@ -271,7 +270,6 @@ void AstraModule::updateCombat(
                 objective = vanguard->center;
             }
         }
-        auto routedRetreat = squad.retreat;
         const auto hasGroundUnit = std::ranges::any_of(
             squad.units, [](const UnitSnapshot& unit) { return !unit.flying; });
         auto routeSignature = squad.signature;
@@ -284,7 +282,6 @@ void AstraModule::updateCombat(
         if (refreshRoute) {
             navigationSignatures_[squadIndex] = routeSignature;
             advanceWaypoints_[squadIndex] = {-1, -1};
-            retreatWaypoints_[squadIndex] = {-1, -1};
         }
         if (refreshRoute && hasGroundUnit) {
             // During uncontested travel, let BWAPI route each unit to the
@@ -295,15 +292,10 @@ void AstraModule::updateCombat(
                 advanceWaypoints_[squadIndex] =
                     navigation_.nextWaypoint(squad.center, objective);
             }
-            retreatWaypoints_[squadIndex] =
-                navigation_.nextWaypoint(squad.center, squad.retreat);
         }
         if (hasGroundUnit) {
             if (!squad.enemies.empty() && advanceWaypoints_[squadIndex].valid()) {
                 objective = advanceWaypoints_[squadIndex];
-            }
-            if (retreatWaypoints_[squadIndex].valid()) {
-                routedRetreat = retreatWaypoints_[squadIndex];
             }
         }
         auto estimate = combat_.evaluate(
@@ -323,51 +315,30 @@ void AstraModule::updateCombat(
         if (SquadPlanner::mustHoldDefensiveScreen(squad)) {
             estimate.decision = FightDecision::engage;
         }
+        if (SquadPlanner::canCounterattack(squad, estimate, plan_)) {
+            // A global defense response must not trap an independently strong
+            // reserve army while the allocated defenders protect the base.
+            defense = {};
+            objective = plan_.attackTarget;
+            if (firstCounterattackFrame_ < 0) firstCounterattackFrame_ = state_.frame;
+        }
         if (squad.role == SquadRole::mainArmy && squad.units.size() >= debugSquadSize) {
             debugSquadSize = squad.units.size();
             fight_ = estimate;
         }
+        const auto targets = SquadPlanner::tacticalTargets(squad, state_.enemy.units);
         for (const auto& order : tactics_.control(
-                 squad.units, squad.enemies, estimate, objective,
-                 routedRetreat, influence_, squad.center, state_.latencyFrames,
-                 technologyLevel(state_.self, TechnologyKind::psionicStorm) > 0)) {
+                 squad.units, targets, estimate, objective,
+                 squad.retreat, influence_, squad.center, state_.latencyFrames,
+                 technologyLevel(state_.self, TechnologyKind::psionicStorm) > 0,
+                 defense)) {
             commands_.submit(order);
         }
     }
 
-    // Use completed Shield Batteries between exchanges. During a base defense,
-    // Probes are combat resources too: recharging wounded militia prevents one
-    // Zealot wave from permanently deleting the economy. The order is issued
-    // after worker jobs and therefore safely overrides mining for that tick.
-    for (const auto& unit : state_.self.units) {
-        const auto eligibleWorker = plan_.posture == Posture::defend &&
-                                    isWorker(unit.kind) && unit.completed;
-        if ((!isCombatUnit(unit.kind) && !eligibleWorker) || unit.hallucination ||
-            unit.loaded) {
-            continue;
-        }
-        if (unit.maxShields <= 0 || unit.shields * 5 >= unit.maxShields * 2 ||
-            unit.attackFrame || (unit.underAttack && unit.healthFraction() >= 0.5)) {
-            continue;
-        }
-        const UnitSnapshot* battery = nullptr;
-        auto bestDistance = 256 * 256 + 1;
-        for (const auto& candidate : state_.self.units) {
-            if (candidate.kind != UnitKind::shieldBattery || !candidate.completed ||
-                candidate.energy < 10 || !candidate.position.valid()) {
-                continue;
-            }
-            const auto candidateDistance = distanceSquared(unit.position, candidate.position);
-            if (candidateDistance < bestDistance) {
-                bestDistance = candidateDistance;
-                battery = &candidate;
-            }
-        }
-        if (battery != nullptr) {
-            commands_.submit({unit.id, CommandType::recharge, battery->id, {-1, -1},
-                              UnitKind::shieldBattery, 92, 0,
-                              "shield-battery-recharge"});
-        }
+    for (const auto& order : tactics_.recharge(state_.self.units,
+                                              plan_.posture == Posture::defend)) {
+        commands_.submit(order);
     }
 
     detectorEscorts_.clear();
@@ -456,6 +427,16 @@ void AstraModule::logDecision() {
          << ",army=" << mobileArmy
          << ",enemyVisibleArmy=" << visibleEnemyArmy
          << ",minAttack=" << plan_.minimumAttackSize
+         << ",gasWorkers=" << std::ranges::count(state_.self.units, true,
+                                                  &UnitSnapshot::gatheringGas)
+         << ",gasTarget=" << plan_.desiredGasWorkers
+         << ",core=" << countUnits(UnitKind::cyberneticsCore, false) << '/'
+         << countUnits(UnitKind::cyberneticsCore, true)
+         << ",range=" << technologyLevel(state_.self, TechnologyKind::singularityCharge)
+         << '/' << technologyInProgress(state_.self, TechnologyKind::singularityCharge)
+         << ",minedMinerals=" << BWAPI::Broodwar->self()->gatheredMinerals()
+         << ",minedGas=" << BWAPI::Broodwar->self()->gatheredGas()
+         << ",counterattackFirst=" << firstCounterattackFrame_
          << ",attackTarget=" << plan_.attackTarget.x << 'x' << plan_.attackTarget.y
          << ",rally=" << plan_.rallyPoint.x << 'x' << plan_.rallyPoint.y
          << ",defense=";
@@ -490,7 +471,8 @@ void AstraModule::logDecision() {
             !unit.position.valid()) continue;
         if (armyIndex++ > 0) log_ << ';';
         log_ << unit.id << ':' << unitStats(unit.kind).name << '@'
-             << unit.position.x << 'x' << unit.position.y;
+             << unit.position.x << 'x' << unit.position.y << ':' << unit.durability()
+             << ':' << unit.weaponCooldown << ':' << unit.orderTargetId << ':' << unit.ammo;
     }
     log_ << ",knownStructures=";
     auto structureIndex = 0;
@@ -518,6 +500,16 @@ void AstraModule::logDecision() {
         log_ << static_cast<int>(action.action) << ':' << unitStats(action.target).name << ':'
              << (!action.reserved ? 'W' : (action.executable ? 'R' : 'H')) << ':'
              << action.priority;
+    }
+    log_ << ",busy=";
+    for (std::size_t index = 0; index < state_.self.busyProducers.size(); ++index) {
+        if (index > 0) log_ << ';';
+        log_ << unitStats(state_.self.busyProducers[index]).name;
+    }
+    log_ << ",queued=";
+    for (std::size_t index = 0; index < state_.self.queuedUnits.size(); ++index) {
+        if (index > 0) log_ << ';';
+        log_ << unitStats(state_.self.queuedUnits[index]).name;
     }
     log_ << '\n';
     log_.flush();

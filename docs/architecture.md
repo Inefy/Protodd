@@ -47,7 +47,7 @@ opponent file during a live game.
 
 | Module | Responsibility |
 |---|---|
-| `OpponentModel` | Base-anchored Bayesian opening, rush, first-seen timing, motion and production-capacity inference |
+| `OpponentModel` | Base-anchored evidence weighting, rush inference, conservative construction timing, motion and production-capacity inference |
 | `InfluenceMap` | Ground/air threat, detection, mobility, and strategic value |
 | `ScoutManager` | Route-risk sampling, search/tech/expansion deadlines and assignment hysteresis |
 | `StrategyEngine` | Matchup plans, observed-composition counters, transitions and attack timing |

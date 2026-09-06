@@ -1,5 +1,132 @@
 # Tournament validation
 
+## Follow-up candidate v15
+
+- Frozen DLL: `build/strength-pass2/v15-reserve-counterattack.dll`
+- SHA-256: `7B64C816C06927B567E90FB9A43C189DEB4C9AD534F4A1D08788E69AC40EB09E`
+- Target: Release, Win32, BWAPI 4.4.0
+- Source baseline: commit `3a74e70`, plus the follow-up working-tree changes
+- Changes and prior failed experiments: [follow-up audit](strength-pass2.md)
+
+The strict verifier and all four Release CTest targets pass. Tests ran on
+Windows 11 Education, version 10.0.26200; native Windows 10 validation and a
+broad competition benchmark remain outstanding.
+
+| Exact v15 binary | Map | Result | Peak callback |
+| --- | --- | --- | --- |
+| UABZerg | Benzene | Win, frame 29,018 | 10.577 ms |
+| UABProtoss | Python | Win, frame 21,547 | 11.598 ms |
+| UABTerran | Destination | Win, frame 22,229 | 9.064 ms |
+| BananaBrain AIIDE 2025 | Python | Pending | Pending |
+
+The Zerg run recorded no runtime threshold overruns or caught errors. The
+reserve-counterattack guard first activated at frame 17,445; pressure cleared,
+the plan returned to Harass, and Astra expanded before completing the win.
+This resolves the stalled v14 sample, which remained unfinished beyond frame
+57,960. The Zerg trace reached 30 Probes, but its late Core/Dragoon transition
+still exposes an opening that needs broader testing against ranged pressure.
+
+The Protoss run also recorded no runtime overruns or caught errors and reached
+50 Probes. Its Core, first Dragoon, and Dragoon range were first observed
+completed at frames 5,040, 6,120, and 9,720. Its reserve counterattack first
+activated at frame 11,736. The prior v5 Python sample won at frame 24,368;
+the 2,821-frame difference is an individual timing observation, not a measured
+increase in win rate.
+
+The Terran run recorded no runtime overruns or caught errors and reached 37
+Probes. At frame 17,640, three Dark Templar were attacking near the enemy main,
+the posture was Pressure, and Astra had started its second Nexus. This game
+did not activate the reserve-counterattack guard; the covert-advance behavior
+provided the breakout. Core completion was first observed at frame 7,920 and
+the first Dragoon at frame 9,000, so the slow fortified opening remains a
+limitation even though this opponent was defeated.
+
+All four tests request seed `1788550258`, reset Astra's learning, and use the
+same frozen DLL. Opponent learning and internal randomness can still vary;
+these are individual diagnostic games, not a win-rate estimate. The harness
+records package/map hashes, observed seeds, and authoritative pre-cleanup
+outcomes. Incomplete runs remain excluded from competitive wins and losses.
+
+## Follow-up candidate v14
+
+This candidate fixed the Terran breakout but exposed the reserve-army
+counterattack problem in Zerg testing. It is superseded by v15.
+
+- Frozen DLL: `build/strength-pass2/v14-covert-breakout.dll`
+- SHA-256: `4D201A4F3503F8A7B08CDBEF9E750FA9F450B1850E97AF93176AAA55E47300A0`
+- Target: Release, Win32, BWAPI 4.4.0
+- Source baseline: commit `3a74e70`, plus the follow-up working-tree changes
+- Implementation and experiments: [follow-up audit](strength-pass2.md)
+
+The full strict verifier and all four Release CTest targets pass. Native
+Windows 10 testing and a broad competition benchmark remain outstanding.
+
+| Exact v14 binary | Map | Result | Peak callback |
+| --- | --- | --- | --- |
+| UABTerran | Destination | Win, frame 27,747 | 25.522 ms |
+| UABProtoss | Python | Win, frame 22,725 | 12.981 ms |
+| UABZerg | Benzene | Incomplete at 900-second test limit | 17.038 ms, raw shutdown summary |
+
+The Terran run recorded no runtime threshold overruns or caught errors. At
+frame 18,720, the Dark Templar had crossed toward the enemy base, the global
+posture returned to Pressure, and expansion resumed. The game finished with
+58 Probes observed near the end. The v13 run had stalled beyond frame 52,200;
+this sample validates a breakout and completion, not a general win-rate claim.
+The Protoss run also had no runtime overruns or caught errors. It reached 55
+Probes and fielded a Reaver with three Scarabs at frame 15,480 while saving for
+expansion. Its win was 1,643 frames earlier than the prior v5 Python sample;
+these two games do not establish a general win-rate increase. The Zerg run
+was incomplete at the 900-second test limit: the army reached maximum supply
+but remained on defense. At frame 33,840 it had 73 combat units, nine visible
+enemies, and a favorable reserve fight estimate, yet did not advance. V15 adds
+a guarded reserve counterattack. The queued v14 BananaBrain test was not run
+after this incomplete-game failure.
+
+## Follow-up candidate v13
+
+This candidate exposed a Terran containment regression and is superseded by
+the v14 experiment. Its records remain separate below.
+
+- Frozen DLL: `build/strength-pass2/v13-economy-defense.dll`
+- SHA-256: `0F4E0F2E0639FD4471AE09465AEDFCA8B33379DCA8D9248760A8AB5FB3C1C05D`
+- Target: Release, Win32, BWAPI 4.4.0
+- Source baseline: commit `3a74e70`, plus the follow-up working-tree changes
+- Changes and failed experiments: [follow-up audit](strength-pass2.md)
+
+The strict verifier passes: warnings-as-errors core compilation, x86 adapter
+compilation, core scenarios, two log-analyzer tests, six direct-report tests,
+seven ladder tests, privacy, and whitespace. All four Release CTest targets
+pass. Tests ran on the same Windows 11 host as the initial audit; native
+Windows 10 verification remains outstanding.
+
+| Exact v13 binary | Map | Result | Peak callback |
+| --- | --- | --- | --- |
+| UABProtoss | Python | Win, frame 20,958 | 13.184 ms |
+| BananaBrain AIIDE 2025 | Python | Loss, frame 12,371 | 5.016 ms |
+| UABTerran | Destination | Incomplete at 900-second test limit | 26.112 ms, raw shutdown summary |
+
+The Protoss game requested and observed seed `1788550258`. It retained the
+economy through the opening, reached 51 Probes, and closed the game after
+recovering from an attack. Its trace records no over-42-ms callbacks or caught
+errors. The first completed Core and Dragoon were observed at frames 5,040
+and 6,120 respectively. The prior v5 won its Python sample at frame 24,368;
+the 3,410-frame difference is a sample timing improvement, not a measured
+win-rate increase.
+
+The v13 Terran run stalled with a large army at home and later lost nearly all
+workers. Its last sampled state was frame 52,200. Cleanup's terminal record is
+not a competitive loss: the manifest marks the game incomplete. This regression
+prompted v14's Dark Templar breakout correction. No v13 Zerg game was run.
+
+The BananaBrain test completed
+without recorded runtime overruns or caught errors, but its ranged attack
+destroyed the economy. Earlier BananaBrain experiments through v12 were also
+losses. Do not describe this
+candidate as championship-ready or pool its results with the earlier DLLs.
+Local manifests record opponent packages, map hashes, seeds, and authoritative
+pre-cleanup outcomes. Opponent learning and internal randomness can vary
+between runs even when the requested seed and package are the same.
+
 ## September 4 strength-audit candidate
 
 - DLL: `build/tournament/Release/AstraBot.dll`

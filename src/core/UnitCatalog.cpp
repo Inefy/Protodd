@@ -167,8 +167,7 @@ std::span<const UnitKind> unitPrerequisites(const UnitKind kind) noexcept {
     static constexpr UnitKind gatewayCore[]{UnitKind::gateway, UnitKind::cyberneticsCore};
     static constexpr UnitKind robotics[]{UnitKind::roboticsFacility};
     static constexpr UnitKind observatory[]{UnitKind::roboticsFacility, UnitKind::observatory};
-    static constexpr UnitKind supportBay[]{UnitKind::roboticsFacility,
-                                            UnitKind::roboticsSupportBay};
+    static constexpr UnitKind supportBay[]{UnitKind::roboticsFacility};
     static constexpr UnitKind stargate[]{UnitKind::stargate};
     static constexpr UnitKind citadel[]{UnitKind::citadelOfAdun};
     static constexpr UnitKind archives[]{UnitKind::gateway, UnitKind::templarArchives};

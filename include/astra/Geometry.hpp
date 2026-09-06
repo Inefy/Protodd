@@ -17,6 +17,20 @@ struct Position {
     friend constexpr bool operator==(const Position&, const Position&) = default;
 };
 
+struct BuildingFootprint {
+    Position topLeft;
+    int width{};
+    int height{};
+};
+
+[[nodiscard]] constexpr bool separatedByGap(
+    const BuildingFootprint a, const BuildingFootprint b, const int gap) noexcept {
+    return a.topLeft.x + a.width + gap <= b.topLeft.x ||
+           b.topLeft.x + b.width + gap <= a.topLeft.x ||
+           a.topLeft.y + a.height + gap <= b.topLeft.y ||
+           b.topLeft.y + b.height + gap <= a.topLeft.y;
+}
+
 [[nodiscard]] inline double distance(const Position a, const Position b) noexcept {
     return std::hypot(static_cast<double>(a.x - b.x),
                       static_cast<double>(a.y - b.y));
@@ -44,4 +58,3 @@ struct Position {
 }
 
 }  // namespace astra
-

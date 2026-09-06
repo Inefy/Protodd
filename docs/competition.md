@@ -81,7 +81,9 @@ Direct local tests record a `.json` outcome manifest before StarCraft is
 closed. Use `tools/direct_report.py` with those manifests: an interrupted game
 is incomplete even if shutdown subsequently writes `END,loss` to a raw trace.
 The direct-match helper preserves a raw trace and archives the pre-cleanup
-trace separately. Its default resets learning; `-PreserveLearning` retains it.
+trace separately. Its default resets Astra's learning; `-PreserveLearning`
+retains it. Opponent read/write data is preserved, so repeated tests may face
+different learned openings even with the same opponent package and seed.
 Use `-Seed <integer>` to request BWAPI's seed override on both clients, then
 check the manifest's observed seed and the initial base positions before
 treating runs as paired. Matching a requested seed alone is not proof of

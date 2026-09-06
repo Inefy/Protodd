@@ -100,6 +100,7 @@ void OpponentModel::update(const GameState& state) {
 
     Beliefs evidence{};
     evidence.fill(1.0);
+    evidence[index(EnemyPlan::unknown)] = 2.5;
     const auto minutes = static_cast<double>(state.frame) / (24.0 * 60.0);
     const auto recentlySeen = [&state](const UnitSnapshot& unit, const Frame memory) {
         return unit.visible || state.frame - unit.lastSeen <= memory;
@@ -156,18 +157,18 @@ void OpponentModel::update(const GameState& state) {
         evidence[index(EnemyPlan::heavyPressure)] += static_cast<double>(enemyCombat) * 0.08;
     }
 
-    // A completed Pool first seen early enough must have started far earlier
-    // than a macro opening. For an incomplete Pool, build progress gives a
-    // tighter start estimate. This lets the strategy prepare at the first
-    // scouting pass rather than waiting for Zerglings to cross the map.
+    // Enemy construction timers are private. An unfinished Pool proves only
+    // that it has started; observing completion tightens the latest possible
+    // start by one build duration. Never subtract current progress from the
+    // timestamp of an earlier, different observation.
     auto earliestPoolStart = std::numeric_limits<Frame>::max();
     for (const auto& unit : state.enemy.units) {
         if (unit.kind != UnitKind::spawningPool || unit.firstSeen <= 0) continue;
         const auto buildTime = unitStats(UnitKind::spawningPool).buildTime;
-        const auto elapsed = unit.completed
-                                 ? buildTime
-                                 : buildTime * std::clamp(unit.buildProgress, 0, 100) / 100;
-        earliestPoolStart = std::min(earliestPoolStart, unit.firstSeen - elapsed);
+        const auto latestStart = unit.constructionStartUpperBound >= 0
+                                     ? unit.constructionStartUpperBound
+                                     : unit.firstSeen - (unit.completed ? buildTime : 0);
+        earliestPoolStart = std::min(earliestPoolStart, latestStart);
     }
     if (minutes < 6.0 && earliestPoolStart < 1'650) {
         evidence[index(EnemyPlan::fastRush)] += 9.0;
@@ -219,11 +220,12 @@ void OpponentModel::update(const GameState& state) {
     }
     evidence[index(EnemyPlan::cloakedTech)] += cloakUnits * 2.2;
 
-    // A tempered Bayesian update retains prior knowledge without becoming
-    // permanently certain after a single scout observation.
-    for (std::size_t i = 0; i < beliefs_.size(); ++i) {
-        beliefs_[i] = std::pow(std::max(0.0001, beliefs_[i]), 0.82) * evidence[i];
-    }
+    // These features already include remembered observations. Multiplying
+    // them into yesterday's posterior counted one visible Zealot as hundreds
+    // of independent confirmations and eventually declared a certain rush.
+    // Score the current evidence once; unit memory and the strategic director
+    // provide persistence without making confidence depend on callback rate.
+    beliefs_ = evidence;
     normalize();
 
     double armyValue = 0.0;
@@ -253,14 +255,24 @@ void OpponentModel::update(const GameState& state) {
     assessment_.workerRush = probability(EnemyPlan::workerRush);
     assessment_.proxy = probability(EnemyPlan::proxyRush);
     assessment_.staticContain = probability(EnemyPlan::staticContain);
+    // A unit can be close enough to influence pressure without actually
+    // breaching the mineral line. Keep the broader local count for pressure
+    // scoring, but only expose a tighter count as an emergency breach. The
+    // previous 896px value kept the strategic director in Defend while an
+    // enemy army was merely staging outside the base.
     const auto localCombat = std::ranges::count_if(
         state.enemy.units, [&nearMain](const UnitSnapshot& unit) {
             return unit.visible && !unit.flying && isCombatUnit(unit.kind) &&
                    nearMain(unit, 896);
         });
+    const auto combatAtMain = std::ranges::count_if(
+        state.enemy.units, [&nearMain](const UnitSnapshot& unit) {
+            return unit.visible && !unit.flying && isCombatUnit(unit.kind) &&
+                   nearMain(unit, 448);
+        });
     assessment_.enemiesNearMain = static_cast<int>(workersNearUs + proxyBuildings +
                                                    localCombat);
-    assessment_.combatEnemiesNearMain = static_cast<int>(localCombat);
+    assessment_.combatEnemiesNearMain = static_cast<int>(combatAtMain);
     assessment_.approachingCombatEnemies = approachingCombat;
     assessment_.approachingArmyValue = approachingValue;
     assessment_.enemyProductionCapacity = observedProduction;

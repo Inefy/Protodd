@@ -27,6 +27,7 @@ bool closeTo(const Position left, const Position right, const int radius) noexce
 
 void BwapiBridge::onStart() {
     enemyMemory_.clear();
+    mineralAllocator_.reset();
     baseLastScouted_.clear();
     pendingBuilds_.clear();
     failedBuildSites_.clear();
@@ -61,8 +62,7 @@ GameState BwapiBridge::observe() {
         const auto live = Broodwar->getUnit(memory.id);
         if (live != nullptr && live->exists() && live->isVisible()) {
             auto current = snapshotUnit(live, false);
-            current.lastPosition = memory.position;
-            current.firstSeen = memory.firstSeen;
+            current.inheritObservationHistory(memory);
             memory = std::move(current);
         } else {
             const auto tile = BWAPI::TilePosition(memory.position.x / 32,
@@ -166,8 +166,7 @@ void BwapiBridge::remember(const BWAPI::Unit unit) {
     auto current = snapshotUnit(unit, false);
     if (const auto previous = enemyMemory_.find(unit->getID());
         previous != enemyMemory_.end()) {
-        current.lastPosition = previous->second.position;
-        current.firstSeen = previous->second.firstSeen;
+        current.inheritObservationHistory(previous->second);
     } else {
         current.firstSeen = current.lastSeen;
     }
@@ -307,16 +306,25 @@ int BwapiBridge::executeMacro(
 }
 
 void BwapiBridge::executeWorkers(const std::span<const WorkerAssignment> assignments) {
-    std::unordered_map<UnitId, int> mineralLoad;
-    for (const auto candidate : Broodwar->self()->getUnits()) {
-        if (candidate == nullptr || !candidate->exists() || !candidate->getType().isWorker()) {
-            continue;
-        }
-        const auto target = candidate->getOrderTarget();
-        if (target != nullptr && target->exists() && target->getType().isMineralField()) {
-            ++mineralLoad[target->getID()];
+    std::vector<MineralWorker> mineralWorkers;
+    std::vector<MineralPatchCandidate> patches;
+    for (const auto& assignment : assignments) {
+        if (assignment.job != WorkerJob::minerals && assignment.job != WorkerJob::transfer) continue;
+        const auto worker = Broodwar->getUnit(assignment.worker);
+        if (worker == nullptr || !worker->exists() || !worker->isCompleted() ||
+            worker->isConstructing()) continue;
+        const auto target = worker->getOrderTarget();
+        mineralWorkers.push_back({assignment.worker, fromBwapi(worker->getPosition()),
+                                  assignment.targetPosition,
+                                  target != nullptr && target->getType().isMineralField()
+                                      ? target->getID() : -1});
+    }
+    for (const auto patch : Broodwar->getMinerals()) {
+        if (patch != nullptr && patch->exists() && patch->getResources() > 0) {
+            patches.push_back({patch->getID(), fromBwapi(patch->getPosition()), 0});
         }
     }
+    const auto& mineralTargets = mineralAllocator_.assign(mineralWorkers, patches);
 
     for (const auto& assignment : assignments) {
         const auto worker = Broodwar->getUnit(assignment.worker);
@@ -420,29 +428,9 @@ void BwapiBridge::executeWorkers(const std::span<const WorkerAssignment> assignm
                 Filter::IsOwned && Filter::IsCompleted && Filter::IsRefinery);
         } else if (assignment.job == WorkerJob::minerals ||
                    assignment.job == WorkerJob::transfer) {
-            const auto currentMineral = currentTarget != nullptr && currentTarget->exists() &&
-                                        currentTarget->getType().isMineralField()
-                                            ? currentTarget->getID()
-                                            : -1;
-            if (currentMineral >= 0 && mineralLoad[currentMineral] > 0) {
-                --mineralLoad[currentMineral];
-            }
-            std::vector<MineralPatchCandidate> candidates;
-            for (const auto mineral : Broodwar->getMinerals()) {
-                if (mineral == nullptr || !mineral->exists() || mineral->getResources() <= 0 ||
-                    !closeTo(fromBwapi(mineral->getInitialPosition()),
-                             assignment.targetPosition, 480)) {
-                    continue;
-                }
-                candidates.push_back({mineral->getID(), fromBwapi(mineral->getPosition()),
-                                      mineralLoad[mineral->getID()]});
-            }
-            const auto targetId = selectMineralPatch(
-                candidates, assignment.targetPosition,
-                fromBwapi(worker->getPosition()), currentMineral);
-            if (targetId >= 0) {
-                target = Broodwar->getUnit(targetId);
-                ++mineralLoad[targetId];
+            const auto selected = mineralTargets.find(assignment.worker);
+            if (selected != mineralTargets.end()) {
+                target = Broodwar->getUnit(selected->second);
             } else {
                 target = Broodwar->getClosestUnit(anchor, Filter::IsMineralField);
             }
@@ -485,7 +473,8 @@ void BwapiBridge::runMaintenance(const int mineralReserve, const int gasReserve)
         return zone.expires <= frame;
     });
 
-    auto freeMinerals = std::max(0, self->minerals() - mineralReserve);
+    auto mineralBank = self->minerals();
+    auto freeMinerals = std::max(0, mineralBank - mineralReserve);
     auto freeGas = std::max(0, self->gas() - gasReserve);
     std::unordered_set<UnitId> spellcastersCommitted;
     const auto reaverCapacity = self->getUpgradeLevel(UpgradeTypes::Reaver_Capacity) > 0
@@ -501,20 +490,28 @@ void BwapiBridge::runMaintenance(const int mineralReserve, const int gasReserve)
         }
         const auto type = unit->getType();
         if (type == UnitTypes::Protoss_Reaver &&
-            unit->getScarabCount() < reaverCapacity) {
+            unit->getScarabCount() < reaverCapacity && unit->getTrainingQueue().empty()) {
             const auto ammo = UnitTypes::Protoss_Scarab;
-            if (freeMinerals >= ammo.mineralPrice() && freeGas >= ammo.gasPrice() &&
+            // The first payload makes an expensive unit useful immediately.
+            // Repeated army reservations must not leave an empty Reaver unable
+            // to buy a fifteen-mineral Scarab during the fight it was built for.
+            const auto ammoBudget = unit->getScarabCount() < 2 ? mineralBank : freeMinerals;
+            if (ammoBudget >= ammo.mineralPrice() && freeGas >= ammo.gasPrice() &&
                 unit->canTrain(ammo) && unit->train(ammo)) {
-                freeMinerals -= ammo.mineralPrice();
+                mineralBank -= ammo.mineralPrice();
+                freeMinerals = std::max(0, mineralBank - mineralReserve);
                 freeGas -= ammo.gasPrice();
             }
         } else if (type == UnitTypes::Protoss_Carrier &&
                    unit->getInterceptorCount() < carrierCapacity &&
-                   freeMinerals >= UnitTypes::Protoss_Interceptor.mineralPrice() &&
+                   unit->getTrainingQueue().empty() &&
+                   (unit->getInterceptorCount() < 4 ? mineralBank : freeMinerals) >=
+                       UnitTypes::Protoss_Interceptor.mineralPrice() &&
                    freeGas >= UnitTypes::Protoss_Interceptor.gasPrice() &&
                    unit->canTrain(UnitTypes::Protoss_Interceptor) &&
                    unit->train(UnitTypes::Protoss_Interceptor)) {
-            freeMinerals -= UnitTypes::Protoss_Interceptor.mineralPrice();
+            mineralBank -= UnitTypes::Protoss_Interceptor.mineralPrice();
+            freeMinerals = std::max(0, mineralBank - mineralReserve);
             freeGas -= UnitTypes::Protoss_Interceptor.gasPrice();
         }
     }
@@ -754,6 +751,17 @@ UnitSnapshot BwapiBridge::snapshotUnit(const BWAPI::Unit unit, const bool ours) 
     result.dimensionDown = type.dimensionDown();
     result.disabled = unit->isLockedDown() || unit->isMaelstrommed() || unit->isStasised();
     result.invincible = unit->isInvincible() || unit->isStasised();
+    result.gatheringGas = ours && unit->isGatheringGas();
+    if (!ours && !result.completed) {
+        // BWAPI's inside-only remaining-build-time field is zero for enemies.
+        // Zero here means unavailable, not a construction that is 100% done.
+        result.buildProgress = -1;
+    }
+    if (isBuilding(kind)) {
+        const auto elapsed = result.completed ? buildTime :
+                             (ours ? buildTime * result.buildProgress / 100 : 0);
+        result.constructionStartUpperBound = std::max(0, result.lastSeen - elapsed);
+    }
     result.groundWeapon.hits = std::max(result.groundWeapon.hits, type.maxGroundHits());
     result.airWeapon.hits = std::max(result.airWeapon.hits, type.maxAirHits());
     if (kind == UnitKind::reaver) result.ammo = unit->getScarabCount();
@@ -1172,11 +1180,15 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
     auto anchorPosition = plan.rallyPoint.valid()
                               ? toBwapiPosition(plan.rallyPoint)
                               : BWAPI::Position(Broodwar->self()->getStartLocation());
-    const auto twoPlayerMap = Broodwar->getStartLocations().size() == 2U;
+    const auto defenseDirectionKnown = Broodwar->getStartLocations().size() == 2U ||
+        std::ranges::any_of(enemyMemory_, [](const auto& entry) {
+            return entry.second.role == UnitRole::resourceDepot;
+        });
     auto useForwardLayout = false;
     auto startLayoutAtCenter = false;
     auto preserveBaseAnchor = false;
     auto avoidEnemyFire = false;
+    Unit defendedNexus = nullptr;
     if (kind == UnitKind::pylon) {
         Unit disabledProduction = nullptr;
         for (const auto building : Broodwar->self()->getUnits()) {
@@ -1223,11 +1235,11 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
                                              ? distance(fromBwapi(leastPoweredBase->getPosition()),
                                                         plan.rallyPoint)
                                              : 0.0;
-            if (twoPlayerMap &&
+            if (defenseDirectionKnown &&
                 (needsFirstForwardPower || needsRedundantForwardPower) &&
                 forwardDistance >= 64.0 && forwardDistance <= 256.0) {
-                // On a two-player map the enemy-facing direction is known at
-                // frame zero. Power the intercept with the first Pylon, then
+                // Once the enemy-facing direction is known, power the intercept
+                // with the first Pylon, then
                 // put redundant power halfway back toward the Nexus. The
                 // backup still overlaps the Cannon screen without sending its
                 // builder through the forward Marine lane.
@@ -1257,7 +1269,7 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
                                 kind == UnitKind::templarArchives ||
                                 kind == UnitKind::fleetBeacon ||
                                 kind == UnitKind::arbiterTribunal;
-    if (twoPlayerMap && type.requiresPsi() && vulnerableTech) {
+    if (defenseDirectionKnown && type.requiresPsi() && vulnerableTech) {
         const auto base = Broodwar->getClosestUnit(
             builder->getPosition(),
             Filter::GetType == UnitTypes::Protoss_Nexus && Filter::IsCompleted &&
@@ -1301,6 +1313,7 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
             }
         }
         if (forwardNexus != nullptr) {
+            defendedNexus = forwardNexus;
             const auto localPylon = Broodwar->getClosestUnit(
                 forwardNexus->getPosition(),
                 Filter::GetType == UnitTypes::Protoss_Pylon && Filter::IsCompleted &&
@@ -1315,7 +1328,7 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
                                              ? distance(fromBwapi(forwardNexus->getPosition()),
                                                         plan.rallyPoint)
                                              : 0.0;
-            if (twoPlayerMap && forwardDistance >= 64.0 &&
+            if (defenseDirectionKnown && forwardDistance >= 64.0 &&
                 forwardDistance <= 256.0) {
                 // Intercept ranged rushes before they acquire the Probe line.
                 // Keeping the anchor within eight tiles of the Nexus preserves
@@ -1360,6 +1373,11 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         TilePosition{4, 0},
     };
     const auto& layout = useForwardLayout ? forwardLayout : standardLayout;
+    // Tech buildings are allowed to sit adjacent to the production cluster.
+    // BWAPI's own canBuildHere check still forbids overlapping footprints, but
+    // the old 32px movement corridor made Robotics/Support Bay placement
+    // impossible after a healthy one-base Gateway swell.
+    const auto structureGap = vulnerableTech ? 0 : 32;
     const auto existing = static_cast<std::size_t>(std::ranges::count_if(
         Broodwar->self()->getUnits(), [type](const Unit unit) {
             return unit != nullptr && unit->exists() && unit->getType() == type;
@@ -1385,6 +1403,27 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         // false here can select a nominally buildable fogged tile which the
         // command then rejects as Unbuildable_Location.
         if (!Broodwar->canBuildHere(location, type, builder, true)) return false;
+        const BuildingFootprint footprint{
+            {location.x * 32, location.y * 32}, type.tileWidth() * 32, type.tileHeight() * 32};
+        for (const auto building : Broodwar->self()->getUnits()) {
+            if (building == nullptr || !building->exists() || !building->getType().isBuilding() ||
+                building->isLifted()) continue;
+            const auto otherType = building->getType();
+            const auto otherTile = building->getTilePosition();
+            const BuildingFootprint occupied{
+                {otherTile.x * 32, otherTile.y * 32}, otherType.tileWidth() * 32,
+                otherType.tileHeight() * 32};
+            // Adjacent buildings created sealed pockets of fresh Dragoons.
+            // Reserve a full build tile for movement between structures.
+            if (!separatedByGap(footprint, occupied, structureGap)) return false;
+        }
+        for (const auto& [pendingKind, pending] : pendingBuilds_) {
+            if (pendingKind == kind || pendingKind == UnitKind::nexus) continue;
+            const auto pendingType = toBwapi(pendingKind);
+            if (!separatedByGap(footprint,
+                    {pending.target, pendingType.tileWidth() * 32, pendingType.tileHeight() * 32},
+                    structureGap)) return false;
+        }
         ++buildableCandidates;
         const Position center{
             location.x * 32 + type.tileWidth() * 16,
@@ -1421,6 +1460,53 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         if (!miningLaneFallback.isValid()) miningLaneFallback = location;
         return TilePositions::None;
     };
+    if (defendedNexus != nullptr) {
+        // Score actual coverage before consulting the generic layout. A
+        // Cannon beside the forward Pylon can leave the entire mineral line
+        // outside its weapon range, even though it is close to the Nexus.
+        auto bestLocation = TilePositions::None;
+        auto bestScore = -std::numeric_limits<double>::infinity();
+        const auto nexusPosition = fromBwapi(defendedNexus->getPosition());
+        const auto nexusTile = defendedNexus->getTilePosition();
+        std::vector<Position> workerLine;
+        std::vector<Position> existingCannons;
+        for (const auto patch : Broodwar->getMinerals()) {
+            if (patch->exists() && patch->getResources() > 0 &&
+                patch->getDistance(defendedNexus) <= 288) {
+                workerLine.push_back(fromBwapi(patch->getPosition()));
+            }
+        }
+        for (const auto cannon : Broodwar->self()->getUnits()) {
+            if (cannon->exists() && cannon->getType() == UnitTypes::Protoss_Photon_Cannon &&
+                cannon->isPowered()) existingCannons.push_back(fromBwapi(cannon->getPosition()));
+        }
+        for (auto dy = -8; dy <= 8; ++dy) {
+            for (auto dx = -8; dx <= 8; ++dx) {
+                const auto location = nexusTile + TilePosition{dx, dy};
+                if (!usable(location) || blocksMiningLane(location, type)) continue;
+                const Position center{location.x * 32 + type.tileWidth() * 16,
+                                      location.y * 32 + type.tileHeight() * 16};
+                auto score = -distance(center, nexusPosition) * 0.04;
+                if (plan.rallyPoint.valid()) score -= distance(center, plan.rallyPoint) * 0.08;
+                for (const auto patch : workerLine) {
+                    if (distanceSquared(center, patch) > 256 * 256) continue;
+                    const auto alreadyCovered = std::ranges::any_of(existingCannons,
+                        [patch](const Position cannon) {
+                            return distanceSquared(cannon, patch) <= 256 * 256;
+                        });
+                    score += alreadyCovered ? 2.0 : 12.0;
+                }
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestLocation = location;
+                }
+            }
+        }
+        if (bestLocation.isValid()) {
+            lastMacroStatus_ = "placement-defensive-coverage";
+            return bestLocation;
+        }
+    }
     for (std::size_t attempt = 0; attempt < layout.size(); ++attempt) {
         const auto offset = layout[(layoutStart + attempt) % layout.size()];
         const auto location = Broodwar->getBuildLocation(type, anchor + offset, 8);

@@ -1,5 +1,9 @@
 # Strength audit — September 4, 2026
 
+This is the initial audit record. The [follow-up audit](strength-pass2.md)
+documents subsequent implementation changes and live experiments; consult
+[validation](validation.md) for the current candidate.
+
 Astra has a useful architecture and reproducible local testing, but there is
 not yet evidence that it can contend for first place at AIIDE. The immediate
 work in this audit fixes concrete execution and evaluation errors. The next

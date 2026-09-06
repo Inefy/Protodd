@@ -13,6 +13,49 @@ import unittest
 from log_analyzer import analyze, wilson_interval
 
 
+def diagnose_states(lines: list[str]) -> dict:
+    """Extract observed milestones, not exact event timings, from sampled states."""
+    result = {"state_samples": 0, "max_probes": 0,
+              "first_observed_completed_dragoon_frame": None,
+              "first_observed_completed_core_frame": None,
+              "first_observed_range_frame": None,
+              "first_counterattack_frame": None,
+              "gas_assignment_samples": 0, "gas_above_target_samples": 0,
+              "last_mined_minerals": None, "last_mined_gas": None}
+    for line in lines:
+        fields = line.strip().split(",")
+        if len(fields) < 14 or fields[0] != "STATE":
+            continue
+        try:
+            frame = int(fields[1])
+            extras = dict(field.split("=", 1) for field in fields[14:] if "=" in field)
+            result["state_samples"] += 1
+            result["max_probes"] = max(result["max_probes"], int(extras.get("probes", 0)))
+            for name, milestone in (("dragoons", "first_observed_completed_dragoon_frame"),
+                                    ("core", "first_observed_completed_core_frame")):
+                counts = extras.get(name, "0/0").split("/")
+                completed = int(counts[1]) if len(counts) == 2 else 0
+                if completed > 0 and result[milestone] is None:
+                    result[milestone] = frame
+            if result["first_observed_completed_core_frame"] is None and any(
+                    structure.startswith("R@") for structure in extras.get("defense", "").split(";")):
+                result["first_observed_completed_core_frame"] = frame
+            if int(extras.get("range", "0/0").split("/")[0]) > 0 and result["first_observed_range_frame"] is None:
+                result["first_observed_range_frame"] = frame
+            counterattack = int(extras.get("counterattackFirst", -1))
+            if counterattack >= 0 and result["first_counterattack_frame"] is None:
+                result["first_counterattack_frame"] = counterattack
+            if "gasWorkers" in extras and "gasTarget" in extras:
+                result["gas_assignment_samples"] += 1
+                result["gas_above_target_samples"] += int(int(extras["gasWorkers"]) > int(extras["gasTarget"]))
+            for field, key in (("minedMinerals", "last_mined_minerals"), ("minedGas", "last_mined_gas")):
+                if field in extras:
+                    result[key] = int(extras[field])
+        except (ValueError, IndexError):
+            continue
+    return result
+
+
 def summarize(records: list[dict]) -> dict:
     completed = [r for r in records if r.get("status") == "completed"
                  and str(r.get("result", "")).startswith(("END,win,", "END,loss,"))]
@@ -54,6 +97,29 @@ def summarize(records: list[dict]) -> dict:
 
 
 class DirectReportTests(unittest.TestCase):
+    def test_milestones_require_completed_units(self):
+        prefix = "STATE,{frame},Plan,Hold,Unknown,1,1,100,50,30,50,0.1,normal,idle,"
+        states = [prefix.format(frame=3600) + "probes=12,dragoons=1/0,core=1/1,range=0/1",
+                  prefix.format(frame=3960) + "probes=13,dragoons=1/1,range=1/0,counterattackFirst=3652"]
+        result = diagnose_states(states)
+        self.assertEqual(result["first_observed_completed_core_frame"], 3600)
+        self.assertEqual(result["first_observed_completed_dragoon_frame"], 3960)
+        self.assertEqual(result["first_observed_range_frame"], 3960)
+        self.assertEqual(result["max_probes"], 13)
+        self.assertEqual(result["first_counterattack_frame"], 3652)
+        self.assertIsNone(result["last_mined_minerals"])
+        self.assertEqual(result["gas_assignment_samples"], 0)
+
+    def test_mining_observation_and_legacy_core(self):
+        state = ("STATE,7200,Plan,Hold,Unknown,1,1,100,50,30,50,0.1,normal,idle,"
+                 "defense=N@256x256;R@400x256,gasWorkers=4,gasTarget=3,"
+                 "minedMinerals=2400,minedGas=300")
+        result = diagnose_states([state])
+        self.assertEqual(result["first_observed_completed_core_frame"], 7200)
+        self.assertEqual(result["last_mined_minerals"], 2400)
+        self.assertEqual(result["last_mined_gas"], 300)
+        self.assertEqual(result["gas_above_target_samples"], 1)
+
     def test_shutdown_loss_is_incomplete(self):
         report = summarize([{"status": "incomplete", "result": "END,loss,18377"}])
         self.assertEqual((report["completed"], report["losses"], report["incomplete"]), (0, 0, 1))
@@ -98,8 +164,11 @@ def main() -> None:
     for path in args.manifests:
         record = json.loads(path.read_text(encoding="utf-8-sig"))
         trace = path.with_suffix(".log")
-        if record.get("status") == "completed" and trace.exists():
-            record["telemetry"] = analyze(trace.read_text(encoding="utf-8-sig").splitlines())
+        if trace.exists():
+            lines = trace.read_text(encoding="utf-8-sig").splitlines()
+            record["build_diagnostics"] = diagnose_states(lines)
+            if record.get("status") == "completed":
+                record["telemetry"] = analyze(lines)
         records.append(record)
     print(json.dumps({**summarize(records), "matches": records}, indent=2))
 

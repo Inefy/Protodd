@@ -439,6 +439,38 @@ double CombatEvaluator::unitPower(
     return (unitStats(unit.kind).combatValue + dps * 0.45) * rangeFactor * mobility * vitality;
 }
 
+std::vector<Command> TacticalController::recharge(
+    const std::span<const UnitSnapshot> friendly, const bool defending) const {
+    std::vector<Command> commands;
+    for (const auto& unit : friendly) {
+        if ((!isCombatUnit(unit.kind) && !(defending && isWorker(unit.kind))) ||
+            !combatReady(unit) || unit.maxShields <= 0 ||
+            unit.shields * 5 >= unit.maxShields * 2 || unit.attackFrame ||
+            (unit.underAttack && unit.healthFraction() >= 0.5)) continue;
+        const UnitSnapshot* battery = nullptr;
+        auto bestDistance = 256 * 256 + 1;
+        for (const auto& candidate : friendly) {
+            if (candidate.kind != UnitKind::shieldBattery || !combatReady(candidate) ||
+                !candidate.powered || candidate.energy < 10 ||
+                !candidate.position.valid()) continue;
+            const auto candidateDistance = distanceSquared(unit.position, candidate.position);
+            if (candidateDistance < bestDistance) {
+                bestDistance = candidateDistance;
+                battery = &candidate;
+            }
+        }
+        if (battery != nullptr) {
+            // A critically wounded unit's retreat has priority 100. Healing
+            // must beat it or the most damaged units can never use a Battery.
+            commands.push_back({unit.id, CommandType::recharge, battery->id, {-1, -1},
+                                UnitKind::shieldBattery,
+                                unit.healthFraction() < 0.28 ? 101 : 92, 0,
+                                "shield-battery-recharge"});
+        }
+    }
+    return commands;
+}
+
 std::vector<Command> TacticalController::control(
     const std::span<const UnitSnapshot> friendly,
     const std::span<const UnitSnapshot> enemy,
@@ -448,7 +480,8 @@ std::vector<Command> TacticalController::control(
     const InfluenceMap& influence,
     const Position formationCenter,
     const int latencyFrames,
-    const bool psionicStormAvailable) const {
+    const bool psionicStormAvailable,
+    const DefenseArea defense) const {
     std::vector<Command> commands;
     commands.reserve(friendly.size());
     CombatEvaluator evaluator;
@@ -470,10 +503,15 @@ std::vector<Command> TacticalController::control(
         if (!isCombatUnit(unit.kind) || !combatReady(unit)) {
             continue;
         }
-        const auto target = evaluator.selectTarget(unit, enemy, allocations);
         const auto local = influence.at(unit.position);
         const auto localThreat = unit.flying ? local.airThreat : local.groundThreat;
         const auto fragile = unit.healthFraction() < 0.28;
+        // Our BWAPI detected flag describes our own vision, not the enemy's.
+        // Use observed detection influence and actual incoming attacks to
+        // decide whether a Dark Templar can probe a contain. This is a fog-of-
+        // war risk estimate: unseen detectors or a future scan can invalidate it.
+        const auto covertAdvance = unit.kind == UnitKind::darkTemplar && unit.cloaked &&
+                                   !unit.underAttack && !fragile && local.detection <= 0.1F;
         const auto locallyOverwhelmed = localThreat > 5.0F &&
                                         estimate.decision != FightDecision::engage &&
                                         estimate.ratio < 1.0;
@@ -493,6 +531,29 @@ std::vector<Command> TacticalController::control(
         // can interrupt the attack sequence. Let the shot complete instead of
         // producing stutter, cancelled Dragoon volleys, and indecisive melee.
         if (unit.attackFrame) continue;
+
+        // An attack-unit order follows a kiting opponent indefinitely. Return
+        // stragglers to the protected area, and never acquire a distant target
+        // merely because it is visible to another member of the squad.
+        if (defense.active() && !covertAdvance && !defense.contains(unit.position)) {
+            commands.push_back({unit.id, CommandType::move, -1,
+                                defense.center,
+                                UnitKind::unknown, 90, 0, "defense-return"});
+            continue;
+        }
+        std::vector<UnitSnapshot> defenseTargets;
+        if (defense.active() && !covertAdvance) {
+            for (const auto& candidate : enemy) {
+                const auto& weapon = candidate.flying ? unit.airWeapon : unit.groundWeapon;
+                if (defense.contains(candidate.position) ||
+                    weaponDistance(unit, candidate) <= weapon.maxRange) {
+                    defenseTargets.push_back(candidate);
+                }
+            }
+        }
+        const auto targets = defense.active() && !covertAdvance
+                                 ? std::span<const UnitSnapshot>{defenseTargets} : enemy;
+        const auto target = evaluator.selectTarget(unit, targets, allocations);
 
         if (psionicStormAvailable && unit.kind == UnitKind::highTemplar &&
             unit.energy >= 75) {
@@ -548,10 +609,13 @@ std::vector<Command> TacticalController::control(
             }
         }
 
-        if (estimate.decision == FightDecision::retreat || fragile || locallyOverwhelmed) {
+        if (fragile || (!covertAdvance &&
+                       (estimate.decision == FightDecision::retreat || locallyOverwhelmed))) {
             commands.push_back({
                 unit.id, CommandType::move, -1,
-                influence.safestStep(unit.position, retreatPoint, unit.flying),
+                localThreat > 0.05F
+                    ? influence.safestStep(unit.position, retreatPoint, unit.flying)
+                    : retreatPoint,
                 UnitKind::unknown, fragile ? 100 : 86, 0, "combat-retreat",
             });
             continue;
@@ -630,6 +694,18 @@ std::vector<Command> TacticalController::control(
                         allocation->committedDamage += damage;
                     }
                 }
+            }
+        } else if (defense.active()) {
+            // Attack-move would let the engine acquire the same forbidden
+            // pursuit between control ticks. Move into the screen, then hold.
+            const auto anchor = objective.valid() && defense.contains(objective)
+                                    ? objective : defense.center;
+            if (distanceSquared(unit.position, anchor) > 96 * 96) {
+                commands.push_back({unit.id, CommandType::move, -1, anchor,
+                                    UnitKind::unknown, 82, 0, "defense-screen"});
+            } else {
+                commands.push_back({unit.id, CommandType::hold, -1, {-1, -1},
+                                    UnitKind::unknown, 82, 0, "defense-hold"});
             }
         } else if (!enemy.empty() && formationCenter.valid() && friendly.size() >= 4 &&
                    distanceSquared(unit.position, formationCenter) > 448 * 448) {

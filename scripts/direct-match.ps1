@@ -199,23 +199,31 @@ log_path = bwapi-data/logs
 
 $launched = @()
 function Close-LaunchedStarCraft {
-    Add-Type -AssemblyName Microsoft.VisualBasic
-    Add-Type -AssemblyName System.Windows.Forms
+    # Never use AppActivate or SendKeys here: focus can change while a game
+    # exits, sending Alt+F4/Enter to an unrelated application or Windows.
     foreach ($id in $script:launched) {
         $process = Get-Process -Id $id -ErrorAction SilentlyContinue
-        if (-not $process) { continue }
+        if (-not $process -or $process.ProcessName -ne 'StarCraft') { continue }
         [void]$process.CloseMainWindow()
     }
-    Start-Sleep -Seconds 2
-    foreach ($id in $script:launched) {
-        if (-not (Get-Process -Id $id -ErrorAction SilentlyContinue)) { continue }
-        [Microsoft.VisualBasic.Interaction]::AppActivate($id) | Out-Null
-        Start-Sleep -Milliseconds 250
-        [System.Windows.Forms.SendKeys]::SendWait('%{F4}')
-        Start-Sleep -Milliseconds 600
-        [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+
+    $gracePeriod = [DateTime]::UtcNow.AddSeconds(3)
+    while ([DateTime]::UtcNow -lt $gracePeriod) {
+        $remaining = @(
+            foreach ($id in $script:launched) {
+                $process = Get-Process -Id $id -ErrorAction SilentlyContinue
+                if ($process -and $process.ProcessName -eq 'StarCraft') { $process }
+            }
+        )
+        if ($remaining.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 200
     }
-    Start-Sleep -Seconds 1
+
+    foreach ($id in $script:launched) {
+        $process = Get-Process -Id $id -ErrorAction SilentlyContinue
+        if (-not $process -or $process.ProcessName -ne 'StarCraft') { continue }
+        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+    }
 }
 
 $logPath = Join-Path $writeRoot "AstraBot.log"
@@ -282,7 +290,6 @@ try {
         learning_preserved = [bool]$PreserveLearning
     }
     $record | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $archiveRoot "$Label.json") -Encoding utf8
-    Close-LaunchedStarCraft
     Close-LaunchedStarCraft
 }
 

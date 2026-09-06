@@ -74,6 +74,42 @@ UnitId selectMineralPatch(
     return selected;
 }
 
+const std::unordered_map<UnitId, UnitId>& MineralAllocator::assign(
+    const std::span<const MineralWorker> workers,
+    const std::span<const MineralPatchCandidate> patches) {
+    std::unordered_map<UnitId, UnitId> retained;
+    std::unordered_map<UnitId, int> load;
+    for (const auto& worker : workers) {
+        const auto previous = targets_.find(worker.id);
+        const auto target = previous != targets_.end() ? previous->second : worker.currentTarget;
+        const auto patch = std::ranges::find(patches, target, &MineralPatchCandidate::id);
+        if (patch != patches.end() &&
+            distanceSquared(patch->position, worker.mineralLine) <= 480 * 480) {
+            retained[worker.id] = target;
+            ++load[target];
+        }
+    }
+    for (const auto& worker : workers) {
+        const auto previous = retained.find(worker.id);
+        const auto current = previous != retained.end() ? previous->second : -1;
+        if (current >= 0) --load[current];
+        std::vector<MineralPatchCandidate> candidates;
+        for (const auto& patch : patches) {
+            if (distanceSquared(patch.position, worker.mineralLine) <= 480 * 480) {
+                candidates.push_back({patch.id, patch.position, load[patch.id]});
+            }
+        }
+        const auto selected = selectMineralPatch(candidates, worker.mineralLine,
+                                                 worker.position, current);
+        if (selected >= 0) {
+            retained[worker.id] = selected;
+            ++load[selected];
+        }
+    }
+    targets_ = std::move(retained);
+    return targets_;
+}
+
 std::vector<WorkerAssignment> WorkerManager::assign(
     const GameState& state,
     const StrategicPlan& plan,
@@ -308,9 +344,10 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     auto effectiveDesiredGas = plan.desiredGasWorkers;
     const auto mineralStarved = state.self.minerals < 150;
     if (mineralStarved && state.self.gas >= 300 &&
-        (plan.posture == Posture::defend || plan.posture == Posture::recover)) {
+        (plan.posture == Posture::defend || plan.posture == Posture::recover ||
+         (plan.posture == Posture::hold && ownedBases.size() == 1U))) {
         // A large existing gas bank already funds several Dragoon/tech cycles.
-        // During a base defense, the binding resource is almost always the
+        // During a base defense or one-base assembly, the binding resource is the
         // mineral cost of units, pylons, batteries, and replacement workers.
         effectiveDesiredGas = 0;
     } else if (mineralStarved && state.self.gas >= 600) {
@@ -318,7 +355,9 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     }
     const auto desiredGas = std::min(
         {effectiveDesiredGas, static_cast<int>(gasSlots.size()),
-         static_cast<int>(available.size())});
+         // Gas cannot replace lost Probes. Preserve enough unleased workers
+         // on minerals even when the strategic gas request predates a raid.
+         std::max(0, static_cast<int>(available.size()) - 6)});
     auto gasAssigned = 0;
 
     // Keep workers that are already on the requested refinery. Re-selecting
@@ -326,10 +365,21 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     // workers onto gas and gas workers back to minerals, losing mining time.
     for (auto worker = available.begin(); worker != available.end() &&
                                     gasAssigned < desiredGas;) {
-        const auto slot = std::ranges::find_if(
+        auto slot = std::ranges::find_if(
             gasSlots, [worker](const GasSlot& candidate) {
                 return candidate.refinery->id == (*worker)->orderTargetId;
             });
+        if (slot == gasSlots.end() && (*worker)->gatheringGas) {
+            // ReturnGas targets the Nexus, and workers inside a refinery can
+            // temporarily have no target. Preserve their mining cycle too.
+            slot = std::ranges::min_element(gasSlots, {}, [worker](const GasSlot& candidate) {
+                return distanceSquared(candidate.refinery->position, (*worker)->position);
+            });
+            if (slot != gasSlots.end() &&
+                distanceSquared(slot->refinery->position, (*worker)->position) > 480 * 480) {
+                slot = gasSlots.end();
+            }
+        }
         if (slot == gasSlots.end()) {
             ++worker;
             continue;

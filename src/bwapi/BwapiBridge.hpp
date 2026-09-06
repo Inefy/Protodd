@@ -77,6 +77,7 @@ private:
     };
 
     std::unordered_map<UnitId, UnitSnapshot> enemyMemory_;
+    MineralAllocator mineralAllocator_;
     std::unordered_map<int, Frame> baseLastScouted_;
     std::unordered_map<UnitKind, PendingBuild> pendingBuilds_;
     std::vector<FailedBuildSite> failedBuildSites_;

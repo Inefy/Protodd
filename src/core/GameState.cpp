@@ -4,6 +4,19 @@
 
 namespace astra {
 
+void UnitSnapshot::inheritObservationHistory(const UnitSnapshot& previous) noexcept {
+    lastPosition = previous.position;
+    // Zerg morphs retain their unit ID, but not the timing of the old type.
+    if (kind != previous.kind) return;
+    firstSeen = previous.firstSeen;
+    if (previous.constructionStartUpperBound >= 0) {
+        constructionStartUpperBound = constructionStartUpperBound < 0
+                                         ? previous.constructionStartUpperBound
+                                         : std::min(constructionStartUpperBound,
+                                                    previous.constructionStartUpperBound);
+    }
+}
+
 double UnitSnapshot::healthFraction() const noexcept {
     const auto maximum = maxHitPoints + maxShields;
     if (maximum <= 0) {

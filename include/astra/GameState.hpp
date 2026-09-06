@@ -226,6 +226,11 @@ struct UnitSnapshot {
     int dimensionDown{};
     bool disabled{};
     bool invincible{};
+    bool gatheringGas{};
+    // Latest possible start supported by legal observations; -1 is unknown.
+    Frame constructionStartUpperBound{-1};
+
+    void inheritObservationHistory(const UnitSnapshot& previous) noexcept;
 
     [[nodiscard]] int durability() const noexcept {
         return hitPoints + shields;

@@ -78,8 +78,25 @@ private:
     std::unordered_map<std::uint64_t, Memory> memory_;
 };
 
+struct DefenseArea {
+    Position center{-1, -1};
+    int pursuitRadius{};
+    Position economyCenter{-1, -1};
+
+    [[nodiscard]] bool active() const noexcept {
+        return center.valid() && pursuitRadius > 0;
+    }
+    [[nodiscard]] bool contains(Position position) const noexcept {
+        return distanceSquared(center, position) <= pursuitRadius * pursuitRadius ||
+               (economyCenter.valid() &&
+                distanceSquared(economyCenter, position) <= 256 * 256);
+    }
+};
+
 class TacticalController {
 public:
+    [[nodiscard]] std::vector<Command> recharge(
+        std::span<const UnitSnapshot> friendly, bool defending) const;
     [[nodiscard]] std::vector<Command> control(
         std::span<const UnitSnapshot> friendly,
         std::span<const UnitSnapshot> enemy,
@@ -89,7 +106,8 @@ public:
         const InfluenceMap& influence,
         Position formationCenter = {-1, -1},
         int latencyFrames = 0,
-        bool psionicStormAvailable = false) const;
+        bool psionicStormAvailable = false,
+        DefenseArea defense = {}) const;
 };
 
 }  // namespace astra

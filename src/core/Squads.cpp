@@ -165,6 +165,12 @@ std::vector<Squad> SquadPlanner::form(
         // Screen on the side of the Nexus opposite the mineral line. A losing
         // defender should not drag melee units through the worker economy.
         defense.retreat = defensiveScreen(state, *threatenedBase);
+        defense.defense = {threatenedBase->center, 448, threatenedBase->center};
+        if (!staticSupport.empty()) {
+            // Fight within the actual weapons' support instead of assuming
+            // every point around a Nexus is covered by rear-placed Cannons.
+            defense.defense = {centroid(staticSupport), 256, threatenedBase->center};
+        }
         defense.requiredRatio = 0.55;
         defense.units = std::move(staticSupport);
         auto committedPower = 0.0;
@@ -304,14 +310,72 @@ const Squad* SquadPlanner::selectVanguard(
     return best;
 }
 
+bool SquadPlanner::canCounterattack(
+    const Squad& squad, const CombatEstimate& estimate, const StrategicPlan& plan) {
+    if (plan.posture != Posture::defend || squad.role != SquadRole::mainArmy ||
+        squad.enemies.empty() || estimate.decision != FightDecision::engage ||
+        estimate.ratio < std::max(1.6, plan.attackThreshold * 1.35)) return false;
+    const auto fighters = std::ranges::count_if(squad.units, [&squad](const UnitSnapshot& unit) {
+        return isCombatUnit(unit.kind) && unit.completed && !unit.disabled && !unit.loaded &&
+               std::ranges::any_of(squad.enemies, [&unit](const UnitSnapshot& target) {
+                   return target.visible && unit.canAttack(target);
+               });
+    });
+    // These are unassigned mobile reserves. Static support and the units
+    // already allocated to base defense cannot inflate this breakout force.
+    return fighters >= std::max(8, plan.minimumAttackSize);
+}
+
+std::vector<UnitSnapshot> SquadPlanner::tacticalTargets(
+    const Squad& squad, const std::span<const UnitSnapshot> hostiles) {
+    auto targets = squad.enemies;
+    for (const auto& candidate : hostiles) {
+        if (!candidate.visible || !candidate.detected || !candidate.position.valid() ||
+            candidate.loaded || candidate.invincible || candidate.hallucination ||
+            std::ranges::find(targets, candidate.id, &UnitSnapshot::id) != targets.end()) {
+            continue;
+        }
+        const auto reachableTarget = std::ranges::any_of(squad.units,
+            [&candidate](const UnitSnapshot& unit) {
+                return isCombatUnit(unit.kind) && unit.canAttack(candidate) &&
+                       distanceSquared(unit.position, candidate.position) <= 416 * 416;
+            });
+        if (reachableTarget) targets.push_back(candidate);
+    }
+    std::ranges::sort(targets, {}, &UnitSnapshot::id);
+    return targets;
+}
+
+DefenseArea SquadPlanner::defensiveArea(const GameState& state, const Position rally) {
+    const auto* base = nearestOwnedBase(state, rally);
+    std::vector<UnitSnapshot> support;
+    for (const auto& unit : state.self.units) {
+        if (isStaticDefense(unit.kind) && unit.completed && unit.powered && !unit.disabled &&
+            distanceSquared(unit.position, rally) <= 576 * 576 &&
+            (base == nullptr || nearestOwnedBase(state, unit.position) == base)) {
+            support.push_back(unit);
+        }
+    }
+    const auto economy = base != nullptr ? base->center : Position{-1, -1};
+    return support.empty() ? DefenseArea{rally, 320, economy}
+                           : DefenseArea{centroid(support), 256, economy};
+}
+
 bool SquadPlanner::mustHoldDefensiveScreen(const Squad& squad) noexcept {
     if (squad.role != SquadRole::baseDefense || !squad.retreat.valid()) return false;
-    constexpr auto breachRadius = 384;
+    // The base-defense squad is formed from a threat already inside the
+    // 800-pixel local window. Waiting until 224 pixels leaves melee units
+    // standing on the mineral line before the low-confidence combat estimate
+    // is forced to engage; hold the outer 448-pixel perimeter instead.
+    constexpr auto breachRadius = 448;
     return std::ranges::any_of(squad.enemies, [&squad](const UnitSnapshot& enemy) {
         return enemy.visible && enemy.detected && !enemy.flying &&
                enemy.groundWeapon.damage > 0 &&
-               distanceSquared(enemy.position, squad.retreat) <=
-                   breachRadius * breachRadius;
+               (distanceSquared(enemy.position, squad.retreat) <=
+                    breachRadius * breachRadius ||
+                (squad.defense.economyCenter.valid() &&
+                 distanceSquared(enemy.position, squad.defense.economyCenter) <=
+                     256 * 256));
     });
 }
 

@@ -11,7 +11,7 @@ tournament bot or depend on code whose license restricts competition entry.
 
 - Matchup-specific PvT, PvZ, and PvP plans with base-anchored worker-rush and
   proxy-contain recognition plus reactive anti-air and anti-cloak transitions.
-- Bayesian opening recognition under fog of war, first-seen Pool timing,
+- Evidence-weighted opening recognition under fog of war, conservative Pool timing,
   approaching-army motion, observed production capacity, and decaying enemy
   memory; the PvZ opener converts an early-Pool warning into close Nexus
   Cannon coverage before the first Zerglings arrive.
@@ -102,6 +102,8 @@ The [validation record](docs/validation.md) documents the exact candidate DLL,
 automated gates, iterative match outcomes, and unresolved validation gaps.
 The [strength audit](docs/strength-audit.md) details the September 2026 fixes,
 remaining micro/macro weaknesses, and the experiments needed before AIIDE.
+The [follow-up audit](docs/strength-pass2.md) records the subsequent defense,
+economy, placement, and decision-conflict fixes, including failed experiments.
 
 ## Local opponent ladder
 

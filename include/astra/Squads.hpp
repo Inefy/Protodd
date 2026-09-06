@@ -26,6 +26,7 @@ struct Squad {
     Position retreat{-1, -1};
     double requiredRatio{1.2};
     bool needsDetection{};
+    DefenseArea defense;
 };
 
 class SquadPlanner {
@@ -48,6 +49,17 @@ public:
 
     [[nodiscard]] static bool mustHoldDefensiveScreen(
         const Squad& squad) noexcept;
+
+    [[nodiscard]] static DefenseArea defensiveArea(
+        const GameState& state, Position rally);
+
+    // Workers and unfinished/ordinary structures are legal tactical targets,
+    // but must not inflate the army used for engagement simulation.
+    [[nodiscard]] static std::vector<UnitSnapshot> tacticalTargets(
+        const Squad& squad, std::span<const UnitSnapshot> hostiles);
+
+    [[nodiscard]] static bool canCounterattack(
+        const Squad& squad, const CombatEstimate& estimate, const StrategicPlan& plan);
 
 private:
     [[nodiscard]] static Position centroid(std::span<const UnitSnapshot> units) noexcept;
