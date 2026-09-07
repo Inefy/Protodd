@@ -1,6 +1,7 @@
 #include "protodd/Scouting.hpp"
 
 #include "protodd/UnitCatalog.hpp"
+#include "protodd/Combat.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -94,11 +95,127 @@ UnitId selectOpeningWorkerScout(
     return selected != nullptr ? selected->id : -1;
 }
 
+void ProbeHarasser::reset() noexcept {
+    withdrawing_ = finished_ = false;
+    evadeUntil_ = 0;
+    routeFrame_ = -1;
+    returnWaypoint_ = {-1, -1};
+}
+
+std::optional<Command> ProbeHarasser::control(
+    const GameState& state, const UnitId scoutId, const Position scoutGoal,
+    const InfluenceMap& influence, const NavigationGrid* terrain) {
+    if (finished_) return std::nullopt;
+    const auto scout = state.findUnit(scoutId);
+    if (!scout || !scout->ours || scout->kind != UnitKind::probe || !scout->completed || scout->loaded) {
+        finished_ = true;
+        return std::nullopt;
+    }
+    const auto home = friendlyMain(state);
+    const auto armyUp = std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& enemy) {
+        return enemy.completed && !isWorker(enemy.kind) &&
+            (isCombatUnit(enemy.kind) || enemy.groundWeapon.damage > 0);
+    });
+    withdrawing_ = withdrawing_ || armyUp || state.frame >= 6 * 60 * 24 ||
+        scout->hitPoints < std::max(1, scout->maxHitPoints * 3 / 4);
+    const auto move = [&scout](const Position target, const char* reason, const int priority = 94) {
+        return Command{scout->id, CommandType::move, -1, target,
+                       UnitKind::unknown, priority, 0, reason};
+    };
+    if (withdrawing_) {
+        if (!home.valid() || distanceSquared(scout->position, home) <= 160 * 160) {
+            finished_ = true;
+            return std::nullopt;
+        }
+        auto toward = home;
+        if (terrain && !terrain->empty()) {
+            if (routeFrame_ < 0 || state.frame - routeFrame_ >= 24 ||
+                distanceSquared(scout->position, returnWaypoint_) <= 48 * 48) {
+                returnWaypoint_ = terrain->nextWaypoint(scout->position, home);
+                routeFrame_ = state.frame;
+            }
+            if (returnWaypoint_.valid()) toward = returnWaypoint_;
+        }
+        const auto inDanger = std::ranges::any_of(state.enemy.units, [&scout](const UnitSnapshot& enemy) {
+            return enemy.visible && enemy.completed && enemy.groundWeapon.damage > 0 &&
+                weaponDistance(*scout, enemy) < enemy.groundWeapon.maxRange + 96;
+        });
+        auto step = inDanger ? influence.safestStep(scout->position, toward, false) : toward;
+        if (terrain && !terrain->empty() && !terrain->lineWalkable(scout->position, step)) step = toward;
+        return move(step, "probe-harass-withdraw", 100);
+    }
+
+    const UnitSnapshot* chaser = nullptr;
+    const UnitSnapshot* target = nullptr;
+    auto targetScore = std::numeric_limits<double>::infinity();
+    auto closeWorkers = 0;
+    for (const auto& enemy : state.enemy.units) {
+        if (!isWorker(enemy.kind) || !enemy.visible || !enemy.detected || !enemy.completed ||
+            !enemy.position.valid() || enemy.invincible) continue;
+        const auto range = weaponDistance(*scout, enemy);
+        if (range < 80) ++closeWorkers;
+        if (range < 224 && (enemy.orderTargetId == scoutId ||
+            (scout->underAttack && range < 80))) {
+            if (chaser == nullptr || range < weaponDistance(*scout, *chaser) ||
+                (range == weaponDistance(*scout, *chaser) && enemy.id < chaser->id)) chaser = &enemy;
+        }
+        // Do not turn a worker passing our own mineral line into a chase.
+        const auto atEnemyBase = std::ranges::any_of(state.enemy.units, [&enemy](const UnitSnapshot& depot) {
+            return depot.role == UnitRole::resourceDepot && depot.position.valid() &&
+                distanceSquared(depot.position, enemy.position) <= 512 * 512;
+        });
+        if (!atEnemyBase || range > 320 || !scout->canAttack(enemy)) continue;
+        const auto score = range + enemy.durability() * 0.5;
+        if (score < targetScore || (score == targetScore && (target == nullptr || enemy.id < target->id))) {
+            targetScore = score;
+            target = &enemy;
+        }
+    }
+    const auto urgentEscape = chaser != nullptr || closeWorkers >= 2 || scout->underAttack ||
+        (scout->maxShields > 0 && scout->shields < scout->maxShields / 2);
+    if (urgentEscape) evadeUntil_ = state.frame + 24;
+    if (scout->attackFrame && !urgentEscape) return std::nullopt;
+    if (state.frame < evadeUntil_ || (target != nullptr && scout->weaponCooldown > state.latencyFrames + 2)) {
+        const auto* danger = chaser != nullptr ? chaser : target;
+        auto away = home.valid() ? home : scoutGoal;
+        if (danger != nullptr) {
+            away = {scout->position.x * 2 - danger->position.x,
+                    scout->position.y * 2 - danger->position.y};
+            if (away == scout->position) away = home;
+        }
+        auto escape = influence.safestStep(scout->position, away, false);
+        // Check all visible workers before committing to an escape direction;
+        // fleeing one defender must not run straight into a second defender.
+        const auto clearance = [&state](const Position position) {
+            auto closest = 1000.0;
+            for (const auto& enemy : state.enemy.units)
+                if (enemy.visible && isWorker(enemy.kind) && enemy.position.valid())
+                    closest = std::min(closest, distance(position, enemy.position));
+            return closest;
+        };
+        const auto homeStep = influence.safestStep(scout->position, home, false);
+        if (home.valid() && clearance(homeStep) > clearance(escape) + 16.0) escape = homeStep;
+        return move(escape, chaser != nullptr ? "probe-harass-evade-chaser" : "probe-harass-reset");
+    }
+    // Preserve the contact frame of our own attack unless escape is urgent.
+    if (scout->attackFrame) return std::nullopt;
+    if (target != nullptr) {
+        if (weaponDistance(*scout, *target) <= 128)
+            return Command{scoutId, CommandType::attackUnit, target->id, {-1, -1},
+                UnitKind::unknown, 80, 0, "probe-harass-tag-worker"};
+        return move(target->position, "probe-harass-approach", 70);
+    }
+    if (scoutGoal.valid()) return move(scoutGoal, "probe-scout-search", 60);
+    return std::nullopt;
+}
+
 void ScoutManager::reset() noexcept {
     previousOrders_.clear();
     workerMissionStarted_ = -1;
     nextWorkerMission_ = 0;
     workerScout_ = -1;
+    openingMission_ = false;
+    harasser_.reset();
 }
 
 UnitId ScoutManager::selectWorkerScout(
@@ -106,8 +223,23 @@ UnitId ScoutManager::selectWorkerScout(
     const std::span<const UnitId> previousScouts,
     const std::span<const UnitId> unavailableWorkers) {
     if (workerMissionStarted_ > state.frame) reset();
+    if (openingMission_) {
+        const auto worker = state.findUnit(workerScout_);
+        if (worker && worker->ours && worker->completed &&
+            std::ranges::find(unavailableWorkers, workerScout_) == unavailableWorkers.end())
+            return workerScout_;
+        openingMission_ = false;
+        workerScout_ = -1;
+        harasser_.finish();
+        nextWorkerMission_ = state.frame + 45 * 24;
+    }
     const auto opening = selectOpeningWorkerScout(state, previousScouts, unavailableWorkers);
-    if (opening >= 0) return opening;
+    if (opening >= 0 && !harasser_.finished()) {
+        workerScout_ = opening;
+        workerMissionStarted_ = state.frame;
+        openingMission_ = true;
+        return opening;
+    }
     const auto enoughWorkers = std::ranges::count_if(state.self.units, [](const UnitSnapshot& unit) {
         return unit.kind == UnitKind::probe && unit.completed;
     }) >= 12;
@@ -139,6 +271,20 @@ UnitId ScoutManager::selectWorkerScout(
     }
     if (workerScout_ >= 0) workerMissionStarted_ = state.frame;
     return workerScout_;
+}
+
+std::optional<Command> ScoutManager::controlWorkerScout(
+    const GameState& state, const InfluenceMap& influence, const NavigationGrid* terrain) {
+    if (!openingMission_) return std::nullopt;
+    const auto previous = previousOrders_.find(workerScout_);
+    const auto goal = previous != previousOrders_.end() ? previous->second.target : friendlyMain(state);
+    const auto command = harasser_.control(state, workerScout_, goal, influence, terrain);
+    if (harasser_.finished()) {
+        openingMission_ = false;
+        workerScout_ = -1;
+        nextWorkerMission_ = state.frame + 45 * 24;
+    }
+    return command;
 }
 
 std::vector<ScoutOrder> ScoutManager::assign(

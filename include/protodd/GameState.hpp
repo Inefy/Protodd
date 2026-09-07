@@ -257,7 +257,7 @@ struct BaseSnapshot {
     int geysers{};
     // A visible, empty depot footprint; -1 means never confirmed empty.
     Frame lastConfirmedEmpty{-1};
-    DefensivePosition defense;
+    DefensivePosition defense{};
 };
 
 struct TechnologySnapshot {

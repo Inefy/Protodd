@@ -37,6 +37,7 @@ struct CombatEstimate {
     double simulatedEnemyRemaining{};
     FightDecision decision{FightDecision::retreat};
     bool advanceBlocked{};
+    bool holdScreen{};
 };
 
 struct TargetAllocation {
@@ -69,23 +70,35 @@ private:
 // squad reverses direction, while still allowing an immediate emergency exit.
 class EngagementTracker {
 public:
+    [[nodiscard]] std::uint64_t identify(std::span<const UnitSnapshot> members, Frame frame);
     [[nodiscard]] FightDecision stabilize(
         std::uint64_t squadSignature,
         FightDecision proposed,
         double ratio,
         double requiredRatio,
-        Frame frame);
+        Frame frame,
+        bool contact = true);
     void reset();
 
 private:
     struct Memory {
         FightDecision decision{FightDecision::retreat};
         FightDecision candidate{FightDecision::retreat};
-        int consecutive{};
+        Frame candidateSince{};
+        Frame changedAt{};
+        Frame lastSeen{};
+        Frame lastContact{};
+    };
+
+    struct Group {
+        std::uint64_t key{};
+        std::vector<UnitId> members;
         Frame lastSeen{};
     };
 
     std::unordered_map<std::uint64_t, Memory> memory_;
+    std::vector<Group> groups_;
+    std::uint64_t nextKey_{1};
 };
 
 struct DefenseArea {

@@ -2,6 +2,7 @@
 
 #include "protodd/Combat.hpp"
 #include "protodd/UnitCatalog.hpp"
+#include "protodd/Technology.hpp"
 
 #include <algorithm>
 #include <array>
@@ -279,6 +280,10 @@ bool BwapiBridge::execute(const Command& command) {
 
     switch (command.type) {
         case CommandType::move:
+            if (command.source == "splash-spacing" &&
+                (!actor->hasPath(toBwapiPosition(command.targetPosition)) ||
+                 !Broodwar->isWalkable(command.targetPosition.x / 8, command.targetPosition.y / 8)))
+                return false;
             return command.targetPosition.valid() &&
                    actor->move(toBwapiPosition(command.targetPosition));
         case CommandType::attackMove:
@@ -335,12 +340,30 @@ bool BwapiBridge::execute(const Command& command) {
     return false;
 }
 
+ExpansionFeedback BwapiBridge::expansionFeedback() const {
+    const auto found = pendingBuilds_.find(UnitKind::nexus);
+    if (found == pendingBuilds_.end()) return {};
+    const auto& pending = found->second;
+    return {{pending.target.x + 64, pending.target.y + 48}, true,
+        pending.lastProgress >= 0 ? Broodwar->getFrameCount() - pending.lastProgress : 0};
+}
+
+bool BwapiBridge::cancelExpansion() {
+    const auto found = pendingBuilds_.find(UnitKind::nexus);
+    if (found == pendingBuilds_.end()) return true;
+    const auto worker = Broodwar->getUnit(found->second.builder);
+    if (worker != nullptr && worker->exists() && !worker->stop()) return false;
+    pendingBuilds_.erase(found);
+    return true;
+}
+
 int BwapiBridge::executeMacro(
     const std::span<const MacroAction> actions,
     const StrategicPlan& plan,
     const std::span<const UnitId> unavailableBuilders,
     const int maximumCommands) {
     auto issued = 0;
+    macroExecutions_.clear();
     std::string firstFailure;
     lastMacroStatus_ = actions.empty() ? "idle" : "saving";
     for (const auto& action : actions) {
@@ -350,12 +373,18 @@ int BwapiBridge::executeMacro(
         // still under construction).  It is not executable this pass, but it
         // must not terminate the queue: lower-priority actions that already
         // have disjoint reservations still need to reach their producers.
-        if (!action.reserved) continue;
+        if (!action.reserved) {
+            macroExecutions_.push_back({action, "saving-resources", false});
+            continue;
+        }
         // A non-executable action is a deliberate reservation for a target
         // whose prerequisite is already under construction. Its resources
         // remain protected by the planner, but it must not block valid
         // commands funded from the remaining surplus.
-        if (!action.executable) continue;
+        if (!action.executable) {
+            macroExecutions_.push_back({action, "waiting-prerequisite", false});
+            continue;
+        }
         lastMacroStatus_ = "command-rejected-a" +
                            std::to_string(static_cast<int>(action.action)) + "-" +
                            std::string(unitStats(action.target).name);
@@ -375,6 +404,7 @@ int BwapiBridge::executeMacro(
         } else if (firstFailure.empty() || lastMacroStatus_.starts_with("build-")) {
             firstFailure = lastMacroStatus_;
         }
+        macroExecutions_.push_back({action, lastMacroStatus_, success});
         // Every emitted reserved action has a disjoint allocation in the
         // ledger. A rejected placement keeps its allocation, but must not
         // freeze unrelated producers funded from the remaining surplus.
@@ -754,7 +784,14 @@ void BwapiBridge::drawDebug(
     const ThreatAssessment& threat,
     const DebugOverlay& debug) const {
     if (debug.level == 0) return;
-    Broodwar->drawBoxScreen(4, 4, 636, debug.level == 1 ? 94 : 216, Colors::Black, true);
+    const auto macroLimit = debug.level == 1 ? 1U : 3U;
+    const auto expansion = pendingBuilds_.find(UnitKind::nexus);
+    const auto rows = 8 + static_cast<int>(std::min<std::size_t>(macroLimit, debug.macro.size())) +
+        (!debug.scout.empty() ? 1 : 0) +
+        (expansion != pendingBuilds_.end() ? 1 : 0) +
+        (debug.level > 1 ? 2 * static_cast<int>(std::min<std::size_t>(3, debug.squads.size())) :
+                          (debug.squads.empty() ? 0 : 1));
+    Broodwar->drawBoxScreen(4, 4, 636, 12 + rows * 12, Colors::Black, true);
     auto y = 8;
     const auto row = [&y](const char* format, auto... args) {
         Broodwar->drawTextScreen(10, y, format, args...);
@@ -777,15 +814,27 @@ void BwapiBridge::drawDebug(
         weight(UnitKind::zealot), weight(UnitKind::reaver), count(UnitKind::probe), plan.desiredWorkers);
     row("Rally %d,%d | Bases %d/%d | Expansion %s | Gas workers target %d",
         plan.rallyPoint.x, plan.rallyPoint.y, count(UnitKind::nexus), plan.desiredBases,
-        plan.expansionTarget.valid() ? "COVERING SITE" : plan.sustainEconomy ? "GROWTH ENABLED" : "WAIT",
+        plan.expansionTarget.valid() ? "TARGET SELECTED" : plan.sustainEconomy ? "GROWTH ENABLED" : "WAIT",
         plan.desiredGasWorkers);
     row("Macro: %.90s", lastMacroStatus_.c_str());
-    const auto macroLimit = debug.level == 1 ? 1U : 3U;
+    row("Mission: %.88s", debug.operation.c_str());
+    row("Health: %.88s", debug.health.c_str());
+    if (!debug.scout.empty()) row("Scout: %.88s", debug.scout.c_str());
+    if (expansion != pendingBuilds_.end()) {
+        const auto& pending = expansion->second;
+        const auto builder = Broodwar->getUnit(pending.builder);
+        const auto remaining = builder != nullptr && builder->exists()
+            ? static_cast<int>(distance(fromBwapi(builder->getPosition()),
+                                       {pending.target.x + 64, pending.target.y + 48})) : -1;
+        row("Nexus Probe %d | %d px to site | waiting %ds | no movement %ds", pending.builder,
+            remaining, (state.frame - pending.issued) / 24,
+            pending.lastProgress >= 0 ? (state.frame - pending.lastProgress) / 24 : 0);
+    }
     for (std::size_t i = 0; i < std::min<std::size_t>(macroLimit, debug.macro.size()); ++i) {
         const auto& action = debug.macro[i];
         const auto label = action.technology != TechnologyKind::none
             ? technologyStats(action.technology).name.data() : unitStats(action.target).name.data();
-        row("%s %s (%dM %dG): %.52s", !action.executable ? "PREREQ" : action.reserved ? "READY" : "SAVING",
+        row("%s %s (%dM %dG): %.52s", !action.executable ? "PREREQ" : action.reserved ? "FUNDED" : "SAVING",
             label, action.minerals, action.gas, action.reason.c_str());
     }
     if (debug.level > 1) {
@@ -797,8 +846,15 @@ void BwapiBridge::drawDebug(
             else row("%s %d | no local enemy", squad.role.c_str(), squad.units);
             row("  %.72s -> %d,%d", squad.reason.c_str(), squad.objective.x, squad.objective.y);
         }
+    } else if (!debug.squads.empty()) {
+        const auto& squad = debug.squads.front();
+        if (squad.enemies > 0)
+            row("%s: %.55s | %.2f / %.2f", squad.role.c_str(), squad.reason.c_str(), squad.ratio, squad.required);
+        else row("%s: %.55s | no local enemy", squad.role.c_str(), squad.reason.c_str());
     }
-    row("/debug: cycle detail/off/compact | /debug 0, 1, 2: select display");
+    if (Broodwar->isFlagEnabled(BWAPI::Flag::UserInput))
+        row("/debug: cycle detail/off/compact | /debug 0, 1, 2: select display");
+    else row("Passive overlay | interactive controls disabled by host");
 
     const auto marker = [](const Position point, const Color color, const char* label) {
         if (!point.valid()) return;
@@ -1641,6 +1697,14 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
     auto laneCandidates = 0;
     auto enemyFireFallback = TilePositions::None;
     auto enemyFireFallbackScore = -std::numeric_limits<double>::infinity();
+    std::vector<DefensivePosition> reservedEntrances;
+    for (const auto& site : resourceSites_) {
+        const auto owned = std::ranges::any_of(Broodwar->self()->getUnits(), [&site](const Unit unit) {
+            return unit != nullptr && unit->exists() && unit->getType().isResourceDepot() &&
+                   closeTo(site.depotCenter, fromBwapi(unit->getPosition()), 320);
+        });
+        if (owned) reservedEntrances.insert(reservedEntrances.end(), site.defenses.begin(), site.defenses.end());
+    }
     const auto usable = [&](const TilePosition location) {
         if (!location.isValid() || location.x < 0 || location.y < 0 ||
             location.x + type.tileWidth() > Broodwar->mapWidth() ||
@@ -1666,6 +1730,17 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         }
         const BuildingFootprint footprint{
             {location.x * 32, location.y * 32}, type.tileWidth() * 32, type.tileHeight() * 32};
+        if (kind != UnitKind::nexus && plan.expansionTarget.valid() &&
+            !separatedByGap(footprint,
+                {{plan.expansionTarget.x - 64, plan.expansionTarget.y - 48}, 128, 96}, 32))
+            return false;
+        if (kind != UnitKind::nexus) {
+            for (const auto& entrance : reservedEntrances) {
+                for (const auto point : {entrance.anchor, entrance.entrance}) {
+                    if (!separatedByGap(footprint, {{point.x - 32, point.y - 32}, 64, 64}, 32)) return false;
+                }
+            }
+        }
         for (const auto building : Broodwar->self()->getUnits()) {
             if (building == nullptr || !building->exists() || !building->getType().isBuilding() ||
                 building->isLifted()) continue;
@@ -1951,6 +2026,23 @@ bool BwapiBridge::build(
                 pending->second.target.x + type.tileWidth() * 16,
                 pending->second.target.y + type.tileHeight() * 16,
             };
+            if (builder == nullptr || !builder->exists()) {
+                lastMacroStatus_ = "nexus-builder-missing";
+                return false;
+            }
+            if (builder->getDistance(center) > 96) {
+                lastMacroStatus_ = "nexus-builder-travelling";
+                return false;
+            }
+            if (builder->getLastCommandFrame() + std::max(6, Broodwar->getLatencyFrames()) >=
+                Broodwar->getFrameCount()) {
+                lastMacroStatus_ = "nexus-command-latency";
+                return false;
+            }
+            if (!Broodwar->canBuildHere(targetTile, type, builder, true)) {
+                lastMacroStatus_ = "nexus-footprint-blocked";
+                return false;
+            }
             if (builder != nullptr && builder->exists() && builder->isCompleted() &&
                 builder->getDistance(center) <= 96 &&
                 Broodwar->canBuildHere(targetTile, type, builder, true) &&

@@ -115,6 +115,24 @@ const std::unordered_map<UnitId, UnitId>& MineralAllocator::assign(
     return targets_;
 }
 
+int GasBankController::target(const GameState& state, const StrategicPlan& plan) {
+    if (state.frame < lastFrame_) paused_ = false;
+    lastFrame_ = state.frame;
+    auto highWater = 300;
+    for (const auto& goal : plan.goals) {
+        if (!goal.blocking || goal.target == UnitKind::unknown) continue;
+        const auto existing = std::ranges::count(state.self.units, goal.target, &UnitSnapshot::kind) +
+            std::ranges::count(state.self.queuedUnits, goal.target);
+        if (existing < goal.desiredCount)
+            highWater = std::max(highWater, unitStats(goal.target).gas + 100);
+    }
+    // Separate stop/resume thresholds prevent every 50-mineral spend or
+    // strategic plan flip from shuffling workers between gas and minerals.
+    if (paused_ && (state.self.gas < highWater / 2 || state.self.minerals >= 300)) paused_ = false;
+    if (!paused_ && state.self.minerals < 150 && state.self.gas >= highWater) paused_ = true;
+    return paused_ ? 0 : std::max(0, plan.desiredGasWorkers);
+}
+
 std::vector<WorkerAssignment> WorkerManager::assign(
     const GameState& state,
     const StrategicPlan& plan,
@@ -475,18 +493,7 @@ std::vector<WorkerAssignment> WorkerManager::assign(
             }
         }
     }
-    auto effectiveDesiredGas = plan.desiredGasWorkers;
-    const auto mineralStarved = state.self.minerals < 150;
-    if (mineralStarved && state.self.gas >= 300 &&
-        (plan.posture == Posture::defend || plan.posture == Posture::recover ||
-         ownedBases.size() == 1U || plan.sustainEconomy)) {
-        // A large existing gas bank already funds several Dragoon/tech cycles.
-        // During a base defense or one-base assembly, the binding resource is the
-        // mineral cost of units, pylons, batteries, and replacement workers.
-        effectiveDesiredGas = 0;
-    } else if (mineralStarved && state.self.gas >= 600) {
-        effectiveDesiredGas = std::min(effectiveDesiredGas, 1);
-    }
+    const auto effectiveDesiredGas = gasBank_.target(state, plan);
     const auto desiredGas = std::min(
         {effectiveDesiredGas, static_cast<int>(gasSlots.size()),
          // Gas cannot replace lost Probes. Preserve enough unleased workers

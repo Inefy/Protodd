@@ -319,12 +319,39 @@ CombatEstimate CombatEvaluator::evaluate(
     return result;
 }
 
+std::uint64_t EngagementTracker::identify(const std::span<const UnitSnapshot> members, const Frame frame) {
+    std::erase_if(groups_, [frame](const Group& group) {
+        return frame < group.lastSeen || frame - group.lastSeen > 10 * 24;
+    });
+    Group* best = nullptr;
+    std::size_t bestOverlap = 0;
+    for (auto& group : groups_) {
+        if (group.lastSeen == frame) continue; // A split cannot assign one history to two squads.
+        const auto overlap = static_cast<std::size_t>(std::ranges::count_if(members, [&group](const UnitSnapshot& unit) {
+            return std::ranges::find(group.members, unit.id) != group.members.end();
+        }));
+        if (overlap > bestOverlap && overlap * 2 >= members.size() && overlap * 2 >= group.members.size()) {
+            best = &group;
+            bestOverlap = overlap;
+        }
+    }
+    if (!best) {
+        groups_.push_back({nextKey_++, {}, frame});
+        best = &groups_.back();
+    }
+    best->members.clear();
+    for (const auto& unit : members) best->members.push_back(unit.id);
+    best->lastSeen = frame;
+    return best->key;
+}
+
 FightDecision EngagementTracker::stabilize(
     const std::uint64_t squadSignature,
     const FightDecision proposed,
     const double ratio,
     const double requiredRatio,
-    const Frame frame) {
+    const Frame frame,
+    const bool contact) {
     constexpr auto staleFrames = 10 * 24;
     if (memory_.size() > 128U) {
         std::erase_if(memory_, [frame](const auto& entry) {
@@ -332,46 +359,53 @@ FightDecision EngagementTracker::stabilize(
         });
     }
     auto found = memory_.find(squadSignature);
-    if (found == memory_.end() || frame - found->second.lastSeen > staleFrames) {
+    if (found == memory_.end() || frame < found->second.lastSeen || frame - found->second.lastSeen > staleFrames) {
         memory_.insert_or_assign(
-            squadSignature, Memory{proposed, proposed, 0, frame});
+            squadSignature, Memory{proposed, proposed, frame, frame, frame, contact ? frame : -1});
         return proposed;
     }
 
     auto& memory = found->second;
     memory.lastSeen = frame;
+    if (contact) memory.lastContact = frame;
+    // Enemies falling out of the local combat radius is not evidence that a
+    // retreat succeeded. Finish regrouping before travelling back into range.
+    if (!contact && memory.decision != FightDecision::engage && frame - memory.lastContact < 72)
+        return memory.decision;
     if (proposed == memory.decision) {
         memory.candidate = proposed;
-        memory.consecutive = 0;
+        memory.candidateSince = frame;
         return memory.decision;
     }
 
-    // Catastrophic estimates bypass hysteresis. Likewise, a decisive local
-    // advantage may start an attack immediately rather than wasting a timing
-    // window waiting for several redundant simulation passes.
-    if ((proposed == FightDecision::retreat && ratio < requiredRatio * 0.55) ||
-        (proposed == FightDecision::engage && ratio >= requiredRatio * 1.35)) {
+    // New overwhelming danger always breaks commitment. An apparently easy
+    // fight cannot bypass the regroup interval and send stragglers back in.
+    if (contact && proposed == FightDecision::retreat && ratio < requiredRatio * 0.70) {
         memory.decision = proposed;
         memory.candidate = proposed;
-        memory.consecutive = 0;
+        memory.candidateSince = memory.changedAt = frame;
         return memory.decision;
     }
 
     if (memory.candidate != proposed) {
         memory.candidate = proposed;
-        memory.consecutive = 1;
-    } else {
-        ++memory.consecutive;
+        memory.candidateSince = frame;
     }
-    if (memory.consecutive >= 3) {
+    const auto commitment = memory.decision == FightDecision::engage ? 48 : 72;
+    const auto evidenceFrames = proposed == FightDecision::engage ? 48 : 24;
+    const auto recoveryMargin = !contact || proposed != FightDecision::engage || ratio >= requiredRatio * 1.08;
+    if (!recoveryMargin) memory.candidateSince = frame;
+    if (recoveryMargin && frame - memory.changedAt >= commitment && frame - memory.candidateSince >= evidenceFrames) {
         memory.decision = proposed;
-        memory.consecutive = 0;
+        memory.changedAt = frame;
     }
     return memory.decision;
 }
 
 void EngagementTracker::reset() {
     memory_.clear();
+    groups_.clear();
+    nextKey_ = 1;
 }
 
 const UnitSnapshot* CombatEvaluator::selectTarget(
@@ -690,12 +724,16 @@ std::vector<Command> TacticalController::control(
                 for (const auto& candidate : targets) {
                     const auto& weapon = candidate.flying ? unit.airWeapon : unit.groundWeapon;
                     const auto range = weaponDistance(unit, candidate);
-                    if (weapon.maxRange >= 96 && range >= weapon.minRange &&
-                        range <= weapon.maxRange) firingTargets.push_back(candidate);
+                    const auto screenIntercept = estimate.holdScreen && weapon.maxRange < 96 &&
+                        range <= 64 && (!defense.active() || defense.contains(candidate.position));
+                    if (range >= weapon.minRange &&
+                        ((weapon.maxRange >= 96 && range <= weapon.maxRange) || screenIntercept))
+                        firingTargets.push_back(candidate);
                 }
                 if (const auto* shot = evaluator.selectTarget(unit, firingTargets, allocations)) {
                     commands.push_back({unit.id, CommandType::attackUnit, shot->id, {-1, -1},
-                                        UnitKind::unknown, 86, 0, "retreat-volley"});
+                                        UnitKind::unknown, 86, 0,
+                                        estimate.holdScreen ? "screen-intercept" : "retreat-volley"});
                     const auto allocation = std::ranges::find(
                         allocations, shot->id, &TargetAllocation::target);
                     const auto committed = allocation == allocations.end() ? 0.0 : allocation->committedDamage;
@@ -757,6 +795,57 @@ std::vector<Command> TacticalController::control(
             const auto kite = estimate.decision == FightDecision::kite || rangeAdvantage;
             const auto targetCanPressure = targetWeapon.damage > 0 &&
                                            range <= targetWeapon.maxRange + 64;
+            // Spend reload time opening firing lanes against observed splash.
+            // Keep ready volleys, retreats and attack frames on their existing
+            // paths. Score destinations jointly so neighbors do not fan into
+            // the same square, or step downhill across a defensive boundary.
+            if (unit.kind == UnitKind::dragoon && !canFire &&
+                unit.weaponCooldown > latencyFrames + 8 &&
+                std::ranges::any_of(enemy, [&unit](const UnitSnapshot& threat) {
+                    const auto splash = threat.kind == UnitKind::reaver ||
+                        threat.kind == UnitKind::archon || threat.kind == UnitKind::lurker ||
+                        (threat.kind == UnitKind::siegeTank && threat.groundWeapon.maxRange >= 320);
+                    return splash && threat.visible && threat.completed && !threat.disabled &&
+                        threat.position.valid() && threat.groundWeapon.damage > 0 &&
+                        weaponDistance(unit, threat) <= threat.groundWeapon.maxRange + 96;
+                })) {
+                const auto crowding = [&friendly, &commands, &unit](const Position position) {
+                    auto score = 0.0;
+                    for (const auto& neighbor : friendly) {
+                        if (neighbor.id == unit.id || neighbor.flying || neighbor.loaded ||
+                            !neighbor.position.valid()) continue;
+                        auto destination = neighbor.position;
+                        const auto order = std::ranges::find(commands, neighbor.id, &Command::actor);
+                        if (order != commands.end() && order->source == "splash-spacing")
+                            destination = order->targetPosition;
+                        score += std::max(0.0, 80.0 - distance(position, destination));
+                    }
+                    return score;
+                };
+                const auto currentCrowding = crowding(unit.position);
+                auto bestScore = currentCrowding - 12.0;
+                Position best{-1, -1};
+                constexpr std::array<Position, 8> offsets{{
+                    {0, 64}, {0, -64}, {-64, 0}, {64, 0},
+                    {-45, 45}, {45, -45}, {-45, -45}, {45, 45}}};
+                for (const auto offset : offsets) {
+                    const Position candidate{unit.position.x + offset.x, unit.position.y + offset.y};
+                    if (!candidate.valid() || (defense.active() && !defense.contains(candidate))) continue;
+                    // The adapter additionally checks actual ground connectivity.
+                    if (influence.at(candidate).groundThreat > local.groundThreat + 0.05F ||
+                        distance(candidate, target->position) + 16 < distance(unit.position, target->position))
+                        continue;
+                    const auto score = crowding(candidate) +
+                        std::max(0.0, distance(candidate, target->position) -
+                                      distance(unit.position, target->position)) * 0.25;
+                    if (score < bestScore) { bestScore = score; best = candidate; }
+                }
+                if (best.valid()) {
+                    commands.push_back({unit.id, CommandType::move, -1, best,
+                        UnitKind::unknown, 85, 0, "splash-spacing"});
+                    continue;
+                }
+            }
             if (!canFire && kite && ranged && targetCanPressure &&
                 unit.weaponCooldown > latencyFrames + 2 &&
                 range <= weapon.maxRange + 64) {

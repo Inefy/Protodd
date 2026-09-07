@@ -343,6 +343,49 @@ StrategicPlan StrategyEngine::plan(
             result.minimumAttackSize = std::max(6, result.minimumAttackSize);
         }
     }
+    // Reconcile all independent safety rules against the final observation.
+    // Explicit fulfilled goals also clear MacroPlanner's older commitments;
+    // simply erasing a demand lets yesterday's Cannon reservation survive.
+    const auto suppressNew = [&result, &state](const UnitKind kind, const char* reason) {
+        const auto existing = count(state, kind) + static_cast<int>(std::ranges::count(state.self.queuedUnits, kind));
+        for (auto& demand : result.goals) {
+            if (demand.target != kind || demand.goal == GoalKind::upgrade) continue;
+            demand.desiredCount = existing;
+            demand.blocking = false;
+            demand.reason = reason;
+        }
+        goal(result, isBuilding(kind) ? GoalKind::build : GoalKind::train, kind, existing, 125, reason);
+    };
+    const auto visiblePerimeterRanged = home.valid() && std::ranges::any_of(
+        state.enemy.units, [home](const UnitSnapshot& enemy) {
+            return enemy.visible && enemy.completed && !enemy.flying && !isWorker(enemy.kind) &&
+                enemy.position.valid() && enemy.groundWeapon.damage > 0 &&
+                enemy.groundWeapon.maxRange >= 96 &&
+                distanceSquared(home, enemy.position) <= 1200 * 1200;
+        });
+    const auto containedByRanged = state.enemy.race == Race::protoss &&
+        count(state, UnitKind::cyberneticsCore, true) > 0 && !hardBreachAtMain(state) &&
+        (visiblePerimeterRanged || threat.staticContain > 0.34) &&
+        (recentEnemyCount(state, UnitKind::zealot) < 2 ||
+         recentEnemyCount(state, UnitKind::dragoon) >= 2 * recentEnemyCount(state, UnitKind::zealot)) &&
+        threat.workerRush <= 0.30 && threat.air <= 0.30;
+    if (containedByRanged) {
+        suppressNew(UnitKind::photonCannon, "break ranged containment with mobile units");
+        suppressNew(UnitKind::forge, "fund the mobile breakout before more static defense");
+        if (!result.sustainEconomy) result.prioritizeReinforcements = true;
+        result.desiredGasWorkers = std::max(3, result.desiredGasWorkers);
+        goal(result, GoalKind::train, UnitKind::dragoon, std::max(6, count(state, UnitKind::dragoon) + 1),
+             114, "assemble a ranged breakout force", true);
+        if (count(state, UnitKind::dragoon) > 0)
+            technologyGoal(result, TechnologyKind::singularityCharge, 1, 115,
+                           "range before spending into containment", true);
+        result.name += " [mobile breakout]";
+    }
+    if (state.enemy.race == Race::protoss && !result.requireMobileDetection &&
+        count(state, UnitKind::dragoon, true) < 6 && minute(state) < 10) {
+        suppressNew(UnitKind::observer, "fund six Dragoons before optional scouting detection");
+        suppressNew(UnitKind::observatory, "defer optional detection until the ranged screen is ready");
+    }
     if ((result.posture == Posture::hold || result.posture == Posture::defend) &&
         !result.expansionTarget.valid() && !hardBreachAtMain(state)) {
         const auto base = std::ranges::find_if(state.bases, [&state, home](const BaseSnapshot& candidate) {
@@ -690,17 +733,17 @@ StrategicPlan StrategyEngine::planPvP(
         threat.proxy + threat.staticContain > 0.34 || threat.cloak > 0.20;
     if (minute(state) < 8 && !pressureEvidence) {
         StrategicPlan opening;
-        opening.name = "PvP 3-Gate Robo";
+        opening.name = "PvP ranged economy into Robo";
         opening.desiredWorkers = 32;
         opening.desiredGasWorkers = supplyAtLeast(state, 12) ? 3 : 0;
         opening.minimumAttackSize = 8;
         opening.attackThreshold = 1.25;
         const auto roboCommitted = count(state, UnitKind::roboticsFacility) > 0;
-        const auto gates = count(state, UnitKind::gateway);
+        const auto dragoonsReady = count(state, UnitKind::dragoon, true);
         const auto detectorReady = count(state, UnitKind::observer, true) > 0;
-        opening.desiredBases = detectorReady && count(state, UnitKind::dragoon, true) >= 6 ? 2 : 1;
+        opening.desiredBases = dragoonsReady >= 6 ? 2 : 1;
         opening.maximumBases = opening.desiredBases;
-        opening.posture = detectorReady && count(state, UnitKind::dragoon, true) >= 6 ?
+        opening.posture = dragoonsReady >= 6 ?
                               Posture::pressure : Posture::hold;
         const auto rangedScreenCommitted = count(state, UnitKind::dragoon) >= 2;
         // The explicit bodyguard goal owns the first Zealot. Letting the
@@ -719,28 +762,29 @@ StrategicPlan StrategyEngine::planPvP(
             goal(opening, GoalKind::build, UnitKind::cyberneticsCore, 1, 97, "timely ranged access", true);
         }
         if (count(state, UnitKind::cyberneticsCore) > 0) {
-            goal(opening, GoalKind::train, UnitKind::dragoon, 2, 108, "first ranged screen", true);
+            goal(opening, GoalKind::train, UnitKind::dragoon, 4, 108, "fund four Dragoons before optional tech", true);
             if (count(state, UnitKind::dragoon) >= 1)
                 technologyGoal(opening, TechnologyKind::singularityCharge, 1, 98, "opening range", true);
         }
-        if (supplyAtLeast(state, 20) || roboCommitted) {
-            goal(opening, GoalKind::build, UnitKind::roboticsFacility, 1, 105, "3-Gate Robo detection", true);
+        if (dragoonsReady >= 4 || roboCommitted) {
+            goal(opening, GoalKind::build, UnitKind::roboticsFacility, 1, 95, "splash after the ranged screen", true);
         }
-        if (roboCommitted && supplyAtLeast(state, 22)) {
-            const auto throughput = supplyAtLeast(state, 29) ? 3 : 2;
-            goal(opening, GoalKind::build, UnitKind::gateway, throughput, 104, "three-Gateway throughput", true);
-            if (gates < throughput) opening.desiredWorkers = count(state, UnitKind::probe);
+        if (supplyAtLeast(state, 22)) {
+            const auto throughput = supplyAtLeast(state, 32) ? 3 : 2;
+            goal(opening, GoalKind::build, UnitKind::gateway, throughput, 104, "army throughput before optional detection", true);
         }
         if (roboCommitted) {
-            goal(opening, GoalKind::build, UnitKind::observatory, 1, 106, "detection before optional splash", true);
-            goal(opening, GoalKind::train, UnitKind::observer, 1, 107, "first army detector", true);
-            goal(opening, GoalKind::build, UnitKind::roboticsSupportBay, 1, 105,
-                 "prepare splash while the first detector is training", true);
+            if (dragoonsReady >= 6) {
+                goal(opening, GoalKind::build, UnitKind::observatory, 1, 86, "scouting after six ranged defenders");
+                goal(opening, GoalKind::train, UnitKind::observer, 1, 87, "first optional army scout");
+            }
+            goal(opening, GoalKind::build, UnitKind::roboticsSupportBay, 1, 95,
+                 "prepare splash behind the ranged screen", true);
             if (count(state, UnitKind::roboticsSupportBay) > 0)
                 goal(opening, GoalKind::train, UnitKind::reaver, 1, 105,
                      "first Reaver with the ranged screen", true);
         }
-        if (detectorReady) {
+        if (detectorReady && count(state, UnitKind::nexus, true) >= 2) {
             goal(opening, GoalKind::train, UnitKind::observer, 2, 85, "spare detector and tech scout");
         }
         return opening;

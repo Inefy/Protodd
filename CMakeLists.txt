@@ -27,6 +27,8 @@ add_library(protodd_core OBJECT
     src/core/Runtime.cpp
     src/core/Squads.cpp
     src/core/Transport.cpp
+    src/core/Operations.cpp
+    src/core/Harassment.cpp
 )
 add_library(Protodd::Core ALIAS protodd_core)
 
@@ -104,6 +106,8 @@ if(PROTODD_BUILD_TESTS)
     endif()
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME protodd_decision_report_tests
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/decision_report.py" --self-test)
         add_test(
             NAME protodd_log_analyzer_tests
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/log_analyzer.py" --self-test

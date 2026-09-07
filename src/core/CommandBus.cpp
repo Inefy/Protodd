@@ -10,6 +10,7 @@ void CommandBus::beginFrame(const Frame frame, const int latencyFrames) {
     frame_ = frame;
     latencyFrames_ = std::max(0, latencyFrames);
     pending_.clear();
+    stats_ = {};
 }
 
 void CommandBus::submit(Command command) {
@@ -17,6 +18,7 @@ void CommandBus::submit(Command command) {
         return;
     }
     pending_.push_back(std::move(command));
+    ++stats_.proposed;
 }
 
 std::vector<Command> CommandBus::finalize(const std::size_t maximumCommands) {
@@ -31,13 +33,15 @@ std::vector<Command> CommandBus::finalize(const std::size_t maximumCommands) {
     selected.reserve(pending_.size());
     UnitId actor = -1;
     for (const auto& command : pending_) {
-        if (command.actor == actor) continue;
+        if (command.actor == actor) { ++stats_.superseded; continue; }
         actor = command.actor;
         // A redundant winning order still owns the unit. Otherwise a lower
         // priority attack can cancel a retreat/recharge on the very next tick.
         if (!redundant(command)) selected.push_back(command);
+        else ++stats_.redundant;
     }
     if (selected.size() <= maximumCommands) return selected;
+    stats_.budgetDeferred = selected.size() - maximumCommands;
     if (maximumCommands == 0) return {};
 
     // Preserve every command above the cutoff priority, then rotate fairly
@@ -73,6 +77,7 @@ void CommandBus::markIssued(const Command& command) {
 }
 
 void CommandBus::clear() {
+    stats_ = {};
     pending_.clear();
     lastIssued_.clear();
     fairnessCursor_ = 0;

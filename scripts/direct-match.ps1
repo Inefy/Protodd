@@ -15,7 +15,8 @@ param(
     [ValidateRange(-1, 2147483646)]
     [int]$Seed = -1,
     [string]$BotDll = "build/protodd-tournament/Release/Protodd.dll",
-    [switch]$PreserveLearning
+    [switch]$PreserveLearning,
+    [switch]$NoObserver
 )
 
 $ErrorActionPreference = "Stop"
@@ -296,7 +297,26 @@ $result = $null
 $traceBeforeCleanup = ""
 $script:startedAtUtc = [DateTime]::UtcNow
 $startedUtc = $script:startedAtUtc.ToString('o')
+$observerProcess = $null
 try {
+    if (-not $NoObserver) {
+        # Read-only observer on an ephemeral loopback port. Each match owns
+        # its helper and authoritative manifest; no stale cross-match result.
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        $observerPort = $listener.LocalEndpoint.Port
+        $listener.Stop()
+        $observerArguments = @(
+            ('"{0}"' -f (Join-Path $repoPath 'tools/decision_report.py')),
+            ('"{0}"' -f $logPath), '--serve', [string]$observerPort, '--manifest',
+            ('"{0}"' -f (Join-Path $archiveRoot "$Label.json"))
+        )
+        $observerProcess = Start-Process -FilePath (Get-Command python).Source `
+            -ArgumentList $observerArguments -WorkingDirectory $repoPath -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput (Join-Path $archiveRoot "$Label.observer.out") `
+            -RedirectStandardError (Join-Path $archiveRoot "$Label.observer.err")
+        "LIVE_OBSERVER=http://127.0.0.1:$observerPort"
+    }
     Start-Process -FilePath (Join-Path $runtimeA "injectory_x86.exe") `
         -ArgumentList '--launch','StarCraft.exe','--inject','bwapi-data\BWAPI.dll','wmode.dll' `
         -WorkingDirectory $runtimeA -WindowStyle Hidden
@@ -367,6 +387,9 @@ try {
     }
     Close-LaunchedStarCraft
     Close-LaunchedProxy
+    if ($null -ne $observerProcess) {
+        Stop-Process -Id $observerProcess.Id -ErrorAction SilentlyContinue
+    }
     if ($OpponentName -eq 'BananaBrain') {
         # This is opponent-side diagnostic evidence only. Never replace the
         # pre-cleanup competitive result with a cleanup-generated outcome.
@@ -385,6 +408,10 @@ if (Test-Path -LiteralPath $logPath) {
     Copy-Item -LiteralPath $logPath -Destination (Join-Path $archiveRoot "$Label.raw.log") -Force
     [System.IO.File]::WriteAllText($archive, $traceBeforeCleanup)
     "TRACE=$archive"
+    $decisionReport = Join-Path $archiveRoot "$Label.decisions.html"
+    python (Join-Path $repoPath "tools/decision_report.py") $archive --output $decisionReport | Out-Null
+    if ($LASTEXITCODE -eq 0) { "DECISION_REPORT=$decisionReport" }
+    else { Write-Warning "Decision report generation failed; the archived match trace is intact" }
 }
 if (-not $result) {
     throw "Match did not produce a terminal result within $TimeoutSeconds seconds"

@@ -5,6 +5,7 @@
 #include "protodd/GameState.hpp"
 #include "protodd/MacroPlanner.hpp"
 #include "protodd/Navigation.hpp"
+#include "protodd/Operations.hpp"
 #include "protodd/Scouting.hpp"
 #include "protodd/Strategy.hpp"
 #include "protodd/Workers.hpp"
@@ -32,10 +33,19 @@ struct DebugSquad {
 };
 
 struct DebugOverlay {
-    int level{2};
+    int level{1};
     std::vector<MacroAction> macro;
     std::vector<DebugSquad> squads;
     std::unordered_map<UnitId, std::string> orders;
+    std::string operation;
+    std::string health;
+    std::string scout;
+};
+
+struct MacroExecution {
+    MacroAction action;
+    std::string outcome;
+    bool accepted{};
 };
 
 class BwapiBridge {
@@ -53,6 +63,11 @@ public:
     }
 
     [[nodiscard]] bool execute(const Command& command);
+    [[nodiscard]] ExpansionFeedback expansionFeedback() const;
+    [[nodiscard]] bool cancelExpansion();
+    [[nodiscard]] const std::vector<MacroExecution>& macroExecutions() const noexcept {
+        return macroExecutions_;
+    }
     int executeMacro(
         std::span<const MacroAction> actions,
         const StrategicPlan& plan,
@@ -99,7 +114,7 @@ private:
         Position depotCenter{-1, -1};
         Position mineralLine{-1, -1};
         BWAPI::TilePosition depotTile{BWAPI::TilePositions::None};
-        std::vector<DefensivePosition> defenses;
+        std::vector<DefensivePosition> defenses{};
     };
 
     std::unordered_map<UnitId, UnitSnapshot> enemyMemory_;
@@ -112,6 +127,7 @@ private:
     std::vector<ResourceSite> resourceSites_;
     std::vector<SpellZone> recentAreaSpells_;
     std::string lastMacroStatus_{"idle"};
+    std::vector<MacroExecution> macroExecutions_;
 
     [[nodiscard]] static Race toRace(BWAPI::Race race) noexcept;
     [[nodiscard]] static DamageType toDamageType(BWAPI::DamageType type) noexcept;

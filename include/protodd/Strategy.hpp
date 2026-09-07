@@ -51,6 +51,8 @@ struct StrategicPlan {
     bool sustainEconomy{};
     bool breakContainment{};
     Position expansionTarget{-1, -1};
+    // Temporarily release expansion savings while a failed builder recovers.
+    bool deferExpansion{};
 };
 
 class StrategyEngine {

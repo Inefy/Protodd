@@ -61,6 +61,14 @@ private:
     std::unordered_map<UnitId, UnitId> targets_;
 };
 
+class GasBankController {
+public:
+    [[nodiscard]] int target(const GameState& state, const StrategicPlan& plan);
+private:
+    bool paused_{};
+    Frame lastFrame_{-1};
+};
+
 class WorkerManager {
 public:
     [[nodiscard]] std::vector<WorkerAssignment> assign(
@@ -70,6 +78,7 @@ public:
         std::span<const UnitId> reservedBuilders = {}) const;
 
 private:
+    mutable GasBankController gasBank_;
     [[nodiscard]] static const BaseSnapshot* safestOwnedBase(
         const GameState& state,
         const InfluenceMap& influence);

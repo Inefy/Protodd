@@ -18,7 +18,8 @@ public:
         Position objective,
         Position retreat,
         const InfluenceMap& influence,
-        int reservedArmyReavers = 0);
+        int reservedArmyReavers = 0,
+        bool economicTargets = false);
     void reset();
 
 private:
@@ -26,6 +27,7 @@ private:
         UnitId reaver{-1};
         TransportPhase phase{TransportPhase::gathering};
         Frame transitionFrame{};
+        Position target{-1, -1};
     };
 
     std::unordered_map<UnitId, Mission> missions_;

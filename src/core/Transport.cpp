@@ -1,4 +1,5 @@
 #include "protodd/Transport.hpp"
+#include "protodd/Harassment.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -36,7 +37,8 @@ std::vector<Command> TransportController::control(
     const Position objective,
     const Position retreat,
     const InfluenceMap& influence,
-    const int reservedArmyReavers) {
+    const int reservedArmyReavers,
+    const bool economicTargets) {
     std::vector<const UnitSnapshot*> shuttles;
     std::vector<const UnitSnapshot*> reavers;
     for (const auto& unit : state.self.units) {
@@ -78,8 +80,16 @@ std::vector<Command> TransportController::control(
             }
         }
         if (closest != nullptr) {
+            auto target = objective;
+            if (economicTargets && !armyReavers.contains(closest->id)) {
+                auto raider = *closest;
+                raider.position = shuttle->position;
+                raider.ammo = std::max(1, raider.ammo); // Target selection may precede loading Scarabs.
+                target = harassmentOpportunity(state, raider, true).target;
+                if (!target.valid()) continue;
+            }
             missions_.insert_or_assign(
-                shuttle->id, Mission{closest->id, TransportPhase::gathering, state.frame});
+                shuttle->id, Mission{closest->id, TransportPhase::gathering, state.frame, target});
             assignedReavers.insert(closest->id);
         }
     }
@@ -121,12 +131,21 @@ std::vector<Command> TransportController::control(
                 continue;
             }
             const auto localAirThreat = influence.at(shuttle->position).airThreat;
-            if (!objective.valid() || shuttle->healthFraction() < 0.42 ||
+            auto targetStillSafe = true;
+            if (economicTargets) {
+                auto raider = *reaver;
+                raider.position = shuttle->position;
+                raider.ammo = std::max(1, raider.ammo);
+                const auto opportunity = harassmentOpportunity(state, raider, true);
+                targetStillSafe = opportunity.target.valid() &&
+                    distanceSquared(opportunity.target, mission.target) <= 320 * 320;
+            }
+            if (!mission.target.valid() || !targetStillSafe || shuttle->healthFraction() < 0.42 ||
                 localAirThreat > 4.5F) {
                 mission.phase = TransportPhase::returning;
                 mission.transitionFrame = state.frame;
-            } else if (distanceSquared(shuttle->position, objective) <= 352 * 352 ||
-                       enemyNear(state, shuttle->position, 288)) {
+            } else if (distanceSquared(shuttle->position, mission.target) <= 352 * 352 ||
+                       (!economicTargets && enemyNear(state, shuttle->position, 288))) {
                 if (localAirThreat <= 3.25F) {
                     commands.push_back({shuttleId, CommandType::unload, -1,
                                         shuttle->position, UnitKind::unknown,
@@ -137,7 +156,7 @@ std::vector<Command> TransportController::control(
                 }
             } else {
                 commands.push_back(moveCommand(
-                    shuttleId, influence.safestStep(shuttle->position, objective, true),
+                    shuttleId, influence.safestStep(shuttle->position, mission.target, true),
                     93, "shuttle-attack-route"));
             }
         }

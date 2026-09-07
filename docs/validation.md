@@ -1,7 +1,9 @@
 # Tournament validation
 
-The subsequent [containment investigation](containment-review.md) records the
-latest changes and full BananaBrain game results. Passing automated checks is
+The latest [terrain defense pass](terrain-defense.md), preceded by the
+[opening tempo test](opening-tempo-review.md) and
+[containment investigation](containment-review.md), records the changes and
+full BananaBrain game results. Passing automated checks is
 not evidence that this candidate is ready to win the tournament.
 
 The [September 6 ladder source candidate](ladder-source-review.md) records the

@@ -62,6 +62,13 @@ Candidate SHA-256:
 | Build | Result | First Core / Dragoon / range frames | Peak Probes / army / Nexuses |
 | --- | --- | --- | --- |
 | Frozen v7 baseline | Loss, frame 15,316 | 4,896 / 6,168 / 8,256 | 22 / 16 / 1 |
+| First ranged screen | Loss, frame 12,712 | 4,728 / 5,472 / 7,968 | 22 / 8 / 1 |
 
 BananaBrain's own fresh result record confirms `PvP_nzcore` for the baseline;
 the copied evidence is `build/tempo-audit/baseline-opponent-results.txt`.
+
+The candidate also observed `PvP_nzcore`. Its first Dragoon arrived 696 frames
+earlier, but its base was breached at frame 9,864, compared with 11,112 in the
+baseline. Earlier ranged production alone did not improve this match. The
+subsequent [terrain defense pass](terrain-defense.md) addresses army composition
+execution and the user's observations about defending chokepoints.

@@ -307,7 +307,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             const auto desired = ranged ? ++dragoons : ++zealots;
             if (ranged) gasBudget -= 50;
             goals.push_back({GoalKind::train, kind, desired, 112, true,
-                             "protect a defensive reinforcement cycle", TechnologyKind::none, true});
+                             "protect a defensive reinforcement cycle", TechnologyKind::none, !enoughMelee});
         }
         for (auto& demand : goals) {
             const auto detectorChain = plan.requireMobileDetection &&
@@ -348,6 +348,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                       demand.target == UnitKind::shieldBattery) && countExisting(state, demand.target) == 0)
                 demand.priority = std::max(120, demand.priority);
             else if ((demand.target == UnitKind::forge || demand.target == UnitKind::photonCannon) &&
+                     demand.desiredCount > countExisting(state, demand.target) && demand.blocking &&
                      countExisting(state, UnitKind::photonCannon) == 0 && demand.priority >= 110) {
                 demand.priority = std::max(126, demand.priority);
                 // Once the first Cannon is paid for, let the mobile screen
@@ -362,6 +363,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     std::ranges::stable_sort(goals, std::greater{}, &ProductionGoal::priority);
 
     for (auto goal : goals) {
+        if (plan.deferExpansion && goal.target == UnitKind::nexus &&
+            (goal.goal == GoalKind::expand || goal.goal == GoalKind::build)) continue;
         const auto futureTarget = goal.technology == TechnologyKind::none
             ? goal.target : technologyStats(goal.technology).producer;
         auto wait = prerequisiteWait(state, futureTarget);

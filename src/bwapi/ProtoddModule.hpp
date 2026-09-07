@@ -3,6 +3,8 @@
 #include "BwapiBridge.hpp"
 
 #include "protodd/Combat.hpp"
+#include "protodd/Diagnostics.hpp"
+#include "protodd/Operations.hpp"
 #include "protodd/CommandBus.hpp"
 #include "protodd/InfluenceMap.hpp"
 #include "protodd/Information.hpp"
@@ -20,6 +22,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <map>
 #include <vector>
 
 namespace protodd::bwapi {
@@ -43,6 +46,7 @@ private:
     NavigationGrid navigation_;
     StrategyEngine strategy_;
     StrategicDirector strategicDirector_;
+    ExpansionCoordinator expansion_;
     MacroPlanner macro_;
     WorkerManager workers_;
     ScoutManager scouts_;
@@ -53,6 +57,7 @@ private:
     TransportController transports_;
     FrameBudget frameBudget_;
     CommandBus commands_;
+    CommandBus scoutCommands_;
     StrategicPlan plan_;
     CombatEstimate fight_;
     GameState state_;
@@ -100,18 +105,38 @@ private:
     int maintenanceGasReserve_{};
     Frame lastErrorFrame_{-1000};
     std::ofstream log_;
+    ResourceLedger lastLedger_;
+    Frame lastMacroFrame_{-1};
+    Frame lastSquadLogFrame_{-1};
+    FrameIntegral supplyBlockedFrames_;
+    FrameIntegral idleGatewayFrames_;
+    FrameIntegral idleWorkerFrames_;
+    std::map<std::string, PhaseTiming> phases_;
+    struct TraceEntry { std::string value; Frame frame{-1}; };
+    std::map<std::string, TraceEntry> traceMemory_;
+    std::uint64_t commandsAttempted_{};
+    std::uint64_t commandsAccepted_{};
+    std::uint64_t macroAttempted_{};
+    std::uint64_t macroAccepted_{};
+    std::uint64_t commandsProposed_{};
+    std::uint64_t commandsSuperseded_{};
+    std::uint64_t commandsRedundant_{};
+    std::uint64_t commandsDeferred_{};
 
     void runFrame();
     void updateStrategy();
     void updateMacro();
     void updateWorkers();
     void updateScouting();
+    void updateScoutMicro();
     void updateCombat(bool runSimulation, int navigationInterval,
                       std::size_t commandLimit);
     [[nodiscard]] std::vector<UnitSnapshot> combatUnits(bool ours) const;
     [[nodiscard]] Position retreatPoint() const;
     void sampleTelemetry();
     void logDecision();
+    void logDiagnostics();
+    void trace(std::string key, std::string value, Frame heartbeat = 120);
 };
 
 }  // namespace protodd::bwapi

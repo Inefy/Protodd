@@ -3,6 +3,7 @@
 #include "protodd/Combat.hpp"
 #include "protodd/GameState.hpp"
 #include "protodd/InfluenceMap.hpp"
+#include "protodd/Harassment.hpp"
 #include "protodd/Strategy.hpp"
 
 #include <cstdint>
@@ -30,10 +31,13 @@ struct Squad {
     double requiredRatio{1.2};
     bool needsDetection{};
     DefenseArea defense;
+    bool withdrawing{};
+    std::string missionReason;
 };
 
 class SquadPlanner {
 public:
+    void reset() { harassment_.reset(); }
     [[nodiscard]] std::vector<Squad> form(
         const GameState& state,
         std::span<const UnitSnapshot> friendly,
@@ -69,6 +73,7 @@ public:
         const Squad& squad, const CombatEstimate& estimate, const StrategicPlan& plan);
 
 private:
+    mutable HarassmentPlanner harassment_;
     [[nodiscard]] static Position centroid(std::span<const UnitSnapshot> units) noexcept;
     [[nodiscard]] static std::vector<std::vector<UnitSnapshot>> connectedGroups(
         std::span<const UnitSnapshot> units,

@@ -33,6 +33,9 @@ try {
     python tools/direct_report.py --self-test
     if ($LASTEXITCODE -ne 0) { throw "Direct-match report tests failed" }
 
+    python tools/decision_report.py --self-test
+    if ($LASTEXITCODE -ne 0) { throw "Decision observer tests failed" }
+
     python tests/test_ladder.py
     if ($LASTEXITCODE -ne 0) { throw "Ladder tests failed" }
 

@@ -11,6 +11,7 @@ from pathlib import Path
 import unittest
 
 from log_analyzer import analyze, wilson_interval
+from decision_report import analyze_decisions
 
 
 def diagnose_states(lines: list[str]) -> dict:
@@ -120,6 +121,7 @@ def diagnose_states(lines: list[str]) -> dict:
     for field, key in (("maxProbes", "max_probes"),):
         if field in summary:
             result[key] = max(int(result[key]), int(summary[field]))
+    result["decision_diagnostics"] = analyze_decisions(lines)
     return result
 
 

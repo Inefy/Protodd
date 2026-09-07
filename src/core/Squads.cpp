@@ -191,7 +191,7 @@ std::vector<Squad> SquadPlanner::form(
             const auto& terrain = threatenedBase->defense;
             defense.defense = {terrain.anchor, std::clamp(terrain.width, 192, 320),
                                threatenedBase->center, terrain.entrance};
-        } else if (breached) {
+        } else if (breached && threatenedBase->defense.valid()) {
             defense.retreat = threatenedBase->center;
         }
         defense.requiredRatio = 0.55;
@@ -280,6 +280,31 @@ std::vector<Squad> SquadPlanner::form(
         }
     }
 
+    std::vector<UnitSnapshot> raidCandidates;
+    for (const auto& unit : friendly)
+        if (!assigned.contains(unit.id) && isCombatUnit(unit.kind) && !unit.loaded && !unit.disabled)
+            raidCandidates.push_back(unit);
+    const auto raid = harassment_.update(state, raidCandidates, plan, fallbackRetreat, !threats.empty());
+    if (!raid.members.empty()) {
+        Squad squad;
+        squad.id = nextId++;
+        squad.role = SquadRole::harassment;
+        for (const auto id : raid.members) {
+            const auto member = std::ranges::find(raidCandidates, id, &UnitSnapshot::id);
+            if (member != raidCandidates.end()) { squad.units.push_back(*member); assigned.insert(id); }
+        }
+        squad.center = centroid(squad.units);
+        squad.objective = raid.withdrawing ? fallbackRetreat : raid.target;
+        squad.retreat = fallbackRetreat;
+        squad.withdrawing = raid.withdrawing;
+        squad.missionReason = raid.reason;
+        squad.requiredRatio = 1.50;
+        squad.enemies = localEnemies(enemy, squad.units, squad.objective, 720, state.frame);
+        squad.needsDetection = std::ranges::any_of(squad.enemies, detectionThreat);
+        finishSquad(squad);
+        result.push_back(std::move(squad));
+    }
+
     std::vector<UnitSnapshot> groundHarassment;
     std::vector<UnitSnapshot> airHarassment;
     std::vector<UnitSnapshot> main;
@@ -301,7 +326,12 @@ std::vector<Squad> SquadPlanner::form(
         squad.id = nextId++;
         squad.role = SquadRole::harassment;
         squad.units = std::move(group);
-        squad.objective = plan.attackTarget;
+        const auto opportunity = harassmentOpportunity(state, squad.units.front());
+        squad.objective = opportunity.target.valid() ? opportunity.target : fallbackRetreat;
+        squad.withdrawing = !opportunity.target.valid();
+        squad.missionReason = opportunity.target.valid() ?
+            (squad.units.front().flying ? "Raid exposed air logistics" : "Raid exposed worker line") :
+            "Raid waiting: no observed safe economic target";
         squad.center = centroid(squad.units);
         const auto home = nearestOwnedBase(state, squad.center);
         squad.retreat = home != nullptr ? defensiveScreen(state, *home) : fallbackRetreat;

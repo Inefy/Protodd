@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <sstream>
 #include <string>
 #include <string_view>
 
@@ -101,14 +102,33 @@ namespace protodd::bwapi {
 void ProtoddModule::onStart() {
     BWAPI::Broodwar->setCommandOptimizationLevel(2);
     BWAPI::Broodwar->setLatCom(true);
+    // BWAPI only delivers onSendText and selected-unit information with this
+    // flag enabled. Tournament hosts may deny it; the passive overlay still
+    // works and reports that its interactive controls are unavailable.
+    BWAPI::Broodwar->enableFlag(BWAPI::Flag::UserInput);
     bridge_.onStart();
     state_ = bridge_.observe();
     navigation_ = bridge_.navigationGrid();
     opponent_.reset(state_.enemy.race);
     strategicDirector_.reset();
+    expansion_.reset();
+    macro_ = {};
+    workers_ = {};
+    plan_ = {};
+    phases_.clear();
+    traceMemory_.clear();
+    supplyBlockedFrames_.reset();
+    idleGatewayFrames_.reset();
+    idleWorkerFrames_.reset();
+    commandsAttempted_ = commandsAccepted_ = macroAttempted_ = macroAccepted_ = 0;
+    commandsProposed_ = commandsSuperseded_ = commandsRedundant_ = commandsDeferred_ = 0;
+    lastMacroFrame_ = lastSquadLogFrame_ = -1;
+    lastLedger_ = {};
     influence_ = InfluenceMap(64);
     commands_.clear();
+    scoutCommands_.clear();
     engagements_.reset();
+    squads_.reset();
     transports_.reset();
     scouts_.reset();
     frameBudget_.reset();
@@ -166,6 +186,7 @@ void ProtoddModule::onStart() {
              << opponentName_ << ',' << openingStyleName(openingStyle_) << '\n';
         log_ << "MATCH,seed=" << BWAPI::Broodwar->getRandomSeed()
              << ",map_hash=" << BWAPI::Broodwar->mapHash() << '\n';
+        log_ << "DIAGNOSTICS,version=1,sampleFrames=24,entityFrames=120,information=legal-observations\n";
     }
 }
 
@@ -251,7 +272,13 @@ void ProtoddModule::runFrame() {
         BWAPI::Broodwar->self() == nullptr || BWAPI::Broodwar->enemy() == nullptr) {
         return;
     }
-    state_ = bridge_.observe();
+    const auto measure = [this](const char* phase, auto&& operation) {
+        const auto start = std::chrono::steady_clock::now();
+        operation();
+        phases_[phase].record(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start).count());
+    };
+    measure("observe", [this] { state_ = bridge_.observe(); });
     if (state_.self.race != Race::protoss) {
         BWAPI::Broodwar->drawTextScreen(8, 8, "Protodd requires Protoss");
         return;
@@ -259,38 +286,54 @@ void ProtoddModule::runFrame() {
 
     const auto cadence = frameBudget_.expensiveCadenceMultiplier(state_.frame);
     // Work is staggered to keep frame time predictable under tournament load.
-    if (state_.frame % (8 * cadence) == 0) influence_.update(state_);
-    if (state_.frame % (12 * cadence) == 0) opponent_.update(state_);
-    if (state_.frame % 24 == 0 || plan_.goals.empty()) updateStrategy();
+    if (state_.frame % (8 * cadence) == 0) measure("influence", [this] { influence_.update(state_); });
+    if (state_.frame % (12 * cadence) == 0) measure("inference", [this] { opponent_.update(state_); });
+    if (state_.frame % 24 == 0 || plan_.goals.empty()) measure("strategy", [this] { updateStrategy(); });
     // Macro is cheap and producer idleness is time-sensitive: a Nexus or
     // Gateway should receive its next queue item within a latency-sized
     // window, not after the old quarter-second cadence.  Reconcile every
     // three frames while keeping the more expensive strategy/scouting loops
     // staggered below.
-    if (state_.frame % 3 == 1) updateMacro();
-    if (state_.frame % 12 == 2) updateWorkers();
-    if (state_.frame % (24 * cadence) == 3) updateScouting();
+    if (state_.frame % 3 == 1) measure("macro", [this] { updateMacro(); });
+    if (state_.frame % 12 == 2) measure("workers", [this] { updateWorkers(); });
+    if (state_.frame % (24 * cadence) == 3) measure("scouting", [this] { updateScouting(); });
     const auto combatCadence = std::max(1, state_.latencyFrames) *
                                (frameBudget_.load(state_.frame) == RuntimeLoad::emergency ? 2 : 1);
     if (state_.frame % combatCadence == 0) {
-        updateCombat(frameBudget_.allowSimulation(state_.frame),
+        measure("scout-micro", [this] { updateScoutMicro(); });
+        measure("combat", [this] { updateCombat(frameBudget_.allowSimulation(state_.frame),
                      frameBudget_.navigationInterval(state_.frame),
-                     frameBudget_.combatCommandLimit(state_.frame));
+                     frameBudget_.combatCommandLimit(state_.frame)); });
     }
     if (state_.frame % 24 == 5) {
-        bridge_.runMaintenance(maintenanceMineralReserve_, maintenanceGasReserve_);
+        measure("maintenance", [this] { bridge_.runMaintenance(maintenanceMineralReserve_, maintenanceGasReserve_); });
     }
-    if (state_.frame % 24 == 0) sampleTelemetry();
-    if (state_.frame % (24 * 5) == 0) logDecision();
+    if (state_.frame % 24 == 0) measure("diagnostics", [this] { sampleTelemetry(); logDiagnostics(); });
+    if (state_.frame % (24 * 5) == 0) measure("state-log", [this] { logDecision(); });
 
     if (frameBudget_.load(state_.frame) == RuntimeLoad::normal) {
-        bridge_.drawDebug(state_, plan_, opponent_.assessment(), debug_);
+        measure("overlay", [this] { bridge_.drawDebug(state_, plan_, opponent_.assessment(), debug_); });
     }
 }
 
 void ProtoddModule::onUnitDiscover(const BWAPI::Unit unit) { bridge_.remember(unit); }
 void ProtoddModule::onUnitShow(const BWAPI::Unit unit) { bridge_.remember(unit); }
-void ProtoddModule::onUnitDestroy(const BWAPI::Unit unit) { bridge_.forget(unit); }
+void ProtoddModule::onUnitDestroy(const BWAPI::Unit unit) {
+    if (log_ && unit != nullptr &&
+        (unit->getPlayer() == BWAPI::Broodwar->self() || unit->isVisible())) {
+        const auto kind = BwapiBridge::toKind(unit->getType());
+        log_ << "LOSS," << BWAPI::Broodwar->getFrameCount() << ','
+             << (unit->getPlayer() == BWAPI::Broodwar->self() ? "self" : "enemy") << ','
+             << unit->getID() << ',' << unitStats(kind).name << ','
+             << unit->getPosition().x << ',' << unit->getPosition().y << ','
+             << unit->getType().mineralPrice() << ',' << unit->getType().gasPrice() << '\n';
+    }
+    if (unit != nullptr) {
+        traceMemory_.erase("order/" + std::to_string(unit->getID()));
+        debug_.orders.erase(unit->getID());
+    }
+    bridge_.forget(unit);
+}
 void ProtoddModule::onUnitMorph(const BWAPI::Unit unit) { bridge_.remember(unit); }
 void ProtoddModule::onUnitRenegade(const BWAPI::Unit unit) {
     bridge_.forget(unit);
@@ -298,14 +341,23 @@ void ProtoddModule::onUnitRenegade(const BWAPI::Unit unit) {
 }
 
 void ProtoddModule::updateStrategy() {
-    plan_ = strategicDirector_.stabilize(
-        strategy_.plan(state_, opponent_.assessment(), openingStyle_),
-        state_, opponent_.assessment());
+    auto candidate = strategy_.plan(state_, opponent_.assessment(), openingStyle_);
+    const auto proposed = candidate.posture;
+    plan_ = strategicDirector_.stabilize(std::move(candidate), state_, opponent_.assessment());
+    expansion_.update(plan_, state_, bridge_.expansionFeedback());
+    if (expansion_.releaseBuilder() && !bridge_.cancelExpansion()) plan_.deferExpansion = false;
+    debug_.operation = expansion_.reason();
+    trace("strategy", "STRATEGY," + csvSafe(plan_.name) + ',' +
+        std::string(postureName(proposed)) + ',' + std::string(postureName(plan_.posture)) + ',' +
+        std::string(enemyPlanName(opponent_.assessment().mostLikely)) + ',' + debug_.operation + ',' +
+        std::to_string(plan_.deferExpansion));
 }
 
 void ProtoddModule::updateMacro() {
     ResourceLedger ledger{state_.self.minerals, state_.self.gas};
     const auto actions = macro_.reconcile(state_, plan_, ledger);
+    lastLedger_ = ledger;
+    lastMacroFrame_ = state_.frame;
     debug_.macro = actions;
     maintenanceMineralReserve_ = 0;
     maintenanceGasReserve_ = 0;
@@ -316,6 +368,22 @@ void ProtoddModule::updateMacro() {
         break;
     }
     bridge_.executeMacro(actions, plan_, leasedScouts_);
+    for (const auto& execution : bridge_.macroExecutions()) {
+        const auto& action = execution.action;
+        if (action.reserved && action.executable) {
+            ++macroAttempted_;
+            if (execution.accepted) ++macroAccepted_;
+        }
+        const auto key = std::to_string(static_cast<int>(action.action)) + '/' +
+            std::to_string(static_cast<int>(action.target)) + '/' +
+            std::to_string(static_cast<int>(action.technology));
+        std::ostringstream entry;
+        entry << "MACRO," << static_cast<int>(action.action) << ',' << unitStats(action.target).name
+              << ',' << static_cast<int>(action.technology) << ',' << csvSafe(execution.outcome)
+              << ',' << execution.accepted << ',' << csvSafe(action.reason) << ','
+              << action.minerals << ',' << action.gas << ',' << action.reserved << ',' << action.executable;
+        trace("macro/" + key, entry.str());
+    }
 }
 
 void ProtoddModule::updateWorkers() {
@@ -324,6 +392,10 @@ void ProtoddModule::updateWorkers() {
     std::ranges::sort(reserved);
     reserved.erase(std::unique(reserved.begin(), reserved.end()), reserved.end());
     const auto assignments = workers_.assign(state_, plan_, influence_, reserved);
+    const auto gas = std::ranges::count(assignments, WorkerJob::gas, &WorkerAssignment::job);
+    const auto minerals = std::ranges::count(assignments, WorkerJob::minerals, &WorkerAssignment::job);
+    trace("workers", "WORKERS,gas=" + std::to_string(gas) + ",minerals=" + std::to_string(minerals) +
+        ",leased=" + std::to_string(reserved.size()) + ",gasRequested=" + std::to_string(plan_.desiredGasWorkers));
     bridge_.executeWorkers(assignments);
 }
 
@@ -354,7 +426,30 @@ void ProtoddModule::updateScouting() {
     const auto orders = scouts_.assign(state_, available, influence_,
                                        opponent_.assessment());
     for (const auto& order : orders) leasedScouts_.push_back(order.scout);
-    bridge_.executeScouts(orders);
+    // Keep the opening Probe leased while it evades or returns, even if the
+    // strategic scout selector finds no safe new destination this pass.
+    const auto openingScout = scouts_.openingScout();
+    if (openingScout >= 0 && std::ranges::find(leasedScouts_, openingScout) == leasedScouts_.end())
+        leasedScouts_.push_back(openingScout);
+    std::vector<ScoutOrder> ordinary;
+    for (const auto& order : orders) if (order.scout != openingScout) ordinary.push_back(order);
+    bridge_.executeScouts(ordinary);
+}
+
+void ProtoddModule::updateScoutMicro() {
+    scoutCommands_.beginFrame(state_.frame, state_.latencyFrames);
+    if (const auto command = scouts_.controlWorkerScout(state_, influence_, &navigation_)) scoutCommands_.submit(*command);
+    for (const auto& command : scoutCommands_.finalize(1)) {
+        const auto accepted = bridge_.execute(command);
+        if (accepted) {
+            scoutCommands_.markIssued(command);
+            debug_.orders[command.actor] = command.source;
+            debug_.scout = "Probe " + std::to_string(command.actor) + ": " + command.source;
+        }
+        trace("scout", "SCOUT," + std::to_string(command.actor) + ',' + command.source + ',' +
+            std::to_string(command.targetUnit) + ',' + std::to_string(accepted));
+    }
+    if (scouts_.openingScout() < 0) debug_.scout.clear();
 }
 
 void ProtoddModule::updateCombat(
@@ -383,25 +478,22 @@ void ProtoddModule::updateCombat(
     commands_.beginFrame(state_.frame, state_.latencyFrames);
     fight_ = {};
     auto debugSquadSize = std::size_t{0};
+    const auto logSquads = lastSquadLogFrame_ < 0 || state_.frame - lastSquadLogFrame_ >= 24;
     const auto* vanguard = SquadPlanner::selectVanguard(formed, plan_.attackTarget);
     for (std::size_t squadIndex = 0; squadIndex < formed.size(); ++squadIndex) {
         const auto& squad = formed[squadIndex];
         auto requiredRatio = squad.requiredRatio;
         auto objective = squad.objective;
         auto defense = squad.defense;
-        // Squad formation keeps a permissive base-defense ratio so the
-        // planner can always create a last-stand detachment.  Outside the
-        // hard-breach ring, however, a growing wave should make that
-        // detachment fall back to its static screen instead of trading every
-        // mobile unit at the edge of the mineral line.  mustHoldDefensiveScreen
-        // below still overrides this when contact reaches the last stand.
-        if (squad.role == SquadRole::baseDefense &&
-            !SquadPlanner::mustHoldDefensiveScreen(squad)) {
+        // Protecting an economy does not make a losing outward chase safe.
+        // A breached screen permits nearby interception, never a ratio override.
+        if (squad.role == SquadRole::baseDefense) {
             requiredRatio = std::max(requiredRatio,
                                      plan_.posture == Posture::defend ? 1.25 : 1.05);
         }
         if (squad.role == SquadRole::mainArmy) {
-            if (plan_.expansionTarget.valid()) objective = plan_.expansionTarget;
+            if (plan_.expansionTarget.valid())
+                objective = expansionAssemblyPoint(state_, plan_.expansionTarget, retreatPoint());
             const auto undersizedVanguard =
                 vanguard == &squad &&
                 squad.units.size() <
@@ -414,7 +506,8 @@ void ProtoddModule::updateCombat(
                 requiredRatio = squad.enemies.empty()
                                     ? 0.88
                                     : (undersizedVanguard ? 1.18 : 1.05);
-                objective = plan_.rallyPoint;
+                objective = plan_.expansionTarget.valid()
+                    ? expansionAssemblyPoint(state_, plan_.expansionTarget, retreatPoint()) : plan_.rallyPoint;
                 defense = SquadPlanner::defensiveArea(state_, plan_.rallyPoint);
             } else if (vanguard != nullptr && vanguard != &squad &&
                        squad.enemies.empty()) {
@@ -462,29 +555,17 @@ void ProtoddModule::updateCombat(
             squad.enemies.empty() ? opponent_.assessment().uncertainty * 0.25
                                   : opponent_.assessment().uncertainty,
             runSimulation);
-        if (!squad.enemies.empty()) {
-            estimate.decision = engagements_.stabilize(
-                squad.engagementKey, estimate.decision, estimate.ratio,
-                requiredRatio, state_.frame);
-        }
-        // Once a ground threat has crossed the last defensive screen, running
-        // the army behind the Nexus only exposes workers and production. Make
-        // melee units take the last stand while ranged units still use their
-        // range-advantage kiting inside TacticalController.
-        if (SquadPlanner::mustHoldDefensiveScreen(squad)) {
-            estimate.decision = FightDecision::engage;
-        }
+        const auto proposedDecision = estimate.decision;
+        const auto engagementKey = engagements_.identify(squad.units, state_.frame);
+        estimate.decision = engagements_.stabilize(
+            engagementKey, estimate.decision, estimate.ratio,
+            requiredRatio, state_.frame, !squad.enemies.empty());
+        if (squad.enemies.empty() && estimate.decision == FightDecision::kite)
+            estimate.decision = FightDecision::retreat;
+        if (squad.withdrawing) estimate.decision = FightDecision::retreat;
+        estimate.holdScreen = SquadPlanner::mustHoldDefensiveScreen(squad);
         estimate.advanceBlocked = squad.role != SquadRole::baseDefense &&
             !SquadPlanner::mobileDetectionReady(state_, squad);
-        if (state_.frame % (24 * 5) == 0) {
-            log_ << "SQUAD," << state_.frame << ',' << squadRoleName(squad.role)
-                 << ",units=" << squad.units.size() << ",enemies=" << squad.enemies.size()
-                 << ",center=" << squad.center.x << 'x' << squad.center.y
-                 << ",objective=" << objective.x << 'x' << objective.y
-                 << ",ratio=" << estimate.ratio << ",required=" << requiredRatio
-                 << ",decision=" << static_cast<int>(estimate.decision)
-                 << ",detectionBlocked=" << estimate.advanceBlocked << '\n';
-        }
         if (!estimate.advanceBlocked && SquadPlanner::canCounterattack(squad, estimate, plan_)) {
             // A global defense response must not trap an independently strong
             // reserve army while the allocated defenders protect the base.
@@ -493,13 +574,33 @@ void ProtoddModule::updateCombat(
             if (firstCounterattackFrame_ < 0) firstCounterattackFrame_ = state_.frame;
         }
         const auto reason = estimate.advanceBlocked ? "Wait for mobile detection" :
-            SquadPlanner::mustHoldDefensiveScreen(squad) ? "Economy breached: intercept" :
+            estimate.holdScreen ? "Protect economy: intercept within reach" :
+            !squad.missionReason.empty() ? squad.missionReason.c_str() :
+            estimate.decision != proposedDecision ?
+                (estimate.decision == FightDecision::engage ? "Commit: awaiting sustained contrary evidence" :
+                                                            "Regroup: await stable advantage") :
             estimate.decision == FightDecision::retreat ?
                 (defense.front.valid() ? "Hold terrain: unfavorable fight" : "Retreat: unfavorable fight") :
             estimate.decision == FightDecision::kite ? "Fire and reposition" :
             !squad.enemies.empty() ? "Local fight accepted" :
             defense.front.valid() ? "Occupy defensive terrain" :
             plan_.expansionTarget.valid() ? "Cover expansion" : "Assemble / advance";
+        if (log_ && logSquads) {
+            log_ << "SQUAD," << state_.frame << ',' << squadRoleName(squad.role)
+                 << ",key=" << engagementKey << ",units=" << squad.units.size()
+                 << ",enemies=" << squad.enemies.size()
+                 << ",center=" << squad.center.x << 'x' << squad.center.y
+                 << ",objective=" << objective.x << 'x' << objective.y
+                 << ",ratio=" << estimate.ratio << ",required=" << requiredRatio
+                 << ",proposed=" << static_cast<int>(proposedDecision)
+                 << ",decision=" << static_cast<int>(estimate.decision)
+                 << ",confidence=" << estimate.confidence << ",simulation=" << runSimulation
+                 << ",friendlyRemaining=" << estimate.simulatedFriendlyRemaining
+                 << ",enemyRemaining=" << estimate.simulatedEnemyRemaining
+                 << ",detectionBlocked=" << estimate.advanceBlocked << ",reason=" << reason << ",members=";
+            for (const auto& member : squad.units) log_ << member.id << ';';
+            log_ << '\n';
+        }
         debug_.squads.push_back({std::string(squadRoleName(squad.role)), reason, squad.center,
             objective, squad.retreat, estimate.ratio, requiredRatio,
             static_cast<int>(squad.units.size()), static_cast<int>(squad.enemies.size()), estimate.decision});
@@ -516,6 +617,10 @@ void ProtoddModule::updateCombat(
             commands_.submit(order);
         }
     }
+    if (logSquads) lastSquadLogFrame_ = state_.frame;
+
+    for (const auto& order : clearExpansionFootprint(state_, plan_.expansionTarget,
+             expansionAssemblyPoint(state_, plan_.expansionTarget, retreatPoint()))) commands_.submit(order);
 
     for (const auto& order : tactics_.recharge(state_.self.units,
                                               plan_.posture == Posture::defend)) {
@@ -530,16 +635,30 @@ void ProtoddModule::updateCombat(
     for (const auto& order : transports_.control(
              state_, plan_.attackTarget, retreatPoint(), influence_,
              plan_.prioritizeReinforcements ? 100 :
-                 (state_.enemy.race == Race::protoss ? 2 : 1))) {
+                 (state_.enemy.race == Race::protoss ? 2 : 1), true)) {
         commands_.submit(order);
     }
     // BWAPI calls are capped per combat tick. Priority-aware rotation keeps
     // retreat and detector orders immediate while bounding large-army spikes.
-    for (const auto& command : commands_.finalize(commandLimit)) {
-        if (bridge_.execute(command)) {
+    const auto selectedCommands = commands_.finalize(commandLimit);
+    const auto& commandStats = commands_.stats();
+    commandsProposed_ += commandStats.proposed;
+    commandsSuperseded_ += commandStats.superseded;
+    commandsRedundant_ += commandStats.redundant;
+    commandsDeferred_ += commandStats.budgetDeferred;
+    for (const auto& command : selectedCommands) {
+        ++commandsAttempted_;
+        const auto accepted = bridge_.execute(command);
+        if (accepted) {
+            ++commandsAccepted_;
             commands_.markIssued(command);
             debug_.orders[command.actor] = command.source;
         }
+        std::ostringstream entry;
+        entry << "ORDER," << command.actor << ',' << static_cast<int>(command.type) << ','
+              << command.targetUnit << ',' << command.targetPosition.x << ',' << command.targetPosition.y
+              << ',' << command.source << ',' << accepted;
+        trace("order/" + std::to_string(command.actor), entry.str(), 120);
     }
 }
 
@@ -662,6 +781,84 @@ void ProtoddModule::sampleTelemetry() {
     lastEnemyVisibleArmy_ = visibleEnemyArmy;
 }
 
+void ProtoddModule::trace(std::string key, std::string value, const Frame heartbeat) {
+    if (!log_) return;
+    auto& previous = traceMemory_[key];
+    if (value == previous.value && state_.frame - previous.frame < heartbeat) return;
+    const auto comma = value.find(',');
+    if (comma == std::string::npos) return;
+    log_ << value.substr(0, comma) << ',' << state_.frame << value.substr(comma) << '\n';
+    previous = {std::move(value), state_.frame};
+}
+
+void ProtoddModule::logDiagnostics() {
+    auto idleGateways = 0;
+    auto usableGateways = 0;
+    auto idleWorkers = 0;
+    auto unpowered = 0;
+    for (const auto unit : BWAPI::Broodwar->self()->getUnits()) {
+        if (unit == nullptr || !unit->exists() || !unit->isCompleted()) continue;
+        if (unit->getType().requiresPsi() && !unit->isPowered()) ++unpowered;
+        if (unit->getType() == BWAPI::UnitTypes::Protoss_Gateway && unit->isPowered()) {
+            ++usableGateways;
+            if (!unit->isTraining() && unit->getRemainingTrainTime() == 0 &&
+                unit->getTrainingQueue().empty() &&
+                unit->getLastCommandFrame() + std::max(1, state_.latencyFrames) < state_.frame)
+                ++idleGateways;
+        }
+        if (unit->getType().isWorker() && unit->isIdle()) ++idleWorkers;
+    }
+    const auto blocked = state_.self.supplyTotal > 0 && state_.self.supplyTotal < 400 &&
+        state_.self.supplyTotal - state_.self.supplyUsed < 4;
+    supplyBlockedFrames_.sample(state_.frame, blocked ? 1 : 0);
+    idleGatewayFrames_.sample(state_.frame, idleGateways);
+    idleWorkerFrames_.sample(state_.frame, idleWorkers);
+    debug_.health = "Idle Gateways " + std::to_string(idleGateways) + "/" +
+        std::to_string(usableGateways) + " | idle Probes " + std::to_string(idleWorkers) +
+        " | supply tight " + std::to_string(supplyBlockedFrames_.total() / 24) + "s";
+    if (!log_) return;
+    const auto feedback = bridge_.expansionFeedback();
+    log_ << "HEALTH," << state_.frame << ",idleGateways=" << idleGateways
+         << ",gateways=" << usableGateways << ",idleWorkers=" << idleWorkers
+         << ",unpowered=" << unpowered << ",supplyTightFrames=" << supplyBlockedFrames_.total()
+         << ",idleGatewayFrames=" << idleGatewayFrames_.total()
+         << ",idleWorkerFrames=" << idleWorkerFrames_.total()
+         << ",commandsAttempted=" << commandsAttempted_ << ",commandsAccepted=" << commandsAccepted_
+         << ",commandsProposed=" << commandsProposed_ << ",commandsSuperseded=" << commandsSuperseded_
+         << ",commandsRedundant=" << commandsRedundant_ << ",commandsDeferred=" << commandsDeferred_
+         << ",macroAttempted=" << macroAttempted_ << ",macroAccepted=" << macroAccepted_
+         << ",expansionPending=" << feedback.pending << ",expansionStalled=" << feedback.stalledFrames
+         << ",expansionDeferred=" << plan_.deferExpansion
+         << ",minerals=" << state_.self.minerals << ",gas=" << state_.self.gas
+         << ",minedMinerals=" << state_.self.gatheredMinerals << ",minedGas=" << state_.self.gatheredGas
+         << ",supply=" << state_.self.supplyUsed << ",supplyTotal=" << state_.self.supplyTotal
+         << ",probes=" << countUnits(state_.self.units, UnitKind::probe, true)
+         << ",bases=" << countUnits(state_.self.units, UnitKind::nexus, true) << '\n';
+    if (state_.frame % 120 == 0) {
+        for (const auto& [name, timing] : phases_)
+            log_ << "PHASE," << state_.frame << ',' << name << ',' << timing.calls << ','
+                 << timing.totalUs << ',' << timing.peakUs << '\n';
+        for (auto raw = 0; raw < static_cast<int>(EnemyPlan::count); ++raw) {
+            const auto kind = static_cast<EnemyPlan>(raw);
+            log_ << "BELIEF," << state_.frame << ',' << enemyPlanName(kind) << ','
+                 << opponent_.probability(kind) << '\n';
+        }
+        const auto entities = [this](const PlayerSnapshot& player, const char* side) {
+            for (const auto& unit : player.units) {
+                const auto order = debug_.orders.find(unit.id);
+                log_ << "ENTITY," << state_.frame << ',' << side << ',' << unit.id << ','
+                     << unitStats(unit.kind).name << ',' << unit.position.x << ',' << unit.position.y
+                     << ',' << unit.hitPoints << ',' << unit.shields << ',' << unit.weaponCooldown
+                     << ',' << unit.orderTargetId << ',' << unit.lastSeen << ',' << unit.visible
+                     << ',' << (unit.ours && order != debug_.orders.end() ? order->second : "") << '\n';
+            }
+        };
+        entities(state_.self, "self");
+        entities(state_.enemy, "enemy");
+    }
+    log_.flush();
+}
+
 void ProtoddModule::logDecision() {
     if (!log_) return;
     const auto countUnits = [this](const UnitKind kind, const bool completedOnly) {
@@ -701,8 +898,9 @@ void ProtoddModule::logDecision() {
         state_.enemy.units, [](const UnitSnapshot& unit) {
             return unit.visible && unit.completed && isCombatUnit(unit.kind);
         });
-    ResourceLedger diagnosticLedger{state_.self.minerals, state_.self.gas};
-    const auto diagnosticActions = macro_.reconcile(state_, plan_, diagnosticLedger);
+    // Observability must never invoke the stateful planner a second time.
+    const auto& diagnosticLedger = lastLedger_;
+    const auto& diagnosticActions = debug_.macro;
     const auto& threat = opponent_.assessment();
     const auto workerGas = std::ranges::count_if(
         state_.self.units, [](const UnitSnapshot& unit) {
@@ -837,6 +1035,7 @@ void ProtoddModule::logDecision() {
          << ",enemyComp=" << composition(state_.enemy.units, true)
          << ",selfComp=" << composition(state_.self.units, false)
          << ",workersStatus=" << workerGas << '/' << workerCarrying << '/' << workerUnderAttack
+         << ",macroFrame=" << lastMacroFrame_
          << ",ledger=" << diagnosticLedger.freeMinerals() << '/'
          << diagnosticLedger.freeGas() << '/' << diagnosticLedger.reservedMinerals << '/'
          << diagnosticLedger.reservedGas

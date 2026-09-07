@@ -41,6 +41,8 @@ tournament bot or depend on code whose license restricts competition entry.
 - UCB-based opponent/map learning across games, using tournament-safe read and
   write directories to explore and exploit four opening styles.
 - Portable deterministic regression scenarios and strict-warning compilation.
+- Live and archived [decision diagnosis](docs/decision-observer.md), opening Probe
+  harassment, spare-unit worker raids, economic drop targets and persistent fight decisions.
 
 ## Build the portable core
 
@@ -100,6 +102,8 @@ The [research notes](docs/research.md) record the open-source projects and
 design patterns reviewed while keeping Protodd's implementation license-clean.
 The [ladder source review](docs/ladder-source-review.md) records coverage of all
 eleven configured opponents and the resulting combat and construction changes.
+The [terrain defense update](docs/terrain-defense.md) covers choke and high-ground
+positions, ranged composition, and the on-screen `/debug` controls.
 The [validation record](docs/validation.md) documents the exact candidate DLL,
 automated gates, iterative match outcomes, and unresolved validation gaps.
 The [strength audit](docs/strength-audit.md) details the September 2026 fixes,
