@@ -36,6 +36,21 @@ void BwapiBridge::onStart() {
     recentAreaSpells_.clear();
     lastMacroStatus_ = "idle";
     discoverResourceClusters();
+    const auto terrain = navigationGrid();
+    std::vector<Position> approaches{{Broodwar->mapWidth() * 16, Broodwar->mapHeight() * 16}};
+    for (const auto start : Broodwar->getStartLocations())
+        approaches.push_back({start.x * 32 + 64, start.y * 32 + 48});
+    for (auto& site : resourceSites_) {
+        for (const auto approach : approaches) {
+            if (distanceSquared(site.depotCenter, approach) < 384 * 384) continue;
+            const auto defense = terrain.defensivePosition(site.depotCenter, approach);
+            if (!defense.valid() || std::ranges::any_of(site.defenses,
+                [&defense](const DefensivePosition& prior) {
+                    return distanceSquared(prior.entrance, defense.entrance) < 160 * 160;
+                })) continue;
+            site.defenses.push_back(defense);
+        }
+    }
 }
 
 GameState BwapiBridge::observe() {
@@ -80,6 +95,33 @@ GameState BwapiBridge::observe() {
     }
     std::ranges::sort(state.enemy.units, {}, &UnitSnapshot::id);
 
+    // Only count visible, still-travelling shots whose damage semantics we
+    // can identify unambiguously. Hitscan effects and impact animations must
+    // never reserve damage that has already been applied to observed HP.
+    std::vector<IncomingProjectile> incoming;
+    for (const auto bullet : Broodwar->getBullets()) {
+        if (bullet == nullptr || !bullet->exists() || !bullet->isVisible() ||
+            bullet->getPlayer() != Broodwar->self()) continue;
+        const auto source = bullet->getSource();
+        const auto target = bullet->getTarget();
+        if (source == nullptr || target == nullptr || !source->exists() ||
+            !target->exists() || !target->isVisible() || !target->isDetected() ||
+            target->getPlayer() != Broodwar->enemy()) continue;
+        const auto supported =
+            (source->getType() == BWAPI::UnitTypes::Protoss_Dragoon &&
+             bullet->getType() == BWAPI::BulletTypes::Phase_Disruptor) ||
+            (source->getType() == BWAPI::UnitTypes::Protoss_Photon_Cannon &&
+             bullet->getType() == BWAPI::BulletTypes::STA_STS_Cannon_Overlay);
+        if (!supported || !bullet->getPosition().isValid()) continue;
+        const auto speed = std::hypot(bullet->getVelocityX(), bullet->getVelocityY());
+        if (speed < 0.5 || bullet->getRemoveTimer() <= 0) continue;
+        const auto flightFrames = distance(fromBwapi(bullet->getPosition()),
+                                           fromBwapi(target->getPosition())) / speed;
+        if (flightFrames > std::min(24, bullet->getRemoveTimer())) continue;
+        incoming.push_back({bullet->getID(), source->getID(), target->getID()});
+    }
+    accountIncomingDamage(state, incoming);
+
     const auto frame = state.frame;
     std::erase_if(failedBuildSites_, [frame](const FailedBuildSite& site) {
         return site.expires <= frame;
@@ -87,6 +129,15 @@ GameState BwapiBridge::observe() {
     std::erase_if(unitCommandLocks_, [frame](const auto& entry) {
         return entry.second <= frame;
     });
+    for (auto& [kind, pending] : pendingBuilds_) {
+        const auto builder = Broodwar->getUnit(pending.builder);
+        if (builder != nullptr && builder->exists() &&
+            (!pending.lastPosition.valid() ||
+             distanceSquared(pending.lastPosition, fromBwapi(builder->getPosition())) >= 16 * 16)) {
+            pending.lastPosition = fromBwapi(builder->getPosition());
+            pending.lastProgress = frame;
+        }
+    }
     std::erase_if(pendingBuilds_, [this, frame](const auto& entry) {
         const auto kind = entry.first;
         const auto& pending = entry.second;
@@ -95,16 +146,8 @@ GameState BwapiBridge::observe() {
             if (unit == nullptr || !unit->exists() || toKind(unit->getType()) != kind) {
                 return false;
             }
-            // Normal building leases store the exact top-left tile passed to
-            // Unit::build, while Nexus prepositioning stores the footprint
-            // center for the retry distance check.  Comparing a normal
-            // building's center with its top-left lease made every successful
-            // Forge/Cannon look unstarted and allowed the lease to expire.
-            if (kind != UnitKind::nexus) {
-                return closeTo(fromBwapi(BWAPI::Position(unit->getTilePosition())),
-                               pending.target, 96);
-            }
-            return closeTo(fromBwapi(unit->getPosition()), pending.target, 96);
+            // A nearby older Pylon/Gateway cannot fulfill this reservation.
+            return fromBwapi(BWAPI::Position(unit->getTilePosition())) == pending.target;
         });
         if (started) return true;
 
@@ -120,24 +163,26 @@ GameState BwapiBridge::observe() {
         }
         const auto age = frame - pending.issued;
         const auto expectedType = toBwapi(kind);
-        if (kind != UnitKind::nexus && age > 2 * 24) {
-            // Ordinary structures either appear at the worker's destination
-            // within a short travel window or the command was rejected by a
-            // transient placement/worker collision. Holding this lease for
-            // the Nexus-length timeout made a Forge or Cannon look
-            // permanently pending while the Probe stood idle, blocking every
-            // retry and eventually the entire tech chain. Expire ordinary
-            // leases after two seconds; failedBuildSites_ below keeps the
-            // exact bad tile out of the next search while allowing a fresh
-            // builder/location pair.
+        const auto lastCommand = builder->getLastCommand();
+        const auto commandedBuild = lastCommand.getType() == BWAPI::UnitCommandTypes::Build &&
+            lastCommand.getUnitType() == expectedType &&
+            fromBwapi(lastCommand.getTargetPosition()) == pending.target;
+        if (kind != UnitKind::nexus && age > std::max(2 * 24, Broodwar->getLatencyFrames() + 12) &&
+            frame - pending.lastProgress > 2 * 24) {
+            // Keep travelling builders leased. A stalled order must be
+            // cancelled before its resources and worker can be reassigned,
+            // otherwise it may complete after a replacement is already sent.
+            if (builder->getBuildType() == expectedType || commandedBuild) builder->stop();
             rememberFailure();
             return true;
         }
-        // A Protoss Probe can be free-moving while travelling to place a
-        // building. Track the exact assignment: treating any construction as
-        // proof would leave a Pylon reservation alive when another macro
-        // command had redirected that Probe to a Gateway.
-        const auto stillAssigned = builder->getBuildType() == expectedType;
+        // A pre-positioned expansion Probe is intentionally only moving until
+        // its fogged footprint becomes commandable, so BWAPI reports no
+        // build type during that interval. Ordinary construction leases still
+        // require the explicit build type to prevent a redirected Probe from
+        // blocking another macro action.
+        const auto stillAssigned = pending.prepositioned || commandedBuild ||
+                                   builder->getBuildType() == expectedType;
         // Give the command time to cross the latency boundary, then recover
         // quickly if another subsystem or the game rejected the order. Keep a
         // genuinely travelling builder reserved long enough for expansions.
@@ -147,6 +192,8 @@ GameState BwapiBridge::observe() {
             return true;
         }
         if (age >= 45 * 24) {
+            if (builder->getBuildType() == expectedType || commandedBuild || pending.prepositioned)
+                builder->stop();
             rememberFailure();
             return true;
         }
@@ -161,6 +208,7 @@ NavigationGrid BwapiBridge::navigationGrid() const {
     const auto height = Broodwar->mapHeight();
     std::vector<std::uint8_t> cells(
         static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0U);
+    auto elevation = cells;
     for (auto tileY = 0; tileY < height; ++tileY) {
         for (auto tileX = 0; tileX < width; ++tileX) {
             auto passable = 0;
@@ -178,9 +226,10 @@ NavigationGrid BwapiBridge::navigationGrid() const {
                                    static_cast<std::size_t>(width) +
                                static_cast<std::size_t>(tileX);
             cells[index] = passable >= 10 && centerPassable >= 3 ? 1U : 0U;
+            elevation[index] = static_cast<std::uint8_t>(Broodwar->getGroundHeight(tileX, tileY) / 2);
         }
     }
-    return {width, height, 32, std::move(cells)};
+    return {width, height, 32, std::move(cells), std::move(elevation)};
 }
 
 void BwapiBridge::remember(const BWAPI::Unit unit) {
@@ -700,15 +749,88 @@ void BwapiBridge::runMaintenance(const int mineralReserve, const int gasReserve)
 }
 
 void BwapiBridge::drawDebug(
+    const GameState& state,
     const StrategicPlan& plan,
     const ThreatAssessment& threat,
-    const CombatEstimate& combat) const {
-    Broodwar->drawTextScreen(8, 8, "Protodd | %s", plan.name.c_str());
-    Broodwar->drawTextScreen(8, 22, "Posture: %s | Enemy: %s (%.0f%% uncertainty)",
-                            postureName(plan.posture).data(),
-                            enemyPlanName(threat.mostLikely).data(), threat.uncertainty * 100.0);
-    Broodwar->drawTextScreen(8, 36, "Fight ratio %.2f | %d goals | %d bases target",
-                            combat.ratio, static_cast<int>(plan.goals.size()), plan.desiredBases);
+    const DebugOverlay& debug) const {
+    if (debug.level == 0) return;
+    Broodwar->drawBoxScreen(4, 4, 636, debug.level == 1 ? 94 : 216, Colors::Black, true);
+    auto y = 8;
+    const auto row = [&y](const char* format, auto... args) {
+        Broodwar->drawTextScreen(10, y, format, args...);
+        y += 12;
+    };
+    const auto count = [&state](const UnitKind kind) {
+        return static_cast<int>(std::ranges::count_if(state.self.units, [kind](const UnitSnapshot& unit) {
+            return unit.kind == kind && unit.completed;
+        }));
+    };
+    const auto weight = [&plan](const UnitKind kind) {
+        const auto found = std::ranges::find(plan.composition, kind, &CompositionTarget::kind);
+        return found == plan.composition.end() ? 0 : static_cast<int>(found->weight * 100.0 + 0.5);
+    };
+    row("Protodd | %.85s", plan.name.c_str());
+    row("%s | Enemy: %s | uncertainty %.0f%%", postureName(plan.posture).data(),
+        enemyPlanName(threat.mostLikely).data(), threat.uncertainty * 100.0);
+    row("Army D/Z/R %d/%d/%d | mix %d/%d/%d%% | Probes %d/%d", count(UnitKind::dragoon),
+        count(UnitKind::zealot), count(UnitKind::reaver), weight(UnitKind::dragoon),
+        weight(UnitKind::zealot), weight(UnitKind::reaver), count(UnitKind::probe), plan.desiredWorkers);
+    row("Rally %d,%d | Bases %d/%d | Expansion %s | Gas workers target %d",
+        plan.rallyPoint.x, plan.rallyPoint.y, count(UnitKind::nexus), plan.desiredBases,
+        plan.expansionTarget.valid() ? "COVERING SITE" : plan.sustainEconomy ? "GROWTH ENABLED" : "WAIT",
+        plan.desiredGasWorkers);
+    row("Macro: %.90s", lastMacroStatus_.c_str());
+    const auto macroLimit = debug.level == 1 ? 1U : 3U;
+    for (std::size_t i = 0; i < std::min<std::size_t>(macroLimit, debug.macro.size()); ++i) {
+        const auto& action = debug.macro[i];
+        const auto label = action.technology != TechnologyKind::none
+            ? technologyStats(action.technology).name.data() : unitStats(action.target).name.data();
+        row("%s %s (%dM %dG): %.52s", !action.executable ? "PREREQ" : action.reserved ? "READY" : "SAVING",
+            label, action.minerals, action.gas, action.reason.c_str());
+    }
+    if (debug.level > 1) {
+        for (std::size_t i = 0; i < std::min<std::size_t>(3, debug.squads.size()); ++i) {
+            const auto& squad = debug.squads[i];
+            if (squad.enemies > 0)
+                row("%s %d vs %d | ratio %.2f / need %.2f", squad.role.c_str(),
+                    squad.units, squad.enemies, squad.ratio, squad.required);
+            else row("%s %d | no local enemy", squad.role.c_str(), squad.units);
+            row("  %.72s -> %d,%d", squad.reason.c_str(), squad.objective.x, squad.objective.y);
+        }
+    }
+    row("/debug: cycle detail/off/compact | /debug 0, 1, 2: select display");
+
+    const auto marker = [](const Position point, const Color color, const char* label) {
+        if (!point.valid()) return;
+        Broodwar->drawCircleMap(point.x, point.y, 24, color);
+        Broodwar->drawTextMap(point.x + 26, point.y, "%s", label);
+    };
+    marker(plan.rallyPoint, Colors::Cyan, "RALLY");
+    marker(plan.attackTarget, Colors::Red, "STRATEGIC TARGET");
+    marker(plan.expansionTarget, Colors::Green, "EXPANSION COVER");
+    for (const auto& base : state.bases) {
+        if (base.ownerId != state.self.id || !base.defense.valid()) continue;
+        const auto& defense = base.defense;
+        Broodwar->drawLineMap(defense.left.x, defense.left.y, defense.right.x, defense.right.y, Colors::Yellow);
+        Broodwar->drawCircleMap(defense.anchor.x, defense.anchor.y,
+            std::clamp(defense.width, 192, 320), Colors::Cyan);
+        marker(defense.anchor, Colors::Cyan, defense.highGround ? "HIGH-GROUND HOLD" : "CHOKE HOLD");
+        Broodwar->drawTextMap(defense.entrance.x, defense.entrance.y, "FRONT / no pursuit (%d px)", defense.width);
+    }
+    for (const auto& squad : debug.squads) {
+        if (!squad.center.valid() || !squad.objective.valid()) continue;
+        const auto color = squad.decision == FightDecision::retreat ? Colors::Red :
+                           squad.decision == FightDecision::kite ? Colors::Yellow : Colors::Green;
+        Broodwar->drawLineMap(squad.center.x, squad.center.y, squad.objective.x, squad.objective.y, color);
+        Broodwar->drawTextMap(squad.center.x, squad.center.y - 20, "%s: %s", squad.role.c_str(), squad.reason.c_str());
+    }
+    for (const auto selected : Broodwar->getSelectedUnits()) {
+        if (selected->getPlayer() != Broodwar->self()) continue;
+        const auto found = debug.orders.find(selected->getID());
+        if (found != debug.orders.end())
+            Broodwar->drawTextMap(selected->getPosition().x, selected->getPosition().y + 20,
+                                 "ORDER: %s", found->second.c_str());
+    }
 }
 
 Race BwapiBridge::toRace(const BWAPI::Race race) noexcept {
@@ -1017,6 +1139,21 @@ std::vector<BaseSnapshot> BwapiBridge::snapshotBases(const GameState& state) {
                          baseLastScouted_[id],
                          start, island, mineralPatches, geysers,
                          baseLastConfirmedEmpty_.contains(id) ? baseLastConfirmedEmpty_.at(id) : -1});
+        const UnitSnapshot* approach = nullptr;
+        auto closest = 1600 * 1600;
+        for (const auto& enemy : state.enemy.units) {
+            if (!enemy.visible || enemy.flying || !isCombatUnit(enemy.kind) ||
+                enemy.groundWeapon.damage <= 0 || !enemy.position.valid()) continue;
+            const auto separation = distanceSquared(center, enemy.position);
+            if (separation < closest) { closest = separation; approach = &enemy; }
+        }
+        auto bestScore = std::numeric_limits<double>::infinity();
+        for (const auto& defense : site.defenses) {
+            const auto score = (approach ? distance(defense.entrance, approach->position) : 0.0) +
+                defense.width * (approach ? 0.25 : 1.5) +
+                distance(center, defense.anchor) * 0.25 - (defense.highGround ? 180.0 : 0.0);
+            if (score < bestScore) { bestScore = score; bases.back().defense = defense; }
+        }
     }
     return bases;
 }
@@ -1229,7 +1366,10 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
             const auto danger = std::max(0.0, 1200.0 - nearestEnemy) *
                                 (plan.posture == Posture::defend ? 1.8 : 0.8);
             const auto travel = distance(fromBwapi(builder->getPosition()), center);
-            const auto score = travel + danger - static_cast<double>(resources) / 40.0;
+            const auto strategicSite = plan.expansionTarget.valid() &&
+                closeTo(center, plan.expansionTarget, 64);
+            const auto score = travel + danger - static_cast<double>(resources) / 40.0 -
+                (strategicSite ? 100000.0 : 0.0);
             if (score < bestScore) {
                 bestScore = score;
                 best = &site;
@@ -1342,7 +1482,9 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
     const auto highValueTech = kind == UnitKind::roboticsFacility ||
                                kind == UnitKind::observatory ||
                                kind == UnitKind::roboticsSupportBay;
-    if (defenseDirectionKnown && type.requiresPsi() && vulnerableTech) {
+    const auto protectProduction = kind == UnitKind::gateway;
+    if ((defenseDirectionKnown || protectProduction) && type.requiresPsi() &&
+        (vulnerableTech || protectProduction)) {
         const auto base = Broodwar->getClosestUnit(
             builder->getPosition(),
             Filter::GetType == UnitTypes::Protoss_Nexus && Filter::IsCompleted &&
@@ -1358,7 +1500,7 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
             // counterattack.  If an enemy army is already in the home area,
             // reject forward-cluster tiles inside a generous weapon buffer so
             // the building survives long enough to produce its first unit.
-            if (highValueTech) {
+            if (highValueTech || protectProduction) {
                 Unit danger = nullptr;
                 auto dangerDistance = std::numeric_limits<int>::max();
                 for (const auto enemy : Broodwar->enemy()->getUnits()) {
@@ -1481,11 +1623,10 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         TilePosition{4, 0},
     };
     const auto& layout = useForwardLayout ? forwardLayout : standardLayout;
-    // Tech buildings are allowed to sit adjacent to the production cluster.
-    // BWAPI's own canBuildHere check still forbids overlapping footprints, but
-    // the old 32px movement corridor made Robotics/Support Bay placement
-    // impossible after a healthy one-base Gateway swell.
-    const auto structureGap = vulnerableTech ? 0 : 32;
+    // Non-producing tech can share edges, but Robotics and Gateway exits must
+    // stay open for large units. A legal Probe path does not prove that the
+    // Reaver produced there can leave the building cluster.
+    const auto structureGap = vulnerableTech && !type.canProduce() ? 0 : 32;
     const auto existing = static_cast<std::size_t>(std::ranges::count_if(
         Broodwar->self()->getUnits(), [type](const Unit unit) {
             return unit != nullptr && unit->exists() && unit->getType() == type;
@@ -1535,14 +1676,15 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
                 otherType.tileHeight() * 32};
             // Adjacent buildings created sealed pockets of fresh Dragoons.
             // Reserve a full build tile for movement between structures.
-            if (!separatedByGap(footprint, occupied, structureGap)) return false;
+            const auto exitGap = type.canProduce() || otherType.canProduce() ? 32 : structureGap;
+            if (!separatedByGap(footprint, occupied, exitGap)) return false;
         }
         for (const auto& [pendingKind, pending] : pendingBuilds_) {
             if (pendingKind == kind || pendingKind == UnitKind::nexus) continue;
             const auto pendingType = toBwapi(pendingKind);
             if (!separatedByGap(footprint,
                     {pending.target, pendingType.tileWidth() * 32, pendingType.tileHeight() * 32},
-                    structureGap)) return false;
+                    type.canProduce() || pendingType.canProduce() ? 32 : structureGap)) return false;
         }
         ++buildableCandidates;
         const Position center{
@@ -1597,6 +1739,30 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         if (!miningLaneFallback.isValid()) miningLaneFallback = location;
         return TilePositions::None;
     };
+    if (protectProduction) {
+        // getBuildLocation returns its first legal tile, which can be on the
+        // exposed side of a distant Pylon. Rank the compact powered footprint
+        // around the economy instead of accepting that search-order accident.
+        auto bestLocation = TilePositions::None;
+        auto bestScore = std::numeric_limits<double>::infinity();
+        for (auto dy = -10; dy <= 10; ++dy) {
+            for (auto dx = -10; dx <= 10; ++dx) {
+                const auto location = anchor + TilePosition{dx, dy};
+                const Position center{location.x * 32 + type.tileWidth() * 16,
+                                      location.y * 32 + type.tileHeight() * 16};
+                const auto score = distance(center, fromBwapi(anchorPosition)) +
+                    distance(center, fromBwapi(builder->getPosition())) * 0.10;
+                if (score >= bestScore || !usable(location) || blocksMiningLane(location, type))
+                    continue;
+                bestScore = score;
+                bestLocation = location;
+            }
+        }
+        if (bestLocation.isValid()) {
+            lastMacroStatus_ = "placement-protected-production";
+            return bestLocation;
+        }
+    }
     if (defendedNexus != nullptr) {
         // Score actual coverage before consulting the generic layout. A
         // Cannon beside the forward Pylon can leave the entire mineral line
@@ -1605,6 +1771,19 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         auto bestScore = -std::numeric_limits<double>::infinity();
         const auto nexusPosition = fromBwapi(defendedNexus->getPosition());
         const auto nexusTile = defendedNexus->getTilePosition();
+        Position intercept{-1, -1};
+        auto nearestApproach = 1100 * 1100;
+        for (const auto& [id, enemy] : enemyMemory_) {
+            static_cast<void>(id);
+            if (!enemy.visible || !enemy.completed || enemy.flying ||
+                enemy.groundWeapon.damage <= 0 || !enemy.position.valid() ||
+                isWorker(enemy.kind)) continue;
+            const auto separation = distanceSquared(enemy.position, nexusPosition);
+            if (separation < nearestApproach) {
+                nearestApproach = separation;
+                intercept = moveToward(nexusPosition, enemy.position, 160.0);
+            }
+        }
         std::vector<Position> workerLine;
         std::vector<Position> existingCannons;
         for (const auto patch : Broodwar->getMinerals()) {
@@ -1624,14 +1803,15 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
                 const Position center{location.x * 32 + type.tileWidth() * 16,
                                       location.y * 32 + type.tileHeight() * 16};
                 auto score = -distance(center, nexusPosition) * 0.04;
-                if (plan.rallyPoint.valid()) score -= distance(center, plan.rallyPoint) * 0.08;
+                if (intercept.valid()) score -= distance(center, intercept) * 0.30;
+                else if (plan.rallyPoint.valid()) score -= distance(center, plan.rallyPoint) * 0.08;
                 for (const auto patch : workerLine) {
                     if (distanceSquared(center, patch) > 256 * 256) continue;
                     const auto alreadyCovered = std::ranges::any_of(existingCannons,
                         [patch](const Position cannon) {
                             return distanceSquared(cannon, patch) <= 256 * 256;
                         });
-                    score += alreadyCovered ? 2.0 : 12.0;
+                    score += alreadyCovered ? 2.0 : (intercept.valid() ? 4.0 : 12.0);
                 }
                 if (score > bestScore) {
                     bestScore = score;
@@ -1764,17 +1944,15 @@ bool BwapiBridge::build(
         // worker arrives and the footprint is explored.
         if (action.target == UnitKind::nexus) {
             const auto builder = Broodwar->getUnit(pending->second.builder);
-            // `PendingBuild::target` is the footprint center used for the
-            // Probe's move order, not the top-left tile BWAPI expects for a
-            // building command.  Converting the center directly to a tile
-            // shifts a Nexus by half its footprint (2x1 tiles), making the
-            // retry fail forever once the Probe arrives.  Recover the exact
-            // top-left tile before asking BWAPI to place it.
             const auto targetTile = BWAPI::TilePosition(
-                (pending->second.target.x - type.tileWidth() * 16) / 32,
-                (pending->second.target.y - type.tileHeight() * 16) / 32);
+                pending->second.target.x / 32,
+                pending->second.target.y / 32);
+            const BWAPI::Position center{
+                pending->second.target.x + type.tileWidth() * 16,
+                pending->second.target.y + type.tileHeight() * 16,
+            };
             if (builder != nullptr && builder->exists() && builder->isCompleted() &&
-                builder->getDistance(toBwapiPosition(pending->second.target)) <= 96 &&
+                builder->getDistance(center) <= 96 &&
                 Broodwar->canBuildHere(targetTile, type, builder, true) &&
                 builder->build(type, targetTile)) {
                 lastMacroStatus_ = "issued-pending-Nexus";
@@ -1843,7 +2021,8 @@ bool BwapiBridge::build(
             };
             if (builder->move(center)) {
                 pendingBuilds_[action.target] = {
-                    builder->getID(), Broodwar->getFrameCount(), fromBwapi(center),
+                    builder->getID(), Broodwar->getFrameCount(),
+                    fromBwapi(BWAPI::Position(location)), true,
                 };
                 lastMacroStatus_ = "build-preposition-Nexus";
                 return false;
@@ -1854,7 +2033,8 @@ bool BwapiBridge::build(
     }
     if (builder->build(type, location)) {
         pendingBuilds_[action.target] = {
-            builder->getID(), Broodwar->getFrameCount(), fromBwapi(BWAPI::Position(location)),
+            builder->getID(), Broodwar->getFrameCount(),
+            fromBwapi(BWAPI::Position(location)), false,
         };
         return true;
     }

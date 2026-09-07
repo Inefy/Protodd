@@ -229,6 +229,9 @@ struct UnitSnapshot {
     bool gatheringGas{};
     // Latest possible start supported by legal observations; -1 is unknown.
     Frame constructionStartUpperBound{-1};
+    // Damage from visible, imminent friendly projectiles, rebuilt each frame.
+    // Kept separate from observed HP: a predicted hit is not an observation.
+    double incomingDamage{};
 
     void inheritObservationHistory(const UnitSnapshot& previous) noexcept;
 
@@ -254,6 +257,7 @@ struct BaseSnapshot {
     int geysers{};
     // A visible, empty depot footprint; -1 means never confirmed empty.
     Frame lastConfirmedEmpty{-1};
+    DefensivePosition defense;
 };
 
 struct TechnologySnapshot {

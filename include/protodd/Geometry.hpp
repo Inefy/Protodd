@@ -23,6 +23,16 @@ struct BuildingFootprint {
     int height{};
 };
 
+struct DefensivePosition {
+    Position anchor{-1, -1};
+    Position entrance{-1, -1};
+    Position left{-1, -1};
+    Position right{-1, -1};
+    int width{};
+    bool highGround{};
+    [[nodiscard]] bool valid() const noexcept { return anchor.valid() && entrance.valid(); }
+};
+
 [[nodiscard]] constexpr bool separatedByGap(
     const BuildingFootprint a, const BuildingFootprint b, const int gap) noexcept {
     return a.topLeft.x + a.width + gap <= b.topLeft.x ||

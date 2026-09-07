@@ -29,6 +29,7 @@ public:
     void onStart() override;
     void onEnd(bool winner) override;
     void onFrame() override;
+    void onSendText(std::string text) override;
     void onUnitDiscover(BWAPI::Unit unit) override;
     void onUnitShow(BWAPI::Unit unit) override;
     void onUnitDestroy(BWAPI::Unit unit) override;
@@ -55,6 +56,7 @@ private:
     StrategicPlan plan_;
     CombatEstimate fight_;
     GameState state_;
+    DebugOverlay debug_;
     OpponentHistory history_;
     OpeningStyle openingStyle_{OpeningStyle::standard};
     std::string opponentName_;

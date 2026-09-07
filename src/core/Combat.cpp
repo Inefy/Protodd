@@ -14,6 +14,7 @@ struct SimUnit {
     const UnitSnapshot* unit{};
     double durability{};
     int readyFrame{};
+    int ammunition{};
 };
 
 struct SimulationOutcome {
@@ -69,7 +70,7 @@ std::vector<SimUnit> simulationUnits(const std::span<const UnitSnapshot> source)
     result.reserve(selected.size());
     for (const auto* unit : selected) {
         result.push_back({unit, static_cast<double>(std::max(1, unit->durability())),
-                          std::max(0, unit->weaponCooldown)});
+                          std::max(0, unit->weaponCooldown), std::max(0, unit->ammo)});
     }
     return result;
 }
@@ -130,6 +131,7 @@ void scheduleVolleys(
     const int frame) {
     for (auto& attacker : attackers) {
         if (attacker.durability <= 0.0 || frame < attacker.readyFrame) continue;
+        if (attacker.unit->kind == UnitKind::reaver && attacker.ammunition <= 0) continue;
         auto targetIndex = std::size_t{0};
         const auto* target = nearestLivingTarget(attacker, defenders, pending,
                                                  targetIndex, frame);
@@ -139,6 +141,9 @@ void scheduleVolleys(
         pending[targetIndex] += attackDamage(*attacker.unit, *target,
             defenders[targetIndex].durability - pending[targetIndex]);
         attacker.readyFrame = frame + std::max(1, weapon.cooldown);
+        // Scarabs are consumed; Interceptors return and must not be consumed.
+        // Future Scarab production is not guaranteed by the observed bank.
+        if (attacker.unit->kind == UnitKind::reaver) --attacker.ammunition;
     }
 }
 
@@ -226,6 +231,31 @@ double attackDamage(const UnitSnapshot& attacker, const UnitSnapshot& target,
     return damage;
 }
 
+void accountIncomingDamage(GameState& state,
+                           const std::span<const IncomingProjectile> projectiles) {
+    for (auto& target : state.enemy.units) target.incomingDamage = 0.0;
+    auto ordered = std::vector<IncomingProjectile>(projectiles.begin(), projectiles.end());
+    std::ranges::sort(ordered, {}, &IncomingProjectile::id);
+    auto previousId = -1;
+    for (const auto& projectile : ordered) {
+        if (projectile.id < 0 || projectile.id == previousId) continue;
+        previousId = projectile.id;
+        const auto source = std::ranges::find(state.self.units, projectile.source, &UnitSnapshot::id);
+        const auto target = std::ranges::find(state.enemy.units, projectile.target, &UnitSnapshot::id);
+        if (source == state.self.units.end() || target == state.enemy.units.end() ||
+            !target->visible || !target->detected || target->invincible ||
+            target->durability() <= 0) continue;
+        auto attacker = *source;
+        // A projectile is a hit, not an entire multi-hit volley.
+        attacker.groundWeapon.hits = 1;
+        attacker.airWeapon.hits = 1;
+        const auto remaining = std::max(0.0, target->durability() - target->incomingDamage);
+        if (remaining > 0.0) {
+            target->incomingDamage += std::min(remaining, attackDamage(attacker, *target, remaining));
+        }
+    }
+}
+
 CombatEstimate CombatEvaluator::evaluate(
     const std::span<const UnitSnapshot> friendly,
     const std::span<const UnitSnapshot> enemy,
@@ -272,6 +302,11 @@ CombatEstimate CombatEvaluator::evaluate(
     const auto uncertaintyPenalty = 1.0 + std::clamp(uncertainty, 0.0, 1.0) * 0.28;
     result.enemyPower *= uncertaintyPenalty;
     result.ratio = result.friendlyPower / std::max(0.1, result.enemyPower);
+    if (rawEnemyPower <= 0.0 && std::ranges::any_of(friendly, combatReady)) {
+        // An army with no weapons that can affect this squad is no reason to
+        // abandon its mission (for example, Corsairs flying past Zealots).
+        result.ratio = std::max(result.ratio, requiredRatio);
+    }
     result.confidence = std::clamp((1.0 - uncertainty * 0.65) * simulation.coverage,
                                    0.2, 1.0);
     if (result.ratio >= requiredRatio) {
@@ -353,6 +388,16 @@ const UnitSnapshot* CombatEvaluator::selectTarget(
                    !target.hallucination && attacker.canAttack(target) &&
                    distanceSquared(attacker.position, target.position) <= 224 * 224;
         });
+    const auto hasShot = !meleeAttacker && std::ranges::any_of(candidates,
+        [&attacker, allocations](const UnitSnapshot& target) {
+            const auto reserved = std::ranges::find(allocations, target.id, &TargetAllocation::target);
+            const auto committed = reserved == allocations.end() ? 0 : reserved->committedDamage;
+            const auto& weapon = target.flying ? attacker.airWeapon : attacker.groundWeapon;
+            const auto separation = weaponDistance(attacker, target);
+            return target.visible && target.detected && !target.invincible && !target.hallucination &&
+                   attacker.canAttack(target) && target.durability() > target.incomingDamage + committed &&
+                   separation >= weapon.minRange && separation <= weapon.maxRange;
+        });
     for (const auto& target : candidates) {
         if (!target.visible || !target.detected || target.hallucination || target.invincible ||
             !attacker.canAttack(target)) {
@@ -363,11 +408,13 @@ const UnitSnapshot* CombatEvaluator::selectTarget(
         const auto committed = allocation != allocations.end()
                                    ? allocation->committedDamage
                                    : 0;
-        const auto remainingHealth = target.durability() - committed;
+        const auto remainingHealth = static_cast<double>(target.durability() - committed) -
+                                     target.incomingDamage;
         if (remainingHealth <= 0) continue;
         const auto range = weaponDistance(attacker, target);
         if (hasCloseMeleeTarget && range > 224.0) continue;
         const auto weapon = target.flying ? attacker.airWeapon : attacker.groundWeapon;
+        if (range < weapon.minRange || (hasShot && range > weapon.maxRange + 32)) continue;
         const auto splashTargets = attacker.kind == UnitKind::reaver
                                        ? std::ranges::count_if(
                                              candidates,
@@ -388,7 +435,7 @@ const UnitSnapshot* CombatEvaluator::selectTarget(
                                    ? 3.0
                                    : 0.0) +
                               static_cast<double>(splashTargets) * 0.9;
-        const auto effectiveHealth = std::max(1, remainingHealth);
+        const auto effectiveHealth = std::max(1.0, remainingHealth);
         const auto killEfficiency = attackDamage(attacker, target, remainingHealth) / effectiveHealth;
         const auto inRange = range <= weapon.maxRange + 16 ? 2.0 : 0.0;
         const auto targetStability = target.id == attacker.orderTargetId &&
@@ -418,16 +465,24 @@ double CombatEvaluator::unitPower(
         unit.ammo <= 0) {
         return unitStats(unit.kind).combatValue * 0.12;
     }
-    const auto hasAirTargets = std::ranges::any_of(opposition, [](const UnitSnapshot& target) {
-        return target.flying;
+    const auto usefulTarget = [&unit](const UnitSnapshot& target) {
+        if (target.invincible || target.loaded || !unit.canAttack(target)) return false;
+        if (!isBuilding(unit.kind)) return true;
+        const auto& weapon = target.flying ? unit.airWeapon : unit.groundWeapon;
+        const auto& response = unit.flying ? target.airWeapon : target.groundWeapon;
+        const auto separation = weaponDistance(unit, target);
+        return (separation >= weapon.minRange && separation <= weapon.maxRange) ||
+               (!isBuilding(target.kind) && target.topSpeed > 0.0 && target.canAttack(unit) &&
+                response.maxRange < weapon.maxRange);
+    };
+    const auto airUseful = std::ranges::any_of(opposition, [&usefulTarget](const UnitSnapshot& target) {
+        return target.flying && usefulTarget(target);
     });
-    const auto hasGroundTargets = std::ranges::any_of(opposition, [](const UnitSnapshot& target) {
-        return !target.flying;
+    const auto groundUseful = std::ranges::any_of(opposition, [&usefulTarget](const UnitSnapshot& target) {
+        return !target.flying && usefulTarget(target);
     });
-    const auto airUseful = hasAirTargets && unit.airWeapon.damage > 0;
-    const auto groundUseful = hasGroundTargets && unit.groundWeapon.damage > 0;
     if (!airUseful && !groundUseful && !opposition.empty()) {
-        return unit.role == UnitRole::spellcaster ? unitStats(unit.kind).combatValue * 0.6 : 0.1;
+        return unit.role == UnitRole::spellcaster ? unitStats(unit.kind).combatValue * 0.6 : 0.0;
     }
 
     const auto& weapon = airUseful ? unit.airWeapon : unit.groundWeapon;
@@ -505,6 +560,9 @@ std::vector<Command> TacticalController::control(
         }
         const auto local = influence.at(unit.position);
         const auto localThreat = unit.flying ? local.airThreat : local.groundThreat;
+        const auto protectedStep = [&defense](const Position proposed) {
+            return defense.front.valid() && !defense.contains(proposed) ? defense.center : proposed;
+        };
         const auto fragile = unit.healthFraction() < 0.28;
         // Our BWAPI detected flag describes our own vision, not the enemy's.
         // Use observed detection influence and actual incoming attacks to
@@ -622,11 +680,37 @@ std::vector<Command> TacticalController::control(
 
         if (fragile || (!covertAdvance &&
                        (estimate.decision == FightDecision::retreat || locallyOverwhelmed))) {
+            // Falling back must not silence a ready ranged volley. Only fire
+            // at targets already in range; an attack order toward a distant
+            // target would reverse the retreat. Wounded units keep escaping.
+            if (!fragile && unit.weaponCooldown == 0 &&
+                ((unit.kind != UnitKind::reaver && unit.kind != UnitKind::carrier) ||
+                 unit.ammo > 0)) {
+                std::vector<UnitSnapshot> firingTargets;
+                for (const auto& candidate : targets) {
+                    const auto& weapon = candidate.flying ? unit.airWeapon : unit.groundWeapon;
+                    const auto range = weaponDistance(unit, candidate);
+                    if (weapon.maxRange >= 96 && range >= weapon.minRange &&
+                        range <= weapon.maxRange) firingTargets.push_back(candidate);
+                }
+                if (const auto* shot = evaluator.selectTarget(unit, firingTargets, allocations)) {
+                    commands.push_back({unit.id, CommandType::attackUnit, shot->id, {-1, -1},
+                                        UnitKind::unknown, 86, 0, "retreat-volley"});
+                    const auto allocation = std::ranges::find(
+                        allocations, shot->id, &TargetAllocation::target);
+                    const auto committed = allocation == allocations.end() ? 0.0 : allocation->committedDamage;
+                    const auto remaining = std::max(0.0, shot->durability() - shot->incomingDamage - committed);
+                    const auto damage = std::min(remaining, attackDamage(unit, *shot, remaining));
+                    if (allocation == allocations.end()) allocations.push_back({shot->id, damage});
+                    else allocation->committedDamage += damage;
+                    continue;
+                }
+            }
             commands.push_back({
                 unit.id, CommandType::move, -1,
                 localThreat > 0.05F
-                    ? influence.safestStep(unit.position, retreatPoint, unit.flying)
-                    : retreatPoint,
+                    ? protectedStep(influence.safestStep(unit.position, retreatPoint, unit.flying))
+                    : protectedStep(retreatPoint),
                 UnitKind::unknown, fragile ? 100 : 86, 0, "combat-retreat",
             });
             continue;
@@ -682,7 +766,7 @@ std::vector<Command> TacticalController::control(
                 };
                 commands.push_back({
                     unit.id, CommandType::move, -1,
-                    influence.safestStep(unit.position, away, unit.flying),
+                    protectedStep(influence.safestStep(unit.position, away, unit.flying)),
                     UnitKind::unknown, 84, 0, "combat-kite",
                 });
             } else {
@@ -694,11 +778,13 @@ std::vector<Command> TacticalController::control(
                 const auto approachingMelee = !ranged &&
                     range <= weapon.maxRange + 96;
                 if (canFire || approachingMelee) {
-                    const auto fullDamage = std::max(
-                        1, static_cast<int>(std::lround(attackDamage(unit, *target))));
-                    const auto damage = canFire ? fullDamage : std::max(1, fullDamage / 2);
                     const auto allocation = std::ranges::find(
                         allocations, target->id, &TargetAllocation::target);
+                    const auto committed = allocation == allocations.end() ? 0.0 : allocation->committedDamage;
+                    const auto remaining = std::max(0.0, target->durability() -
+                        target->incomingDamage - committed);
+                    const auto fullDamage = attackDamage(unit, *target, remaining);
+                    const auto damage = std::min(remaining, fullDamage * (canFire ? 1.0 : 0.5));
                     if (allocation == allocations.end()) {
                         allocations.push_back({target->id, damage});
                     } else {

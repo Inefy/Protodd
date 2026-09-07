@@ -17,7 +17,8 @@ public:
         int width,
         int height,
         int cellSize,
-        std::vector<std::uint8_t> walkable);
+        std::vector<std::uint8_t> walkable,
+        std::vector<std::uint8_t> elevation = {});
 
     [[nodiscard]] bool empty() const noexcept;
     [[nodiscard]] bool walkable(Position position) const noexcept;
@@ -34,6 +35,7 @@ public:
         int maximumExpansions = 12000) const;
 
     [[nodiscard]] int width() const noexcept { return width_; }
+    [[nodiscard]] DefensivePosition defensivePosition(Position home, Position outside) const;
     [[nodiscard]] int height() const noexcept { return height_; }
     [[nodiscard]] int cellSize() const noexcept { return cellSize_; }
 
@@ -42,6 +44,7 @@ private:
     int height_{};
     int cellSize_{32};
     std::vector<std::uint8_t> walkable_;
+    std::vector<std::uint8_t> elevation_;
 
     [[nodiscard]] int index(int x, int y) const noexcept;
     [[nodiscard]] bool cellWalkable(int x, int y) const noexcept;

@@ -1,7 +1,12 @@
 param(
-    [ValidateSet("Zerg", "Terran", "Protoss")]
+    [ValidateSet("Zerg", "Terran", "Protoss", "Random")]
     [string]$OpponentRace = "Zerg",
     [string]$OpponentName = "",
+    [ValidateSet('', 'PvP_nzcore', 'PvP_zcore', 'PvP_zzcore', 'PvP_zcorez',
+        'PvP_10/12gatedt', 'PvP_2gatedtexpo', 'PvP_2gatereaver', 'PvP_3gaterobo',
+        'PvP_3gatespeedzeal', 'PvP_12nexus', 'PvP_4gategoon', 'PvP_9/9gate',
+        'PvP_9/9proxygate', 'PvP_10/12gate')]
+    [string]$OpponentOpening = "",
     [string]$Map = "maps/aiide/(2)Benzene.scx",
     [string]$Label = "direct-match",
     [int]$TimeoutSeconds = 480,
@@ -9,7 +14,7 @@ param(
     [int]$FrameMilliseconds = 0,
     [ValidateRange(-1, 2147483646)]
     [int]$Seed = -1,
-    [string]$BotDll = "build/tournament/Release/Protodd.dll",
+    [string]$BotDll = "build/protodd-tournament/Release/Protodd.dll",
     [switch]$PreserveLearning
 )
 
@@ -53,6 +58,10 @@ if ([string]::IsNullOrWhiteSpace($OpponentName)) { $OpponentName = "UAB$Opponent
 if ($OpponentName -notmatch '^[A-Za-z0-9_-]+$') {
     throw "Opponent name must identify a local ladder bot without path separators"
 }
+if ($OpponentOpening -and ($OpponentName -ne 'BananaBrain' -or
+    $OpponentRace -ne 'Protoss' -or $OpponentOpening -notmatch '^PvP_[A-Za-z0-9/]+$')) {
+    throw "OpponentOpening requires BananaBrain Protoss and a PvP opening name"
+}
 $moduleName = "$OpponentName.dll"
 $opponentRoot = Join-Path $repoPath "ladder/bots/$OpponentName/AI"
 if (-not (Test-Path -LiteralPath (Join-Path $opponentRoot $moduleName) -PathType Leaf)) {
@@ -85,6 +94,25 @@ foreach ($existing in $archiveFiles) {
     }
 }
 
+# Opponents also learn from runtime read/write files. Archive both sides by
+# default so an A/B test does not quietly train the opponent between games.
+if (-not $PreserveLearning) {
+    foreach ($dataKind in @('read', 'write')) {
+        $opponentData = Join-Path $runtimeB "bwapi-data/$dataKind"
+        foreach ($file in @(Get-ChildItem -LiteralPath $opponentData -File -Recurse)) {
+            $relative = $file.FullName.Substring($opponentData.Length).TrimStart('\', '/')
+            $saved = [System.IO.Path]::GetFullPath(
+                (Join-Path $archiveRoot "$Label-opponent-before/$dataKind/$relative"))
+            if (-not $file.FullName.StartsWith($buildPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+                -not $saved.StartsWith($buildPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "Opponent history archive must remain inside the build workspace"
+            }
+            New-Item -ItemType Directory -Path (Split-Path -Parent $saved) -Force | Out-Null
+            Move-Item -LiteralPath $file.FullName -Destination $saved
+        }
+    }
+}
+
 $sourceDllHash = (Get-FileHash -LiteralPath $resolvedDll -Algorithm SHA256).Hash
 $deployedDll = Join-Path $runtimeA "bwapi-data/AI/Protodd.dll"
 Copy-Item -LiteralPath $resolvedDll -Destination $deployedDll -Force
@@ -100,6 +128,15 @@ foreach ($file in $opponentFiles) {
     New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
     Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
 }
+if ($OpponentOpening) {
+    # Runtime-only configuration: the installed ladder opponent is unchanged.
+    Add-Content -LiteralPath (Join-Path $runtimeB 'bwapi-data/AI/Configuration.txt') `
+        -Value "`nPvP_opening=$OpponentOpening" -Encoding ascii
+}
+$runtimeConfiguration = Join-Path $runtimeB 'bwapi-data/AI/Configuration.txt'
+$runtimeConfigurationHash = if (Test-Path -LiteralPath $runtimeConfiguration) {
+    (Get-FileHash -LiteralPath $runtimeConfiguration -Algorithm SHA256).Hash
+} else { $null }
 
 $seedConfiguration = if ($Seed -ge 0) { "seed_override = $Seed" } else { "" }
 $hostIni = @"
@@ -200,6 +237,7 @@ log_path = bwapi-data/logs
 [System.IO.File]::WriteAllText((Join-Path $runtimeB "bwapi-data/bwapi.ini"), $joinIni)
 
 $launched = @()
+$proxyLaunched = @()
 function Get-TrackedStarCraftIds {
     $ids = @($script:launched)
     # StarCraft can fork a child after the injection wrapper was sampled. Only
@@ -247,6 +285,11 @@ function Close-LaunchedStarCraft {
         Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
     }
 }
+function Close-LaunchedProxy {
+    foreach ($id in @($script:proxyLaunched)) {
+        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+    }
+}
 
 $logPath = Join-Path $writeRoot "Protodd.log"
 $result = $null
@@ -257,6 +300,13 @@ try {
     Start-Process -FilePath (Join-Path $runtimeA "injectory_x86.exe") `
         -ArgumentList '--launch','StarCraft.exe','--inject','bwapi-data\BWAPI.dll','wmode.dll' `
         -WorkingDirectory $runtimeA -WindowStyle Hidden
+    if (Test-Path -LiteralPath (Join-Path $opponentRoot "run_proxy.bat")) {
+        $proxy = Start-Process -FilePath $env:ComSpec `
+            -ArgumentList @('/c', 'call', 'bwapi-data\AI\run_proxy.bat') `
+            -WorkingDirectory $runtimeB -WindowStyle Hidden -PassThru
+        $proxyLaunched += $proxy.Id
+        Start-Sleep -Seconds 2
+    }
     Start-Sleep -Seconds 3
     $launched += @(Get-Process -Name StarCraft -ErrorAction Stop | Select-Object -ExpandProperty Id)
     Start-Process -FilePath (Join-Path $runtimeB "injectory_x86.exe") `
@@ -273,7 +323,7 @@ try {
                     Where-Object { $_ -match '^END,(win|loss),(\d+)$' } |
                     Select-Object -Last 1
                 if ($terminal) {
-                    $result = $terminal
+                    $result = [string]$terminal
                     break
                 }
             } catch {
@@ -305,6 +355,9 @@ try {
         opponent_race = $OpponentRace
         opponent_sha256 = (Get-FileHash -LiteralPath (Join-Path $opponentRoot $moduleName)).Hash
         opponent_components_sha256 = $opponentComponents
+        opponent_opening_requested = $OpponentOpening
+        opponent_runtime_configuration_sha256 = $runtimeConfigurationHash
+        opponent_runtime_learning_reset = -not [bool]$PreserveLearning
         map = $Map
         map_sha256 = (Get-FileHash -LiteralPath $mapPath).Hash
         timeout_seconds = $TimeoutSeconds
@@ -312,8 +365,19 @@ try {
         seed_observed = $observedSeed
         learning_preserved = [bool]$PreserveLearning
     }
-    $record | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $archiveRoot "$Label.json") -Encoding utf8
     Close-LaunchedStarCraft
+    Close-LaunchedProxy
+    if ($OpponentName -eq 'BananaBrain') {
+        # This is opponent-side diagnostic evidence only. Never replace the
+        # pre-cleanup competitive result with a cleanup-generated outcome.
+        foreach ($file in @(Get-ChildItem -LiteralPath (Join-Path $runtimeB 'bwapi-data/write') -Filter 'Results_*.txt' -File)) {
+            Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $archiveRoot "$Label-opponent-$($file.Name)")
+            $last = Get-Content -LiteralPath $file.FullName -Tail 1
+            $fields = $last -split ','
+            if ($fields.Length -eq 13) { $record.opponent_opening_observed = $fields[5] }
+        }
+    }
+    $record | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $archiveRoot "$Label.json") -Encoding utf8
 }
 
 if (Test-Path -LiteralPath $logPath) {

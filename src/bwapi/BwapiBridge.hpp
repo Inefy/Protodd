@@ -18,6 +18,26 @@
 
 namespace protodd::bwapi {
 
+struct DebugSquad {
+    std::string role;
+    std::string reason;
+    Position center{-1, -1};
+    Position objective{-1, -1};
+    Position retreat{-1, -1};
+    double ratio{};
+    double required{};
+    int units{};
+    int enemies{};
+    FightDecision decision{FightDecision::retreat};
+};
+
+struct DebugOverlay {
+    int level{2};
+    std::vector<MacroAction> macro;
+    std::vector<DebugSquad> squads;
+    std::unordered_map<UnitId, std::string> orders;
+};
+
 class BwapiBridge {
 public:
     BwapiBridge() = default;
@@ -42,9 +62,10 @@ public:
     void executeScouts(std::span<const ScoutOrder> orders);
     void runMaintenance(int mineralReserve = 0, int gasReserve = 0);
     void drawDebug(
+        const GameState& state,
         const StrategicPlan& plan,
         const ThreatAssessment& threat,
-        const CombatEstimate& combat) const;
+        const DebugOverlay& debug) const;
 
     [[nodiscard]] static UnitKind toKind(BWAPI::UnitType type) noexcept;
     [[nodiscard]] static BWAPI::UnitType toBwapi(UnitKind kind) noexcept;
@@ -60,7 +81,11 @@ private:
     struct PendingBuild {
         UnitId builder{-1};
         Frame issued{};
+        // Pixel coordinates of the exact top-left build tile for every type.
         Position target{-1, -1};
+        bool prepositioned{};
+        Position lastPosition{-1, -1};
+        Frame lastProgress{-1};
     };
 
     struct FailedBuildSite {
@@ -74,6 +99,7 @@ private:
         Position depotCenter{-1, -1};
         Position mineralLine{-1, -1};
         BWAPI::TilePosition depotTile{BWAPI::TilePositions::None};
+        std::vector<DefensivePosition> defenses;
     };
 
     std::unordered_map<UnitId, UnitSnapshot> enemyMemory_;

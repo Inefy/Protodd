@@ -42,6 +42,7 @@ double allocationPower(const UnitSnapshot& unit) {
 }
 
 Position defensiveScreen(const GameState& state, const BaseSnapshot& base) {
+    if (base.defense.valid()) return base.defense.anchor;
     if (!base.mineralLine.valid() || base.mineralLine == base.center) return base.center;
     const Position away{
         base.center.x + base.center.x - base.mineralLine.x,
@@ -77,6 +78,8 @@ std::uint64_t squadSignature(const Squad& squad) {
 void finishSquad(Squad& squad) {
     std::ranges::sort(squad.units, {}, &UnitSnapshot::id);
     squad.signature = squadSignature(squad);
+    squad.engagementKey = (static_cast<std::uint64_t>(squad.role) << 32U) |
+        static_cast<std::uint32_t>(squad.units.empty() ? -1 : squad.units.front().id);
 }
 
 }  // namespace
@@ -109,9 +112,14 @@ std::vector<Squad> SquadPlanner::form(
                 unit.disabled || (unit.groundWeapon.damage <= 0 &&
                                   unit.role != UnitRole::spellcaster) ||
                 nearestOwnedBase(state, unit.position) != &base ||
-                distanceSquared(unit.position, base.center) > 800 * 800) {
+                (distanceSquared(unit.position, base.center) > 800 * 800 &&
+                 (!base.defense.valid() || distanceSquared(unit.position, base.defense.entrance) > 640 * 640))) {
                 continue;
             }
+            // A stabilized field army contests a perimeter contain as one
+            // group. Only an actual base breach creates a tethered detachment.
+            if (plan.breakContainment &&
+                distanceSquared(unit.position, base.center) > 320 * 320) continue;
             nearby.push_back(unit);
             threatPower += allocationPower(unit);
         }
@@ -176,6 +184,16 @@ std::vector<Squad> SquadPlanner::form(
             // every point around a Nexus is covered by rear-placed Cannons.
             defense.defense = {centroid(staticSupport), 256, threatenedBase->center};
         }
+        const auto breached = std::ranges::any_of(baseThreats, [threatenedBase](const UnitSnapshot& enemyUnit) {
+            return distanceSquared(enemyUnit.position, threatenedBase->center) <= 320 * 320;
+        });
+        if (threatenedBase->defense.valid() && !breached) {
+            const auto& terrain = threatenedBase->defense;
+            defense.defense = {terrain.anchor, std::clamp(terrain.width, 192, 320),
+                               threatenedBase->center, terrain.entrance};
+        } else if (breached) {
+            defense.retreat = threatenedBase->center;
+        }
         defense.requiredRatio = 0.55;
         defense.units = std::move(staticSupport);
         auto committedPower = 0.0;
@@ -200,7 +218,7 @@ std::vector<Squad> SquadPlanner::form(
         for (const auto& unit : defense.units) assigned.insert(unit.id);
         defense.center = centroid(defense.units);
         finishSquad(defense);
-        defense.enemies = localEnemies(enemy, defense.units, defense.objective, 900);
+        defense.enemies = localEnemies(enemy, defense.units, defense.objective, 900, state.frame);
         defense.needsDetection = std::ranges::any_of(defense.enemies, detectionThreat);
         result.push_back(std::move(defense));
     }
@@ -209,7 +227,7 @@ std::vector<Squad> SquadPlanner::form(
     // map. Without this reserve, a cleared perimeter immediately sends every
     // fighter toward the enemy and a hidden reinforcement wave can walk into
     // the Nexus before the next threat snapshot forms a defense squad.
-    if (threats.empty() &&
+    if (threats.empty() && !plan.breakContainment &&
         (plan.posture == Posture::pressure || plan.posture == Posture::attack)) {
         const auto* homeBase = nearestOwnedBase(state, fallbackRetreat);
         if (homeBase != nullptr) {
@@ -237,48 +255,62 @@ std::vector<Squad> SquadPlanner::form(
             // were present.  Two bodies cover the Nexus after the strategy
             // lowers its attack size and commits the remaining group forward.
             const auto guardLimit = plan.minimumAttackSize <= 8 ? 2U : 4U;
-            const auto guardCount = std::min<std::size_t>(guardLimit, candidates.size());
+            const auto spare = candidates.size() > static_cast<std::size_t>(plan.minimumAttackSize)
+                ? candidates.size() - static_cast<std::size_t>(plan.minimumAttackSize) : 0U;
+            const auto guardCount = std::min<std::size_t>(guardLimit, spare);
             if (guardCount > 0) {
                 Squad guard;
                 guard.id = nextId++;
                 guard.role = SquadRole::baseDefense;
-                guard.objective = homeBase->center;
+                guard.objective = defensiveScreen(state, *homeBase);
                 guard.retreat = defensiveScreen(state, *homeBase);
                 guard.defense = {homeBase->center, 448, homeBase->center};
+                if (homeBase->defense.valid())
+                    guard.defense = {homeBase->defense.anchor, 256, homeBase->center,
+                                     homeBase->defense.entrance};
                 guard.requiredRatio = 1.15;
                 guard.units.assign(candidates.begin(), candidates.begin() +
                     static_cast<std::ptrdiff_t>(guardCount));
                 for (const auto& unit : guard.units) assigned.insert(unit.id);
                 finishSquad(guard);
-                guard.enemies = localEnemies(enemy, guard.units, guard.objective, 900);
+                guard.enemies = localEnemies(enemy, guard.units, guard.objective, 900, state.frame);
                 guard.needsDetection = std::ranges::any_of(guard.enemies, detectionThreat);
                 result.push_back(std::move(guard));
             }
         }
     }
 
-    std::vector<UnitSnapshot> harassment;
+    std::vector<UnitSnapshot> groundHarassment;
+    std::vector<UnitSnapshot> airHarassment;
     std::vector<UnitSnapshot> main;
     for (const auto& unit : friendly) {
         if (assigned.contains(unit.id) || isStaticDefense(unit.kind) ||
             !isCombatUnit(unit.kind)) continue;
-        (harassmentUnit(unit) ? harassment : main).push_back(unit);
+        if (harassmentUnit(unit)) {
+            (unit.flying ? airHarassment : groundHarassment).push_back(unit);
+        } else {
+            main.push_back(unit);
+        }
     }
 
-    if (!harassment.empty()) {
+    // Corsairs and Dark Templar cannot support one another's targets. Each
+    // movement domain also splits by locality, just like the main army.
+    for (const auto* harassment : {&groundHarassment, &airHarassment}) {
+      for (auto& group : connectedGroups(*harassment, 576)) {
         Squad squad;
         squad.id = nextId++;
         squad.role = SquadRole::harassment;
-        squad.units = std::move(harassment);
+        squad.units = std::move(group);
         squad.objective = plan.attackTarget;
         squad.center = centroid(squad.units);
         const auto home = nearestOwnedBase(state, squad.center);
-        squad.retreat = home != nullptr ? home->center : fallbackRetreat;
+        squad.retreat = home != nullptr ? defensiveScreen(state, *home) : fallbackRetreat;
         squad.requiredRatio = 1.38;
         finishSquad(squad);
-        squad.enemies = localEnemies(enemy, squad.units, squad.objective, 720);
+        squad.enemies = localEnemies(enemy, squad.units, squad.objective, 720, state.frame);
         squad.needsDetection = std::ranges::any_of(squad.enemies, detectionThreat);
         result.push_back(std::move(squad));
+      }
     }
 
     // Disconnected army components make independent local decisions until they
@@ -292,10 +324,10 @@ std::vector<Squad> SquadPlanner::form(
         squad.objective = plan.attackTarget.valid() ? plan.attackTarget : plan.rallyPoint;
         squad.center = centroid(squad.units);
         const auto home = nearestOwnedBase(state, squad.center);
-        squad.retreat = home != nullptr ? home->center : fallbackRetreat;
+        squad.retreat = home != nullptr ? defensiveScreen(state, *home) : fallbackRetreat;
         squad.requiredRatio = plan.attackThreshold;
         finishSquad(squad);
-        squad.enemies = localEnemies(enemy, squad.units, squad.objective, 820);
+        squad.enemies = localEnemies(enemy, squad.units, squad.objective, 820, state.frame);
         squad.needsDetection = std::ranges::any_of(squad.enemies, detectionThreat);
         result.push_back(std::move(squad));
     }
@@ -335,6 +367,8 @@ std::vector<Command> SquadPlanner::detectorEscorts(
 
     std::vector<const Squad*> priorities;
     for (const auto& squad : squads) {
+        if (squad.role == SquadRole::baseDefense && squad.enemies.empty() &&
+            !squad.needsDetection) continue;
         if (!squad.units.empty()) priorities.push_back(&squad);
     }
     std::ranges::sort(priorities, [](const Squad* left, const Squad* right) {
@@ -396,6 +430,29 @@ const Squad* SquadPlanner::selectVanguard(
     return best;
 }
 
+Position SquadPlanner::supportRendezvous(
+    const GameState& state, const Squad& squad, const Position objective) noexcept {
+    if (!objective.valid() || squad.role != SquadRole::mainArmy ||
+        squad.units.size() < 4 || !squad.enemies.empty()) return objective;
+    const UnitSnapshot* support = nullptr;
+    auto closest = 1536 * 1536;
+    for (const auto& reaver : state.self.units) {
+        if (reaver.kind != UnitKind::reaver || !reaver.completed || reaver.loaded ||
+            reaver.disabled || reaver.hallucination || !reaver.position.valid() ||
+            reaver.healthFraction() < 0.35) continue;
+        const auto separation = distanceSquared(reaver.position, squad.center);
+        if (separation <= 448 * 448 || separation >= closest ||
+            distance(reaver.position, objective) <= distance(squad.center, objective) + 128.0)
+            continue;
+        closest = separation;
+        support = &reaver;
+    }
+    // Do not outrun nearby splash support during uncontested travel. Contact
+    // still belongs to the local combat decision, and distant new production
+    // cannot recall an army from the other side of the map.
+    return support != nullptr ? moveToward(support->position, objective, 256.0) : objective;
+}
+
 bool SquadPlanner::canCounterattack(
     const Squad& squad, const CombatEstimate& estimate, const StrategicPlan& plan) {
     if (plan.posture != Posture::defend || squad.role != SquadRole::mainArmy ||
@@ -434,6 +491,10 @@ std::vector<UnitSnapshot> SquadPlanner::tacticalTargets(
 
 DefenseArea SquadPlanner::defensiveArea(const GameState& state, const Position rally) {
     const auto* base = nearestOwnedBase(state, rally);
+    if (base != nullptr && base->defense.valid() &&
+        distanceSquared(rally, base->defense.anchor) < 256 * 256)
+        return {base->defense.anchor, std::clamp(base->defense.width, 192, 320),
+                base->center, base->defense.entrance};
     std::vector<UnitSnapshot> support;
     for (const auto& unit : state.self.units) {
         if (isStaticDefense(unit.kind) && unit.completed && unit.powered && !unit.disabled &&
@@ -449,6 +510,12 @@ DefenseArea SquadPlanner::defensiveArea(const GameState& state, const Position r
 
 bool SquadPlanner::mustHoldDefensiveScreen(const Squad& squad) noexcept {
     if (squad.role != SquadRole::baseDefense || !squad.retreat.valid()) return false;
+    if (squad.defense.front.valid()) {
+        return std::ranges::any_of(squad.enemies, [&squad](const UnitSnapshot& enemy) {
+            return enemy.visible && enemy.detected && !enemy.flying && enemy.groundWeapon.damage > 0 &&
+                   distanceSquared(enemy.position, squad.defense.economyCenter) <= 256 * 256;
+        });
+    }
     // The base-defense squad is formed from a threat already inside the
     // 800-pixel local window. Waiting until 224 pixels leaves melee units
     // standing on the mineral line before the low-confidence combat estimate
@@ -513,12 +580,22 @@ std::vector<UnitSnapshot> SquadPlanner::localEnemies(
     const std::span<const UnitSnapshot> enemies,
     const std::span<const UnitSnapshot> units,
     const Position /*objective*/,
-    const int radius) {
+    const int radius,
+    const Frame frame) {
     std::vector<UnitSnapshot> result;
     for (const auto& enemy : enemies) {
-        if (!enemy.visible) continue;
-        const auto nearMember = std::ranges::any_of(units, [&enemy, radius](const UnitSnapshot& unit) {
-            return distanceSquared(enemy.position, unit.position) <= radius * radius;
+        const auto age = frame - enemy.lastSeen;
+        if (!enemy.position.valid() || (!enemy.visible &&
+            (age < 0 || (!isBuilding(enemy.kind) && age > 8 * 24)))) continue;
+        // Losing vision while retreating is not evidence that the opposing
+        // army vanished. Keep its last legal observation briefly in the fight
+        // estimate, with a bounded possible approach distance. Target selection
+        // still requires visibility; no attack command uses a hidden target.
+        const auto possibleApproach = enemy.visible ? 0 :
+            static_cast<int>(std::clamp(enemy.topSpeed * age, 0.0, 256.0));
+        const auto reach = radius + possibleApproach;
+        const auto nearMember = std::ranges::any_of(units, [&enemy, reach](const UnitSnapshot& unit) {
+            return distanceSquared(enemy.position, unit.position) <= reach * reach;
         });
         // A distant target's defenses must not enter a local fight until the
         // army approaches them; otherwise reinforcements can retreat at home.

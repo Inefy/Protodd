@@ -98,6 +98,8 @@ Use [the competition workflow](docs/competition.md) to benchmark changes and
 the included log analyzer to compare batches rather than individual games.
 The [research notes](docs/research.md) record the open-source projects and
 design patterns reviewed while keeping Protodd's implementation license-clean.
+The [ladder source review](docs/ladder-source-review.md) records coverage of all
+eleven configured opponents and the resulting combat and construction changes.
 The [validation record](docs/validation.md) documents the exact candidate DLL,
 automated gates, iterative match outcomes, and unresolved validation gaps.
 The [strength audit](docs/strength-audit.md) details the September 2026 fixes,

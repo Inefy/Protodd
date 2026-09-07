@@ -1,5 +1,10 @@
 # Open-source bot research notes
 
+The [September 6 ladder source review](ladder-source-review.md) covers all eleven
+configured opponents and records the resulting combat and construction changes.
+The [containment investigation](containment-review.md) follows the full-game
+failures through production, army allocation, placement, transport, and fog memory.
+
 This document records the design ideas evaluated while hardening Protodd. The
 implementation remains original: repositories with restrictive, unclear, or
 copyleft terms were used only to study architecture and testing practices.

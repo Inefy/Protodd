@@ -132,9 +132,12 @@ def summarize(records: list[dict]) -> dict:
         components = record.get("opponent_components_sha256")
         bundle = hashlib.sha256(json.dumps(components, sort_keys=True).encode()).hexdigest() \
             if components else "unknown"
+        conditions = json.dumps({field: record.get(field, "unknown") for field in (
+            "opponent_opening_requested", "opponent_runtime_configuration_sha256",
+            "opponent_runtime_learning_reset", "learning_preserved")}, sort_keys=True)
         key = (record.get("bot_sha256", "unknown"), record.get("opponent", "unknown"),
                record.get("map", "unknown"), record.get("opponent_sha256", "unknown"),
-               record.get("map_sha256", "unknown"), bundle)
+               record.get("map_sha256", "unknown"), bundle, conditions)
         counts = groups.setdefault(key, Counter())
         if record in completed:
             counts["wins" if str(record["result"]).startswith("END,win,") else "losses"] += 1
@@ -147,6 +150,7 @@ def summarize(records: list[dict]) -> dict:
             "bot_sha256": key[0], "opponent": key[1], "map": key[2],
             "opponent_sha256": key[3], "map_sha256": key[4],
             "opponent_bundle_sha256": key[5],
+            "test_conditions": json.loads(key[6]),
             "wins": counts["wins"], "losses": counts["losses"],
             "incomplete": counts["incomplete"], "completed": games,
             "win_rate": counts["wins"] / games if games else None,
@@ -164,6 +168,16 @@ def summarize(records: list[dict]) -> dict:
 
 
 class DirectReportTests(unittest.TestCase):
+    def test_runtime_openings_and_learning_are_separate_conditions(self):
+        base = {"status": "completed", "result": "END,loss,12000",
+                "bot_sha256": "same", "opponent": "BananaBrain",
+                "opponent_runtime_learning_reset": True,
+                "opponent_opening_requested": "PvP_nzcore"}
+        report = summarize([base, {**base, "opponent_opening_requested": "PvP_3gaterobo"},
+                            {**base, "opponent_runtime_learning_reset": False}])
+        self.assertEqual(len(report["segments"]), 3)
+        self.assertTrue(all(segment["completed"] == 1 for segment in report["segments"]))
+
     def test_milestones_require_completed_units(self):
         prefix = "STATE,{frame},Plan,Hold,Unknown,1,1,100,50,30,50,0.1,normal,idle,"
         states = [prefix.format(frame=3600) + "probes=12,dragoons=1/0,core=1/1,range=0/1",

@@ -18,6 +18,9 @@ struct Squad {
     // Changes whenever the role, objective, retreat anchor, or membership
     // changes. Runtime caches use this instead of the transient vector index.
     std::uint64_t signature{};
+    // Combat decision memory survives reinforcement and a moving objective;
+    // routing still uses the complete signature above.
+    std::uint64_t engagementKey{};
     SquadRole role{SquadRole::mainArmy};
     std::vector<UnitSnapshot> units;
     std::vector<UnitSnapshot> enemies;
@@ -46,6 +49,8 @@ public:
     [[nodiscard]] static const Squad* selectVanguard(
         std::span<const Squad> squads,
         Position objective) noexcept;
+    [[nodiscard]] static Position supportRendezvous(
+        const GameState& state, const Squad& squad, Position objective) noexcept;
 
     [[nodiscard]] static bool mustHoldDefensiveScreen(
         const Squad& squad) noexcept;
@@ -72,7 +77,8 @@ private:
         std::span<const UnitSnapshot> enemies,
         std::span<const UnitSnapshot> units,
         Position objective,
-        int radius);
+        int radius,
+        Frame frame);
 };
 
 [[nodiscard]] std::string_view squadRoleName(SquadRole role) noexcept;

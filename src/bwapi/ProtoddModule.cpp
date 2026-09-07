@@ -112,6 +112,7 @@ void ProtoddModule::onStart() {
     transports_.reset();
     scouts_.reset();
     frameBudget_.reset();
+    debug_ = {};
     detectorEscorts_.clear();
     leasedScouts_.clear();
     advanceWaypoints_.clear();
@@ -238,6 +239,13 @@ void ProtoddModule::onFrame() {
     }
 }
 
+void ProtoddModule::onSendText(std::string text) {
+    if (text == "/debug") debug_.level = (debug_.level + 1) % 3;
+    else if (text == "/debug 0") debug_.level = 0;
+    else if (text == "/debug 1") debug_.level = 1;
+    else if (text == "/debug 2") debug_.level = 2;
+}
+
 void ProtoddModule::runFrame() {
     if (BWAPI::Broodwar->isReplay() || BWAPI::Broodwar->isPaused() ||
         BWAPI::Broodwar->self() == nullptr || BWAPI::Broodwar->enemy() == nullptr) {
@@ -276,7 +284,7 @@ void ProtoddModule::runFrame() {
     if (state_.frame % (24 * 5) == 0) logDecision();
 
     if (frameBudget_.load(state_.frame) == RuntimeLoad::normal) {
-        bridge_.drawDebug(plan_, opponent_.assessment(), fight_);
+        bridge_.drawDebug(state_, plan_, opponent_.assessment(), debug_);
     }
 }
 
@@ -298,6 +306,7 @@ void ProtoddModule::updateStrategy() {
 void ProtoddModule::updateMacro() {
     ResourceLedger ledger{state_.self.minerals, state_.self.gas};
     const auto actions = macro_.reconcile(state_, plan_, ledger);
+    debug_.macro = actions;
     maintenanceMineralReserve_ = 0;
     maintenanceGasReserve_ = 0;
     for (const auto& action : actions) {
@@ -353,6 +362,7 @@ void ProtoddModule::updateCombat(
     const int navigationInterval,
     const std::size_t commandLimit) {
     const auto friendly = combatUnits(true);
+    debug_.squads.clear();
     const auto enemy = combatUnits(false);
     const auto aggressive = plan_.posture == Posture::pressure ||
                             plan_.posture == Posture::attack ||
@@ -391,6 +401,7 @@ void ProtoddModule::updateCombat(
                                      plan_.posture == Posture::defend ? 1.25 : 1.05);
         }
         if (squad.role == SquadRole::mainArmy) {
+            if (plan_.expansionTarget.valid()) objective = plan_.expansionTarget;
             const auto undersizedVanguard =
                 vanguard == &squad &&
                 squad.units.size() <
@@ -412,6 +423,11 @@ void ProtoddModule::updateCombat(
                 requiredRatio = 0.88;
                 objective = vanguard->center;
             }
+            if (vanguard == &squad && aggressive)
+                objective = SquadPlanner::supportRendezvous(state_, squad, objective);
+            if (plan_.expansionTarget.valid() && vanguard == &squad &&
+                distanceSquared(squad.center, plan_.expansionTarget) <= 448 * 448)
+                defense = {plan_.expansionTarget, 448, plan_.expansionTarget};
         }
         const auto hasGroundUnit = std::ranges::any_of(
             squad.units, [](const UnitSnapshot& unit) { return !unit.flying; });
@@ -448,7 +464,7 @@ void ProtoddModule::updateCombat(
             runSimulation);
         if (!squad.enemies.empty()) {
             estimate.decision = engagements_.stabilize(
-                squad.signature, estimate.decision, estimate.ratio,
+                squad.engagementKey, estimate.decision, estimate.ratio,
                 requiredRatio, state_.frame);
         }
         // Once a ground threat has crossed the last defensive screen, running
@@ -460,6 +476,15 @@ void ProtoddModule::updateCombat(
         }
         estimate.advanceBlocked = squad.role != SquadRole::baseDefense &&
             !SquadPlanner::mobileDetectionReady(state_, squad);
+        if (state_.frame % (24 * 5) == 0) {
+            log_ << "SQUAD," << state_.frame << ',' << squadRoleName(squad.role)
+                 << ",units=" << squad.units.size() << ",enemies=" << squad.enemies.size()
+                 << ",center=" << squad.center.x << 'x' << squad.center.y
+                 << ",objective=" << objective.x << 'x' << objective.y
+                 << ",ratio=" << estimate.ratio << ",required=" << requiredRatio
+                 << ",decision=" << static_cast<int>(estimate.decision)
+                 << ",detectionBlocked=" << estimate.advanceBlocked << '\n';
+        }
         if (!estimate.advanceBlocked && SquadPlanner::canCounterattack(squad, estimate, plan_)) {
             // A global defense response must not trap an independently strong
             // reserve army while the allocated defenders protect the base.
@@ -467,6 +492,17 @@ void ProtoddModule::updateCombat(
             objective = plan_.attackTarget;
             if (firstCounterattackFrame_ < 0) firstCounterattackFrame_ = state_.frame;
         }
+        const auto reason = estimate.advanceBlocked ? "Wait for mobile detection" :
+            SquadPlanner::mustHoldDefensiveScreen(squad) ? "Economy breached: intercept" :
+            estimate.decision == FightDecision::retreat ?
+                (defense.front.valid() ? "Hold terrain: unfavorable fight" : "Retreat: unfavorable fight") :
+            estimate.decision == FightDecision::kite ? "Fire and reposition" :
+            !squad.enemies.empty() ? "Local fight accepted" :
+            defense.front.valid() ? "Occupy defensive terrain" :
+            plan_.expansionTarget.valid() ? "Cover expansion" : "Assemble / advance";
+        debug_.squads.push_back({std::string(squadRoleName(squad.role)), reason, squad.center,
+            objective, squad.retreat, estimate.ratio, requiredRatio,
+            static_cast<int>(squad.units.size()), static_cast<int>(squad.enemies.size()), estimate.decision});
         if (squad.role == SquadRole::mainArmy && squad.units.size() >= debugSquadSize) {
             debugSquadSize = squad.units.size();
             fight_ = estimate;
@@ -492,13 +528,18 @@ void ProtoddModule::updateCombat(
         commands_.submit(order);
     }
     for (const auto& order : transports_.control(
-             state_, plan_.attackTarget, retreatPoint(), influence_)) {
+             state_, plan_.attackTarget, retreatPoint(), influence_,
+             plan_.prioritizeReinforcements ? 100 :
+                 (state_.enemy.race == Race::protoss ? 2 : 1))) {
         commands_.submit(order);
     }
     // BWAPI calls are capped per combat tick. Priority-aware rotation keeps
     // retreat and detector orders immediate while bounding large-army spikes.
     for (const auto& command : commands_.finalize(commandLimit)) {
-        if (bridge_.execute(command)) commands_.markIssued(command);
+        if (bridge_.execute(command)) {
+            commands_.markIssued(command);
+            debug_.orders[command.actor] = command.source;
+        }
     }
 }
 
@@ -698,6 +739,9 @@ void ProtoddModule::logDecision() {
          << ",army=" << mobileArmy
          << ",enemyVisibleArmy=" << visibleEnemyArmy
          << ",minAttack=" << plan_.minimumAttackSize
+         << ",sustainEconomy=" << plan_.sustainEconomy
+         << ",breakContainment=" << plan_.breakContainment
+         << ",expansionTarget=" << plan_.expansionTarget.x << 'x' << plan_.expansionTarget.y
          << ",gasWorkers=" << std::ranges::count(state_.self.units, true,
                                                   &UnitSnapshot::gatheringGas)
          << ",gasTarget=" << plan_.desiredGasWorkers

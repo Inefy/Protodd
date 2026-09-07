@@ -47,6 +47,10 @@ struct StrategicPlan {
     // Current threat, independent of whether the army is holding or attacking.
     bool prioritizeReinforcements{};
     bool requireMobileDetection{};
+    // A stabilized army can cover economic growth despite perimeter contact.
+    bool sustainEconomy{};
+    bool breakContainment{};
+    Position expansionTarget{-1, -1};
 };
 
 class StrategyEngine {
@@ -73,6 +77,8 @@ private:
     static void addAdaptiveCounters(StrategicPlan& plan, const GameState& state);
     static void addSafetyReactions(StrategicPlan& plan, const ThreatAssessment& threat);
     static void addEconomicRecovery(StrategicPlan& plan, const GameState& state);
+    static void addPostPressureTransition(StrategicPlan& plan, const GameState& state,
+                                          const ThreatAssessment& threat);
     static void applyOpeningStyle(
         StrategicPlan& plan,
         const GameState& state,

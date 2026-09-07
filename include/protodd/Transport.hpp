@@ -17,7 +17,8 @@ public:
         const GameState& state,
         Position objective,
         Position retreat,
-        const InfluenceMap& influence);
+        const InfluenceMap& influence,
+        int reservedArmyReavers = 0);
     void reset();
 
 private:

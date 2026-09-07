@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <unordered_map>
 
 namespace protodd {
@@ -41,9 +42,29 @@ int queuedForProducer(const GameState& state, const UnitKind producer) {
 int usableProducers(const GameState& state, const UnitKind kind) {
     return static_cast<int>(std::ranges::count_if(state.self.units,
         [kind](const UnitSnapshot& unit) {
-            return unit.kind == kind && unit.completed &&
+            return unit.kind == kind && unit.completed && !unit.disabled &&
+                   !unit.loaded && !unit.hallucination &&
                    (!unitStats(kind).requiresPsi || unit.powered);
         }));
+}
+
+// A paid-for prerequisite is a future deadline, not a reason to freeze every
+// currently usable producer for its entire construction time.
+int prerequisiteWait(const GameState& state, const UnitKind kind) {
+    auto wait = 0;
+    for (const auto prerequisite : unitPrerequisites(kind)) {
+        auto earliest = std::numeric_limits<int>::max();
+        for (const auto& unit : state.self.units) {
+            if (unit.kind != prerequisite) continue;
+            const auto remaining = unit.completed ? 0 :
+                unitStats(prerequisite).buildTime *
+                    (100 - std::clamp(unit.buildProgress, 0, 100)) / 100;
+            earliest = std::min(earliest, remaining);
+        }
+        if (earliest != std::numeric_limits<int>::max()) wait = std::max(wait, earliest);
+        else wait = std::max(wait, prerequisiteWait(state, prerequisite));
+    }
+    return wait;
 }
 
 }  // namespace
@@ -266,11 +287,22 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             countCompleted(state, UnitKind::zealot) + countCompleted(state, UnitKind::dragoon) >= 1;
         const auto mobileScreen = countCompleted(state, UnitKind::zealot) +
             countCompleted(state, UnitKind::dragoon) + countCompleted(state, UnitKind::darkTemplar);
+        const auto protectedSplash = state.enemy.race == Race::protoss &&
+            ((mobileScreen >= 4 && usableProducers(state, UnitKind::photonCannon) > 0) ||
+             countCompleted(state, UnitKind::dragoon) >= 4);
         auto gasBudget = ledger.freeGas();
         auto dragoons = countExisting(state, UnitKind::dragoon);
         auto zealots = countExisting(state, UnitKind::zealot);
+        const auto seenDragoons = std::ranges::count_if(state.enemy.units, [&state](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::dragoon && (unit.visible || state.frame - unit.lastSeen <= 24 * 15);
+        });
+        const auto seenZealots = std::ranges::count_if(state.enemy.units, [&state](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::zealot && (unit.visible || state.frame - unit.lastSeen <= 24 * 15);
+        });
         for (auto cycle = 0; cycle < slots; ++cycle) {
-            const auto ranged = prerequisitesMet(state, UnitKind::dragoon) && gasBudget >= 50;
+            const auto enoughMelee = state.enemy.race == Race::protoss && seenDragoons >= 3 &&
+                seenDragoons >= 2 * seenZealots && zealots >= std::max(2, dragoons / 3);
+            const auto ranged = prerequisitesMet(state, UnitKind::dragoon) && (gasBudget >= 50 || enoughMelee);
             const auto kind = ranged ? UnitKind::dragoon : UnitKind::zealot;
             const auto desired = ranged ? ++dragoons : ++zealots;
             if (ranged) gasBudget -= 50;
@@ -284,7 +316,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                  demand.target == UnitKind::assimilator);
             if (demand.target == UnitKind::pylon) demand.priority = std::max(130, demand.priority);
             else if (detectorChain) demand.priority = std::max(124, demand.priority);
-            else if (mobileScreen >= 8 && demand.goal == GoalKind::train &&
+            else if ((mobileScreen >= 8 || protectedSplash) && demand.goal == GoalKind::train &&
                 ((demand.target == UnitKind::highTemplar && countExisting(state, UnitKind::highTemplar) < 2 &&
                   (technologyLevel(state.self, TechnologyKind::psionicStorm) > 0 ||
                    technologyInProgress(state.self, TechnologyKind::psionicStorm))) ||
@@ -293,6 +325,10 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                 demand.priority = std::max(114, demand.priority);
                 demand.desiredCount = std::min(demand.desiredCount, demand.target == UnitKind::reaver ? 1 : 2);
             }
+            else if (protectedSplash && demand.blocking &&
+                (demand.target == UnitKind::roboticsFacility ||
+                 demand.target == UnitKind::roboticsSupportBay))
+                demand.priority = std::max(113, demand.priority);
             else if (mobileScreen >= 8 && demand.blocking &&
                 (demand.technology == TechnologyKind::psionicStorm ||
                  demand.technology == TechnologyKind::singularityCharge ||
@@ -326,6 +362,20 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     std::ranges::stable_sort(goals, std::greater{}, &ProductionGoal::priority);
 
     for (auto goal : goals) {
+        const auto futureTarget = goal.technology == TechnologyKind::none
+            ? goal.target : technologyStats(goal.technology).producer;
+        auto wait = prerequisiteWait(state, futureTarget);
+        if (goal.technology != TechnologyKind::none) {
+            for (const auto& producer : state.self.units) {
+                if (producer.kind == futureTarget && !producer.completed)
+                    wait = std::max(wait, unitStats(futureTarget).buildTime *
+                        (100 - std::clamp(producer.buildProgress, 0, 100)) / 100);
+            }
+        }
+        // Leave the final ten seconds for saving and command latency. This
+        // applies to both explicit goals and recursively requested tech, so
+        // an Observer cannot indirectly reserve an unusable Observatory.
+        if (wait > 10 * 24) continue;
         // Higher-priority detection may have consumed gas since the budget
         // was composed. Recheck the actual ledger before leaving a usable
         // Gateway idle with enough minerals for its fallback unit.
@@ -541,6 +591,9 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             }
             const auto current = countExisting(state, target.kind) + planned[target.kind];
             const auto desired = target.weight * static_cast<double>(armyCount + 1);
+            // Affordability is not permission to keep growing an already
+            // overrepresented unit type while the desired unit waits for gas.
+            if (static_cast<double>(current) >= desired) continue;
             candidates.push_back({target.kind, producer,
                                   desired - static_cast<double>(current)});
         }

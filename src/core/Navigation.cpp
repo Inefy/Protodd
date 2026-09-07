@@ -25,11 +25,12 @@ NavigationGrid::NavigationGrid(
     const int width,
     const int height,
     const int cellSize,
-    std::vector<std::uint8_t> walkable)
+    std::vector<std::uint8_t> walkable,
+    std::vector<std::uint8_t> elevation)
     : width_(std::max(0, width)),
       height_(std::max(0, height)),
       cellSize_(std::max(1, cellSize)),
-      walkable_(std::move(walkable)) {
+      walkable_(std::move(walkable)), elevation_(std::move(elevation)) {
     const auto expected = static_cast<std::size_t>(width_) *
                           static_cast<std::size_t>(height_);
     if (walkable_.size() != expected) {
@@ -37,6 +38,50 @@ NavigationGrid::NavigationGrid(
         height_ = 0;
         walkable_.clear();
     }
+    if (elevation_.size() != expected) elevation_.assign(expected, 0);
+}
+
+DefensivePosition NavigationGrid::defensivePosition(
+    const Position home, const Position outside) const {
+    const auto path = findPath(home, outside);
+    DefensivePosition best;
+    auto bestScore = std::numeric_limits<double>::infinity();
+    const auto heightAt = [this](const Position point) {
+        return static_cast<int>(elevation_[static_cast<std::size_t>(
+            index(point.x / cellSize_, point.y / cellSize_))]);
+    };
+    for (std::size_t i = 3; i + 4 < path.size(); ++i) {
+        const auto radius = distance(home, path[i]);
+        if (radius < 224.0 || radius > 1400.0) continue;
+        const auto before = path[i - 3];
+        const auto after = path[i + 3];
+        const auto length = distance(before, after);
+        if (length < cellSize_) continue;
+        const auto nx = -(after.y - before.y) / length;
+        const auto ny = (after.x - before.x) / length;
+        const auto edge = [&](const int sign) {
+            auto last = path[i];
+            for (int offset = cellSize_; offset <= 384; offset += cellSize_) {
+                const Position sample{path[i].x + static_cast<int>(std::lround(nx * offset * sign)),
+                                      path[i].y + static_cast<int>(std::lround(ny * offset * sign))};
+                if (!walkable(sample) || !lineWalkable(last, sample)) break;
+                last = sample;
+            }
+            return last;
+        };
+        const auto left = edge(-1);
+        const auto right = edge(1);
+        const auto width = static_cast<int>(distance(left, right)) + cellSize_;
+        const auto upperEdge = heightAt(before) > heightAt(after);
+        // Open plains are not a choke. A wider high-ground edge is useful,
+        // but do not pretend a whole plateau can be covered by a small army.
+        if (width > (upperEdge ? 512 : 320)) continue;
+        const auto score = width * 1.5 + radius * 0.25 - (upperEdge ? 180.0 : 0.0);
+        if (score >= bestScore) continue;
+        bestScore = score;
+        best = {before, path[i], left, right, width, upperEdge};
+    }
+    return best;
 }
 
 bool NavigationGrid::empty() const noexcept {

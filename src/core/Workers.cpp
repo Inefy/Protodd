@@ -479,7 +479,7 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     const auto mineralStarved = state.self.minerals < 150;
     if (mineralStarved && state.self.gas >= 300 &&
         (plan.posture == Posture::defend || plan.posture == Posture::recover ||
-         (plan.posture == Posture::hold && ownedBases.size() == 1U))) {
+         ownedBases.size() == 1U || plan.sustainEconomy)) {
         // A large existing gas bank already funds several Dragoon/tech cycles.
         // During a base defense or one-base assembly, the binding resource is the
         // mineral cost of units, pylons, batteries, and replacement workers.

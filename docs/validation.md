@@ -1,5 +1,13 @@
 # Tournament validation
 
+The subsequent [containment investigation](containment-review.md) records the
+latest changes and full BananaBrain game results. Passing automated checks is
+not evidence that this candidate is ready to win the tournament.
+
+The [September 6 ladder source candidate](ladder-source-review.md) records the
+newer source review, exact DLL, passed checks, and live comparison. The v15
+record below is retained as historical evidence, not overwritten by this pass.
+
 ## Follow-up candidate v15
 
 - Frozen DLL: `build/strength-pass2/v15-reserve-counterattack.dll`

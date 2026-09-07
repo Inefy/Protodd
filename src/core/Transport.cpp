@@ -35,7 +35,8 @@ std::vector<Command> TransportController::control(
     const GameState& state,
     const Position objective,
     const Position retreat,
-    const InfluenceMap& influence) {
+    const InfluenceMap& influence,
+    const int reservedArmyReavers) {
     std::vector<const UnitSnapshot*> shuttles;
     std::vector<const UnitSnapshot*> reavers;
     for (const auto& unit : state.self.units) {
@@ -46,9 +47,14 @@ std::vector<Command> TransportController::control(
     std::ranges::sort(shuttles, {}, [](const UnitSnapshot* unit) { return unit->id; });
     std::ranges::sort(reavers, {}, [](const UnitSnapshot* unit) { return unit->id; });
 
-    std::erase_if(missions_, [&state](const auto& entry) {
+    std::unordered_set<UnitId> armyReavers;
+    for (auto i = 0; i < std::min(reservedArmyReavers, static_cast<int>(reavers.size())); ++i)
+        armyReavers.insert(reavers[static_cast<std::size_t>(i)]->id);
+
+    std::erase_if(missions_, [&state, &armyReavers](const auto& entry) {
+        const auto* reaver = findUnit(state, entry.second.reaver);
         return findUnit(state, entry.first) == nullptr ||
-               findUnit(state, entry.second.reaver) == nullptr;
+               reaver == nullptr || (armyReavers.contains(reaver->id) && !reaver->loaded);
     });
     std::unordered_set<UnitId> assignedReavers;
     for (const auto& [shuttle, mission] : missions_) {
@@ -61,6 +67,7 @@ std::vector<Command> TransportController::control(
         auto closestDistance = std::numeric_limits<int>::max();
         for (const auto* reaver : reavers) {
             if (assignedReavers.contains(reaver->id) ||
+                (armyReavers.contains(reaver->id) && !reaver->loaded) ||
                 (reaver->loaded && reaver->transportId != shuttle->id)) {
                 continue;
             }
@@ -85,6 +92,12 @@ std::vector<Command> TransportController::control(
         if (shuttle == nullptr || reaver == nullptr) continue;
         const auto aboard = reaver->loaded && reaver->transportId == shuttleId;
         const auto separation = distanceSquared(shuttle->position, reaver->position);
+
+        // The first splash units belong to the fighting army. If one was
+        // already aboard when defense became urgent, bring it back and release
+        // it after unloading instead of restarting the raid indefinitely.
+        if (armyReavers.contains(reaver->id) && aboard)
+            mission.phase = TransportPhase::returning;
 
         if (mission.phase == TransportPhase::gathering) {
             if (aboard) {

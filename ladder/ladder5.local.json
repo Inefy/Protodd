@@ -1,0 +1,136 @@
+{
+  "frame_limit": 86400,
+  "maps": [
+    "maps/aiide/(2)Benzene.scx",
+    "maps/aiide/(2)Destination.scx",
+    "maps/aiide/(3)TauCross.scx",
+    "maps/aiide/(4)CircuitBreaker.scx",
+    "maps/aiide/(4)Python.scx"
+  ],
+  "maps_archive": "maps/maps.zip",
+  "opponents": [
+    {
+      "bwapi_version": "BWAPI_412",
+      "directory": "bots/Iron",
+      "name": "Iron",
+      "race": "Terran",
+      "source_url": "https://github.com/davechurchill/StarcraftAITournamentManager/tree/master/server/bots",
+      "type": "dll",
+      "version": "aiide-2016-package-73aa5d0"
+    },
+    {
+      "bwapi_version": "BWAPI_440",
+      "directory": "bots/BananaBrain",
+      "name": "BananaBrain",
+      "race": "Protoss",
+      "source_url": "https://davechurchill.ca/starcraft/aiide/results/2025/bots/BananaBrain.zip",
+      "type": "dll",
+      "version": "AIIDE-2025"
+    },
+    {
+      "bwapi_version": "BWAPI_440",
+      "directory": "bots/McRaveZ",
+      "name": "McRaveZ",
+      "race": "Zerg",
+      "source_url": "https://davechurchill.ca/starcraft/aiide/results/2025/bots/McRaveZ.zip",
+      "type": "dll",
+      "version": "AIIDE-2025-package"
+    },
+    {
+      "bwapi_version": "BWAPI_440",
+      "directory": "bots/Microwave",
+      "name": "Microwave",
+      "race": "Zerg",
+      "source_url": "https://davechurchill.ca/starcraft/aiide/results/2025/bots/Microwave.zip",
+      "type": "dll",
+      "version": "AIIDE-2025-package"
+    },
+    {
+      "bwapi_version": "BWAPI_440",
+      "directory": "bots/Stardust",
+      "name": "Stardust",
+      "race": "Protoss",
+      "source_url": "https://davechurchill.ca/starcraft/aiide/results/2025/bots/Stardust.zip",
+      "type": "dll",
+      "version": "AIIDE-2025-package"
+    },
+    {
+      "bwapi_version": "BWAPI_440",
+      "directory": "bots/Steamhammer",
+      "name": "Steamhammer",
+      "race": "Random",
+      "source_url": "https://davechurchill.ca/starcraft/aiide/results/2025/bots/Steamhammer.zip",
+      "type": "dll",
+      "version": "AIIDE-2025-package"
+    },
+    {
+      "bwapi_version": "BWAPI_440",
+      "directory": "bots/insanitybot",
+      "name": "insanitybot",
+      "race": "Terran",
+      "source_url": "https://davechurchill.ca/starcraft/aiide/results/2025/bots/insanitybot.zip",
+      "type": "dll",
+      "version": "AIIDE-2025-package"
+    },
+    {
+      "bwapi_version": "BWAPI_440",
+      "directory": "bots/C0mputer",
+      "name": "C0mputer",
+      "race": "Random",
+      "source_url": "https://davechurchill.ca/starcraft/aiide/results/2025/bots/C0mputer.zip",
+      "type": "proxy",
+      "version": "AIIDE-2025-package"
+    },
+    {
+      "bwapi_version": "BWAPI_440",
+      "directory": "bots/InfestedArtosis",
+      "name": "InfestedArtosis",
+      "race": "Zerg",
+      "source_url": "https://davechurchill.ca/starcraft/aiide/results/2025/bots/InfestedArtosis.zip",
+      "type": "proxy",
+      "version": "AIIDE-2025-package"
+    },
+    {
+      "bwapi_version": "BWAPI_440",
+      "directory": "bots/PurpleWave",
+      "name": "PurpleWave",
+      "race": "Protoss",
+      "source_url": "https://davechurchill.ca/starcraft/aiide/results/2025/bots/PurpleWave.zip",
+      "type": "proxy",
+      "version": "AIIDE-2025-package"
+    },
+    {
+      "bwapi_version": "BWAPI_440",
+      "directory": "bots/VOID",
+      "name": "VOID",
+      "race": "Terran",
+      "source_url": "https://davechurchill.ca/starcraft/aiide/results/2025/bots/VOID.zip",
+      "type": "proxy",
+      "version": "AIIDE-2025-package"
+    }
+  ],
+  "our_bot": {
+    "artifact": "../build/protodd-tournament/Release/Protodd.dll",
+    "bwapi_version": "BWAPI_440",
+    "name": "Protodd",
+    "race": "Protoss",
+    "type": "dll"
+  },
+  "rounds": 1,
+  "server_port": 1337,
+  "timeout_limits": [
+    {
+      "frame_count": 320,
+      "time_ms": 55
+    },
+    {
+      "frame_count": 10,
+      "time_ms": 1000
+    },
+    {
+      "frame_count": 1,
+      "time_ms": 10000
+    }
+  ],
+  "tournament_manager": "manager"
+}

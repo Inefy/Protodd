@@ -1,6 +1,7 @@
 #include "protodd/UnitCatalog.hpp"
 
 #include <BWAPI/UnitType.h>
+#include <BWAPI/UnitCommand.h>
 #include <BWAPI/WeaponType.h>
 
 #include <array>
@@ -41,6 +42,15 @@ int main() {
         std::pair{UnitKind::arbiter, Protoss_Arbiter},
     };
     auto failures = 0;
+    for (const auto type : {Protoss_Pylon, Protoss_Gateway, Protoss_Nexus}) {
+        const BWAPI::TilePosition tile{17, 23};
+        const auto command = BWAPI::UnitCommand::build(nullptr, tile, type);
+        if (command.getTargetPosition() != BWAPI::Position{17 * 32, 23 * 32} ||
+            command.getTargetTilePosition() != tile || command.getUnitType() != type) {
+            std::cerr << "Construction command coordinate contract mismatch\n";
+            ++failures;
+        }
+    }
     for (const auto& [kind, type] : pairs) {
         const auto& stats = protodd::unitStats(kind);
         if (stats.minerals != type.mineralPrice() || stats.gas != type.gasPrice() ||

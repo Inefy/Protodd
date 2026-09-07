@@ -17,6 +17,15 @@ namespace protodd {
 [[nodiscard]] double attackDamage(const UnitSnapshot& attacker, const UnitSnapshot& target,
                                   double remainingDurability = -1.0) noexcept;
 
+// One visible single-hit projectile. The adapter admits only supported,
+// moving projectiles expected to arrive within the next second.
+struct IncomingProjectile {
+    int id{};
+    UnitId source{-1};
+    UnitId target{-1};
+};
+void accountIncomingDamage(GameState& state, std::span<const IncomingProjectile> projectiles);
+
 enum class FightDecision : std::uint8_t { engage, kite, retreat };
 
 struct CombatEstimate {
@@ -32,7 +41,7 @@ struct CombatEstimate {
 
 struct TargetAllocation {
     UnitId target{-1};
-    int committedDamage{};
+    double committedDamage{};
 };
 
 class CombatEvaluator {
@@ -83,14 +92,20 @@ struct DefenseArea {
     Position center{-1, -1};
     int pursuitRadius{};
     Position economyCenter{-1, -1};
+    Position front{-1, -1};
 
     [[nodiscard]] bool active() const noexcept {
         return center.valid() && pursuitRadius > 0;
     }
     [[nodiscard]] bool contains(Position position) const noexcept {
-        return distanceSquared(center, position) <= pursuitRadius * pursuitRadius ||
-               (economyCenter.valid() &&
-                distanceSquared(economyCenter, position) <= 256 * 256);
+        if (economyCenter.valid() && distanceSquared(economyCenter, position) <= 256 * 256)
+            return true;
+        if (front.valid()) {
+            const auto inward = static_cast<long long>(position.x - front.x) * (center.x - front.x) +
+                                static_cast<long long>(position.y - front.y) * (center.y - front.y);
+            if (inward < 0) return false;
+        }
+        return distanceSquared(center, position) <= pursuitRadius * pursuitRadius;
     }
 };
 
