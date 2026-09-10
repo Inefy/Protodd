@@ -89,7 +89,7 @@ std::vector<Squad> SquadPlanner::form(
     const std::span<const UnitSnapshot> friendly,
     const std::span<const UnitSnapshot> enemy,
     const StrategicPlan& plan,
-    const Position fallbackRetreat) const {
+    const Position fallbackRetreat, const NavigationGrid* navigation) const {
     std::vector<Squad> result;
     std::unordered_set<UnitId> assigned;
     auto nextId = 1;
@@ -284,7 +284,7 @@ std::vector<Squad> SquadPlanner::form(
     for (const auto& unit : friendly)
         if (!assigned.contains(unit.id) && isCombatUnit(unit.kind) && !unit.loaded && !unit.disabled)
             raidCandidates.push_back(unit);
-    const auto raid = harassment_.update(state, raidCandidates, plan, fallbackRetreat, !threats.empty());
+    const auto raid = harassment_.update(state, raidCandidates, plan, fallbackRetreat, !threats.empty(), navigation);
     if (!raid.members.empty()) {
         Squad squad;
         squad.id = nextId++;
@@ -294,7 +294,7 @@ std::vector<Squad> SquadPlanner::form(
             if (member != raidCandidates.end()) { squad.units.push_back(*member); assigned.insert(id); }
         }
         squad.center = centroid(squad.units);
-        squad.objective = raid.withdrawing ? fallbackRetreat : raid.target;
+        squad.objective = raid.withdrawing ? fallbackRetreat : raid.waypoint;
         squad.retreat = fallbackRetreat;
         squad.withdrawing = raid.withdrawing;
         squad.missionReason = raid.reason;
@@ -326,8 +326,8 @@ std::vector<Squad> SquadPlanner::form(
         squad.id = nextId++;
         squad.role = SquadRole::harassment;
         squad.units = std::move(group);
-        const auto opportunity = harassmentOpportunity(state, squad.units.front());
-        squad.objective = opportunity.target.valid() ? opportunity.target : fallbackRetreat;
+        const auto opportunity = harassmentOpportunity(state, squad.units.front(), false, navigation);
+        squad.objective = opportunity.target.valid() ? opportunity.waypoint : fallbackRetreat;
         squad.withdrawing = !opportunity.target.valid();
         squad.missionReason = opportunity.target.valid() ?
             (squad.units.front().flying ? "Raid exposed air logistics" : "Raid exposed worker line") :
@@ -410,7 +410,11 @@ std::vector<Command> SquadPlanner::detectorEscorts(
     });
 
     std::vector<Command> result;
-    const auto count = std::min(observers.size(), priorities.size());
+    // Once a second Observer exists, keep one available for strategic
+    // scouting. Fragmented armies can otherwise lease every Observer as an
+    // escort, leaving no unit to watch a siege push before it reaches a base.
+    const auto escortCapacity = observers.size() > 1 ? observers.size() - 1 : observers.size();
+    const auto count = std::min(escortCapacity, priorities.size());
     result.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
         const auto* squad = priorities[i];

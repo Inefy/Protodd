@@ -223,7 +223,7 @@ Use the direct-match manifest as the outcome authority:
 
 ```powershell
 ./scripts/direct-match.ps1 -OpponentRace Protoss -Map 'maps/aiide/(4)Python.scx' `
-    -Label unique-candidate-label -TimeoutSeconds 900
+    -Label unique-candidate-label -FrameLimit 86400
 python tools/direct_report.py build/direct-logs/unique-candidate-label.json
 ```
 

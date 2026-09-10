@@ -128,14 +128,21 @@ def diagnose_states(lines: list[str]) -> dict:
 def summarize(records: list[dict]) -> dict:
     completed = [r for r in records if r.get("status") == "completed"
                  and str(r.get("result", "")).startswith(("END,win,", "END,loss,"))]
+    completed_ids = {id(record) for record in completed}
     wins = sum(str(r["result"]).startswith("END,win,") for r in completed)
+    incomplete_reasons = Counter(
+        str(record.get("termination_reason", "unknown"))
+        for record in records if id(record) not in completed_ids
+    )
     groups = {}
     for record in records:
         components = record.get("opponent_components_sha256")
         bundle = hashlib.sha256(json.dumps(components, sort_keys=True).encode()).hexdigest() \
             if components else "unknown"
         conditions = json.dumps({field: record.get(field, "unknown") for field in (
-            "opponent_opening_requested", "opponent_runtime_configuration_sha256",
+            "opponent_type", "opponent_opening_requested", "opponent_strategy_requested",
+            "opponent_runtime_configuration_sha256",
+            "opponent_runtime_strategy_configuration_sha256",
             "opponent_runtime_learning_reset", "learning_preserved")}, sort_keys=True)
         key = (record.get("bot_sha256", "unknown"), record.get("opponent", "unknown"),
                record.get("map", "unknown"), record.get("opponent_sha256", "unknown"),
@@ -162,6 +169,7 @@ def summarize(records: list[dict]) -> dict:
         "attempts": len(records), "completed": len(completed),
         "wins": wins, "losses": len(completed) - wins,
         "incomplete": len(records) - len(completed),
+        "incomplete_reasons": dict(sorted(incomplete_reasons.items())),
         "win_rate": wins / len(completed) if completed else None,
         "wilson_95": wilson_interval(wins, len(completed)),
         "mixed_binaries": len({key[0] for key in groups}) > 1,
@@ -214,9 +222,11 @@ class DirectReportTests(unittest.TestCase):
         self.assertEqual(result["max_probes"], 19)
 
     def test_shutdown_loss_is_incomplete(self):
-        report = summarize([{"status": "incomplete", "result": "END,loss,18377"}])
+        report = summarize([{"status": "incomplete", "result": "END,loss,18377",
+                             "termination_reason": "frame-limit"}])
         self.assertEqual((report["completed"], report["losses"], report["incomplete"]), (0, 0, 1))
         self.assertIsNone(report["win_rate"])
+        self.assertEqual(report["incomplete_reasons"], {"frame-limit": 1})
 
     def test_split_by_binary_and_keep_failures(self):
         records = [{"status": "completed", "result": "END,win,20000", "bot_sha256": "a"},
@@ -239,6 +249,14 @@ class DirectReportTests(unittest.TestCase):
         first = {"status": "completed", "result": "END,win,20000",
                  "opponent_components_sha256": {"Configuration.txt": "one"}}
         second = {**first, "opponent_components_sha256": {"Configuration.txt": "two"}}
+        self.assertEqual(len(summarize([first, second])["segments"]), 2)
+
+    def test_runtime_strategy_changes_split_results(self):
+        first = {"status": "completed", "result": "END,win,20000",
+                 "opponent_strategy_requested": "Terran_TankPush",
+                 "opponent_runtime_strategy_configuration_sha256": "one"}
+        second = {**first, "opponent_strategy_requested": "Terran_VultureRush",
+                  "opponent_runtime_strategy_configuration_sha256": "two"}
         self.assertEqual(len(summarize([first, second])["segments"]), 2)
 
 

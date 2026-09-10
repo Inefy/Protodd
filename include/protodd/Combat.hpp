@@ -122,6 +122,8 @@ struct DefenseArea {
     }
 };
 
+enum class TacticalIntent : std::uint8_t { battle, raid, withdraw };
+
 class TacticalController {
 public:
     [[nodiscard]] std::vector<Command> recharge(
@@ -136,7 +138,8 @@ public:
         Position formationCenter = {-1, -1},
         int latencyFrames = 0,
         bool psionicStormAvailable = false,
-        DefenseArea defense = {}) const;
+        DefenseArea defense = {},
+        TacticalIntent intent = TacticalIntent::battle) const;
 };
 
 }  // namespace protodd

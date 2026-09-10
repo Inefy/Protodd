@@ -570,7 +570,7 @@ std::vector<Command> TacticalController::control(
     const Position formationCenter,
     const int latencyFrames,
     const bool psionicStormAvailable,
-    const DefenseArea defense) const {
+    const DefenseArea defense, const TacticalIntent intent) const {
     std::vector<Command> commands;
     commands.reserve(friendly.size());
     CombatEvaluator evaluator;
@@ -624,6 +624,18 @@ std::vector<Command> TacticalController::control(
         // producing stutter, cancelled Dragoon volleys, and indecisive melee.
         if (unit.attackFrame) continue;
 
+        // Mission extraction is unconditional, including cloaked units and
+        // ready volleys. Neither target pursuit nor detector waiting may
+        // reverse a recalled detachment back into the mineral line.
+        if (intent == TacticalIntent::withdraw) {
+            commands.push_back({unit.id, CommandType::move, -1,
+                localThreat > 0.05F || (unit.cloaked && local.detection > 0.1F)
+                    ? influence.safestStep(unit.position, retreatPoint, unit.flying, unit.cloaked)
+                    : retreatPoint,
+                UnitKind::unknown, 100, 0, "raid-extract"});
+            continue;
+        }
+
         // Apply the mission gate before cloak-preserving advances and target
         // pursuit. Air-only harassment remains independent; endangered ground
         // units can still escape while the escort catches up.
@@ -648,14 +660,42 @@ std::vector<Command> TacticalController::control(
         if (defense.active() && !covertAdvance) {
             for (const auto& candidate : enemy) {
                 const auto& weapon = candidate.flying ? unit.airWeapon : unit.groundWeapon;
-                if (defense.contains(candidate.position) ||
+                const auto visibleSiegeThreat = !unit.flying && candidate.visible &&
+                    candidate.detected && candidate.kind == UnitKind::siegeTank &&
+                    candidate.groundWeapon.damage > 0 &&
+                    candidate.groundWeapon.maxRange >= 320 &&
+                    (weaponDistance(unit, candidate) <= candidate.groundWeapon.maxRange + 32 ||
+                     (defense.economyCenter.valid() &&
+                      distance(candidate.position, defense.economyCenter) <=
+                          candidate.groundWeapon.maxRange + 96));
+                // Siege artillery can damage the screen while remaining
+                // outside both the pursuit boundary and the defender's own
+                // range. Treat only a visible Tank that can reach the squad
+                // or protected economy as a legal counter-battery target.
+                if (defense.contains(candidate.position) || visibleSiegeThreat ||
                     weaponDistance(unit, candidate) <= weapon.maxRange) {
                     defenseTargets.push_back(candidate);
                 }
             }
         }
-        const auto targets = defense.active() && !covertAdvance
+        auto targets = defense.active() && !covertAdvance
                                  ? std::span<const UnitSnapshot>{defenseTargets} : enemy;
+        std::vector<UnitSnapshot> raidTargets;
+        if (intent == TacticalIntent::raid) {
+            for (const auto& candidate : targets) {
+                const auto& weapon = candidate.flying ? unit.airWeapon : unit.groundWeapon;
+                const auto range = weaponDistance(unit, candidate);
+                const auto economic = isWorker(candidate.kind) || candidate.kind == UnitKind::overlord ||
+                    candidate.kind == UnitKind::shuttle || candidate.kind == UnitKind::dropship;
+                // Ignore nearby bait buildings and bound worker pursuit to
+                // this mineral line. Immediate threats remain legal targets.
+                if ((economic && range <= 320 &&
+                     distanceSquared(candidate.position, objective) <= 384 * 384) ||
+                    (candidate.canAttack(unit) && range <= weapon.maxRange))
+                    raidTargets.push_back(candidate);
+            }
+            targets = raidTargets;
+        }
         const auto target = evaluator.selectTarget(unit, targets, allocations);
 
         if (psionicStormAvailable && unit.kind == UnitKind::highTemplar &&
@@ -778,7 +818,7 @@ std::vector<Command> TacticalController::control(
             const auto& weapon = target->flying ? unit.airWeapon : unit.groundWeapon;
             const auto range = weaponDistance(unit, *target);
             const auto readySoon = unit.weaponCooldown <= std::max(1, latencyFrames + 2);
-            const auto canFire = readySoon && range <= weapon.maxRange + 12;
+            const auto canFire = readySoon && range >= weapon.minRange && range <= weapon.maxRange + 12;
             if (unit.cloaked && local.detection > 0.1F &&
                 target->role != UnitRole::detector && !canFire) {
                 commands.push_back({
@@ -790,11 +830,24 @@ std::vector<Command> TacticalController::control(
             }
 
             const auto ranged = weapon.maxRange >= 96;
-            const auto targetWeapon = unit.flying ? target->airWeapon : target->groundWeapon;
+            // The selected worker or building may be harmless while another
+            // nearby unit is closing on us. Kite the actual pursuer on reload.
+            const UnitSnapshot* pursuer = target;
+            auto closestPressure = std::numeric_limits<double>::infinity();
+            for (const auto& candidate : enemy) {
+                const auto& response = unit.flying ? candidate.airWeapon : candidate.groundWeapon;
+                const auto separation = weaponDistance(unit, candidate);
+                if (!candidate.visible || !candidate.completed || candidate.disabled ||
+                    candidate.invincible || response.damage <= 0 ||
+                    separation > response.maxRange + 64 || separation < response.minRange) continue;
+                const auto pressureDistance = separation - response.maxRange;
+                if (pressureDistance < closestPressure) { closestPressure = pressureDistance; pursuer = &candidate; }
+            }
+            const auto targetWeapon = unit.flying ? pursuer->airWeapon : pursuer->groundWeapon;
             const auto rangeAdvantage = weapon.maxRange >= targetWeapon.maxRange + 48;
             const auto kite = estimate.decision == FightDecision::kite || rangeAdvantage;
             const auto targetCanPressure = targetWeapon.damage > 0 &&
-                                           range <= targetWeapon.maxRange + 64;
+                                           weaponDistance(unit, *pursuer) <= targetWeapon.maxRange + 64;
             // Spend reload time opening firing lanes against observed splash.
             // Keep ready volleys, retreats and attack frames on their existing
             // paths. Score destinations jointly so neighbors do not fan into
@@ -848,10 +901,10 @@ std::vector<Command> TacticalController::control(
             }
             if (!canFire && kite && ranged && targetCanPressure &&
                 unit.weaponCooldown > latencyFrames + 2 &&
-                range <= weapon.maxRange + 64) {
+                weaponDistance(unit, *pursuer) <= weapon.maxRange + 64) {
                 const Position away{
-                    unit.position.x + unit.position.x - target->position.x,
-                    unit.position.y + unit.position.y - target->position.y,
+                    unit.position.x + unit.position.x - pursuer->position.x,
+                    unit.position.y + unit.position.y - pursuer->position.y,
                 };
                 commands.push_back({
                     unit.id, CommandType::move, -1,
@@ -898,8 +951,9 @@ std::vector<Command> TacticalController::control(
             commands.push_back({unit.id, CommandType::move, -1, formationCenter,
                                 UnitKind::unknown, 62, 0, "regroup-formation"});
         } else if (objective.valid()) {
-            commands.push_back({unit.id, CommandType::attackMove, -1, objective,
-                                UnitKind::unknown, 50, 0, "squad-objective"});
+            commands.push_back({unit.id, intent == TacticalIntent::raid ? CommandType::move : CommandType::attackMove,
+                                -1, objective, UnitKind::unknown, 50, 0,
+                                intent == TacticalIntent::raid ? "raid-travel" : "squad-objective"});
         }
     }
     return commands;

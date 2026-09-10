@@ -104,6 +104,10 @@ private:
     int maintenanceMineralReserve_{};
     int maintenanceGasReserve_{};
     Frame lastErrorFrame_{-1000};
+    Frame slowWindowStart_{-1};
+    Frame slowWindowPeakFrame_{-1};
+    std::int64_t slowWindowPeakUs_{};
+    RuntimeLoad slowWindowLoad_{RuntimeLoad::normal};
     std::ofstream log_;
     ResourceLedger lastLedger_;
     Frame lastMacroFrame_{-1};
@@ -136,7 +140,10 @@ private:
     void sampleTelemetry();
     void logDecision();
     void logDiagnostics();
-    void trace(std::string key, std::string value, Frame heartbeat = 120);
+    void recordPerformance(Frame frame, std::int64_t elapsedUs);
+    void flushPerformanceRecord();
+    void trace(std::string key, std::string value, Frame heartbeat = 120,
+               std::string comparison = {});
 };
 
 }  // namespace protodd::bwapi

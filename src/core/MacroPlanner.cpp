@@ -630,8 +630,9 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     // includes both resource-starved and placement-starved actions; the BWAPI
     // bridge owns retry timing while the planner owns strategic persistence.
     // Do not refresh requests injected from memory or they will never expire.
+    // Optional harassment spending must disappear immediately on an emergency.
     for (const auto& candidate : plan.goals) {
-        if (!candidate.blocking ||
+        if (!candidate.blocking || candidate.harassmentOnly ||
             (candidate.goal != GoalKind::build && candidate.goal != GoalKind::expand)) {
             continue;
         }

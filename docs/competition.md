@@ -84,6 +84,9 @@ The direct-match helper preserves a raw trace and archives the pre-cleanup
 trace separately. Its default resets Protodd's learning; `-PreserveLearning`
 retains it. Opponent read/write data is preserved, so repeated tests may face
 different learned openings even with the same opponent package and seed.
+Direct matches have no wall-clock cutoff by default and run until a terminal
+result or the one-hour in-game limit (`-FrameLimit 86400`); use a positive
+`-TimeoutSeconds` only as an explicit local emergency failsafe.
 Use `-Seed <integer>` to request BWAPI's seed override on both clients, then
 check the manifest's observed seed and the initial base positions before
 treating runs as paired. Matching a requested seed alone is not proof of

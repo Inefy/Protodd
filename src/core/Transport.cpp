@@ -1,5 +1,7 @@
 #include "protodd/Transport.hpp"
 #include "protodd/Harassment.hpp"
+#include "protodd/Combat.hpp"
+#include "protodd/UnitCatalog.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -38,11 +40,11 @@ std::vector<Command> TransportController::control(
     const Position retreat,
     const InfluenceMap& influence,
     const int reservedArmyReavers,
-    const bool economicTargets) {
+    const bool economicTargets, const NavigationGrid* navigation) {
     std::vector<const UnitSnapshot*> shuttles;
     std::vector<const UnitSnapshot*> reavers;
     for (const auto& unit : state.self.units) {
-        if (!unit.completed) continue;
+        if (!unit.completed || unit.disabled || unit.hallucination) continue;
         if (unit.kind == UnitKind::shuttle) shuttles.push_back(&unit);
         if (unit.kind == UnitKind::reaver) reavers.push_back(&unit);
     }
@@ -53,10 +55,11 @@ std::vector<Command> TransportController::control(
     for (auto i = 0; i < std::min(reservedArmyReavers, static_cast<int>(reavers.size())); ++i)
         armyReavers.insert(reavers[static_cast<std::size_t>(i)]->id);
 
-    std::erase_if(missions_, [&state, &armyReavers](const auto& entry) {
+    std::erase_if(missions_, [&state, &armyReavers, retreat](const auto& entry) {
         const auto* reaver = findUnit(state, entry.second.reaver);
         return findUnit(state, entry.first) == nullptr ||
-               reaver == nullptr || (armyReavers.contains(reaver->id) && !reaver->loaded);
+               reaver == nullptr || (armyReavers.contains(reaver->id) && !reaver->loaded &&
+                   distanceSquared(reaver->position, retreat) <= 256 * 256);
     });
     std::unordered_set<UnitId> assignedReavers;
     for (const auto& [shuttle, mission] : missions_) {
@@ -64,12 +67,14 @@ std::vector<Command> TransportController::control(
         assignedReavers.insert(mission.reaver);
     }
     for (const auto* shuttle : shuttles) {
-        if (missions_.contains(shuttle->id)) continue;
+        if (missions_.contains(shuttle->id) || state.frame < nextLaunch_[shuttle->id] ||
+            shuttle->healthFraction() < 0.65) continue;
         const UnitSnapshot* closest = nullptr;
         auto closestDistance = std::numeric_limits<int>::max();
         for (const auto* reaver : reavers) {
             if (assignedReavers.contains(reaver->id) ||
                 (armyReavers.contains(reaver->id) && !reaver->loaded) ||
+                (!reaver->loaded && (reaver->underAttack || reaver->healthFraction() < 0.65)) ||
                 (reaver->loaded && reaver->transportId != shuttle->id)) {
                 continue;
             }
@@ -81,20 +86,24 @@ std::vector<Command> TransportController::control(
         }
         if (closest != nullptr) {
             auto target = objective;
+            auto waypoint = objective;
             if (economicTargets && !armyReavers.contains(closest->id)) {
                 auto raider = *closest;
                 raider.position = shuttle->position;
                 raider.ammo = std::max(1, raider.ammo); // Target selection may precede loading Scarabs.
-                target = harassmentOpportunity(state, raider, true).target;
+                const auto opportunity = harassmentOpportunity(state, raider, true, navigation);
+                target = opportunity.target;
+                waypoint = opportunity.waypoint;
                 if (!target.valid()) continue;
             }
             missions_.insert_or_assign(
-                shuttle->id, Mission{closest->id, TransportPhase::gathering, state.frame, target});
+                shuttle->id, Mission{closest->id, TransportPhase::gathering, state.frame, target, waypoint});
             assignedReavers.insert(closest->id);
         }
     }
 
     std::vector<Command> commands;
+    std::vector<UnitId> finished;
     commands.reserve(missions_.size() * 2U);
     for (auto& [shuttleId, mission] : missions_) {
         const auto* shuttle = findUnit(state, shuttleId);
@@ -108,11 +117,22 @@ std::vector<Command> TransportController::control(
         // it after unloading instead of restarting the raid indefinitely.
         if (armyReavers.contains(reaver->id) && aboard)
             mission.phase = TransportPhase::returning;
+        else if (armyReavers.contains(reaver->id) && mission.phase != TransportPhase::returning)
+            mission.phase = TransportPhase::extracting;
 
         if (mission.phase == TransportPhase::gathering) {
+            if (!aboard && state.frame - mission.transitionFrame > 30 * 24) {
+                finished.push_back(shuttleId);
+                nextLaunch_[shuttleId] = state.frame + 20 * 24;
+                continue;
+            }
             if (aboard) {
                 mission.phase = TransportPhase::attacking;
                 mission.transitionFrame = state.frame;
+            } else if (economicTargets && reaver->ammo < 2) {
+                commands.push_back(moveCommand(shuttleId, reaver->position, 94, "shuttle-await-scarabs"));
+                commands.push_back({reaver->id, CommandType::hold, -1, {-1, -1},
+                                    UnitKind::unknown, 92, 0, "reaver-arm-for-drop"});
             } else if (separation <= 80 * 80) {
                 commands.push_back({shuttleId, CommandType::load, reaver->id, {-1, -1},
                                     UnitKind::unknown, 97, 0, "reaver-load"});
@@ -131,32 +151,39 @@ std::vector<Command> TransportController::control(
                 continue;
             }
             const auto localAirThreat = influence.at(shuttle->position).airThreat;
+            if (distanceSquared(shuttle->position, mission.waypoint) <= 96 * 96)
+                mission.waypoint = mission.target;
             auto targetStillSafe = true;
             if (economicTargets) {
                 auto raider = *reaver;
                 raider.position = shuttle->position;
                 raider.ammo = std::max(1, raider.ammo);
-                const auto opportunity = harassmentOpportunity(state, raider, true);
-                targetStillSafe = opportunity.target.valid() &&
-                    distanceSquared(opportunity.target, mission.target) <= 320 * 320;
+                targetStillSafe = harassmentRouteSafe(state, raider, mission.waypoint, true);
+                raider.position = mission.waypoint;
+                targetStillSafe = targetStillSafe && harassmentRouteSafe(state, raider, mission.target, true);
             }
             if (!mission.target.valid() || !targetStillSafe || shuttle->healthFraction() < 0.42 ||
-                localAirThreat > 4.5F) {
+                localAirThreat > 4.5F || state.frame - mission.transitionFrame > 90 * 24) {
                 mission.phase = TransportPhase::returning;
                 mission.transitionFrame = state.frame;
-            } else if (distanceSquared(shuttle->position, mission.target) <= 352 * 352 ||
+            } else if (distanceSquared(shuttle->position, mission.target) <=
+                           (economicTargets ? 192 * 192 : 352 * 352) ||
                        (!economicTargets && enemyNear(state, shuttle->position, 288))) {
                 if (localAirThreat <= 3.25F) {
-                    commands.push_back({shuttleId, CommandType::unload, -1,
-                                        shuttle->position, UnitKind::unknown,
-                                        99, 0, "reaver-drop"});
+                    const auto landing = navigation != nullptr && !navigation->empty()
+                        ? navigation->nearestWalkable(mission.target, 3) : shuttle->position;
+                    if (landing.valid() && (!economicTargets ||
+                        distanceSquared(landing, mission.target) <= 192 * 192))
+                        commands.push_back({shuttleId, CommandType::unload, -1,
+                                            landing, UnitKind::unknown, 99, 0, "reaver-drop"});
+                    else mission.phase = TransportPhase::returning;
                 } else {
                     mission.phase = TransportPhase::returning;
                     mission.transitionFrame = state.frame;
                 }
             } else {
                 commands.push_back(moveCommand(
-                    shuttleId, influence.safestStep(shuttle->position, mission.target, true),
+                    shuttleId, influence.safestStep(shuttle->position, mission.waypoint, true),
                     93, "shuttle-attack-route"));
             }
         }
@@ -171,9 +198,15 @@ std::vector<Command> TransportController::control(
             const auto dangerous = influence.at(reaver->position).groundThreat > 3.5F;
             const auto shouldExtract = exposedFor >= 7 * 24 ||
                                        reaver->healthFraction() < 0.58 || dangerous ||
+                                       shuttle->healthFraction() < 0.45 ||
+                                       armyReavers.contains(reaver->id) ||
+                                       (economicTargets && reaver->ammo == 0) ||
+                                       (economicTargets && !harassmentRouteSafe(state, *reaver, reaver->position)) ||
                                        !enemyNear(state, reaver->position, 448);
             if (shouldExtract) {
-                if (separation <= 80 * 80) {
+                if (reaver->attackFrame && !dangerous && reaver->healthFraction() >= 0.58) {
+                    commands.push_back(moveCommand(shuttleId, reaver->position, 98, "shuttle-extract"));
+                } else if (separation <= 80 * 80) {
                     commands.push_back({shuttleId, CommandType::load, reaver->id,
                                         {-1, -1}, UnitKind::unknown,
                                         99, 0, "reaver-extract"});
@@ -184,6 +217,19 @@ std::vector<Command> TransportController::control(
                                                    "reaver-board"));
                 }
             } else {
+                CombatEstimate raid;
+                raid.decision = FightDecision::engage;
+                raid.ratio = 2.0;
+                const auto firingOrders = TacticalController{}.control(
+                    std::span<const UnitSnapshot>{reaver, 1}, state.enemy.units,
+                    raid, mission.target, shuttle->position, influence, reaver->position,
+                    state.latencyFrames, false, {},
+                    economicTargets ? TacticalIntent::raid : TacticalIntent::battle);
+                for (auto order : firingOrders) {
+                    order.priority = 96;
+                    if (order.type == CommandType::attackUnit) order.source = "reaver-economic-volley";
+                    commands.push_back(std::move(order));
+                }
                 const auto screen = retreat.valid()
                                         ? moveToward(reaver->position, retreat, 112.0)
                                         : reaver->position;
@@ -195,8 +241,8 @@ std::vector<Command> TransportController::control(
 
         if (mission.phase == TransportPhase::returning) {
             if (!aboard) {
-                mission.phase = TransportPhase::gathering;
-                mission.transitionFrame = state.frame;
+                finished.push_back(shuttleId);
+                nextLaunch_[shuttleId] = state.frame + 20 * 24;
                 continue;
             }
             if (retreat.valid() &&
@@ -210,12 +256,18 @@ std::vector<Command> TransportController::control(
             }
         }
     }
+    for (const auto shuttle : finished) missions_.erase(shuttle);
     std::ranges::sort(commands, {}, &Command::actor);
     return commands;
 }
 
 void TransportController::reset() {
     missions_.clear();
+    nextLaunch_.clear();
+}
+
+bool TransportController::ownsReaver(const UnitId id) const {
+    return std::ranges::any_of(missions_, [id](const auto& entry) { return entry.second.reaver == id; });
 }
 
 }  // namespace protodd

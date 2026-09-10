@@ -3,6 +3,7 @@
 #include "protodd/CommandBus.hpp"
 #include "protodd/GameState.hpp"
 #include "protodd/InfluenceMap.hpp"
+#include "protodd/Navigation.hpp"
 
 #include <unordered_map>
 #include <vector>
@@ -19,8 +20,10 @@ public:
         Position retreat,
         const InfluenceMap& influence,
         int reservedArmyReavers = 0,
-        bool economicTargets = false);
+        bool economicTargets = false,
+        const NavigationGrid* navigation = nullptr);
     void reset();
+    [[nodiscard]] bool ownsReaver(UnitId id) const;
 
 private:
     struct Mission {
@@ -28,9 +31,11 @@ private:
         TransportPhase phase{TransportPhase::gathering};
         Frame transitionFrame{};
         Position target{-1, -1};
+        Position waypoint{-1, -1};
     };
 
     std::unordered_map<UnitId, Mission> missions_;
+    std::unordered_map<UnitId, Frame> nextLaunch_;
 };
 
 }  // namespace protodd

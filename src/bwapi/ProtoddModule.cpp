@@ -45,9 +45,14 @@ int countUnits(
 }
 
 std::string csvSafe(const std::string_view value) {
-    std::string result(value);
-    for (auto& character : result) {
-        if (character == ',' || character == '\n' || character == '\r') character = ';';
+    std::string result;
+    result.reserve(value.size());
+    for (const auto character : value) {
+        const auto byte = static_cast<unsigned char>(character);
+        // StarCraft map strings can contain in-band color/control codes. They
+        // make terminal output unreadable and can corrupt downstream CSV.
+        if (byte < 0x20 || byte == 0x7f) continue;
+        result.push_back(character == ',' ? ';' : character);
     }
     return result;
 }
@@ -102,6 +107,15 @@ namespace protodd::bwapi {
 void ProtoddModule::onStart() {
     BWAPI::Broodwar->setCommandOptimizationLevel(2);
     BWAPI::Broodwar->setLatCom(true);
+    std::error_code error;
+    std::filesystem::create_directories("bwapi-data/write", error);
+    opponentName_ = BWAPI::Broodwar->enemy() ? BWAPI::Broodwar->enemy()->getName() : "unknown";
+    mapName_ = BWAPI::Broodwar->mapName();
+    log_.open("bwapi-data/write/Protodd.log", std::ios::app);
+    if (log_) {
+        log_ << "BOOT," << csvSafe(mapName_) << ',' << csvSafe(opponentName_) << '\n';
+        log_.flush();
+    }
     // BWAPI only delivers onSendText and selected-unit information with this
     // flag enabled. Tournament hosts may deny it; the passive overlay still
     // works and reports that its interactive controls are unavailable.
@@ -170,23 +184,23 @@ void ProtoddModule::onStart() {
     lastPosture_ = Posture::hold;
     maintenanceMineralReserve_ = 0;
     maintenanceGasReserve_ = 0;
+    slowWindowStart_ = slowWindowPeakFrame_ = -1;
+    slowWindowPeakUs_ = 0;
+    slowWindowLoad_ = RuntimeLoad::normal;
 
-    std::error_code error;
-    std::filesystem::create_directories("bwapi-data/write", error);
-    opponentName_ = BWAPI::Broodwar->enemy() ? BWAPI::Broodwar->enemy()->getName() : "unknown";
-    mapName_ = BWAPI::Broodwar->mapName();
     const auto historyFile = OpponentHistory::filename(opponentName_);
     history_.parse(readFile(std::filesystem::path("bwapi-data/read") / historyFile));
     history_.merge(readFile(std::filesystem::path("bwapi-data/write") / historyFile));
     openingStyle_ = history_.choose(opponentName_, mapName_,
                                     stableSeed(opponentName_ + "|" + mapName_));
-    log_.open("bwapi-data/write/Protodd.log", std::ios::app);
     if (log_) {
-        log_ << "START," << BWAPI::Broodwar->mapName() << ','
-             << opponentName_ << ',' << openingStyleName(openingStyle_) << '\n';
+        log_ << "START," << csvSafe(BWAPI::Broodwar->mapName()) << ','
+             << csvSafe(opponentName_) << ',' << openingStyleName(openingStyle_) << '\n';
         log_ << "MATCH,seed=" << BWAPI::Broodwar->getRandomSeed()
              << ",map_hash=" << BWAPI::Broodwar->mapHash() << '\n';
-        log_ << "DIAGNOSTICS,version=1,sampleFrames=24,entityFrames=120,information=legal-observations\n";
+        log_ << "DIAGNOSTICS,version=2,sampleFrames=24,entityFrames=240,"
+                "beliefFrames=240,orderHeartbeatFrames=120,performanceWindowFrames=24,"
+                "information=legal-observations\n";
     }
 }
 
@@ -198,6 +212,7 @@ void ProtoddModule::onEnd(const bool winner) {
                                 std::ios::binary | std::ios::trunc);
     if (historyOutput) historyOutput << history_.serialize();
     if (log_) {
+        flushPerformanceRecord();
         const auto& runtime = frameBudget_.stats();
         log_ << "PERF_SUMMARY," << runtime.samples << ',' << runtime.movingAverageMs << ','
              << runtime.peakMs << ',' << runtime.over42ms << ',' << runtime.over55ms << ','
@@ -254,10 +269,7 @@ void ProtoddModule::onFrame() {
         std::chrono::steady_clock::now() - started).count();
     const auto frame = BWAPI::Broodwar->getFrameCount();
     frameBudget_.record(frame, elapsed);
-    if (log_ && elapsed >= 28000) {
-        log_ << "PERF," << frame << ',' << elapsed << ','
-             << runtimeLoadName(frameBudget_.load(frame)) << '\n';
-    }
+    recordPerformance(frame, elapsed);
 }
 
 void ProtoddModule::onSendText(std::string text) {
@@ -376,7 +388,7 @@ void ProtoddModule::updateMacro() {
         }
         const auto key = std::to_string(static_cast<int>(action.action)) + '/' +
             std::to_string(static_cast<int>(action.target)) + '/' +
-            std::to_string(static_cast<int>(action.technology));
+            std::to_string(static_cast<int>(action.technology)) + '/' + action.reason;
         std::ostringstream entry;
         entry << "MACRO," << static_cast<int>(action.action) << ',' << unitStats(action.target).name
               << ',' << static_cast<int>(action.technology) << ',' << csvSafe(execution.outcome)
@@ -456,13 +468,17 @@ void ProtoddModule::updateCombat(
     const bool runSimulation,
     const int navigationInterval,
     const std::size_t commandLimit) {
-    const auto friendly = combatUnits(true);
+    const auto transportOrders = transports_.control(
+        state_, plan_.attackTarget, retreatPoint(), influence_,
+        plan_.prioritizeReinforcements ? 100 : (state_.enemy.race == Race::protoss ? 2 : 1), true, &navigation_);
+    auto friendly = combatUnits(true);
+    std::erase_if(friendly, [this](const UnitSnapshot& unit) { return transports_.ownsReaver(unit.id); });
     debug_.squads.clear();
     const auto enemy = combatUnits(false);
     const auto aggressive = plan_.posture == Posture::pressure ||
                             plan_.posture == Posture::attack ||
                             plan_.posture == Posture::harass;
-    const auto formed = squads_.form(state_, friendly, enemy, plan_, retreatPoint());
+    const auto formed = squads_.form(state_, friendly, enemy, plan_, retreatPoint(), &navigation_);
     const auto resetNavigation = advanceWaypoints_.size() != formed.size() ||
                                  navigationSignatures_.size() != formed.size();
     const auto periodicNavigationRefresh = navigationRefresh_ < 0 ||
@@ -492,7 +508,7 @@ void ProtoddModule::updateCombat(
                                      plan_.posture == Posture::defend ? 1.25 : 1.05);
         }
         if (squad.role == SquadRole::mainArmy) {
-            if (plan_.expansionTarget.valid())
+            if (plan_.expansionTarget.valid() && plan_.posture != Posture::attack)
                 objective = expansionAssemblyPoint(state_, plan_.expansionTarget, retreatPoint());
             const auto undersizedVanguard =
                 vanguard == &squad &&
@@ -518,7 +534,8 @@ void ProtoddModule::updateCombat(
             }
             if (vanguard == &squad && aggressive)
                 objective = SquadPlanner::supportRendezvous(state_, squad, objective);
-            if (plan_.expansionTarget.valid() && vanguard == &squad &&
+            if (plan_.expansionTarget.valid() && plan_.posture != Posture::attack &&
+                vanguard == &squad &&
                 distanceSquared(squad.center, plan_.expansionTarget) <= 448 * 448)
                 defense = {plan_.expansionTarget, 448, plan_.expansionTarget};
         }
@@ -584,7 +601,8 @@ void ProtoddModule::updateCombat(
             estimate.decision == FightDecision::kite ? "Fire and reposition" :
             !squad.enemies.empty() ? "Local fight accepted" :
             defense.front.valid() ? "Occupy defensive terrain" :
-            plan_.expansionTarget.valid() ? "Cover expansion" : "Assemble / advance";
+            plan_.expansionTarget.valid() && plan_.posture != Posture::attack
+                ? "Cover expansion" : "Assemble / advance";
         if (log_ && logSquads) {
             log_ << "SQUAD," << state_.frame << ',' << squadRoleName(squad.role)
                  << ",key=" << engagementKey << ",units=" << squad.units.size()
@@ -613,7 +631,8 @@ void ProtoddModule::updateCombat(
                  squad.units, targets, estimate, objective,
                  squad.retreat, influence_, squad.center, state_.latencyFrames,
                  technologyLevel(state_.self, TechnologyKind::psionicStorm) > 0,
-                 defense)) {
+                 defense, squad.withdrawing ? TacticalIntent::withdraw :
+                     squad.role == SquadRole::harassment ? TacticalIntent::raid : TacticalIntent::battle)) {
             commands_.submit(order);
         }
     }
@@ -632,10 +651,7 @@ void ProtoddModule::updateCombat(
         detectorEscorts_.push_back(order.actor);
         commands_.submit(order);
     }
-    for (const auto& order : transports_.control(
-             state_, plan_.attackTarget, retreatPoint(), influence_,
-             plan_.prioritizeReinforcements ? 100 :
-                 (state_.enemy.race == Race::protoss ? 2 : 1), true)) {
+    for (const auto& order : transportOrders) {
         commands_.submit(order);
     }
     // BWAPI calls are capped per combat tick. Priority-aware rotation keeps
@@ -658,7 +674,12 @@ void ProtoddModule::updateCombat(
         entry << "ORDER," << command.actor << ',' << static_cast<int>(command.type) << ','
               << command.targetUnit << ',' << command.targetPosition.x << ',' << command.targetPosition.y
               << ',' << command.source << ',' << accepted;
-        trace("order/" + std::to_string(command.actor), entry.str(), 120);
+        // Moving orders naturally change by a few pixels on almost every
+        // combat tick. Deduplicate on intent while retaining exact coordinates
+        // in the sampled row.
+        const auto comparison = std::to_string(static_cast<int>(command.type)) + '/' +
+            command.source + '/' + std::to_string(accepted);
+        trace("order/" + std::to_string(command.actor), entry.str(), 120, comparison);
     }
 }
 
@@ -781,14 +802,42 @@ void ProtoddModule::sampleTelemetry() {
     lastEnemyVisibleArmy_ = visibleEnemyArmy;
 }
 
-void ProtoddModule::trace(std::string key, std::string value, const Frame heartbeat) {
+void ProtoddModule::recordPerformance(const Frame frame, const std::int64_t elapsedUs) {
+    if (!log_) return;
+    if (slowWindowStart_ >= 0 && frame - slowWindowStart_ >= 24) {
+        flushPerformanceRecord();
+    }
+    if (elapsedUs < 28000) return;
+    if (slowWindowStart_ < 0) slowWindowStart_ = frame;
+    if (elapsedUs > slowWindowPeakUs_) {
+        slowWindowPeakUs_ = elapsedUs;
+        slowWindowPeakFrame_ = frame;
+        slowWindowLoad_ = frameBudget_.load(frame);
+    }
+}
+
+void ProtoddModule::flushPerformanceRecord() {
+    if (!log_ || slowWindowPeakFrame_ < 0) return;
+    log_ << "PERF," << slowWindowPeakFrame_ << ',' << slowWindowPeakUs_ << ','
+         << runtimeLoadName(slowWindowLoad_) << '\n';
+    slowWindowStart_ = slowWindowPeakFrame_ = -1;
+    slowWindowPeakUs_ = 0;
+    slowWindowLoad_ = RuntimeLoad::normal;
+}
+
+void ProtoddModule::trace(
+    std::string key,
+    std::string value,
+    const Frame heartbeat,
+    std::string comparison) {
     if (!log_) return;
     auto& previous = traceMemory_[key];
-    if (value == previous.value && state_.frame - previous.frame < heartbeat) return;
+    if (comparison.empty()) comparison = value;
+    if (comparison == previous.value && state_.frame - previous.frame < heartbeat) return;
     const auto comma = value.find(',');
     if (comma == std::string::npos) return;
     log_ << value.substr(0, comma) << ',' << state_.frame << value.substr(comma) << '\n';
-    previous = {std::move(value), state_.frame};
+    previous = {std::move(comparison), state_.frame};
 }
 
 void ProtoddModule::logDiagnostics() {
@@ -834,7 +883,7 @@ void ProtoddModule::logDiagnostics() {
          << ",supply=" << state_.self.supplyUsed << ",supplyTotal=" << state_.self.supplyTotal
          << ",probes=" << countUnits(state_.self.units, UnitKind::probe, true)
          << ",bases=" << countUnits(state_.self.units, UnitKind::nexus, true) << '\n';
-    if (state_.frame % 120 == 0) {
+    if (state_.frame % 240 == 0) {
         for (const auto& [name, timing] : phases_)
             log_ << "PHASE," << state_.frame << ',' << name << ',' << timing.calls << ','
                  << timing.totalUs << ',' << timing.peakUs << '\n';

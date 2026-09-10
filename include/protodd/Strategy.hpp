@@ -23,6 +23,7 @@ struct ProductionGoal {
     std::string reason;
     TechnologyKind technology{TechnologyKind::none};
     bool allowMineralFallback{};
+    bool harassmentOnly{};
 };
 
 struct CompositionTarget {
@@ -53,6 +54,7 @@ struct StrategicPlan {
     Position expansionTarget{-1, -1};
     // Temporarily release expansion savings while a failed builder recovers.
     bool deferExpansion{};
+    int harassmentDrops{};
 };
 
 class StrategyEngine {
@@ -81,6 +83,9 @@ private:
     static void addEconomicRecovery(StrategicPlan& plan, const GameState& state);
     static void addPostPressureTransition(StrategicPlan& plan, const GameState& state,
                                           const ThreatAssessment& threat);
+    static void addMapControlEconomy(StrategicPlan& plan, const GameState& state,
+                                     const ThreatAssessment& threat);
+    static void addHarassmentProduction(StrategicPlan& plan, const GameState& state);
     static void applyOpeningStyle(
         StrategicPlan& plan,
         const GameState& state,

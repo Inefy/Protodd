@@ -1,5 +1,6 @@
 #include "protodd/Strategy.hpp"
 #include "protodd/Combat.hpp"
+#include "protodd/Harassment.hpp"
 
 #include "protodd/UnitCatalog.hpp"
 
@@ -177,6 +178,31 @@ Position enemyMain(const GameState& state) {
     return candidate != nullptr ? candidate->center : Position{-1, -1};
 }
 
+Position nearestExpansionSite(const GameState& state) {
+    const auto home = ourMain(state);
+    if (!home.valid()) return {-1, -1};
+
+    // BaseSnapshot centers are the canonical depot centers discovered by the
+    // BWAPI bridge.  Pick the closest non-island, unowned resource base so a
+    // strategic Nexus target is explicit before macro placement runs.  The
+    // previous planners could request a second base without ever naming one;
+    // the bridge then used the combat rally point and was free to select a
+    // forward or otherwise inappropriate resource cluster.
+    const BaseSnapshot* best = nullptr;
+    auto bestScore = std::numeric_limits<double>::infinity();
+    for (const auto& base : state.bases) {
+        if (base.ownerId != -1 || base.island || !base.center.valid() ||
+            base.mineralsRemaining < 1000) continue;
+        const auto score = distance(home, base.center);
+        if (score < bestScore ||
+            (score == bestScore && (best == nullptr || base.id < best->id))) {
+            bestScore = score;
+            best = &base;
+        }
+    }
+    return best != nullptr ? best->center : Position{-1, -1};
+}
+
 bool hardBreachAtMain(const GameState& state) noexcept {
     const auto home = ourMain(state);
     if (!home.valid()) return false;
@@ -278,7 +304,103 @@ StrategicPlan StrategyEngine::plan(
     }
 
     addPostPressureTransition(result, state, threat);
+    addMapControlEconomy(result, state, threat);
+
+    const auto safeToClose = threat.combatEnemiesNearMain == 0 &&
+                             threat.immediateGround <= 0.45 &&
+                             !hardBreachAtMain(state);
+    auto ownMobilePower = 0.0;
+    auto ownMobileCount = 0;
+    for (const auto& unit : state.self.units) {
+        if (!unit.completed || unit.disabled || unit.loaded || unit.hallucination ||
+            isBuilding(unit.kind) || isWorker(unit.kind) || !isCombatUnit(unit.kind)) continue;
+        ownMobilePower += unitStats(unit.kind).combatValue *
+                          std::clamp(unit.healthFraction(), 0.15, 1.0);
+        ++ownMobileCount;
+    }
+    auto recentEnemyMobilePower = 0.0;
+    auto knownEnemyWorkers = 0;
+    for (const auto& unit : state.enemy.units) {
+        if (!unit.completed || unit.disabled || unit.hallucination) continue;
+        if (isWorker(unit.kind)) {
+            ++knownEnemyWorkers;
+            continue;
+        }
+        if (isBuilding(unit.kind) || !isCombatUnit(unit.kind) ||
+            (!unit.visible && state.frame - unit.lastSeen > 60 * 24)) continue;
+        recentEnemyMobilePower += unitStats(unit.kind).combatValue *
+                                  std::clamp(unit.healthFraction(), 0.15, 1.0);
+    }
+    const auto ownedBases = static_cast<int>(std::ranges::count_if(
+        state.bases, [&state](const BaseSnapshot& base) {
+            return base.ownerId == state.self.id;
+        }));
+    const auto knownEnemyBases = static_cast<int>(std::ranges::count_if(
+        state.bases, [&state](const BaseSnapshot& base) {
+            return state.enemy.id >= 0 && base.ownerId == state.enemy.id;
+        }));
+    const auto decisiveLeadCloseout = safeToClose && state.self.supplyUsed >= 220 &&
+        ownMobileCount >= 20 &&
+        ((ownedBases >= knownEnemyBases + 2 &&
+          ownMobilePower >= std::max(12.0, recentEnemyMobilePower) * 1.65) ||
+         (knownEnemyBases <= 1 && knownEnemyWorkers <= 12 &&
+          ownMobilePower >= std::max(12.0, recentEnemyMobilePower) * 1.35));
+
+    // A maxed army is already the largest possible economic conversion. Do
+    // not park it beside another speculative Nexus while the opponent rebuilds
+    // from a collapsed position. Keep a small margin below the hard cap so one
+    // lost Probe or Observer cannot immediately reverse the map-level order.
+    const auto supplyCapCloseout = state.self.supplyTotal >= 400 &&
+                                   state.self.supplyUsed >= 392 &&
+                                   safeToClose;
+    const auto commitCloseout = [&](const std::string_view reason) {
+        const auto target = enemyMain(state);
+        if (target.valid()) {
+            result.name += " [";
+            result.name += reason;
+            result.name += ']';
+            result.posture = Posture::attack;
+            result.attackThreshold = std::min(result.attackThreshold, 1.10);
+            result.minimumAttackSize = std::min(result.minimumAttackSize, 8);
+            result.attackTarget = target;
+            result.rallyPoint = target;
+            result.expansionTarget = {-1, -1};
+            result.sustainEconomy = false;
+            const auto committedBases = count(state, UnitKind::nexus);
+            result.desiredBases = std::min(result.desiredBases, committedBases);
+            result.maximumBases = std::min(result.maximumBases, committedBases);
+            for (auto& objective : result.goals) {
+                if (objective.goal != GoalKind::expand) continue;
+                objective.desiredCount = committedBases;
+                objective.blocking = false;
+                objective.reason = "convert the army lead before further expansion";
+            }
+        }
+    };
+    if (supplyCapCloseout) {
+        commitCloseout("supply-cap closeout");
+    } else if (decisiveLeadCloseout) {
+        commitCloseout("decisive-lead closeout");
+    }
     result.desiredBases = std::min(result.desiredBases, result.maximumBases);
+
+    // Every planner can request economic growth. Resolve that request to a
+    // concrete natural before infrastructure reconciliation so the expansion
+    // reservation, builder routing, placement, and cover all share one
+    // location.
+    if (!result.expansionTarget.valid()) {
+        for (const auto& nexus : state.self.units) {
+            if (nexus.kind == UnitKind::nexus && !nexus.completed &&
+                nexus.position.valid()) {
+                result.expansionTarget = nexus.position;
+                break;
+            }
+        }
+    }
+    if (!result.expansionTarget.valid() &&
+        result.desiredBases > count(state, UnitKind::nexus)) {
+        result.expansionTarget = nearestExpansionSite(state);
+    }
 
     // Infrastructure must follow the final intent: a safety reaction or an
     // opening style can change the economy after the matchup plan is made.
@@ -394,6 +516,7 @@ StrategicPlan StrategyEngine::plan(
         });
         if (base != state.bases.end()) result.rallyPoint = base->defense.anchor;
     }
+    addHarassmentProduction(result, state);
     std::ranges::stable_sort(result.goals, std::greater{}, &ProductionGoal::priority);
     return result;
 }
@@ -2317,6 +2440,144 @@ void StrategyEngine::addPostPressureTransition(
                        "mobile mineral reinforcement for the ranged army");
 }
 
+void StrategyEngine::addHarassmentProduction(StrategicPlan& plan, const GameState& state) {
+    const auto bases = count(state, UnitKind::nexus, true);
+    const auto workers = countRole(state, UnitRole::worker);
+    const auto screen = count(state, UnitKind::dragoon, true) + count(state, UnitKind::zealot, true);
+    if (minute(state) < 7 || bases < 2 || workers < 28 || screen < 8 ||
+        plan.prioritizeReinforcements || plan.posture == Posture::defend ||
+        plan.posture == Posture::recover || hardBreachAtMain(state)) return;
+    const auto enemyEconomy = std::ranges::any_of(state.bases, [&](const BaseSnapshot& base) {
+        return state.enemy.id >= 0 && base.ownerId == state.enemy.id && base.mineralsRemaining >= 500;
+    }) || std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& enemy) {
+        return isWorker(enemy.kind) || enemy.role == UnitRole::resourceDepot;
+    });
+    if (!enemyEconomy) return;
+
+    // Buy a separate drop package. The first army Reavers remain on the
+    // ground; harassment receives an additional Reaver and its own Shuttle.
+    const auto armyReavers = state.enemy.race == Race::protoss ? 2 : 1;
+    const auto firstHarassmentGoal = plan.goals.size();
+    plan.harassmentDrops = 1;
+    goal(plan, GoalKind::build, UnitKind::roboticsFacility, 1, 102,
+         "dedicated mineral-line drop technology", true);
+    goal(plan, GoalKind::build, UnitKind::roboticsSupportBay, 1, 102,
+         "unlock dedicated harassment Reaver", true);
+    goal(plan, GoalKind::train, UnitKind::reaver, armyReavers + plan.harassmentDrops, 103,
+         "extra Reaver for drops without borrowing army splash", true);
+    if (count(state, UnitKind::reaver) >= armyReavers)
+        goal(plan, GoalKind::train, UnitKind::shuttle, plan.harassmentDrops, 104,
+             "dedicated transport to bypass the defended entrance", true);
+    if (count(state, UnitKind::shuttle, true) > 0)
+        technologyGoal(plan, TechnologyKind::graviticDrive, 1, 87,
+                       "faster drop entry and extraction");
+    if (state.enemy.race == Race::zerg && recentEnemyCount(state, UnitKind::overlord) > 0 &&
+        count(state, UnitKind::stargate) > 0)
+        goal(plan, GoalKind::train, UnitKind::corsair, 4, 94,
+             "dedicated Overlord hunters alongside worker drops");
+    if (count(state, UnitKind::templarArchives, true) > 0) {
+        UnitSnapshot covert;
+        covert.kind = UnitKind::darkTemplar;
+        covert.position = ourMain(state);
+        covert.cloaked = true;
+        covert.groundWeapon = {40, 30, 0, 32, DamageType::normal, false, true};
+        if (harassmentOpportunity(state, covert).target.valid())
+            goal(plan, GoalKind::train, UnitKind::darkTemplar, 2, 94,
+                 "dedicated cloaked raiders for an exposed economy");
+    }
+    for (auto i = firstHarassmentGoal; i < plan.goals.size(); ++i)
+        plan.goals[i].harassmentOnly = true;
+}
+
+void StrategyEngine::addMapControlEconomy(
+    StrategicPlan& plan, const GameState& state, const ThreatAssessment& threat) {
+    const auto bases = count(state, UnitKind::nexus);
+    const auto workers = countRole(state, UnitRole::worker);
+    if (minute(state) < 12 || bases < 2 || workers < 32 ||
+        plan.posture == Posture::recover || threat.combatEnemiesNearMain > 0 ||
+        activeApproach(state, threat) || threat.immediateGround > 0.45 ||
+        threat.workerRush > 0.30 || threat.proxy + threat.staticContain > 0.34 ||
+        hardBreachAtMain(state)) return;
+
+    auto armyPower = 0.0;
+    auto mobileCount = 0;
+    for (const auto& unit : state.self.units) {
+        if (!unit.completed || unit.disabled || unit.loaded || unit.hallucination ||
+            isBuilding(unit.kind) || !isCombatUnit(unit.kind)) continue;
+        armyPower += unitStats(unit.kind).combatValue * unit.healthFraction();
+        ++mobileCount;
+    }
+    auto enemyMobilePower = 0.0;
+    auto fortifications = 0;
+    for (const auto& enemy : state.enemy.units) {
+        if (!enemy.completed || enemy.disabled || !enemy.position.valid() || enemy.hallucination) continue;
+        const auto armed = enemy.groundWeapon.damage > 0 || enemy.airWeapon.damage > 0;
+        if (!armed || isWorker(enemy.kind)) continue;
+        // A raid at any owned base cancels growth, including remote economies
+        // that the main-base threat classifier does not cover.
+        if ((enemy.visible || state.frame - enemy.lastSeen <= 8 * 24) &&
+            std::ranges::any_of(state.bases, [&](const BaseSnapshot& base) {
+                return base.ownerId == state.self.id &&
+                    distanceSquared(base.center, enemy.position) <= 800 * 800;
+            })) return;
+        if (!isBuilding(enemy.kind)) {
+            if (enemy.visible || state.frame - enemy.lastSeen <= 90 * 24)
+                enemyMobilePower += unitStats(enemy.kind).combatValue * enemy.healthFraction();
+        }
+        if ((isStaticDefense(enemy.kind) ||
+             (enemy.kind == UnitKind::siegeTank && enemy.groundWeapon.maxRange >= 320)) &&
+            std::ranges::any_of(state.bases, [&](const BaseSnapshot& base) {
+                return state.enemy.id >= 0 && base.ownerId == state.enemy.id &&
+                    distanceSquared(base.center, enemy.position) <= 800 * 800;
+            })) ++fortifications;
+    }
+    // Compare field armies rather than requiring a profitable frontal fight
+    // into static defenses. Fog increases the margin required to spend.
+    if (fortifications < 3 || mobileCount < 12 ||
+        armyPower < std::max(12.0, enemyMobilePower) * (1.35 + threat.uncertainty * 0.35)) return;
+
+    const auto home = ourMain(state);
+    Position site{-1, -1};
+    auto bestScore = std::numeric_limits<double>::infinity();
+    for (const auto& base : state.bases) {
+        if (base.ownerId != -1 || base.island || !base.center.valid() ||
+            base.mineralsRemaining < 1500) continue;
+        auto danger = false;
+        auto enemyDistance = 4096.0;
+        for (const auto& enemy : state.enemy.units) {
+            if (!enemy.position.valid() ||
+                (!isBuilding(enemy.kind) && !enemy.visible && state.frame - enemy.lastSeen > 30 * 24)) continue;
+            enemyDistance = std::min(enemyDistance, distance(base.center, enemy.position));
+            if ((enemy.groundWeapon.damage > 0 || enemy.role == UnitRole::resourceDepot) &&
+                distanceSquared(base.center, enemy.position) <= 960 * 960) danger = true;
+        }
+        if (danger) continue;
+        auto friendlyDistance = distance(home, base.center);
+        for (const auto& owned : state.bases)
+            if (owned.ownerId == state.self.id && owned.center.valid())
+                friendlyDistance = std::min(friendlyDistance, distance(owned.center, base.center));
+        const auto score = friendlyDistance - enemyDistance * 0.20;
+        if (score < bestScore) { bestScore = score; site = base.center; }
+    }
+    const auto pending = bases > count(state, UnitKind::nexus, true);
+    if (!site.valid() && !pending) return;
+    plan.sustainEconomy = true;
+    plan.posture = Posture::pressure;
+    plan.name += " [outgrow fortified opponent]";
+    plan.maximumBases = 8;
+    // Commit one Nexus at a time, then immediately reassess. A lead and a
+    // bank can fund growth before every old mineral line is saturated.
+    const auto grow = !pending && bases < 8 &&
+        (workers >= bases * 16 || state.self.minerals >= 600);
+    plan.desiredBases = bases + (grow ? 1 : 0);
+    plan.desiredWorkers = std::min(80, bases * 22);
+    plan.desiredGasWorkers = std::min(12, bases * 3);
+    if (grow) plan.expansionTarget = site;
+    for (const auto& nexus : state.self.units)
+        if (nexus.kind == UnitKind::nexus && !nexus.completed) plan.expansionTarget = nexus.position;
+    if (plan.expansionTarget.valid()) plan.rallyPoint = plan.expansionTarget;
+}
+
 void StrategyEngine::addInfrastructure(
     StrategicPlan& plan,
     const GameState& state,
@@ -2344,7 +2605,8 @@ void StrategyEngine::addInfrastructure(
                               projectedSupply - projectedUsed <= desiredBuffer;
     const auto expansionDue = plan.desiredBases > bases;
     const auto expansionReady = bases == completedBases &&
-                                 workers >= bases * 12;
+        (workers >= bases * 12 ||
+         (plan.sustainEconomy && workers >= 32 && state.self.minerals >= 600));
     const auto defensiveGrowth = plan.sustainEconomy ||
         (plan.posture == Posture::defend && defensiveExpansionWindow(state, threat));
     const auto expansionBanking = expansionDue && expansionReady &&
@@ -2453,6 +2715,7 @@ void StrategyEngine::addAdaptiveCounters(
                          recentEnemyCount(state, UnitKind::firebat) +
                          recentEnemyCount(state, UnitKind::ghost);
         const auto mines = recentEnemyCount(state, UnitKind::spiderMine);
+        const auto factories = recentEnemyCount(state, UnitKind::factory);
         const auto mech = recentEnemyCount(state, UnitKind::vulture) +
                           recentEnemyCount(state, UnitKind::siegeTank) +
                           recentEnemyCount(state, UnitKind::goliath) + mines;
@@ -2460,7 +2723,8 @@ void StrategyEngine::addAdaptiveCounters(
                                 recentEnemyCount(state, UnitKind::wraith) +
                                 recentEnemyCount(state, UnitKind::valkyrie);
 
-        if (mines > 0 || recentEnemyCount(state, UnitKind::siegeTank) >= 2) {
+        const auto siegeTanks = recentEnemyCount(state, UnitKind::siegeTank);
+        if (mines > 0 || siegeTanks >= 2) {
             goal(plan, GoalKind::train, UnitKind::observer, 3, 92,
                  "track mines and siege lines", true);
         }
@@ -2490,12 +2754,16 @@ void StrategyEngine::addAdaptiveCounters(
             setCompositionWeight(plan, UnitKind::highTemplar, 0.24);
             setCompositionWeight(plan, UnitKind::zealot, 0.30);
         }
-        if (mech >= 7) {
+        const auto projectedMech = std::max(mech, factories * 3);
+        if (mech >= 4 || siegeTanks >= 2 || factories >= 2) {
             plan.name += " [anti-mech mobility]";
-            technologyGoal(plan, TechnologyKind::legEnhancements, 1, 86,
-                           "close on observed siege composition");
+            technologyGoal(plan, TechnologyKind::legEnhancements, 1, 96,
+                           factories >= 2 && mech < 4
+                               ? "close on scouted Factory production"
+                               : "close on observed siege composition");
             goal(plan, GoalKind::train, UnitKind::zealot,
-                 std::clamp(mech, 8, 18), 83, "absorb mines and surround tanks");
+                 std::clamp(projectedMech, 8, 18), 95,
+                 "absorb mines and surround tanks");
             setCompositionWeight(plan, UnitKind::zealot, 0.34);
             setCompositionWeight(plan, UnitKind::arbiter, 0.14);
         }

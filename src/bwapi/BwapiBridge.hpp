@@ -125,6 +125,7 @@ private:
     std::vector<FailedBuildSite> failedBuildSites_;
     std::unordered_map<UnitId, Frame> unitCommandLocks_;
     std::vector<ResourceSite> resourceSites_;
+    bool defensesInitialized_{};
     std::vector<SpellZone> recentAreaSpells_;
     std::string lastMacroStatus_{"idle"};
     std::vector<MacroExecution> macroExecutions_;

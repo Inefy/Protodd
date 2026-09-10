@@ -34,24 +34,10 @@ void BwapiBridge::onStart() {
     pendingBuilds_.clear();
     failedBuildSites_.clear();
     unitCommandLocks_.clear();
+    defensesInitialized_ = false;
     recentAreaSpells_.clear();
     lastMacroStatus_ = "idle";
     discoverResourceClusters();
-    const auto terrain = navigationGrid();
-    std::vector<Position> approaches{{Broodwar->mapWidth() * 16, Broodwar->mapHeight() * 16}};
-    for (const auto start : Broodwar->getStartLocations())
-        approaches.push_back({start.x * 32 + 64, start.y * 32 + 48});
-    for (auto& site : resourceSites_) {
-        for (const auto approach : approaches) {
-            if (distanceSquared(site.depotCenter, approach) < 384 * 384) continue;
-            const auto defense = terrain.defensivePosition(site.depotCenter, approach);
-            if (!defense.valid() || std::ranges::any_of(site.defenses,
-                [&defense](const DefensivePosition& prior) {
-                    return distanceSquared(prior.entrance, defense.entrance) < 160 * 160;
-                })) continue;
-            site.defenses.push_back(defense);
-        }
-    }
 }
 
 GameState BwapiBridge::observe() {
@@ -200,6 +186,28 @@ GameState BwapiBridge::observe() {
         }
         return false;
     });
+
+    // Defer expensive pathfinding until the game has entered its frame loop.
+    // Doing this in onStart can leave StarCraft responsive but prevent the
+    // injected module from reaching its first telemetry record.
+    if (!defensesInitialized_ && frame >= 24) {
+        const auto terrain = navigationGrid();
+        std::vector<Position> approaches{{Broodwar->mapWidth() * 16, Broodwar->mapHeight() * 16}};
+        for (const auto start : Broodwar->getStartLocations())
+            approaches.push_back({start.x * 32 + 64, start.y * 32 + 48});
+        for (auto& site : resourceSites_) {
+            for (const auto approach : approaches) {
+                if (distanceSquared(site.depotCenter, approach) < 384 * 384) continue;
+                const auto defense = terrain.defensivePosition(site.depotCenter, approach);
+                if (!defense.valid() || std::ranges::any_of(site.defenses,
+                    [&defense](const DefensivePosition& prior) {
+                        return distanceSquared(prior.entrance, defense.entrance) < 160 * 160;
+                    })) continue;
+                site.defenses.push_back(defense);
+            }
+        }
+        defensesInitialized_ = true;
+    }
     state.bases = snapshotBases(state);
     return state;
 }
@@ -1381,6 +1389,10 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
                                      : TilePositions::None;
     }
     if (kind == UnitKind::nexus) {
+        if (!plan.expansionTarget.valid()) {
+            lastMacroStatus_ = "nexus-site-unidentified";
+            return TilePositions::None;
+        }
         const ResourceSite* best = nullptr;
         auto bestScore = std::numeric_limits<double>::infinity();
         auto validSites = 0;
@@ -1945,6 +1957,51 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         }
     }
 
+    // A crowded main or forward base must not make a rich multi-base economy
+    // incapable of adding production. The primary search is deliberately
+    // compact, but when it is exhausted, inspect powered space around every
+    // completed Pylon before declaring placement failure. This also avoids
+    // tying all late-game construction to whichever Probe happened to be
+    // closest to an attack rally point.
+    if (type.requiresPsi()) {
+        std::vector<Unit> pylons;
+        for (const auto unit : Broodwar->self()->getUnits()) {
+            if (unit != nullptr && unit->exists() && unit->isCompleted() &&
+                unit->getType() == UnitTypes::Protoss_Pylon) {
+                pylons.push_back(unit);
+            }
+        }
+        std::ranges::sort(pylons, [builder](const Unit lhs, const Unit rhs) {
+            const auto leftDistance = builder->getDistance(lhs);
+            const auto rightDistance = builder->getDistance(rhs);
+            return leftDistance < rightDistance ||
+                   (leftDistance == rightDistance && lhs->getID() < rhs->getID());
+        });
+        for (const auto pylon : pylons) {
+            const auto poweredAnchor = pylon->getTilePosition();
+            for (auto radius = 1; radius <= 10; ++radius) {
+                for (auto dx = -radius; dx <= radius; ++dx) {
+                    for (const auto dy : {-radius, radius}) {
+                        const auto accepted = consider(poweredAnchor + TilePosition(dx, dy));
+                        if (accepted.isValid()) {
+                            lastMacroStatus_ = "placement-powered-base-fallback";
+                            return accepted;
+                        }
+                    }
+                }
+                for (auto dy = -radius + 1; dy < radius; ++dy) {
+                    for (const auto dx : {-radius, radius}) {
+                        const auto accepted = consider(poweredAnchor + TilePosition(dx, dy));
+                        if (accepted.isValid()) {
+                            lastMacroStatus_ = "placement-powered-base-fallback";
+                            return accepted;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if (enemyFireFallback.isValid()) {
         lastMacroStatus_ = "placement-enemy-fire-fallback";
         return enemyFireFallback;
@@ -2078,8 +2135,11 @@ bool BwapiBridge::build(
         lastMacroStatus_ = "build-pending";
         return false;
     }
-    const auto near = plan.rallyPoint.valid() ? toBwapiPosition(plan.rallyPoint)
-                                              : BWAPI::Position(Broodwar->self()->getStartLocation());
+    const auto near = action.target == UnitKind::nexus && plan.expansionTarget.valid()
+                          ? toBwapiPosition(plan.expansionTarget)
+                          : (plan.rallyPoint.valid()
+                                 ? toBwapiPosition(plan.rallyPoint)
+                                 : BWAPI::Position(Broodwar->self()->getStartLocation()));
     const auto builder = findBuilder(type, near, unavailableBuilders);
     if (builder == nullptr) {
         lastMacroStatus_ = "build-no-builder";

@@ -43,7 +43,7 @@ public:
         std::span<const UnitSnapshot> friendly,
         std::span<const UnitSnapshot> enemy,
         const StrategicPlan& plan,
-        Position fallbackRetreat) const;
+        Position fallbackRetreat, const NavigationGrid* navigation = nullptr) const;
 
     [[nodiscard]] std::vector<Command> detectorEscorts(
         const GameState& state,

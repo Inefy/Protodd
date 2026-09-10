@@ -45,12 +45,17 @@ metrics, scouting action and squad explanations.
 | `ORDER` / `SCOUT` | Issued tactical/scouting intent and BWAPI acceptance |
 | `HEALTH` | Bank, income counters, army/economy health, cumulative idle worker/Gateway unit-frames, supply-tight frames, expansion status, command pipeline totals |
 | `WORKERS` | Actual gas/mineral assignment counts, worker leases and requested gas policy |
-| `ENTITY` | Own and observed/remembered enemy positions, durability, cooldown, order target, visibility and last-seen frame |
-| `BELIEF` | All enemy-plan weights rather than only the winning hypothesis |
+| `ENTITY` | Own and observed/remembered enemy positions, durability, cooldown, order target, visibility and last-seen frame; sampled every 10 game seconds |
+| `BELIEF` | All enemy-plan weights rather than only the winning hypothesis; sampled every 10 game seconds |
 | `LOSS` | Observed destruction, side, unit, position and resource cost |
 | `PHASE` | Calls, total and peak execution time by subsystem, including diagnostics and overlay |
 
-Health is sampled every 24 game frames and entities every 120. Durations integrate
+`ORDER` rows are emitted when a unit's semantic intent changes and as a
+five-second heartbeat; small coordinate changes do not create a new row.
+`PERF` rows retain the worst frame in each one-second window, while
+`PERF_SUMMARY` remains the authoritative count of all slow frames.
+
+Health is sampled every 24 game frames and entities every 240. Durations integrate
 elapsed frames rather than the number of callbacks. Macro logging uses the ledger
 and actions from the real reconciliation; it no longer calls the stateful planner
 a second time merely to describe its decision.

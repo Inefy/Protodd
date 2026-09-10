@@ -414,6 +414,28 @@ void testOpponentInferenceAndStrategy() {
                       goal.blocking;
            }),
            "observed Zerg air mass increases blocking air-control production");
+
+    auto factoryMech = adaptive;
+    factoryMech.frame = 6 * 60 * 24;
+    factoryMech.enemy.race = protodd::Race::terran;
+    factoryMech.enemy.units.clear();
+    for (int i = 0; i < 2; ++i) {
+        auto factory = unit(600 + i, protodd::UnitKind::factory, false,
+                            {1200 + i * 128, 1200});
+        factory.lastSeen = factoryMech.frame;
+        factoryMech.enemy.units.push_back(factory);
+    }
+    const auto factoryPlan = strategy.plan(factoryMech, {});
+    expect(factoryPlan.name.find("anti-mech mobility") != std::string::npos &&
+               std::ranges::any_of(factoryPlan.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.technology == protodd::TechnologyKind::legEnhancements &&
+                          goal.priority >= 96;
+               }) &&
+               std::ranges::any_of(factoryPlan.goals, [](const protodd::ProductionGoal& goal) {
+                   return goal.target == protodd::UnitKind::zealot && goal.desiredCount >= 8 &&
+                          goal.priority >= 95;
+               }),
+           "two scouted Factories trigger the mobile anti-siege composition before Tanks mass");
 }
 
 void testSupplyPlanning() {
@@ -2244,6 +2266,13 @@ void testLocalSquadsAndDetection() {
     const auto escorts = planner.detectorEscorts(state, squads, influence);
     expect(!escorts.empty() && escorts.front().actor == observer.id,
            "observer is assigned to highest-priority detection squad");
+    auto scoutObserver = unit(102, protodd::UnitKind::observer, true, {1500, 1500});
+    scoutObserver.flying = true;
+    scoutObserver.role = protodd::UnitRole::detector;
+    state.self.units.push_back(scoutObserver);
+    const auto reservedScoutEscorts = planner.detectorEscorts(state, squads, influence);
+    expect(reservedScoutEscorts.size() == 1,
+           "multiple squads leave one Observer free for strategic scouting");
 
     auto localCannon = unit(101, protodd::UnitKind::photonCannon, true, {280, 280});
     localCannon.role = protodd::UnitRole::staticDefense;
@@ -2795,6 +2824,14 @@ void testRangedDefense() {
                                   bait.position, area.center, influence, {}, 3, false, area);
     expect(orders.size() == 1 && orders.front().type == CommandType::hold,
            "a defender holds its screen instead of chasing ranged bait outside the base");
+    auto siege = unit(19, UnitKind::siegeTank, false, {850, 500});
+    siege.groundWeapon = {.damage = 70, .cooldown = 75, .maxRange = 384,
+                          .targetsGround = true};
+    orders = tactics.control(std::vector{defender}, std::vector{siege}, engage,
+                             siege.position, area.center, influence, {}, 3, false, area);
+    expect(orders.size() == 1 && orders.front().type == CommandType::attackUnit &&
+               orders.front().targetUnit == siege.id,
+           "defenders close on visible siege artillery that can shell the protected screen");
     auto intruder = unit(3, UnitKind::zealot, false, {600, 500});
     orders = tactics.control(std::vector{defender}, std::vector{bait, intruder}, engage,
                              bait.position, area.center, influence, {}, 3, false, area);
@@ -3136,7 +3173,15 @@ void testReportImprovements() {
         }), "normal PvT preserves income and waits for its army before the Nexus");
     for (int i = 0; i < 3; ++i) state.self.units.push_back(unit(200 + i, UnitKind::dragoon, true));
     plan = strategy.plan(state, {});
-    expect(plan.desiredBases == 2, "28 supply and three completed Dragoons unlock the natural");
+    expect(plan.desiredBases == 2 && plan.expansionTarget == protodd::Position{1900, 2500},
+           "28 supply and three completed Dragoons identify the nearest natural");
+    auto zergState = state;
+    zergState.enemy.race = Race::zerg;
+    zergState.frame = 5 * 60 * 24;
+    const auto zergPlan = strategy.plan(zergState, {});
+    expect(zergPlan.desiredBases >= 2 &&
+               zergPlan.expansionTarget == Position{1900, 2500},
+           "PvZ expansion timing resolves to the nearest natural site");
     ThreatAssessment pressure;
     pressure.combatEnemiesNearMain = 3;
     pressure.immediateGround = 0.8;
@@ -4143,7 +4188,259 @@ void testDecisionDiagnosticsAndOperations() {
            "hidden splash memory alone cannot trigger perpetual spreading");
 }
 
+void testDedicatedHarassmentAndMapEconomy() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 17 * 60 * 24;
+    state.mapWidthPixels = state.mapHeightPixels = 4096;
+    state.self.id = 1;
+    state.enemy.id = 2;
+    state.self.race = Race::protoss;
+    state.self.minerals = 800;
+    state.self.gas = 600;
+    state.self.supplyTotal = 300;
+    state.self.supplyUsed = 180;
+    state.bases = {{1, {300, 300}, {250, 300}, 5000, 3000, 1},
+                   {2, {300, 1100}, {250, 1100}, 5000, 3000, 1},
+                   {3, {1100, 300}, {1050, 300}, 5000, 3000, 1},
+                   {4, {1200, 1200}, {1150, 1200}, 8000, 5000, -1},
+                   {5, {300, 2200}, {250, 2200}, 8000, 5000, -1},
+                   {6, {3300, 3300}, {3450, 3300}, 8000, 5000, 2}};
+    for (int i = 0; i < 3; ++i) {
+        auto nexus = unit(i + 1, UnitKind::nexus, true, state.bases[static_cast<std::size_t>(i)].center);
+        nexus.role = UnitRole::resourceDepot;
+        state.self.units.push_back(nexus);
+    }
+    for (int i = 0; i < 44; ++i) {
+        auto probe = unit(10 + i, UnitKind::probe, true, {300, 300});
+        probe.role = UnitRole::worker;
+        state.self.units.push_back(probe);
+    }
+    for (int i = 0; i < 18; ++i) {
+        auto goon = unit(100 + i, UnitKind::dragoon, true, {600 + i * 8, 600});
+        goon.groundWeapon = {20, 30, 0, 192, DamageType::normal, false, true};
+        state.self.units.push_back(goon);
+    }
+    for (int i = 0; i < 3; ++i) {
+        auto cannon = unit(200 + i, UnitKind::photonCannon, false, {3100 + i * 64, 3250});
+        cannon.groundWeapon = {20, 22, 0, 224, DamageType::normal, false, true};
+        state.enemy.units.push_back(cannon);
+    }
+    for (const auto race : {Race::terran, Race::zerg, Race::protoss}) {
+        state.enemy.race = race;
+        const auto plan = StrategyEngine{}.plan(state, {});
+        expect(plan.sustainEconomy && plan.desiredBases == 4 && plan.expansionTarget.valid(),
+               "all matchups spend a bank on map control before full saturation against a fortified opponent");
+        expect(std::ranges::any_of(plan.goals, [](const ProductionGoal& demand) {
+            return demand.goal == GoalKind::expand && demand.desiredCount == 4 && demand.blocking && demand.priority == 120;
+        }), "anti-turtle expansion savings outrank optional production");
+        expect(plan.harassmentDrops == 1 && std::ranges::any_of(plan.goals, [race](const ProductionGoal& demand) {
+            return demand.target == UnitKind::reaver && demand.desiredCount >= (race == Race::protoss ? 3 : 2) &&
+                demand.reason == "extra Reaver for drops without borrowing army splash";
+        }), "dedicated drop production adds cargo above the army's splash reserve");
+        expect(std::ranges::any_of(plan.goals, [](const ProductionGoal& demand) {
+            return demand.target == UnitKind::roboticsSupportBay && demand.blocking && demand.priority == 102;
+        }), "dedicated harassment funds the actual technology chain");
+    }
+    auto pending = unit(300, UnitKind::nexus, true, {1200, 1200});
+    pending.completed = false;
+    state.self.units.push_back(pending);
+    auto plan = StrategyEngine{}.plan(state, {});
+    expect(plan.desiredBases == 4 && plan.expansionTarget == pending.position,
+           "map-control growth covers one paid Nexus before committing another");
+    state.self.units.pop_back();
+    auto raider = unit(310, UnitKind::marine, false, {300, 1100});
+    raider.groundWeapon = {6, 15, 0, 128, DamageType::normal, false, true};
+    state.enemy.units.push_back(raider);
+    plan = StrategyEngine{}.plan(state, {});
+    expect(plan.name.find("outgrow fortified opponent") == std::string::npos,
+           "an attack at a remote economy vetoes the anti-turtle spending override");
+    state.enemy.units.pop_back();
+    ThreatAssessment emergency;
+    emergency.immediateGround = 0.9;
+    emergency.combatEnemiesNearMain = 4;
+    plan = StrategyEngine{}.plan(state, emergency);
+    expect(plan.harassmentDrops == 0, "emergency reinforcement cancels dedicated harassment production");
+
+    auto mature = state;
+    for (int i = 0; i < 3; ++i)
+        mature.self.units.push_back(unit(320 + i, UnitKind::nexus, true, {300, 1400 + i * 200}));
+    plan = StrategyEngine{}.plan(mature, {});
+    expect(plan.desiredBases == 7, "a late-game bank can keep growing beyond the old five-base ceiling");
+
+    auto decisiveLead = state;
+    decisiveLead.self.supplyTotal = 300;
+    decisiveLead.self.supplyUsed = 230;
+    for (int i = 0; i < 6; ++i) {
+        auto goon = unit(350 + i, UnitKind::dragoon, true, {760 + i * 8, 620});
+        goon.groundWeapon = {20, 30, 0, 192, DamageType::normal, false, true};
+        decisiveLead.self.units.push_back(goon);
+    }
+    auto prematureLead = decisiveLead;
+    prematureLead.self.supplyUsed = 218;
+    plan = StrategyEngine{}.plan(prematureLead, {});
+    expect(plan.name.find("decisive-lead closeout") == std::string::npos,
+           "a modest midgame army does not trip the decisive lead closeout too early");
+    plan = StrategyEngine{}.plan(decisiveLead, {});
+    expect(plan.posture == Posture::attack &&
+               plan.name.find("decisive-lead closeout") != std::string::npos,
+           "a large army and multi-base lead attacks before reaching the supply cap");
+    expect(!plan.expansionTarget.valid() && plan.rallyPoint == plan.attackTarget,
+           "decisive lead cannot park the field army beside another expansion");
+
+    auto contestedLead = decisiveLead;
+    for (int i = 0; i < 80; ++i) {
+        auto marine = unit(400 + i, UnitKind::marine, false, {1800 + i * 4, 1800});
+        marine.groundWeapon = {6, 15, 0, 128, DamageType::normal, false, true};
+        contestedLead.enemy.units.push_back(marine);
+    }
+    plan = StrategyEngine{}.plan(contestedLead, {});
+    expect(plan.name.find("decisive-lead closeout") == std::string::npos,
+           "an unproven field-army advantage does not force the pre-max closeout");
+
+    auto maxedCloseout = mature;
+    maxedCloseout.self.supplyTotal = 400;
+    maxedCloseout.self.supplyUsed = 400;
+    plan = StrategyEngine{}.plan(maxedCloseout, {});
+    expect(plan.posture == Posture::attack &&
+               plan.name.find("supply-cap closeout") != std::string::npos,
+           "a maxed army converts an uncontested economic lead into a closeout attack");
+    expect(!plan.expansionTarget.valid() && plan.rallyPoint == plan.attackTarget,
+           "supply-cap closeout cannot be redirected to cover another speculative expansion");
+    expect(plan.desiredBases <= 6 && std::ranges::none_of(
+               plan.goals, [](const ProductionGoal& demand) {
+                   return demand.goal == GoalKind::expand && demand.blocking;
+               }),
+           "supply-cap closeout releases blocking expansion reservations");
+
+    maxedCloseout.self.supplyUsed = 392;
+    plan = StrategyEngine{}.plan(maxedCloseout, {});
+    expect(plan.posture == Posture::attack,
+           "a minor loss at the supply cap does not send the closeout army back home");
+    MacroPlanner macro;
+    StrategicPlan dropSavings;
+    dropSavings.harassmentDrops = 1;
+    dropSavings.goals = {{GoalKind::build, UnitKind::roboticsSupportBay, 1, 102, true, "drop tech"}};
+    dropSavings.goals.front().harassmentOnly = true;
+    ResourceLedger emptyBank{0, 0};
+    static_cast<void>(macro.reconcile(state, dropSavings, emptyBank));
+    auto nextFrame = state;
+    ++nextFrame.frame;
+    ResourceLedger fundedBank{1000, 1000};
+    const auto afterRecall = macro.reconcile(nextFrame, {}, fundedBank);
+    expect(std::ranges::none_of(afterRecall, [](const MacroAction& action) {
+        return action.target == UnitKind::roboticsSupportBay;
+    }), "recalled harassment cannot leave a stale technology reservation consuming emergency income");
+
+    state.enemy.race = Race::terran;
+    state.enemy.units.clear();
+    state.bases = {{1, {300, 300}, {250, 300}, 8000, 5000, 1},
+                   {2, {2600, 800}, {2400, 800}, 8000, 5000, 2}};
+    auto shuttle = unit(400, UnitKind::shuttle, true, {600, 600});
+    shuttle.flying = true;
+    auto reaver = unit(401, UnitKind::reaver, true, {630, 600});
+    reaver.groundWeapon = {100, 60, 0, 256, DamageType::normal, false, true};
+    reaver.ammo = 3;
+    auto armyReaver = reaver;
+    armyReaver.id = 399;
+    state.self.units = {shuttle, reaver, armyReaver};
+    auto sunken = unit(500, UnitKind::sunkenColony, false, {1400, 640});
+    sunken.groundWeapon = {40, 32, 0, 224, DamageType::normal, false, true};
+    state.enemy.units = {sunken};
+    expect(!harassmentOpportunity(state, reaver).target.valid(),
+           "a defended entrance blocks a ground raider");
+    const auto drop = harassmentOpportunity(state, reaver, true);
+    expect(drop.target == Position{2400, 800} && drop.probing,
+           "a dedicated drop can cross a ground contain to scout a remembered mineral line");
+    NavigationGrid terrain(128, 128, 32, std::vector<std::uint8_t>(128 * 128, 1));
+    const auto bypass = harassmentOpportunity(state, reaver, false, &terrain);
+    expect(bypass.target.valid() && bypass.waypoint != bypass.target,
+           "ground harassment only bypasses defenders when both legs are safe and walkable");
+    auto turret = unit(501, UnitKind::missileTurret, false, {1400, 640});
+    turret.airWeapon = {20, 15, 0, 224, DamageType::normal, true, false};
+    state.enemy.units.push_back(turret);
+    const auto airBypass = harassmentOpportunity(state, reaver, true, &terrain);
+    expect(airBypass.target.valid() && airBypass.waypoint != airBypass.target,
+           "a drop can route around anti-air on the approach instead of abandoning an exposed main");
+    state.enemy.units.pop_back();
+    InfluenceMap influence;
+    influence.update(state);
+    TransportController transports;
+    auto orders = transports.control(state, {3500, 3500}, {300, 300}, influence, 1, true);
+    expect(transports.ownsReaver(401) && !transports.ownsReaver(399) &&
+        std::ranges::any_of(orders, [](const Command& order) { return order.type == CommandType::load && order.targetUnit == 401; }),
+        "transport claims dedicated cargo while the first Reaver remains with the army");
+    state.self.units[1].loaded = true;
+    state.self.units[1].transportId = 400;
+    state.self.units[0].position = {2250, 800};
+    state.frame += 24;
+    orders = transports.control(state, {3500, 3500}, {300, 300}, influence, 1, true);
+    expect(std::ranges::any_of(orders, [](const Command& order) { return order.source == "reaver-drop"; }),
+           "the Shuttle delivers dedicated cargo within firing range of the mineral line");
+    state.self.units[1].loaded = false;
+    state.self.units[1].transportId = -1;
+    state.self.units[1].position = {2250, 800};
+    auto worker = unit(510, UnitKind::scv, false, {2400, 800});
+    worker.hitPoints = 60;
+    state.enemy.units.push_back(worker);
+    state.enemy.units.push_back(unit(511, UnitKind::commandCenter, false, {2260, 850}));
+    state.frame += 6;
+    static_cast<void>(transports.control(state, {3500, 3500}, {300, 300}, influence, 1, true));
+    state.frame += 6;
+    orders = transports.control(state, {3500, 3500}, {300, 300}, influence, 1, true);
+    expect(std::ranges::any_of(orders, [](const Command& order) {
+        return order.actor == 401 && order.source == "reaver-economic-volley" && order.targetUnit == 510;
+    }), "unloaded cargo kills workers instead of joining the main army or attacking bait buildings");
+    state.self.units[1].ammo = 0;
+    state.frame += 6;
+    orders = transports.control(state, {3500, 3500}, {300, 300}, influence, 1, true);
+    expect(std::ranges::any_of(orders, [](const Command& order) { return order.source == "reaver-extract"; }),
+           "a dedicated Reaver with no Scarabs boards its Shuttle immediately");
+    state.self.units[1].loaded = true;
+    state.self.units[1].transportId = 400;
+    state.frame += 6;
+    static_cast<void>(transports.control(state, {3500, 3500}, {300, 300}, influence, 1, true));
+    state.self.units[0].position = {300, 300};
+    state.frame += 6;
+    orders = transports.control(state, {3500, 3500}, {300, 300}, influence, 1, true);
+    expect(std::ranges::any_of(orders, [](const Command& order) { return order.source == "reaver-return"; }),
+           "dedicated cargo returns home after pickup");
+    state.self.units[1].loaded = false;
+    state.self.units[1].position = {300, 300};
+    state.frame += 6;
+    static_cast<void>(transports.control(state, {3500, 3500}, {300, 300}, influence, 1, true));
+    state.frame += 6;
+    orders = transports.control(state, {3500, 3500}, {300, 300}, influence, 1, true);
+    expect(orders.empty(), "completed drops have a cooldown instead of immediately reloading empty cargo");
+
+    auto goon = unit(610, UnitKind::dragoon, true, {500, 500});
+    goon.weaponCooldown = 20;
+    goon.groundWeapon = {20, 30, 0, 192, DamageType::normal, false, true};
+    auto bait = unit(611, UnitKind::scv, false, {600, 500});
+    bait.hitPoints = 1;
+    auto chaser = unit(612, UnitKind::zealot, false, {500, 550});
+    chaser.groundWeapon = {16, 22, 0, 32, DamageType::normal, false, true};
+    CombatEstimate engage;
+    engage.decision = FightDecision::engage;
+    InfluenceMap emptyInfluence;
+    orders = TacticalController{}.control(std::vector{goon}, std::vector{bait, chaser}, engage,
+        bait.position, {100, 100}, emptyInfluence);
+    expect(orders.size() == 1 && orders.front().source == "combat-kite" && orders.front().targetPosition.y < 500,
+           "reload movement escapes the actual pursuer while a wounded worker remains the selected target");
+
+    auto dt = unit(600, UnitKind::darkTemplar, true, {2250, 800});
+    dt.cloaked = true;
+    dt.groundWeapon = {40, 30, 0, 32, DamageType::normal, false, true};
+    CombatEstimate retreat;
+    retreat.decision = FightDecision::retreat;
+    orders = TacticalController{}.control(std::vector{dt}, std::vector{worker}, retreat,
+        {2400, 800}, {300, 300}, influence, {}, 0, false, {}, TacticalIntent::withdraw);
+    expect(orders.size() == 1 && orders.front().source == "raid-extract",
+           "a cloaked raider honors mission recall instead of pursuing workers");
+}
+
 int main() {
+    testDedicatedHarassmentAndMapEconomy();
     testEconomicHarassment();
     testScoutHarassmentAndContainment();
     testDecisionDiagnosticsAndOperations();
