@@ -640,17 +640,30 @@ std::vector<Command> TacticalController::control(
         // pursuit. Air-only harassment remains independent; endangered ground
         // units can still escape while the escort catches up.
         if (estimate.advanceBlocked && !unit.flying) {
-            const auto escape = fragile || unit.underAttack || localThreat > 0.05F;
-            commands.push_back({unit.id, escape ? CommandType::move : CommandType::hold, -1,
-                escape ? influence.safestStep(unit.position, retreatPoint, false) : unit.position,
+            commands.push_back({unit.id, CommandType::move, -1,
+                influence.safestStep(unit.position, retreatPoint, false),
                 UnitKind::unknown, 100, 0, "wait-for-mobile-detection"});
             continue;
         }
 
+        const auto visibleSiegeThreat = [&unit, &defense](const UnitSnapshot& candidate) {
+            return !unit.flying && candidate.visible && candidate.detected &&
+                candidate.kind == UnitKind::siegeTank &&
+                candidate.groundWeapon.damage > 0 &&
+                candidate.groundWeapon.maxRange >= 320 &&
+                (weaponDistance(unit, candidate) <= candidate.groundWeapon.maxRange + 32 ||
+                 (defense.economyCenter.valid() &&
+                  distance(candidate.position, defense.economyCenter) <=
+                      candidate.groundWeapon.maxRange + 96));
+        };
+        const auto shellingDefender = std::ranges::any_of(enemy, visibleSiegeThreat);
         // An attack-unit order follows a kiting opponent indefinitely. Return
-        // stragglers to the protected area, and never acquire a distant target
-        // merely because it is visible to another member of the squad.
-        if (defense.active() && !covertAdvance && !defense.contains(unit.position)) {
+        // stragglers to the protected area, unless visible siege artillery is
+        // already shelling that unit or the economy. The old early return made
+        // Dragoons walk away from a lone Tank on the ramp even after the fight
+        // evaluator had accepted the engagement.
+        if (defense.active() && !covertAdvance && !defense.contains(unit.position) &&
+            !shellingDefender) {
             commands.push_back({unit.id, CommandType::move, -1,
                                 defense.center,
                                 UnitKind::unknown, 90, 0, "defense-return"});
@@ -660,19 +673,11 @@ std::vector<Command> TacticalController::control(
         if (defense.active() && !covertAdvance) {
             for (const auto& candidate : enemy) {
                 const auto& weapon = candidate.flying ? unit.airWeapon : unit.groundWeapon;
-                const auto visibleSiegeThreat = !unit.flying && candidate.visible &&
-                    candidate.detected && candidate.kind == UnitKind::siegeTank &&
-                    candidate.groundWeapon.damage > 0 &&
-                    candidate.groundWeapon.maxRange >= 320 &&
-                    (weaponDistance(unit, candidate) <= candidate.groundWeapon.maxRange + 32 ||
-                     (defense.economyCenter.valid() &&
-                      distance(candidate.position, defense.economyCenter) <=
-                          candidate.groundWeapon.maxRange + 96));
                 // Siege artillery can damage the screen while remaining
                 // outside both the pursuit boundary and the defender's own
                 // range. Treat only a visible Tank that can reach the squad
                 // or protected economy as a legal counter-battery target.
-                if (defense.contains(candidate.position) || visibleSiegeThreat ||
+                if (defense.contains(candidate.position) || visibleSiegeThreat(candidate) ||
                     weaponDistance(unit, candidate) <= weapon.maxRange) {
                     defenseTargets.push_back(candidate);
                 }

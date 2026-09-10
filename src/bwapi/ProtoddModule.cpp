@@ -379,7 +379,7 @@ void ProtoddModule::updateMacro() {
         maintenanceGasReserve_ = std::max(maintenanceGasReserve_, action.gas);
         break;
     }
-    bridge_.executeMacro(actions, plan_, leasedScouts_);
+    bridge_.executeMacro(actions, plan_, influence_, leasedScouts_);
     for (const auto& execution : bridge_.macroExecutions()) {
         const auto& action = execution.action;
         if (action.reserved && action.executable) {
@@ -535,9 +535,15 @@ void ProtoddModule::updateCombat(
             if (vanguard == &squad && aggressive)
                 objective = SquadPlanner::supportRendezvous(state_, squad, objective);
             if (plan_.expansionTarget.valid() && plan_.posture != Posture::attack &&
-                vanguard == &squad &&
-                distanceSquared(squad.center, plan_.expansionTarget) <= 448 * 448)
-                defense = {plan_.expansionTarget, 448, plan_.expansionTarget};
+                vanguard == &squad) {
+                const auto assembly = expansionAssemblyPoint(
+                    state_, plan_.expansionTarget, retreatPoint());
+                objective = assembly;
+                // Activate the expansion leash immediately. Waiting until the
+                // army was already within 448px let the existing main-ramp
+                // defense area override the expansion objective forever.
+                defense = {assembly, 448, plan_.expansionTarget};
+            }
         }
         const auto hasGroundUnit = std::ranges::any_of(
             squad.units, [](const UnitSnapshot& unit) { return !unit.flying; });

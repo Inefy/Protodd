@@ -2206,6 +2206,14 @@ void testLocalSquadsAndDetection() {
     plan.rallyPoint = {256, 256};
     plan.attackTarget = {1800, 1800};
     protodd::SquadPlanner planner;
+    auto forecastOnly = plan;
+    forecastOnly.requireMobileDetection = true;
+    const auto forecastSquads = planner.form(state, friendly, {}, forecastOnly, {256, 256});
+    expect(!forecastSquads.empty() &&
+               std::ranges::none_of(forecastSquads, [](const protodd::Squad& squad) {
+                   return squad.needsDetection;
+               }),
+           "forecast cloak risk builds Observers without tethering an uncontested army");
     auto squads = planner.form(state, friendly, enemy, plan, {256, 256});
     const auto defense = std::ranges::find_if(squads, [](const protodd::Squad& squad) {
         return squad.role == protodd::SquadRole::baseDefense;
@@ -2218,6 +2226,20 @@ void testLocalSquadsAndDetection() {
                                    state.bases.front().mineralLine) &&
                defense->requiredRatio < 0.6,
            "base defense screens on the safe side of the economy instead of retreating through workers");
+
+    state.bases.front().defense = {{700, 260}, {820, 260}, {700, 220}, {700, 300}, 160, true};
+    auto cannon = unit(95, protodd::UnitKind::photonCannon, true, {430, 260});
+    cannon.role = protodd::UnitRole::staticDefense;
+    cannon.groundWeapon = {.damage = 20, .cooldown = 22, .maxRange = 224,
+                           .targetsGround = true};
+    auto coveredFriendly = friendly;
+    coveredFriendly.push_back(cannon);
+    squads = planner.form(state, coveredFriendly, enemy, plan, {256, 256});
+    const auto coveredDefense = std::ranges::find_if(squads, [](const protodd::Squad& squad) {
+        return squad.role == protodd::SquadRole::baseDefense;
+    });
+    expect(coveredDefense != squads.end() && coveredDefense->defense.center == cannon.position,
+           "Cannon weapon cover outranks an exposed high-ground terrain anchor");
 
     auto breachedDefense = *defense;
     auto visibleLing = unit(91, protodd::UnitKind::zergling, false,
@@ -2832,6 +2854,13 @@ void testRangedDefense() {
     expect(orders.size() == 1 && orders.front().type == CommandType::attackUnit &&
                orders.front().targetUnit == siege.id,
            "defenders close on visible siege artillery that can shell the protected screen");
+    defender.position = {900, 500};
+    orders = tactics.control(std::vector{defender}, std::vector{siege}, engage,
+                             siege.position, area.center, influence, {}, 3, false, area);
+    expect(orders.size() == 1 && orders.front().type == CommandType::attackUnit &&
+               orders.front().targetUnit == siege.id,
+           "the defense leash cannot pull a defender away from a Tank already shelling it");
+    defender.position = {500, 500};
     auto intruder = unit(3, UnitKind::zealot, false, {600, 500});
     orders = tactics.control(std::vector{defender}, std::vector{bait, intruder}, engage,
                              bait.position, area.center, influence, {}, 3, false, area);
@@ -3083,6 +3112,47 @@ void testBananaBrainMacroRegressions() {
                return assignment.job == WorkerJob::evacuate;
            }), "melee worker protection still works after the opening militia cutoff");
 
+    auto hostileScv = unit(201, UnitKind::scv, false, {540, 560});
+    hostileScv.role = UnitRole::worker;
+    hostileScv.orderTargetId = 100;
+    hostileScv.groundWeapon = {.damage = 5, .cooldown = 15, .maxRange = 32,
+                               .targetsGround = true};
+    workersState.enemy.units = {hostileScv};
+    workersState.self.units.front().underAttack = true;
+    influence.update(workersState);
+    assignments = workers.assign(workersState, {}, influence);
+    expect(std::ranges::count(assignments, WorkerJob::defend,
+                              &WorkerAssignment::job) == 2,
+           "two healthy Probes surround a lone worker that attacks the mineral line");
+
+    GameState transferState;
+    transferState.frame = 12 * 60 * 24;
+    transferState.mapWidthPixels = 2400;
+    transferState.mapHeightPixels = 1200;
+    transferState.self.id = 1;
+    transferState.enemy.id = 2;
+    transferState.bases = {
+        {1, {256, 512}, {300, 560}, 8000, 5000, 1, 0, true, false, 8, 1},
+        {2, {1900, 512}, {1850, 560}, 8000, 5000, 1, 0, false, false, 8, 1},
+    };
+    for (int i = 0; i < 12; ++i) {
+        auto probe = unit(300 + i, UnitKind::probe, true, {300 + i * 3, 560});
+        probe.role = UnitRole::worker;
+        transferState.self.units.push_back(probe);
+    }
+    auto tank = unit(400, UnitKind::siegeTank, false, {1080, 512});
+    tank.groundWeapon = {.damage = 70, .cooldown = 75, .minRange = 64,
+                         .maxRange = 384, .targetsGround = true};
+    transferState.enemy.units = {tank};
+    InfluenceMap transferInfluence;
+    transferInfluence.update(transferState);
+    expect(transferInfluence.maximumGroundThreat({300, 560}, {1850, 560}) > 0.25F,
+           "route influence detects a siege line between owned bases");
+    const auto safeAssignments = workers.assign(transferState, {}, transferInfluence);
+    expect(std::ranges::none_of(safeAssignments, [](const WorkerAssignment& assignment) {
+               return assignment.baseId == 2 && assignment.job == WorkerJob::transfer;
+           }), "mineral balancing does not transfer Probes through known tank fire");
+
     GameState economy;
     economy.frame = 12 * 60 * 24;
     economy.self.id = 1;
@@ -3164,7 +3234,8 @@ void testReportImprovements() {
     }
     state.bases = {{1, {512, 512}, {512, 560}, 8000, 5000, 1, 0, true, false, 8, 1},
         {2, {2500, 2500}, {2500, 2550}, 8000, 5000, 2, state.frame, true, false, 8, 1},
-        {3, {1900, 2500}, {1900, 2550}, 8000, 5000, -1, state.frame, false, false, 8, 1}};
+        {3, {1900, 2500}, {1900, 2550}, 1200, 5000, -1, state.frame, false, false, 8, 1},
+        {4, {3600, 2500}, {3600, 2550}, 50000, 5000, -1, state.frame, false, false, 8, 1}};
     StrategyEngine strategy;
     auto plan = strategy.plan(state, {});
     expect(plan.desiredBases == 1 && plan.desiredWorkers > 7 &&
@@ -3316,7 +3387,7 @@ void testReportImprovements() {
     expect(!model.assessment().enemyNaturalCheckedEmpty,
            "seeing a base center is not proof that its full depot footprint is empty");
     const auto priorPressure = model.probability(EnemyPlan::heavyPressure);
-    state.bases.back().lastConfirmedEmpty = state.frame;
+    state.bases[2].lastConfirmedEmpty = state.frame;
     ++state.frame;
     model.update(state);
     expect(model.assessment().enemyNaturalCheckedEmpty &&
@@ -3365,8 +3436,9 @@ void testReportImprovements() {
            "a healthy backup replaces a closer Observer that cannot satisfy mission readiness");
     const auto orders = TacticalController{}.control(squad.units, {}, estimate,
         squad.objective, squad.retreat, influence, squad.center, 0, false);
-    expect(!orders.empty() && orders.front().type == CommandType::hold,
-           "a favorable fight estimate cannot bypass missing mobile detection");
+    expect(!orders.empty() && orders.front().type == CommandType::move &&
+               orders.front().targetPosition != squad.center,
+           "contact with an undetected threat sends the army home instead of turtling in place");
 }
 
 void testLadderSourceImprovements() {
@@ -4149,6 +4221,12 @@ void testDecisionDiagnosticsAndOperations() {
     state.self.units.push_back(goon);
     const auto assembly = expansionAssemblyPoint(state, plan.expansionTarget, {100, 100});
     expect(distance(assembly, plan.expansionTarget) > 175, "expansion assembly stays outside the construction footprint");
+    state.bases.push_back({3, plan.expansionTarget, {900, 550}, 8000, 5000, -1});
+    state.bases.front().defense = {{1500, 500}, {1600, 500}, {1500, 450}, {1500, 550}, 160, true};
+    const auto nearbyAssembly = expansionAssemblyPoint(state, plan.expansionTarget, {100, 100});
+    expect(distance(nearbyAssembly, plan.expansionTarget) >= 175 &&
+               distance(nearbyAssembly, plan.expansionTarget) <= 320,
+           "a distant high-ground anchor cannot leave a warping expansion undefended");
     auto orders = clearExpansionFootprint(state, plan.expansionTarget, assembly);
     expect(orders.size() == 1 && orders.front().actor == goon.id, "idle army clears Nexus footprint without redirecting workers");
     state.self.units.back().underAttack = true;

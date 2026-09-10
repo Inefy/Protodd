@@ -163,6 +163,16 @@ GameState BwapiBridge::observe() {
             rememberFailure();
             return true;
         }
+        const auto hardLeaseLimit = kind == UnitKind::pylon ? 8 * 24 : 18 * 24;
+        if (kind != UnitKind::nexus && age >= hardLeaseLimit) {
+            // Movement alone is not construction progress. A Probe can orbit
+            // an obstructed footprint indefinitely, which previously held a
+            // Pylon reservation for 45 seconds at a time while the army sat at
+            // the hard supply cap. Re-place urgent supply after eight seconds.
+            if (builder->getBuildType() == expectedType || commandedBuild) builder->stop();
+            rememberFailure();
+            return true;
+        }
         // A pre-positioned expansion Probe is intentionally only moving until
         // its fogged footprint becomes commandable, so BWAPI reports no
         // build type during that interval. Ordinary construction leases still
@@ -368,6 +378,7 @@ bool BwapiBridge::cancelExpansion() {
 int BwapiBridge::executeMacro(
     const std::span<const MacroAction> actions,
     const StrategicPlan& plan,
+    const InfluenceMap& influence,
     const std::span<const UnitId> unavailableBuilders,
     const int maximumCommands) {
     auto issued = 0;
@@ -400,7 +411,7 @@ int BwapiBridge::executeMacro(
         switch (action.action) {
             case MacroActionKind::build:
             case MacroActionKind::expand:
-                success = build(action, plan, unavailableBuilders);
+                success = build(action, plan, influence, unavailableBuilders);
                 break;
             case MacroActionKind::train: success = train(action); break;
             case MacroActionKind::research:
@@ -1147,6 +1158,13 @@ std::vector<BaseSnapshot> BwapiBridge::snapshotBases(const GameState& state) {
     bases.reserve(resourceSites_.size());
     auto id = 0;
     for (const auto& site : resourceSites_) {
+        // Resource clustering can identify a mineral group for which BWAPI
+        // cannot find any legal depot footprint (split or edge clusters are
+        // common examples). Such a point is useful for mining-lane avoidance,
+        // but it is not an expansion. Advertising it to strategy made the
+        // nearest "natural" impossible to build and let placement fall onward
+        // to an unrelated fourth-base site.
+        if (!site.depotTile.isValid()) continue;
         ++id;
         const auto center = site.depotCenter;
         auto minerals = 0;
@@ -1289,6 +1307,32 @@ void BwapiBridge::discoverResourceClusters() {
                 UnitTypes::Protoss_Nexus,
                 TilePosition(resourceCenter.x / 32, resourceCenter.y / 32), 12);
         }
+        if (!depotTile.isValid()) {
+            // getBuildLocation can reject every neutral base while its tiles
+            // are still in fog during onStart. Search the static map footprint
+            // with checkExplored=false so a real natural is not discarded in
+            // favor of the next known start location.
+            const TilePosition origin(resourceCenter.x / 32, resourceCenter.y / 32);
+            auto bestDistance = std::numeric_limits<int>::max();
+            for (auto y = origin.y - 20; y <= origin.y + 20; ++y) {
+                for (auto x = origin.x - 20; x <= origin.x + 20; ++x) {
+                    const TilePosition candidate(x, y);
+                    if (!candidate.isValid() ||
+                        x + UnitTypes::Protoss_Nexus.tileWidth() > Broodwar->mapWidth() ||
+                        y + UnitTypes::Protoss_Nexus.tileHeight() > Broodwar->mapHeight() ||
+                        !Broodwar->canBuildHere(candidate, UnitTypes::Protoss_Nexus,
+                                               nullptr, false)) {
+                        continue;
+                    }
+                    const Position center{x * 32 + 64, y * 32 + 48};
+                    const auto separation = distanceSquared(center, resourceCenter);
+                    if (separation < bestDistance) {
+                        bestDistance = separation;
+                        depotTile = candidate;
+                    }
+                }
+            }
+        }
         const auto depotCenter = depotTile.isValid()
                                      ? Position{depotTile.x * 32 + 64,
                                                 depotTile.y * 32 + 48}
@@ -1308,6 +1352,7 @@ void BwapiBridge::discoverResourceClusters() {
 BWAPI::Unit BwapiBridge::findBuilder(
     const BWAPI::UnitType type,
     const BWAPI::Position near,
+    const InfluenceMap& influence,
     const std::span<const UnitId> unavailableBuilders) const {
     BWAPI::Unit best = nullptr;
     auto bestScore = std::numeric_limits<long long>::max();
@@ -1327,6 +1372,11 @@ BWAPI::Unit BwapiBridge::findBuilder(
         if (std::ranges::any_of(pendingBuilds_, [unit](const auto& entry) {
                 return entry.second.builder == unit->getID();
             })) {
+            continue;
+        }
+        const auto destination = fromBwapi(near);
+        if (unit->getDistance(near) > 640 &&
+            influence.maximumGroundThreat(fromBwapi(unit->getPosition()), destination) > 0.25F) {
             continue;
         }
         auto exposed = false;
@@ -1400,6 +1450,8 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         auto freeSites = 0;
         for (const auto& site : resourceSites_) {
             if (!site.depotTile.isValid()) continue;
+            if (plan.expansionTarget.valid() &&
+                !closeTo(site.depotCenter, plan.expansionTarget, 64)) continue;
             ++validSites;
             const auto center = site.depotCenter;
             if (!Broodwar->hasPath(builder->getPosition(), toBwapiPosition(center))) continue;
@@ -1468,6 +1520,8 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
     auto avoidEnemyFire = false;
     Unit defendedNexus = nullptr;
     if (kind == UnitKind::pylon) {
+        const auto emergencySupply = Broodwar->self()->supplyUsed() >=
+                                     Broodwar->self()->supplyTotal();
         Unit disabledProduction = nullptr;
         for (const auto building : Broodwar->self()->getUnits()) {
             if (building == nullptr || !building->exists() || !building->isCompleted() ||
@@ -1479,7 +1533,15 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
                 disabledProduction = building;
             }
         }
-        if (disabledProduction != nullptr) {
+        if (emergencySupply) {
+            // Restore production first. Do not send the emergency builder to
+            // the least-powered remote base or a forward rally point.
+            const auto safeNexus = Broodwar->getClosestUnit(
+                builder->getPosition(), Filter::IsOwned && Filter::IsCompleted &&
+                    Filter::GetType == UnitTypes::Protoss_Nexus);
+            if (safeNexus != nullptr) anchorPosition = safeNexus->getPosition();
+            disabledProduction = nullptr;
+        } else if (disabledProduction != nullptr) {
             anchorPosition = disabledProduction->getPosition();
         }
         Unit leastPoweredBase = nullptr;
@@ -1495,7 +1557,7 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
                 leastPoweredBase = nexus;
             }
         }
-        if (disabledProduction == nullptr && leastPoweredBase != nullptr) {
+        if (!emergencySupply && disabledProduction == nullptr && leastPoweredBase != nullptr) {
             const auto pylonCount = std::ranges::count_if(
                 Broodwar->self()->getUnits(), [](const Unit unit) {
                     return unit != nullptr && unit->exists() &&
@@ -2060,6 +2122,7 @@ bool BwapiBridge::blocksMiningLane(
 bool BwapiBridge::build(
     const MacroAction& action,
     const StrategicPlan& plan,
+    const InfluenceMap& influence,
     const std::span<const UnitId> unavailableBuilders) {
     const auto type = toBwapi(action.target);
     if (type == UnitTypes::None || !type.isBuilding()) {
@@ -2068,6 +2131,21 @@ bool BwapiBridge::build(
     }
     const auto pending = pendingBuilds_.find(action.target);
     if (pending != pendingBuilds_.end()) {
+        const auto leasedBuilder = Broodwar->getUnit(pending->second.builder);
+        const Position routeTarget{
+            pending->second.target.x + type.tileWidth() * 16,
+            pending->second.target.y + type.tileHeight() * 16,
+        };
+        if (action.target == UnitKind::nexus && leasedBuilder != nullptr && leasedBuilder->exists() &&
+            leasedBuilder->getDistance(toBwapiPosition(routeTarget)) > 256 &&
+            influence.maximumGroundThreat(fromBwapi(leasedBuilder->getPosition()), routeTarget) > 0.25F) {
+            leasedBuilder->stop();
+            failedBuildSites_.push_back({action.target, pending->second.target,
+                                          Broodwar->getFrameCount() + 60 * 24});
+            pendingBuilds_.erase(pending);
+            lastMacroStatus_ = "build-route-danger";
+            return false;
+        }
         // Expansions may be pre-positioned into unexplored fog before BWAPI
         // accepts the build command.  The old guard treated that pending
         // lease as terminal: every later macro pass returned here, so the
@@ -2135,12 +2213,16 @@ bool BwapiBridge::build(
         lastMacroStatus_ = "build-pending";
         return false;
     }
-    const auto near = action.target == UnitKind::nexus && plan.expansionTarget.valid()
+    const auto emergencyPylon = action.target == UnitKind::pylon &&
+        Broodwar->self()->supplyUsed() >= Broodwar->self()->supplyTotal();
+    const auto near = emergencyPylon
+                          ? BWAPI::Position(Broodwar->self()->getStartLocation())
+                          : action.target == UnitKind::nexus && plan.expansionTarget.valid()
                           ? toBwapiPosition(plan.expansionTarget)
                           : (plan.rallyPoint.valid()
                                  ? toBwapiPosition(plan.rallyPoint)
                                  : BWAPI::Position(Broodwar->self()->getStartLocation()));
-    const auto builder = findBuilder(type, near, unavailableBuilders);
+    const auto builder = findBuilder(type, near, influence, unavailableBuilders);
     if (builder == nullptr) {
         lastMacroStatus_ = "build-no-builder";
         return false;

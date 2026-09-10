@@ -52,6 +52,25 @@ InfluenceCell InfluenceMap::at(const Position position) const noexcept {
     return cells_[offset(x, y)];
 }
 
+float InfluenceMap::maximumGroundThreat(
+    const Position from,
+    const Position toward) const noexcept {
+    if (cells_.empty() || !from.valid() || !toward.valid()) return 0.0F;
+    const auto samples = std::max(
+        1, static_cast<int>(std::ceil(distance(from, toward) /
+                                     static_cast<double>(cellSize_))));
+    auto peak = 0.0F;
+    for (auto step = 0; step <= samples; ++step) {
+        const auto ratio = static_cast<double>(step) / static_cast<double>(samples);
+        const Position point{
+            from.x + static_cast<int>(std::lround((toward.x - from.x) * ratio)),
+            from.y + static_cast<int>(std::lround((toward.y - from.y) * ratio)),
+        };
+        peak = std::max(peak, at(point).groundThreat);
+    }
+    return peak;
+}
+
 Position InfluenceMap::safestStep(
     const Position from,
     const Position toward,

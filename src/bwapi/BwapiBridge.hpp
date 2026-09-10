@@ -3,6 +3,7 @@
 #include "protodd/Combat.hpp"
 #include "protodd/CommandBus.hpp"
 #include "protodd/GameState.hpp"
+#include "protodd/InfluenceMap.hpp"
 #include "protodd/MacroPlanner.hpp"
 #include "protodd/Navigation.hpp"
 #include "protodd/Operations.hpp"
@@ -71,6 +72,7 @@ public:
     int executeMacro(
         std::span<const MacroAction> actions,
         const StrategicPlan& plan,
+        const InfluenceMap& influence,
         std::span<const UnitId> unavailableBuilders = {},
         int maximumCommands = 8);
     void executeWorkers(std::span<const WorkerAssignment> assignments);
@@ -143,6 +145,7 @@ private:
     [[nodiscard]] BWAPI::Unit findBuilder(
         BWAPI::UnitType type,
         BWAPI::Position near,
+        const InfluenceMap& influence,
         std::span<const UnitId> unavailableBuilders) const;
     [[nodiscard]] BWAPI::TilePosition buildLocation(
         UnitKind kind,
@@ -155,6 +158,7 @@ private:
     [[nodiscard]] bool build(
         const MacroAction& action,
         const StrategicPlan& plan,
+        const InfluenceMap& influence,
         std::span<const UnitId> unavailableBuilders);
     [[nodiscard]] bool train(const MacroAction& action);
     [[nodiscard]] bool executeTechnology(const MacroAction& action);

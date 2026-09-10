@@ -282,7 +282,7 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                    });
         });
     for (const auto& enemy : state.enemy.units) {
-        const auto demand = militiaDemand(enemy, state.frame);
+        auto demand = militiaDemand(enemy, state.frame);
         // A militia time limit must not also switch off worker protection.
         const auto meleeDanger = enemy.visible && enemy.completed && !enemy.hallucination &&
                                  (enemy.kind == UnitKind::zealot || enemy.kind == UnitKind::zergling ||
@@ -292,7 +292,23 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         // screen exists, charging Marines only donates the economy and blocks
         // the combat units that should be using that screen.
         if (enemy.kind == UnitKind::marine && hasCompletedStaticScreen) continue;
-        if (isWorker(enemy.kind) && localEnemyWorkers < 3) continue;
+        if (isWorker(enemy.kind) && localEnemyWorkers < 3) {
+            const auto attackingProbe = enemy.orderTargetId >= 0 &&
+                std::ranges::any_of(workers, [&enemy](const UnitSnapshot* worker) {
+                    return worker->id == enemy.orderTargetId;
+                });
+            const auto hurtingMineralLine = std::ranges::any_of(
+                workers, [&enemy](const UnitSnapshot* worker) {
+                    return worker->underAttack &&
+                           distanceSquared(worker->position, enemy.position) <= 96 * 96;
+                });
+            // Ignore a harmless scouting worker, but immediately surround one
+            // that has started attacking the mineral line. One defending Probe
+            // merely trades hits with an SCV; two can prevent the repeat kills
+            // seen while the rest of the line continued mining.
+            if (!attackingProbe && !hurtingMineralLine) continue;
+            demand = std::max(demand, 2);
+        }
         if (std::ranges::any_of(ownedBases, [&enemy](const BaseSnapshot* base) {
             return distanceSquared(enemy.position, base->center) < 640 * 640;
             })) {
@@ -559,6 +575,9 @@ std::vector<WorkerAssignment> WorkerManager::assign(
             const auto saturation = static_cast<double>(assignedPerBase[base->id] + 1) /
                                     static_cast<double>(capacity);
             const auto travel = distance(worker->position, base->center) / 2048.0;
+            const auto remote = distanceSquared(worker->position, base->center) > 640 * 640;
+            if (remote && influence.maximumGroundThreat(worker->position, base->center) > 0.25F)
+                continue;
             const auto local = influence.at(base->center);
             const auto depletion = base->mineralsRemaining > 0 ? 0.0 : 100.0;
             const auto score = saturation + travel * 0.18 +

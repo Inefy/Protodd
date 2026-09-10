@@ -187,7 +187,7 @@ std::vector<Squad> SquadPlanner::form(
         const auto breached = std::ranges::any_of(baseThreats, [threatenedBase](const UnitSnapshot& enemyUnit) {
             return distanceSquared(enemyUnit.position, threatenedBase->center) <= 320 * 320;
         });
-        if (threatenedBase->defense.valid() && !breached) {
+        if (staticSupport.empty() && threatenedBase->defense.valid() && !breached) {
             const auto& terrain = threatenedBase->defense;
             defense.defense = {terrain.anchor, std::clamp(terrain.width, 192, 320),
                                threatenedBase->center, terrain.entrance};
@@ -362,11 +362,9 @@ std::vector<Squad> SquadPlanner::form(
         result.push_back(std::move(squad));
     }
 
-    for (auto& squad : result) {
-        if (plan.requireMobileDetection && squad.role != SquadRole::baseDefense &&
-            std::ranges::any_of(squad.units, [](const UnitSnapshot& unit) { return !unit.flying; }))
-            squad.needsDetection = true;
-    }
+    // Strategic cloak risk should accelerate Observer production, not tether
+    // every ground squad to one. A squad requests an escort only after its own
+    // local contact list contains a cloaked, burrowed, or undetected threat.
     std::ranges::sort(result, {}, &Squad::id);
     return result;
 }

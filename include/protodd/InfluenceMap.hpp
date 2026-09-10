@@ -21,6 +21,9 @@ public:
     void update(const GameState& state);
 
     [[nodiscard]] InfluenceCell at(Position position) const noexcept;
+    [[nodiscard]] float maximumGroundThreat(
+        Position from,
+        Position toward) const noexcept;
     [[nodiscard]] Position safestStep(
         Position from,
         Position toward,

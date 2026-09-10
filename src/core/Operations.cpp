@@ -51,7 +51,8 @@ Position expansionAssemblyPoint(const GameState& state, const Position site,
     if (!site.valid()) return site;
     for (const auto& base : state.bases) {
         if (distanceSquared(site, base.center) <= 64 * 64 && base.defense.valid() &&
-            distanceSquared(site, base.defense.anchor) >= 176 * 176)
+            distanceSquared(site, base.defense.anchor) >= 176 * 176 &&
+            distanceSquared(site, base.defense.anchor) <= 320 * 320)
             return base.defense.anchor;
     }
     // Stay on the reachable home side, outside the 128x96 Nexus footprint.

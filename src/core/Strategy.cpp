@@ -388,6 +388,13 @@ StrategicPlan StrategyEngine::plan(
     // concrete natural before infrastructure reconciliation so the expansion
     // reservation, builder routing, placement, and cover all share one
     // location.
+    const auto existingNexuses = count(state, UnitKind::nexus);
+    if (existingNexuses == 1 && result.desiredBases > 1) {
+        // The first expansion is positional infrastructure, not a greed score.
+        // Always take the nearest resource base so matchup-specific danger or
+        // richness scoring cannot skip the natural for a third/fourth location.
+        result.expansionTarget = nearestExpansionSite(state);
+    }
     if (!result.expansionTarget.valid()) {
         for (const auto& nexus : state.self.units) {
             if (nexus.kind == UnitKind::nexus && !nexus.completed &&
@@ -398,7 +405,7 @@ StrategicPlan StrategyEngine::plan(
         }
     }
     if (!result.expansionTarget.valid() &&
-        result.desiredBases > count(state, UnitKind::nexus)) {
+        result.desiredBases > existingNexuses) {
         result.expansionTarget = nearestExpansionSite(state);
     }
 
