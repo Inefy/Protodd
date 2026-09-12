@@ -27,7 +27,7 @@ param(
     [int]$FrameMilliseconds = 0,
     [ValidateRange(-1, 2147483646)]
     [int]$Seed = -1,
-    [string]$BotDll = "build/protodd-tournament/Release/Protodd.dll",
+    [string]$BotDll = "build/tournament/Release/Protodd.dll",
     [switch]$PreserveLearning,
     [switch]$NoObserver
 )

@@ -503,7 +503,19 @@ std::vector<WorkerAssignment> WorkerManager::assign(
             ownedBases, {}, [&building](const BaseSnapshot* candidate) {
                 return distanceSquared(building.position, candidate->center);
         });
-        if (base != ownedBases.end()) {
+        // A refinery can survive after its Nexus falls. It no longer belongs
+        // to the nearest surviving economy across the map: doing that sends
+        // replacement gas workers back through the army that destroyed it.
+        const auto exposed = std::ranges::any_of(state.enemy.units,
+            [&state, &building](const UnitSnapshot& enemy) {
+                return enemy.position.valid() && enemy.completed && !isWorker(enemy.kind) &&
+                    enemy.groundWeapon.damage > 0 && !enemy.disabled &&
+                    (enemy.visible || state.frame - enemy.lastSeen <= 8 * 24) &&
+                    distanceSquared(enemy.position, building.position) <=
+                        (enemy.groundWeapon.maxRange + 128) * (enemy.groundWeapon.maxRange + 128);
+            });
+        if (base != ownedBases.end() &&
+            distanceSquared(building.position, (*base)->center) <= 384 * 384 && !exposed) {
             for (auto slot = 0; slot < 3; ++slot) {
                 gasSlots.push_back({*base, &building});
             }
@@ -516,6 +528,10 @@ std::vector<WorkerAssignment> WorkerManager::assign(
          // on minerals even when the strategic gas request predates a raid.
          std::max(0, static_cast<int>(available.size()) - 6)});
     auto gasAssigned = 0;
+    const auto safeGasRoute = [&influence](const UnitSnapshot* worker, const GasSlot& slot) {
+        return distanceSquared(worker->position, slot.refinery->position) <= 384 * 384 ||
+            influence.maximumGroundThreat(worker->position, slot.refinery->position) <= 0.25F;
+    };
 
     // Keep workers that are already on the requested refinery. Re-selecting
     // the probes nearest the Nexus every worker tick used to rotate mineral
@@ -523,8 +539,8 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     for (auto worker = available.begin(); worker != available.end() &&
                                     gasAssigned < desiredGas;) {
         auto slot = std::ranges::find_if(
-            gasSlots, [worker](const GasSlot& candidate) {
-                return candidate.refinery->id == (*worker)->orderTargetId;
+            gasSlots, [worker, &safeGasRoute](const GasSlot& candidate) {
+                return candidate.refinery->id == (*worker)->orderTargetId && safeGasRoute(*worker, candidate);
             });
         if (slot == gasSlots.end() && (*worker)->gatheringGas) {
             // ReturnGas targets the Nexus, and workers inside a refinery can
@@ -533,7 +549,8 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                 return distanceSquared(candidate.refinery->position, (*worker)->position);
             });
             if (slot != gasSlots.end() &&
-                distanceSquared(slot->refinery->position, (*worker)->position) > 480 * 480) {
+                (distanceSquared(slot->refinery->position, (*worker)->position) > 480 * 480 ||
+                 !safeGasRoute(*worker, *slot))) {
                 slot = gasSlots.end();
             }
         }
@@ -541,7 +558,7 @@ std::vector<WorkerAssignment> WorkerManager::assign(
             ++worker;
             continue;
         }
-        result.push_back({(*worker)->id, WorkerJob::gas, slot->base->id, -1,
+        result.push_back({(*worker)->id, WorkerJob::gas, slot->base->id, slot->refinery->id,
                           slot->refinery->position, 55});
         worker = available.erase(worker);
         gasSlots.erase(slot);
@@ -551,11 +568,17 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     while (gasAssigned < desiredGas && !gasSlots.empty()) {
         const auto slot = gasSlots.begin();
         const auto worker = std::ranges::min_element(
-            available, {}, [slot](const UnitSnapshot* candidate) {
-                return distanceSquared(candidate->position, slot->refinery->position);
+            available, {}, [slot, &safeGasRoute](const UnitSnapshot* candidate) {
+                return safeGasRoute(candidate, *slot)
+                    ? distanceSquared(candidate->position, slot->refinery->position)
+                    : std::numeric_limits<int>::max();
             });
         if (worker == available.end()) break;
-        result.push_back({(*worker)->id, WorkerJob::gas, slot->base->id, -1,
+        if (!safeGasRoute(*worker, *slot)) {
+            gasSlots.erase(slot);
+            continue;
+        }
+        result.push_back({(*worker)->id, WorkerJob::gas, slot->base->id, slot->refinery->id,
                           slot->refinery->position, 55});
         available.erase(worker);
         gasSlots.erase(slot);

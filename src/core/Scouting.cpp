@@ -116,8 +116,14 @@ std::optional<Command> ProbeHarasser::control(
         return enemy.completed && !isWorker(enemy.kind) &&
             (isCombatUnit(enemy.kind) || enemy.groundWeapon.damage > 0);
     });
-    withdrawing_ = withdrawing_ || armyUp || state.frame >= 6 * 60 * 24 ||
-        scout->hitPoints < std::max(1, scout->maxHitPoints * 3 / 4);
+    // A scouted Core is enough warning to leave a worker line before the
+    // first Dragoon arrives. Waiting to see the fighter can leave the Probe
+    // behind it, with the only route home already covered by ranged fire.
+    const auto rangedProduction = std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& enemy) {
+        return enemy.kind == UnitKind::cyberneticsCore && enemy.position.valid();
+    });
+    withdrawing_ = withdrawing_ || armyUp || rangedProduction || state.frame >= 6 * 60 * 24 ||
+        scout->hitPoints < scout->maxHitPoints;
     const auto move = [&scout](const Position target, const char* reason, const int priority = 94) {
         return Command{scout->id, CommandType::move, -1, target,
                        UnitKind::unknown, priority, 0, reason};

@@ -232,6 +232,8 @@ struct UnitSnapshot {
     // Damage from visible, imminent friendly projectiles, rebuilt each frame.
     // Kept separate from observed HP: a predicted hit is not an observation.
     double incomingDamage{};
+    // Own production only; never query hidden opponent training timers.
+    int remainingTrainFrames{};
 
     void inheritObservationHistory(const UnitSnapshot& previous) noexcept;
 
@@ -258,6 +260,10 @@ struct BaseSnapshot {
     // A visible, empty depot footprint; -1 means never confirmed empty.
     Frame lastConfirmedEmpty{-1};
     DefensivePosition defense{};
+    // Static terrain-route length from our starting Nexus. A straight line
+    // can cross cliffs and makes some map fourths appear closer than the
+    // natural. -1 means the bridge has not calculated a route yet.
+    int groundDistanceFromMain{-1};
 };
 
 struct TechnologySnapshot {

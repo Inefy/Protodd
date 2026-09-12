@@ -131,6 +131,14 @@ void ProtoddModule::onStart() {
     plan_ = {};
     phases_.clear();
     traceMemory_.clear();
+    actionTotals_.clear();
+    lastActions_.clear();
+    damageSamples_.clear();
+    incidents_.clear();
+    motionSamples_.clear();
+    caughtErrors_ = loggingErrors_ = 0;
+    lastErrorFrame_ = -1000;
+    bridge_.actionDiagnostic = [this](const ActionDiagnostic& action) { logAction(action); };
     supplyBlockedFrames_.reset();
     idleGatewayFrames_.reset();
     idleWorkerFrames_.reset();
@@ -197,15 +205,19 @@ void ProtoddModule::onStart() {
         log_ << "START," << csvSafe(BWAPI::Broodwar->mapName()) << ','
              << csvSafe(opponentName_) << ',' << openingStyleName(openingStyle_) << '\n';
         log_ << "MATCH,seed=" << BWAPI::Broodwar->getRandomSeed()
-             << ",map_hash=" << BWAPI::Broodwar->mapHash() << '\n';
-        log_ << "DIAGNOSTICS,version=2,sampleFrames=24,entityFrames=240,"
+             << ",map_hash=" << BWAPI::Broodwar->mapHash()
+             << ",width=" << state_.mapWidthPixels << ",height=" << state_.mapHeightPixels << '\n';
+        log_ << "DIAGNOSTICS,version=3,sampleFrames=24,entityFrames=24,"
                 "beliefFrames=240,orderHeartbeatFrames=120,performanceWindowFrames=24,"
-                "information=legal-observations\n";
+                "damageFrames=1,actionHeartbeatFrames=120,information=legal-observations\n";
+        log_.flush();
     }
 }
 
 void ProtoddModule::onEnd(const bool winner) {
+    state_.frame = BWAPI::Broodwar->getFrameCount();
     sampleTelemetry();
+    logDiagnostics();
     history_.record(opponentName_, mapName_, openingStyle_, winner);
     std::ofstream historyOutput(std::filesystem::path("bwapi-data/write") /
                                     OpponentHistory::filename(opponentName_),
@@ -240,6 +252,7 @@ void ProtoddModule::onEnd(const bool winner) {
              << ",highBankSamples=" << highBankSamples_
              << ",planChanges=" << planChanges_
              << ",postureChanges=" << postureChanges_
+             << ",caughtErrors=" << caughtErrors_ << ",loggingErrors=" << loggingErrors_ + bridge_.diagnosticErrors()
              << '\n';
         log_ << "END," << (winner ? "win" : "loss") << ',' << state_.frame << '\n';
         log_.flush();
@@ -251,16 +264,20 @@ void ProtoddModule::onFrame() {
     try {
         runFrame();
     } catch (const std::exception& error) {
+        ++caughtErrors_;
         const auto frame = BWAPI::Broodwar->getFrameCount();
         if (log_ && frame - lastErrorFrame_ >= 24) {
-            log_ << "ERROR," << frame << ',' << error.what() << '\n';
+            log_ << "ERROR," << frame << ',' << csvSafe(error.what())
+                 << ",phase=" << activePhase_ << ",total=" << caughtErrors_ << '\n';
             log_.flush();
             lastErrorFrame_ = frame;
         }
     } catch (...) {
+        ++caughtErrors_;
         const auto frame = BWAPI::Broodwar->getFrameCount();
         if (log_ && frame - lastErrorFrame_ >= 24) {
-            log_ << "ERROR," << frame << ",unknown\n";
+            log_ << "ERROR," << frame << ",unknown,phase=" << activePhase_
+                 << ",total=" << caughtErrors_ << '\n';
             log_.flush();
             lastErrorFrame_ = frame;
         }
@@ -285,12 +302,19 @@ void ProtoddModule::runFrame() {
         return;
     }
     const auto measure = [this](const char* phase, auto&& operation) {
+        activePhase_ = phase;
         const auto start = std::chrono::steady_clock::now();
-        operation();
+        try { operation(); }
+        catch (...) {
+            phases_[phase].record(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start).count());
+            throw;
+        }
         phases_[phase].record(std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - start).count());
     };
     measure("observe", [this] { state_ = bridge_.observe(); });
+    measure("damage-log", [this] { logDamage(); });
     if (state_.self.race != Race::protoss) {
         BWAPI::Broodwar->drawTextScreen(8, 8, "Protodd requires Protoss");
         return;
@@ -328,26 +352,61 @@ void ProtoddModule::runFrame() {
     }
 }
 
-void ProtoddModule::onUnitDiscover(const BWAPI::Unit unit) { bridge_.remember(unit); }
-void ProtoddModule::onUnitShow(const BWAPI::Unit unit) { bridge_.remember(unit); }
+void ProtoddModule::onUnitDiscover(const BWAPI::Unit unit) {
+    bridge_.remember(unit); logLifecycle(unit, "discover");
+}
+void ProtoddModule::onUnitShow(const BWAPI::Unit unit) {
+    bridge_.remember(unit); logLifecycle(unit, "show");
+}
+void ProtoddModule::onUnitCreate(const BWAPI::Unit unit) { logLifecycle(unit, "create"); }
+void ProtoddModule::onUnitComplete(const BWAPI::Unit unit) { logLifecycle(unit, "complete"); }
 void ProtoddModule::onUnitDestroy(const BWAPI::Unit unit) {
     if (log_ && unit != nullptr &&
-        (unit->getPlayer() == BWAPI::Broodwar->self() || unit->isVisible())) {
+        (unit->getPlayer() == BWAPI::Broodwar->self() ||
+         (unit->getPlayer() == BWAPI::Broodwar->enemy() && unit->isVisible()))) {
         const auto kind = BwapiBridge::toKind(unit->getType());
         log_ << "LOSS," << BWAPI::Broodwar->getFrameCount() << ','
              << (unit->getPlayer() == BWAPI::Broodwar->self() ? "self" : "enemy") << ','
              << unit->getID() << ',' << unitStats(kind).name << ','
              << unit->getPosition().x << ',' << unit->getPosition().y << ','
-             << unit->getType().mineralPrice() << ',' << unit->getType().gasPrice() << '\n';
+             << unit->getType().mineralPrice() << ',' << unit->getType().gasPrice()
+             << ",costBatchSize=" << (unit->getType().isTwoUnitsInOneEgg() ? 2 : 1);
+        const auto prior = damageSamples_.find(unit->getID());
+        if (prior != damageSamples_.end()) {
+            log_ << ",lastHp=" << prior->second.hitPoints << ",lastShields=" << prior->second.shields
+                 << ",lastObserved=" << prior->second.lastSeen;
+        }
+        const auto action = lastActions_.find(unit->getID());
+        if (action != lastActions_.end()) {
+            log_ << ",lastAction=" << csvSafe(action->second.source)
+                 << ",actionFrame=" << action->second.frame << ",actionTarget=" << action->second.target;
+        }
+        log_ << ",plan=" << csvSafe(plan_.name) << ",posture=" << postureName(plan_.posture)
+             << ",nearbyVisibleEnemies=";
+        // Context only: nearby enemies are not identified as the killer.
+        for (const auto& enemy : state_.enemy.units) {
+            if (enemy.visible && state_.frame - enemy.lastSeen <= 1 &&
+                distanceSquared(enemy.position, {unit->getPosition().x, unit->getPosition().y}) <= 640 * 640)
+                log_ << enemy.id << ':' << unitStats(enemy.kind).name << ';';
+        }
+        log_ << '\n';
+        log_.flush();
     }
     if (unit != nullptr) {
         traceMemory_.erase("order/" + std::to_string(unit->getID()));
         debug_.orders.erase(unit->getID());
+        lastActions_.erase(unit->getID());
+        damageSamples_.erase(unit->getID());
+        motionSamples_.erase(unit->getID());
+        traceMemory_.erase("action/" + std::to_string(unit->getID()));
     }
     bridge_.forget(unit);
 }
-void ProtoddModule::onUnitMorph(const BWAPI::Unit unit) { bridge_.remember(unit); }
+void ProtoddModule::onUnitMorph(const BWAPI::Unit unit) {
+    bridge_.remember(unit); logLifecycle(unit, "morph");
+}
 void ProtoddModule::onUnitRenegade(const BWAPI::Unit unit) {
+    logLifecycle(unit, "ownership-change");
     bridge_.forget(unit);
     bridge_.remember(unit);
 }
@@ -382,7 +441,7 @@ void ProtoddModule::updateMacro() {
     bridge_.executeMacro(actions, plan_, influence_, leasedScouts_);
     for (const auto& execution : bridge_.macroExecutions()) {
         const auto& action = execution.action;
-        if (action.reserved && action.executable) {
+        if (action.reserved && action.executable && execution.outcome != "command-budget-deferred") {
             ++macroAttempted_;
             if (execution.accepted) ++macroAccepted_;
         }
@@ -399,14 +458,25 @@ void ProtoddModule::updateMacro() {
 }
 
 void ProtoddModule::updateWorkers() {
-    auto reserved = bridge_.reservedBuilders();
+    const auto builders = bridge_.reservedBuilders();
+    auto reserved = builders;
     reserved.insert(reserved.end(), leasedScouts_.begin(), leasedScouts_.end());
     std::ranges::sort(reserved);
     reserved.erase(std::unique(reserved.begin(), reserved.end()), reserved.end());
     const auto assignments = workers_.assign(state_, plan_, influence_, reserved);
     const auto gas = std::ranges::count(assignments, WorkerJob::gas, &WorkerAssignment::job);
     const auto minerals = std::ranges::count(assignments, WorkerJob::minerals, &WorkerAssignment::job);
+    const auto ids = [](const std::span<const UnitId> units) {
+        std::string result;
+        for (const auto unit : units) {
+            if (!result.empty()) result += ';';
+            result += std::to_string(unit);
+        }
+        return result;
+    };
     trace("workers", "WORKERS,gas=" + std::to_string(gas) + ",minerals=" + std::to_string(minerals) +
+        ",builders=" + std::to_string(builders.size()) + ",builderIds=" + ids(builders) +
+        ",scouts=" + std::to_string(leasedScouts_.size()) + ",scoutIds=" + ids(leasedScouts_) +
         ",leased=" + std::to_string(reserved.size()) + ",gasRequested=" + std::to_string(plan_.desiredGasWorkers));
     bridge_.executeWorkers(assignments);
 }
@@ -501,6 +571,7 @@ void ProtoddModule::updateCombat(
         auto requiredRatio = squad.requiredRatio;
         auto objective = squad.objective;
         auto defense = squad.defense;
+        auto travelReason = "squad-mission";
         // Protecting an economy does not make a losing outward chase safe.
         // A breached screen permits nearby interception, never a ratio override.
         if (squad.role == SquadRole::baseDefense) {
@@ -508,6 +579,7 @@ void ProtoddModule::updateCombat(
                                      plan_.posture == Posture::defend ? 1.25 : 1.05);
         }
         if (squad.role == SquadRole::mainArmy) {
+            travelReason = "attack-target";
             if (plan_.expansionTarget.valid() && plan_.posture != Posture::attack)
                 objective = expansionAssemblyPoint(state_, plan_.expansionTarget, retreatPoint());
             const auto undersizedVanguard =
@@ -515,6 +587,7 @@ void ProtoddModule::updateCombat(
                 squad.units.size() <
                     static_cast<std::size_t>(std::max(1, plan_.minimumAttackSize));
             if (!aggressive || undersizedVanguard) {
+                travelReason = "assemble-at-rally";
                 // A small squad may move toward its rally point, but it must
                 // not accept an equal-size fight on the way there. The old
                 // 0.88 ratio made a five-Zealot vanguard engage four-to-six
@@ -531,20 +604,22 @@ void ProtoddModule::updateCombat(
                 // instead of launching a second, usually losing attack wave.
                 requiredRatio = 0.88;
                 objective = vanguard->center;
+                travelReason = "join-vanguard";
             }
-            if (vanguard == &squad && aggressive)
-                objective = SquadPlanner::supportRendezvous(state_, squad, objective);
             if (plan_.expansionTarget.valid() && plan_.posture != Posture::attack &&
                 vanguard == &squad) {
                 const auto assembly = expansionAssemblyPoint(
                     state_, plan_.expansionTarget, retreatPoint());
                 objective = assembly;
-                // Activate the expansion leash immediately. Waiting until the
-                // army was already within 448px let the existing main-ramp
-                // defense area override the expansion objective forever.
-                defense = {assembly, 448, plan_.expansionTarget};
+                travelReason = "cover-expansion";
+                // Uncontested travel adopts the new screen immediately so a
+                // home leash cannot trap the army. An ongoing fight elsewhere
+                // retains its current combat/retreat policy until it resolves.
+                defense = SquadPlanner::expansionDefense(
+                    squad, assembly, plan_.expansionTarget, defense);
             }
         }
+        auto travelGoal = objective;
         const auto hasGroundUnit = std::ranges::any_of(
             squad.units, [](const UnitSnapshot& unit) { return !unit.flying; });
         auto routeSignature = squad.signature;
@@ -573,8 +648,9 @@ void ProtoddModule::updateCombat(
                 objective = advanceWaypoints_[squadIndex];
             }
         }
+        const auto supportedArmy = SquadPlanner::combatSupport(squad, friendly, &navigation_);
         auto estimate = combat_.evaluate(
-            squad.units, squad.enemies, requiredRatio,
+            supportedArmy, squad.enemies, requiredRatio,
             squad.enemies.empty() ? opponent_.assessment().uncertainty * 0.25
                                   : opponent_.assessment().uncertainty,
             runSimulation);
@@ -589,11 +665,14 @@ void ProtoddModule::updateCombat(
         estimate.holdScreen = SquadPlanner::mustHoldDefensiveScreen(squad);
         estimate.advanceBlocked = squad.role != SquadRole::baseDefense &&
             !SquadPlanner::mobileDetectionReady(state_, squad);
-        if (!estimate.advanceBlocked && SquadPlanner::canCounterattack(squad, estimate, plan_)) {
+        if (!estimate.advanceBlocked && supportedArmy.size() == squad.units.size() &&
+            SquadPlanner::canCounterattack(squad, estimate, plan_)) {
             // A global defense response must not trap an independently strong
             // reserve army while the allocated defenders protect the base.
             defense = {};
             objective = plan_.attackTarget;
+            travelGoal = objective;
+            travelReason = "counterattack";
             if (firstCounterattackFrame_ < 0) firstCounterattackFrame_ = state_.frame;
         }
         const auto reason = estimate.advanceBlocked ? "Wait for mobile detection" :
@@ -612,9 +691,14 @@ void ProtoddModule::updateCombat(
         if (log_ && logSquads) {
             log_ << "SQUAD," << state_.frame << ',' << squadRoleName(squad.role)
                  << ",key=" << engagementKey << ",units=" << squad.units.size()
+                 << ",supportUnits=" << supportedArmy.size() - squad.units.size()
                  << ",enemies=" << squad.enemies.size()
                  << ",center=" << squad.center.x << 'x' << squad.center.y
                  << ",objective=" << objective.x << 'x' << objective.y
+                 << ",travelGoal=" << travelGoal.x << 'x' << travelGoal.y
+                 << ",travelReason=" << travelReason
+                 << ",retreat=" << squad.retreat.x << 'x' << squad.retreat.y
+                 << ",defenseCenter=" << defense.center.x << 'x' << defense.center.y
                  << ",ratio=" << estimate.ratio << ",required=" << requiredRatio
                  << ",proposed=" << static_cast<int>(proposedDecision)
                  << ",decision=" << static_cast<int>(estimate.decision)
@@ -638,9 +722,12 @@ void ProtoddModule::updateCombat(
                  squad.retreat, influence_, squad.center, state_.latencyFrames,
                  technologyLevel(state_.self, TechnologyKind::psionicStorm) > 0,
                  defense, squad.withdrawing ? TacticalIntent::withdraw :
-                     squad.role == SquadRole::harassment ? TacticalIntent::raid : TacticalIntent::battle)) {
+                     squad.role == SquadRole::harassment ? TacticalIntent::raid : TacticalIntent::battle,
+                 supportedArmy, &navigation_)) {
             commands_.submit(order);
         }
+        if (aggressive)
+            for (const auto& order : SquadPlanner::supportEscorts(squad, objective)) commands_.submit(order);
     }
     if (logSquads) lastSquadLogFrame_ = state_.frame;
 
@@ -835,15 +922,97 @@ void ProtoddModule::trace(
     std::string key,
     std::string value,
     const Frame heartbeat,
-    std::string comparison) {
+    std::string comparison,
+    Frame frame) {
     if (!log_) return;
+    if (frame < 0) frame = state_.frame;
     auto& previous = traceMemory_[key];
     if (comparison.empty()) comparison = value;
-    if (comparison == previous.value && state_.frame - previous.frame < heartbeat) return;
+    if (comparison == previous.value && frame - previous.frame < heartbeat) return;
     const auto comma = value.find(',');
     if (comma == std::string::npos) return;
-    log_ << value.substr(0, comma) << ',' << state_.frame << value.substr(comma) << '\n';
-    previous = {std::move(comparison), state_.frame};
+    log_ << value.substr(0, comma) << ',' << frame << value.substr(comma) << '\n';
+    previous = {std::move(comparison), frame};
+}
+
+void ProtoddModule::logAction(const ActionDiagnostic& action) noexcept {
+    try {
+        const auto frame = BWAPI::Broodwar->getFrameCount();
+        const auto stage = action.attempted ? "issued" : "blocked";
+        const auto source = csvSafe(action.source);
+        const auto outcome = csvSafe(action.outcome);
+        ++actionTotals_[source + ',' + stage + ',' + outcome];
+        if (action.accepted) {
+            lastActions_[action.actor] = {frame, source, action.type, action.target};
+            debug_.orders[action.actor] = source;
+        }
+        std::ostringstream row;
+        row << "ACTION," << action.actor << ',' << source << ',' << csvSafe(action.type)
+            << ',' << stage << ',' << outcome << ",target=" << action.target
+            << ",x=" << action.position.x << ",y=" << action.position.y << ",extra=" << action.extra
+            << ",minerals=" << state_.self.minerals << ",gas=" << state_.self.gas;
+        const auto actor = BWAPI::Broodwar->getUnit(action.actor);
+        if (actor && actor->exists()) row << ",order=" << csvSafe(actor->getOrder().toString())
+            << ",hp=" << actor->getHitPoints() << ",shields=" << actor->getShields()
+            << ",energy=" << actor->getEnergy();
+        const auto comparison = source + '/' + action.type + '/' + stage + '/' + outcome + '/' +
+            std::to_string(action.target) + '/' + std::to_string(action.extra) + '/' +
+            std::to_string(action.position.x / 64) + '/' + std::to_string(action.position.y / 64);
+        trace("action/" + std::to_string(action.actor), row.str(), 120, comparison, frame);
+    } catch (...) { ++loggingErrors_; }
+}
+
+void ProtoddModule::logLifecycle(const BWAPI::Unit unit, const std::string_view event) {
+    if (!log_ || !unit) return;
+    const auto ours = unit->getPlayer() == BWAPI::Broodwar->self();
+    if (!ours && (unit->getPlayer() != BWAPI::Broodwar->enemy() || !unit->isVisible())) return;
+    log_ << "LIFECYCLE," << BWAPI::Broodwar->getFrameCount() << ',' << event << ','
+         << (ours ? "self" : "enemy") << ',' << unit->getID() << ','
+         << csvSafe(unit->getType().toString()) << ",x=" << unit->getPosition().x
+         << ",y=" << unit->getPosition().y << ",completed=" << unit->isCompleted()
+         << ",remainingBuild=" << unit->getRemainingBuildTime() << '\n';
+}
+
+void ProtoddModule::logDamage() {
+    if (!log_) return;
+    const auto observe = [this](const PlayerSnapshot& player, const char* side) {
+        for (const auto& unit : player.units) {
+            if (!unit.ours && !unit.visible) { damageSamples_.erase(unit.id); continue; }
+            const auto prior = damageSamples_.find(unit.id);
+            if (prior != damageSamples_.end() && prior->second.kind == unit.kind &&
+                prior->second.lastSeen == state_.frame - 1) {
+                const auto hpLoss = std::max(0, prior->second.hitPoints - unit.hitPoints);
+                const auto shieldLoss = std::max(0, prior->second.shields - unit.shields);
+                if (hpLoss + shieldLoss > 0) {
+                    log_ << "DAMAGE," << state_.frame << ',' << side << ',' << unit.id << ','
+                         << unitStats(unit.kind).name << ",hpLoss=" << hpLoss
+                         << ",shieldLoss=" << shieldLoss << ",hp=" << unit.hitPoints
+                         << ",shields=" << unit.shields << ",x=" << unit.position.x
+                         << ",y=" << unit.position.y << ",underAttack=" << unit.underAttack
+                         << ",underStorm=" << unit.underStorm << ",cooldown=" << unit.weaponCooldown;
+                    const auto action = lastActions_.find(unit.id);
+                    if (action != lastActions_.end()) log_ << ",lastAction=" << action->second.source
+                        << ",actionFrame=" << action->second.frame << ",actionTarget=" << action->second.target;
+                    log_ << '\n';
+                }
+            }
+            damageSamples_[unit.id] = unit;
+        }
+    };
+    observe(state_.self, "self");
+    observe(state_.enemy, "enemy");
+    std::erase_if(damageSamples_, [this](const auto& entry) { return entry.second.lastSeen < state_.frame; });
+}
+
+void ProtoddModule::incident(const std::string_view kind, const UnitId unit, const bool active,
+                            const Frame threshold, const std::string_view evidence) {
+    const auto key = std::string(kind) + '/' + std::to_string(unit);
+    if (!active && !incidents_.contains(key)) return;
+    const auto update = incidents_[key].sample(state_.frame, active, threshold);
+    if (update && log_) log_ << "INCIDENT," << state_.frame << ',' << kind << ',' << unit
+        << ",since=" << update->since << ",duration=" << update->duration
+        << ",active=" << update->active << ',' << evidence << '\n';
+    if (!active) incidents_.erase(key);
 }
 
 void ProtoddModule::logDiagnostics() {
@@ -852,7 +1021,39 @@ void ProtoddModule::logDiagnostics() {
     auto idleWorkers = 0;
     auto unpowered = 0;
     for (const auto unit : BWAPI::Broodwar->self()->getUnits()) {
-        if (unit == nullptr || !unit->exists() || !unit->isCompleted()) continue;
+        if (unit == nullptr || !unit->exists()) continue;
+        const auto id = unit->getID();
+        const auto type = unit->getType();
+        const auto evidence = "unitKind=" + csvSafe(type.toString()) + ",x=" +
+            std::to_string(unit->getPosition().x) + ",y=" + std::to_string(unit->getPosition().y) +
+            ",order=" + csvSafe(unit->getOrder().toString()) + ",minerals=" +
+            std::to_string(state_.self.minerals) + ",gas=" + std::to_string(state_.self.gas);
+        const auto ready = unit->isCompleted() && !unit->isLoaded() &&
+            !unit->isLockedDown() && !unit->isStasised() && !unit->isMaelstrommed();
+        incident("idle-worker", id, ready && type.isWorker() && unit->isIdle(), 72, evidence);
+        incident("unpowered-building", id, unit->isCompleted() && type.requiresPsi() &&
+            !unit->isPowered(), 48, evidence);
+        const auto production = type == BWAPI::UnitTypes::Protoss_Nexus ||
+            type == BWAPI::UnitTypes::Protoss_Gateway || type == BWAPI::UnitTypes::Protoss_Stargate ||
+            type == BWAPI::UnitTypes::Protoss_Robotics_Facility;
+        incident("idle-production-with-bank", id, ready && production && unit->isPowered() &&
+            !unit->isTraining() && unit->getRemainingTrainTime() == 0 &&
+            unit->getTrainingQueue().empty() && state_.self.minerals >= 150, 120, evidence);
+        incident("empty-ammunition", id, ready &&
+            ((type == BWAPI::UnitTypes::Protoss_Reaver && unit->getScarabCount() == 0) ||
+             (type == BWAPI::UnitTypes::Protoss_Carrier && unit->getInterceptorCount() == 0)), 72, evidence);
+        auto& motion = motionSamples_[id];
+        const Position position{unit->getPosition().x, unit->getPosition().y};
+        const auto order = unit->getOrder();
+        const auto destination = unit->getOrderTargetPosition();
+        const auto travelling = ready && !type.isBuilding() && destination.isValid() &&
+            (order == BWAPI::Orders::Move || order == BWAPI::Orders::AttackMove) &&
+            unit->getDistance(destination) > 96;
+        if (!travelling || !motion.anchor.valid() || distanceSquared(motion.anchor, position) > 24 * 24)
+            motion = {position, state_.frame};
+        incident("movement-stalled", id, travelling && state_.frame - motion.since >= 144, 0,
+            evidence + ",stationarySince=" + std::to_string(motion.since));
+        if (!unit->isCompleted()) continue;
         if (unit->getType().requiresPsi() && !unit->isPowered()) ++unpowered;
         if (unit->getType() == BWAPI::UnitTypes::Protoss_Gateway && unit->isPowered()) {
             ++usableGateways;
@@ -865,6 +1066,19 @@ void ProtoddModule::logDiagnostics() {
     }
     const auto blocked = state_.self.supplyTotal > 0 && state_.self.supplyTotal < 400 &&
         state_.self.supplyTotal - state_.self.supplyUsed < 4;
+    // Close conditions for dead, transferred, or otherwise absent own units.
+    // Their disappearance must not leave a permanent active incident.
+    for (auto it = incidents_.begin(); it != incidents_.end();) {
+        auto& entry = *it;
+        const auto id = std::stoi(entry.first.substr(entry.first.rfind('/') + 1));
+        if (id < 0 || std::ranges::any_of(state_.self.units,
+            [id](const UnitSnapshot& unit) { return unit.id == id; })) { ++it; continue; }
+        if (const auto update = entry.second.sample(state_.frame, false, 0); update && log_)
+            log_ << "INCIDENT," << state_.frame << ',' << entry.first.substr(0, entry.first.rfind('/'))
+                 << ',' << id << ",since=" << update->since << ",duration=" << update->duration
+                 << ",active=0,reason=unit-unavailable\n";
+        it = incidents_.erase(it);
+    }
     supplyBlockedFrames_.sample(state_.frame, blocked ? 1 : 0);
     idleGatewayFrames_.sample(state_.frame, idleGateways);
     idleWorkerFrames_.sample(state_.frame, idleWorkers);
@@ -873,6 +1087,15 @@ void ProtoddModule::logDiagnostics() {
         " | supply tight " + std::to_string(supplyBlockedFrames_.total() / 24) + "s";
     if (!log_) return;
     const auto feedback = bridge_.expansionFeedback();
+    incident("supply-blocked", -1, state_.self.supplyTotal > 0 && state_.self.supplyTotal < 400 &&
+        state_.self.supplyUsed >= state_.self.supplyTotal, 48,
+        "supply=" + std::to_string(state_.self.supplyUsed) + ",total=" + std::to_string(state_.self.supplyTotal));
+    incident("mineral-bank", -1, state_.self.minerals >= 800, 120,
+        "minerals=" + std::to_string(state_.self.minerals) + ",macro=" + csvSafe(bridge_.lastMacroStatus()));
+    incident("expansion-stalled", -1, feedback.pending && feedback.stalledFrames >= 120, 0,
+        "stalledFrames=" + std::to_string(feedback.stalledFrames));
+    for (const auto& [key, total] : actionTotals_)
+        log_ << "ACTION_TOTAL," << state_.frame << ',' << key << ',' << total << '\n';
     log_ << "HEALTH," << state_.frame << ",idleGateways=" << idleGateways
          << ",gateways=" << usableGateways << ",idleWorkers=" << idleWorkers
          << ",unpowered=" << unpowered << ",supplyTightFrames=" << supplyBlockedFrames_.total()
@@ -882,6 +1105,7 @@ void ProtoddModule::logDiagnostics() {
          << ",commandsProposed=" << commandsProposed_ << ",commandsSuperseded=" << commandsSuperseded_
          << ",commandsRedundant=" << commandsRedundant_ << ",commandsDeferred=" << commandsDeferred_
          << ",macroAttempted=" << macroAttempted_ << ",macroAccepted=" << macroAccepted_
+         << ",caughtErrors=" << caughtErrors_ << ",loggingErrors=" << loggingErrors_ + bridge_.diagnosticErrors()
          << ",expansionPending=" << feedback.pending << ",expansionStalled=" << feedback.stalledFrames
          << ",expansionDeferred=" << plan_.deferExpansion
          << ",minerals=" << state_.self.minerals << ",gas=" << state_.self.gas
@@ -898,19 +1122,51 @@ void ProtoddModule::logDiagnostics() {
             log_ << "BELIEF," << state_.frame << ',' << enemyPlanName(kind) << ','
                  << opponent_.probability(kind) << '\n';
         }
-        const auto entities = [this](const PlayerSnapshot& player, const char* side) {
+    }
+    // Full snapshots have a boundary even if both armies are empty.
+    log_ << "SNAPSHOT," << state_.frame << '\n';
+    const auto entities = [this](const PlayerSnapshot& player, const char* side) {
             for (const auto& unit : player.units) {
                 const auto order = debug_.orders.find(unit.id);
                 log_ << "ENTITY," << state_.frame << ',' << side << ',' << unit.id << ','
                      << unitStats(unit.kind).name << ',' << unit.position.x << ',' << unit.position.y
                      << ',' << unit.hitPoints << ',' << unit.shields << ',' << unit.weaponCooldown
                      << ',' << unit.orderTargetId << ',' << unit.lastSeen << ',' << unit.visible
-                     << ',' << (unit.ours && order != debug_.orders.end() ? order->second : "") << '\n';
+                     << ',' << (unit.ours && order != debug_.orders.end() ? order->second : "")
+                     << ",completed=" << unit.completed << ",powered=" << unit.powered
+                     << ",energy=" << unit.energy << ",ammo=" << unit.ammo
+                     << ",loaded=" << unit.loaded << ",transport=" << unit.transportId
+                     << ",underAttack=" << unit.underAttack << ",underStorm=" << unit.underStorm
+                     << ",detected=" << unit.detected << ",cloaked=" << unit.cloaked
+                     << ",attackFrame=" << unit.attackFrame;
+                // Enemy queues and orders in fog are never queried.
+                if (unit.ours) {
+                    const auto native = BWAPI::Broodwar->getUnit(unit.id);
+                    if (native && native->exists()) {
+                        const auto hasProductionQueue = isBuilding(unit.kind) ||
+                            unit.kind == UnitKind::reaver || unit.kind == UnitKind::carrier;
+                        log_ << ",nativeOrder=" << csvSafe(native->getOrder().toString())
+                             << ",orderX=" << native->getOrderTargetPosition().x
+                             << ",orderY=" << native->getOrderTargetPosition().y
+                             << ",lastCommandFrame=" << native->getLastCommandFrame()
+                             << ",idle=" << native->isIdle() << ",moving=" << native->isMoving()
+                             << ",remainingBuild=" << native->getRemainingBuildTime()
+                             << ",remainingTrain=" << (hasProductionQueue ? native->getRemainingTrainTime() : 0)
+                             << ",remainingResearch=" << native->getRemainingResearchTime()
+                             << ",remainingUpgrade=" << native->getRemainingUpgradeTime()
+                             << ",research=" << csvSafe(native->getTech().toString())
+                             << ",upgrade=" << csvSafe(native->getUpgrade().toString()) << ",queue=";
+                        // BWAPI reuses queue storage on ordinary mobile units;
+                        // a Probe can otherwise appear to be training a Pylon.
+                        if (hasProductionQueue)
+                            for (const auto queued : native->getTrainingQueue()) log_ << csvSafe(queued.toString()) << ';';
+                    }
+                }
+                log_ << '\n';
             }
         };
         entities(state_.self, "self");
         entities(state_.enemy, "enemy");
-    }
     log_.flush();
 }
 
@@ -1031,6 +1287,18 @@ void ProtoddModule::logDecision() {
         if (workerIndex++ > 0) log_ << ';';
         log_ << unit.id << '@' << unit.position.x << 'x' << unit.position.y << ':'
              << unit.hitPoints + unit.shields;
+    }
+    log_ << ",baseCandidates=";
+    for (std::size_t index = 0; index < state_.bases.size(); ++index) {
+        if (index > 0) log_ << ';';
+        const auto& base = state_.bases[index];
+        log_ << base.id << '@' << base.center.x << 'x' << base.center.y
+             << ":route=" << base.groundDistanceFromMain
+             << ":gas=" << base.geysers
+             << ":min=" << base.mineralsRemaining
+             << ":owner=" << base.ownerId
+             << ":start=" << base.startLocation
+             << ":island=" << base.island;
     }
     log_ << ",armyPositions=";
     auto armyIndex = 0;

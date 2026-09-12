@@ -188,12 +188,24 @@ Position nearestExpansionSite(const GameState& state) {
     // previous planners could request a second base without ever naming one;
     // the bridge then used the combat rally point and was free to select a
     // forward or otherwise inappropriate resource cluster.
+    const auto gasBaseAvailable = std::ranges::any_of(
+        state.bases, [](const BaseSnapshot& base) {
+            return base.ownerId == -1 && !base.island && base.center.valid() &&
+                   base.mineralsRemaining >= 1000 && base.geysers > 0;
+        });
     const BaseSnapshot* best = nullptr;
     auto bestScore = std::numeric_limits<double>::infinity();
     for (const auto& base : state.bases) {
         if (base.ownerId != -1 || base.island || !base.center.valid() ||
             base.mineralsRemaining < 1000) continue;
-        const auto score = distance(home, base.center);
+        // The first expansion must be the normal gas natural when one exists.
+        // Mineral-only pockets are useful later, but on maps such as
+        // Destination one can look closer across a cliff while actually being
+        // the fourth base along the ground route.
+        if (gasBaseAvailable && base.geysers == 0) continue;
+        const auto score = base.groundDistanceFromMain >= 0
+                               ? static_cast<double>(base.groundDistanceFromMain)
+                               : distance(home, base.center);
         if (score < bestScore ||
             (score == bestScore && (best == nullptr || base.id < best->id))) {
             bestScore = score;
@@ -389,6 +401,37 @@ StrategicPlan StrategyEngine::plan(
     // reservation, builder routing, placement, and cover all share one
     // location.
     const auto existingNexuses = count(state, UnitKind::nexus);
+    const auto rangedMirrorExpansion = state.enemy.race == Race::protoss &&
+        (std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& enemy) {
+             return enemy.kind == UnitKind::cyberneticsCore && enemy.position.valid();
+         }) ||
+         recentEnemyCount(state, UnitKind::dragoon) > 0 ||
+         recentEnemyCount(state, UnitKind::reaver) > 0);
+    const auto establishedRangedLead = count(state, UnitKind::dragoon, true) >= 8 &&
+        count(state, UnitKind::observer, true) > 0 && recentEnemyMobilePower > 0.0 &&
+        ownMobilePower >= recentEnemyMobilePower * 3.0;
+    if (existingNexuses == 1 && result.desiredBases > 1 && rangedMirrorExpansion &&
+        count(state, UnitKind::reaver, true) == 0 && !establishedRangedLead && minute(state) < 12) {
+        // A six-Dragoon screen is not yet the planned combined army. Buying
+        // the natural first outranks Robotics and moves those Dragoons away
+        // from home while the first Reaver is still several production steps
+        // away. Finish that defensive checkpoint before committing the Nexus.
+        result.desiredBases = 1;
+        result.expansionTarget = {-1, -1};
+        result.sustainEconomy = false;
+        result.breakContainment = false;
+        result.posture = Posture::hold;
+        result.rallyPoint = home;
+        result.name += " [splash before natural]";
+        if (count(state, UnitKind::dragoon, true) >= 4) {
+            goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 113,
+                 "splash screen before the natural", true);
+            goal(result, GoalKind::build, UnitKind::roboticsSupportBay, 1, 113,
+                 "complete splash support before the natural", true);
+            goal(result, GoalKind::train, UnitKind::reaver, 1, 114,
+                 "first splash defender before expansion", true);
+        }
+    }
     if (existingNexuses == 1 && result.desiredBases > 1) {
         // The first expansion is positional infrastructure, not a greed score.
         // Always take the nearest resource base so matchup-specific danger or
@@ -441,7 +484,9 @@ StrategicPlan StrategyEngine::plan(
         recentEnemyCount(state, UnitKind::lurker) > 0 ||
         recentEnemyCount(state, UnitKind::darkTemplar) > 0 ||
         (state.enemy.race == Race::terran && minute(state) >= 5 &&
-         (threat.uncertainty > 0.65 || recentEnemyCount(state, UnitKind::factory) >= 2 ||
+         ((threat.uncertainty > 0.65 && threat.combatEnemiesNearMain == 0 &&
+           !activeApproach(state, threat) && threat.immediateGround <= 0.45) ||
+          recentEnemyCount(state, UnitKind::factory) >= 2 ||
           recentEnemyCount(state, UnitKind::starport) > 0));
     if (result.requireMobileDetection) {
         result.desiredGasWorkers = std::max(3, result.desiredGasWorkers);
@@ -515,6 +560,27 @@ StrategicPlan StrategyEngine::plan(
         suppressNew(UnitKind::observer, "fund six Dragoons before optional scouting detection");
         suppressNew(UnitKind::observatory, "defer optional detection until the ranged screen is ready");
     }
+    if (state.enemy.race == Race::protoss && minute(state) < 6 &&
+        !rangedMirrorExpansion && recentEnemyCount(state, UnitKind::gateway) >= 2 &&
+        count(state, UnitKind::forge) > 0 && count(state, UnitKind::photonCannon) == 0 &&
+        count(state, UnitKind::zealot) >= 1) {
+        goal(result, GoalKind::build, UnitKind::photonCannon, 1, 122,
+             "complete the first melee-rush anchor before further Gateway cycles", true);
+    }
+    const auto reaversCommitted = count(state, UnitKind::reaver) +
+        static_cast<int>(std::ranges::count(state.self.queuedUnits, UnitKind::reaver));
+    if (state.enemy.race == Race::protoss && reaversCommitted == 0 &&
+        count(state, UnitKind::roboticsFacility) > 0 && count(state, UnitKind::roboticsSupportBay) > 0) {
+        // Once the splash chain is paid for, four Gateway reinforcement goals
+        // must not spend every new 50 gas before the first 100-gas Reaver.
+        // One urgent detector still comes first; its backups can follow splash.
+        for (auto& demand : result.goals) {
+            if (demand.goal == GoalKind::train && demand.target == UnitKind::observer)
+                demand.desiredCount = std::min(1, demand.desiredCount);
+        }
+        goal(result, GoalKind::train, UnitKind::reaver, 1, 122,
+             "complete the paid-for splash transition before further Gateway cycles", true);
+    }
     if ((result.posture == Posture::hold || result.posture == Posture::defend) &&
         !result.expansionTarget.valid() && !hardBreachAtMain(state)) {
         const auto base = std::ranges::find_if(state.bases, [&state, home](const BaseSnapshot& candidate) {
@@ -550,9 +616,19 @@ StrategicPlan StrategyEngine::planPvT(
     result.composition = {{UnitKind::dragoon, 0.55}, {UnitKind::zealot, 0.22},
                           {UnitKind::highTemplar, 0.13}, {UnitKind::arbiter, 0.10}};
 
+    const auto home = ourMain(state);
+    const auto enemyHome = enemyMain(state);
+    const auto forwardBio = minute(state) < 7 && home.valid() &&
+        std::ranges::any_of(state.enemy.units, [home, enemyHome](const UnitSnapshot& enemy) {
+            if (!enemy.visible || !enemy.completed || !enemy.position.valid() ||
+                (enemy.kind != UnitKind::marine && enemy.kind != UnitKind::firebat)) return false;
+            return distanceSquared(enemy.position, home) <= 1600 * 1600 ||
+                (enemyHome.valid() && distanceSquared(enemy.position, home) <
+                                      distanceSquared(enemy.position, enemyHome));
+        });
     // Fortify only when current observations justify the economic cost.
     // Unknown Terran openings use the Gateway/Core baseline.
-    const auto rushEvidence = threat.workerRush > 0.30 ||
+    const auto rushEvidence = forwardBio || threat.workerRush > 0.30 ||
         threat.proxy + threat.staticContain > 0.34 ||
         threat.combatEnemiesNearMain > 0 || activeApproach(state, threat) ||
         threat.immediateGround > 0.45;
@@ -561,9 +637,9 @@ StrategicPlan StrategyEngine::planPvT(
         result.desiredWorkers = std::min(result.desiredWorkers, 7);
     }
     if (rushEvidence && supplyAtLeast(state, 7)) {
-        goal(result, GoalKind::build, UnitKind::forge, 1, 100,
+        goal(result, GoalKind::build, UnitKind::forge, 1, forwardBio ? 113 : 100,
              "fortified anti-bio opening anchor", true);
-        goal(result, GoalKind::build, UnitKind::photonCannon, 2, 99,
+        goal(result, GoalKind::build, UnitKind::photonCannon, 2, forwardBio ? 112 : 99,
              "overlap the intercept before first contact", true);
         goal(result, GoalKind::build, UnitKind::gateway, 1, 98,
              "field mobile defense behind the completed static intercept", true);
@@ -573,10 +649,12 @@ StrategicPlan StrategyEngine::planPvT(
         goal(result, GoalKind::build, UnitKind::gateway, minute(state) < 6 ? 1 : 3, 88,
              "Gateway opening before gas and Core", count(state, UnitKind::gateway) == 0);
     }
-    if (rushEvidence && (count(state, UnitKind::gateway) > 0 || supplyAtLeast(state, 10))) {
-        goal(result, GoalKind::train, UnitKind::zealot, 1, 94,
+    if (count(state, UnitKind::gateway) > 0 || supplyAtLeast(state, 10)) {
+        goal(result, GoalKind::train, UnitKind::zealot, 1, 98,
              "opening bodyguard before vulnerable dragoon tech",
              count(state, UnitKind::zealot) == 0);
+    }
+    if (rushEvidence && (count(state, UnitKind::gateway) > 0 || supplyAtLeast(state, 10))) {
         goal(result, GoalKind::build, UnitKind::shieldBattery, 1, 89,
              "opening sustain against bio pressure");
     }
@@ -635,7 +713,7 @@ StrategicPlan StrategyEngine::planPvT(
                        minute(state) >= 19 ? 2 : 1, 51,
                        "improve zealot durability");
     }
-    if (threat.combatEnemiesNearMain > 0 || activeApproach(state, threat) ||
+    if (forwardBio || threat.combatEnemiesNearMain > 0 || activeApproach(state, threat) ||
         (minute(state) < 8 && threat.aggression > 0.62)) {
         result.name = "PvT anti-pressure hold";
         result.posture = Posture::defend;

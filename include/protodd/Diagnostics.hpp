@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 
 namespace protodd {
 
@@ -37,6 +38,40 @@ struct PhaseTiming {
         totalUs += us;
         peakUs = std::max(peakUs, us);
     }
+};
+
+// Consecutive samples support a duration estimate; gaps never imply that an
+// unobserved condition continued. Emits a start, heartbeats, and a resolution.
+struct EpisodeUpdate {
+    Frame since{};
+    Frame duration{};
+    bool active{};
+};
+
+class DiagnosticEpisode {
+public:
+    [[nodiscard]] std::optional<EpisodeUpdate> sample(
+        Frame frame, bool active, Frame threshold, Frame maximumGap = 48) noexcept {
+        if (last_ >= 0 && (frame < last_ || frame - last_ > maximumGap)) *this = {};
+        last_ = frame;
+        if (!active) {
+            const auto result = reported_ ? std::optional<EpisodeUpdate>{{since_, frame - since_, false}}
+                                          : std::nullopt;
+            since_ = emitted_ = -1;
+            reported_ = false;
+            return result;
+        }
+        if (since_ < 0) since_ = frame;
+        if (frame - since_ < threshold || (reported_ && frame - emitted_ < 120)) return {};
+        reported_ = true;
+        emitted_ = frame;
+        return EpisodeUpdate{since_, frame - since_, true};
+    }
+private:
+    Frame since_{-1};
+    Frame last_{-1};
+    Frame emitted_{-1};
+    bool reported_{};
 };
 
 }  // namespace protodd

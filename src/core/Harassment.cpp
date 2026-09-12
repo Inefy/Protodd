@@ -123,6 +123,14 @@ RaidMission HarassmentPlanner::update(const GameState& state,
     });
     const auto emergency = baseThreat || plan.prioritizeReinforcements ||
         plan.posture == Posture::defend || plan.posture == Posture::recover || !home.valid();
+    // A committed full-army attack owns its spare fighters. Do not create a
+    // new raid that can immediately recall those front-line units all the way
+    // home. Existing emergency extractions retain their latched withdrawal.
+    if (plan.posture == Posture::attack && !emergency && !mission_.withdrawing) {
+        mission_ = {};
+        nextAttempt_ = state.frame + 120;
+        return {};
+    }
     if (!mission_.members.empty()) {
         std::erase_if(mission_.members, [&available](const UnitId id) {
             return std::ranges::find(available, id, &UnitSnapshot::id) == available.end();
@@ -165,7 +173,8 @@ RaidMission HarassmentPlanner::update(const GameState& state,
         }
         return mission_;
     }
-    if (state.frame < nextAttempt_ || emergency || mainArmy < std::max(10, plan.minimumAttackSize) + 2) return {};
+    if (state.frame < nextAttempt_ || emergency || plan.posture == Posture::attack ||
+        mainArmy < std::max(10, plan.minimumAttackSize) + 2) return {};
     nextAttempt_ = state.frame + 120;
     std::vector<UnitSnapshot> candidates;
     for (const auto& unit : available)

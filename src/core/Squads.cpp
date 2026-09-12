@@ -462,27 +462,44 @@ const Squad* SquadPlanner::selectVanguard(
     return best;
 }
 
-Position SquadPlanner::supportRendezvous(
-    const GameState& state, const Squad& squad, const Position objective) noexcept {
+std::vector<Command> SquadPlanner::supportEscorts(
+    const Squad& squad, const Position objective) {
     if (!objective.valid() || squad.role != SquadRole::mainArmy ||
-        squad.units.size() < 4 || !squad.enemies.empty()) return objective;
+        squad.withdrawing || !squad.enemies.empty()) return {};
     const UnitSnapshot* support = nullptr;
-    auto closest = 1536 * 1536;
-    for (const auto& reaver : state.self.units) {
+    auto rearDistance = -1.0;
+    for (const auto& reaver : squad.units) {
         if (reaver.kind != UnitKind::reaver || !reaver.completed || reaver.loaded ||
             reaver.disabled || reaver.hallucination || !reaver.position.valid() ||
             reaver.healthFraction() < 0.35) continue;
-        const auto separation = distanceSquared(reaver.position, squad.center);
-        if (separation <= 448 * 448 || separation >= closest ||
-            distance(reaver.position, objective) <= distance(squad.center, objective) + 128.0)
-            continue;
-        closest = separation;
-        support = &reaver;
+        const auto remaining = distance(reaver.position, objective);
+        if (remaining > rearDistance) { rearDistance = remaining; support = &reaver; }
     }
-    // Do not outrun nearby splash support during uncontested travel. Contact
-    // still belongs to the local combat decision, and distant new production
-    // cannot recall an army from the other side of the map.
-    return support != nullptr ? moveToward(support->position, objective, 256.0) : objective;
+    if (support == nullptr) return {};
+    std::vector<const UnitSnapshot*> escorts;
+    for (const auto& unit : squad.units) {
+        if ((unit.kind != UnitKind::dragoon && unit.kind != UnitKind::zealot) ||
+            !unit.completed || unit.loaded || unit.disabled || unit.hallucination ||
+            unit.attackFrame || unit.underAttack || unit.underStorm || unit.healthFraction() < 0.65 ||
+            distanceSquared(unit.position, support->position) > 768 * 768 ||
+            distance(unit.position, objective) + 192 >= rearDistance) continue;
+        escorts.push_back(&unit);
+    }
+    std::ranges::sort(escorts, [support](const UnitSnapshot* a, const UnitSnapshot* b) {
+        const auto da = distanceSquared(a->position, support->position);
+        const auto db = distanceSquared(b->position, support->position);
+        return da != db ? da < db : a->id < b->id;
+    });
+    // A lagging support unit may slow at most two bodyguards, never reverse
+    // the destination of the entire army. Detached/new/transport-owned Reavers
+    // are not members of this squad and cannot recall it.
+    if (escorts.size() > 2) escorts.resize(2);
+    std::vector<Command> result;
+    const auto anchor = moveToward(support->position, objective, 128);
+    for (const auto* escort : escorts)
+        result.push_back({escort->id, CommandType::move, -1, anchor,
+                          UnitKind::unknown, 64, 0, "support-escort"});
+    return result;
 }
 
 bool SquadPlanner::canCounterattack(
@@ -519,6 +536,44 @@ std::vector<UnitSnapshot> SquadPlanner::tacticalTargets(
     }
     std::ranges::sort(targets, {}, &UnitSnapshot::id);
     return targets;
+}
+
+std::vector<UnitSnapshot> SquadPlanner::combatSupport(
+    const Squad& squad, const std::span<const UnitSnapshot> friendly,
+    const NavigationGrid* navigation) {
+    auto result = squad.units;
+    if (squad.enemies.empty() || squad.role == SquadRole::harassment || squad.withdrawing) return result;
+    for (const auto& ally : friendly) {
+        if (!ally.completed || ally.disabled || ally.loaded || ally.hallucination ||
+            !ally.position.valid() || !ally.powered ||
+            (!isCombatUnit(ally.kind) && !isStaticDefense(ally.kind)) ||
+            std::ranges::find(result, ally.id, &UnitSnapshot::id) != result.end()) continue;
+        const auto nearby = std::ranges::any_of(squad.units, [&ally, navigation](const UnitSnapshot& member) {
+            return distanceSquared(ally.position, member.position) <= 384 * 384 &&
+                (ally.flying || navigation == nullptr || navigation->empty() ||
+                 navigation->lineWalkable(ally.position, member.position));
+        });
+        if (!nearby) continue;
+        const auto supportsFight = std::ranges::any_of(squad.enemies, [&ally](const UnitSnapshot& enemy) {
+            const auto& weapon = enemy.flying ? ally.airWeapon : ally.groundWeapon;
+            return ally.canAttack(enemy) && weaponDistance(ally, enemy) >= weapon.minRange &&
+                weaponDistance(ally, enemy) <= weapon.maxRange + (isBuilding(ally.kind) ? 0 : 128);
+        });
+        if (supportsFight) result.push_back(ally);
+    }
+    return result;
+}
+
+DefenseArea SquadPlanner::expansionDefense(
+    const Squad& squad, const Position assembly, const Position expansion,
+    const DefenseArea currentDefense) noexcept {
+    // An expansion is a travel objective, not an emergency recall through an
+    // active battle. Keep the current fight/retreat policy until contact ends
+    // or the army has actually reached the expansion's defensive area.
+    const DefenseArea proposed{assembly, 448, expansion};
+    if (!assembly.valid() || (!squad.enemies.empty() && !proposed.contains(squad.center)))
+        return currentDefense;
+    return proposed;
 }
 
 DefenseArea SquadPlanner::defensiveArea(const GameState& state, const Position rally) {

@@ -7,6 +7,7 @@
 #include <cmath>
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace protodd {
 namespace {
@@ -153,6 +154,15 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     std::vector<ProductionGoal> mergedGoals;
     mergedGoals.reserve(goals.size());
     for (const auto& candidate : goals) {
+        // A fulfilled opening checkpoint cannot lend its priority to a larger,
+        // optional quota. Otherwise "two Gateways before tech" plus "four
+        // Gateways eventually" becomes four Gateways before tech forever.
+        if (candidate.goal != GoalKind::train) {
+            const auto fulfilled = candidate.technology != TechnologyKind::none
+                ? technologyLevel(state.self, candidate.technology) >= candidate.desiredCount
+                : countExisting(state, candidate.target) >= candidate.desiredCount;
+            if (fulfilled) continue;
+        }
         // Train goals are intentionally not merged: one demand can fill one
         // idle Gateway/Nexus, while a second independent train goal can fill a
         // second producer in the same pass.  Structure/expansion/research
@@ -171,16 +181,16 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             continue;
         }
         if (candidate.priority > existing->priority) {
-            existing->reason = candidate.reason;
+            *existing = candidate;
+        } else if (candidate.priority == existing->priority) {
+            existing->desiredCount = std::max(existing->desiredCount, candidate.desiredCount);
+            existing->blocking = existing->blocking || candidate.blocking;
         }
-        existing->desiredCount = std::max(existing->desiredCount,
-                                          candidate.desiredCount);
-        existing->priority = std::max(existing->priority, candidate.priority);
-        existing->blocking = existing->blocking || candidate.blocking;
     }
     goals = std::move(mergedGoals);
     std::unordered_map<UnitKind, int> planned;
     std::unordered_map<UnitKind, int> committedProducers;
+    std::unordered_set<UnitKind> gasStarvedProducers;
     // A blocking Pylon is a supply deadline, not a license to idle the
     // Nexus.  Before the game is within four supply of the cap, let a Probe
     // spend an otherwise-unaffordable Pylon's current mineral shortfall and
@@ -250,24 +260,48 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         // short builder trip. Normalize composition within each producer type.
         std::unordered_map<UnitKind, double> weights;
         std::unordered_map<UnitKind, double> rates;
+        std::unordered_map<UnitKind, int> firstCycle;
         for (const auto& target : plan.composition) {
             const auto producer = producerFor(target.kind);
             const auto& stats = unitStats(target.kind);
             if (producer == UnitKind::unknown || stats.buildTime <= 0 || target.weight <= 0) continue;
             weights[producer] += target.weight;
             rates[producer] += target.weight * stats.supply / stats.buildTime;
+            firstCycle[producer] = std::max(firstCycle[producer], stats.supply);
         }
-        double supplyPerFrame = 0.0;
-        for (const auto& [producer, weight] : weights) {
-            supplyPerFrame += usableProducers(state, producer) * rates[producer] / weight;
+        for (const auto& demand : plan.goals) {
+            if (demand.goal != GoalKind::train ||
+                countExisting(state, demand.target) >= demand.desiredCount) continue;
+            const auto producer = producerFor(demand.target);
+            if (producer != UnitKind::unknown)
+                firstCycle[producer] = std::max(firstCycle[producer], unitStats(demand.target).supply);
         }
         if (countExisting(state, UnitKind::probe) < plan.desiredWorkers) {
             const auto& probe = unitStats(UnitKind::probe);
-            supplyPerFrame += usableProducers(state, UnitKind::nexus) *
-                              static_cast<double>(probe.supply) / probe.buildTime;
+            weights[UnitKind::nexus] = 1.0;
+            rates[UnitKind::nexus] = static_cast<double>(probe.supply) / probe.buildTime;
+            firstCycle[UnitKind::nexus] = probe.supply;
         }
-        const auto forecast = static_cast<int>(std::ceil(
-            supplyPerFrame * (unitStats(UnitKind::pylon).buildTime + 96)));
+        // Include the next discrete queue commitment and producers finishing
+        // during construction. Used supply already includes the current queue;
+        // neither that queue nor a nearly complete Gateway is a smooth rate.
+        const auto horizon = unitStats(UnitKind::pylon).buildTime + 144;
+        double forecastSupply = 0.0;
+        for (const auto& producer : state.self.units) {
+            if (!firstCycle.contains(producer.kind) || producer.disabled || producer.loaded ||
+                producer.hallucination || (producer.completed && !producer.powered)) continue;
+            const auto availableIn = producer.completed ? std::max(0, producer.remainingTrainFrames)
+                : unitStats(producer.kind).buildTime *
+                    (100 - std::clamp(producer.buildProgress, 0, 100)) / 100;
+            if (availableIn > horizon) continue;
+            forecastSupply += firstCycle[producer.kind];
+            if (weights[producer.kind] > 0.0 && firstCycle[producer.kind] > 0) {
+                const auto cycles = static_cast<int>((horizon - availableIn) *
+                    rates[producer.kind] / weights[producer.kind] / firstCycle[producer.kind]);
+                forecastSupply += cycles * firstCycle[producer.kind];
+            }
+        }
+        const auto forecast = static_cast<int>(std::ceil(forecastSupply));
         const auto safetyMargin = std::max(std::clamp(2 + activeProducers * 2, 4, 16), forecast);
         const auto remaining = state.self.supplyTotal + pendingPylons * 16 - state.self.supplyUsed;
         const auto openingDeadline = pylons == 0 && state.self.supplyUsed >= 12;
@@ -470,6 +504,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         }
         if (goal.goal == GoalKind::train) {
             const auto producer = producerFor(goal.target);
+            if (unitStats(goal.target).gas > ledger.freeGas() &&
+                gasStarvedProducers.contains(producer)) continue;
             const auto producerCount = countCompleted(state, producer);
             if (producer != UnitKind::unknown && producerCount > 0 &&
                 queuedForProducer(state, producer) + committedProducers[producer] >=
@@ -549,6 +585,11 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         if (goal.blocking && !actions.back().reserved) {
             protectBlocking(goal.target, stats.minerals, stats.gas,
                             goal.priority);
+            // One future unit can reserve its mineral cost while gas arrives.
+            // Repeating that reservation for every idle Gateway locks the
+            // entire bank behind an income stream that may have been raided.
+            if (goal.goal == GoalKind::train && stats.gas > ledger.freeGas())
+                gasStarvedProducers.insert(producerFor(goal.target));
         }
     }
 
@@ -650,9 +691,13 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             if (existing->lastRequested == state.frame) {
                 // Several strategic signals may renew the same checkpoint.
                 // Preserve the strongest explicit request from this frame.
-                existing->desiredCount = std::max(existing->desiredCount, candidate.desiredCount);
-                if (candidate.priority > existing->priority) existing->reason = candidate.reason;
-                existing->priority = std::max(existing->priority, candidate.priority);
+                if (candidate.priority > existing->priority) {
+                    existing->desiredCount = candidate.desiredCount;
+                    existing->reason = candidate.reason;
+                    existing->priority = candidate.priority;
+                } else if (candidate.priority == existing->priority) {
+                    existing->desiredCount = std::max(existing->desiredCount, candidate.desiredCount);
+                }
             } else {
                 existing->desiredCount = candidate.desiredCount;
                 existing->priority = candidate.priority;

@@ -90,6 +90,12 @@ bool CommandBus::redundant(const Command& command) const {
     }
     const auto& previous = found->second;
     const auto age = frame_ - previous.frame;
+    // Let an accepted attack reach the engine before ordinary retargeting or
+    // formation orders replace it. Higher-priority escapes remain immediate.
+    if (previous.command.type == CommandType::attackUnit &&
+        age <= latencyFrames_ + 2 && command.priority <= previous.command.priority &&
+        (command.type == CommandType::attackUnit || command.type == CommandType::attackMove ||
+         command.type == CommandType::move || command.type == CommandType::hold)) return true;
     auto suppressionWindow = std::max(2, latencyFrames_ + 1);
     if (command.type == CommandType::attackUnit) {
         suppressionWindow = std::max(suppressionWindow, 18);
@@ -98,6 +104,11 @@ bool CommandBus::redundant(const Command& command) const {
         suppressionWindow = std::max(suppressionWindow, 24);
     } else if (command.type == CommandType::recharge) {
         suppressionWindow = std::max(suppressionWindow, 24);
+    } else if (command.type == CommandType::hold) {
+        // Hold is a persistent stance. Reissuing it every latency window
+        // repeatedly restarts acquisition and floods otherwise idle squads.
+        // Any intervening attack/move changes lastIssued_ and bypasses this.
+        suppressionWindow = std::max(suppressionWindow, 120);
     }
     if (age > suppressionWindow) {
         return false;

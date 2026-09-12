@@ -53,8 +53,8 @@ public:
     [[nodiscard]] static const Squad* selectVanguard(
         std::span<const Squad> squads,
         Position objective) noexcept;
-    [[nodiscard]] static Position supportRendezvous(
-        const GameState& state, const Squad& squad, Position objective) noexcept;
+    [[nodiscard]] static std::vector<Command> supportEscorts(
+        const Squad& squad, Position objective);
 
     [[nodiscard]] static bool mustHoldDefensiveScreen(
         const Squad& squad) noexcept;
@@ -63,11 +63,18 @@ public:
 
     [[nodiscard]] static DefenseArea defensiveArea(
         const GameState& state, Position rally);
+    [[nodiscard]] static DefenseArea expansionDefense(
+        const Squad& squad, Position assembly, Position expansion,
+        DefenseArea currentDefense = {}) noexcept;
 
     // Workers and unfinished/ordinary structures are legal tactical targets,
     // but must not inflate the army used for engagement simulation.
     [[nodiscard]] static std::vector<UnitSnapshot> tacticalTargets(
         const Squad& squad, std::span<const UnitSnapshot> hostiles);
+    // Evaluation context only: ownership and issued orders stay with each squad.
+    [[nodiscard]] static std::vector<UnitSnapshot> combatSupport(
+        const Squad& squad, std::span<const UnitSnapshot> friendly,
+        const NavigationGrid* navigation = nullptr);
 
     [[nodiscard]] static bool canCounterattack(
         const Squad& squad, const CombatEstimate& estimate, const StrategicPlan& plan);

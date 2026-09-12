@@ -11,6 +11,8 @@
 
 namespace protodd {
 
+class NavigationGrid;
+
 // Edge-to-edge weapon distance and per-volley damage, shared by targeting and
 // simulation. Remaining durability permits shields to deplete during a fight.
 [[nodiscard]] double weaponDistance(const UnitSnapshot& a, const UnitSnapshot& b) noexcept;
@@ -139,7 +141,9 @@ public:
         int latencyFrames = 0,
         bool psionicStormAvailable = false,
         DefenseArea defense = {},
-        TacticalIntent intent = TacticalIntent::battle) const;
+        TacticalIntent intent = TacticalIntent::battle,
+        std::span<const UnitSnapshot> support = {},
+        const NavigationGrid* navigation = nullptr) const;
 };
 
 }  // namespace protodd

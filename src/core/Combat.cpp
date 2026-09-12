@@ -1,6 +1,7 @@
 #include "protodd/Combat.hpp"
 
 #include "protodd/UnitCatalog.hpp"
+#include "protodd/Navigation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -422,18 +423,18 @@ const UnitSnapshot* CombatEvaluator::selectTarget(
                    !target.hallucination && attacker.canAttack(target) &&
                    distanceSquared(attacker.position, target.position) <= 224 * 224;
         });
-    const auto hasShot = !meleeAttacker && std::ranges::any_of(candidates,
+    const auto hasShot = std::ranges::any_of(candidates,
         [&attacker, allocations](const UnitSnapshot& target) {
             const auto reserved = std::ranges::find(allocations, target.id, &TargetAllocation::target);
             const auto committed = reserved == allocations.end() ? 0 : reserved->committedDamage;
             const auto& weapon = target.flying ? attacker.airWeapon : attacker.groundWeapon;
             const auto separation = weaponDistance(attacker, target);
-            return target.visible && target.detected && !target.invincible && !target.hallucination &&
+            return target.visible && target.detected && !target.loaded && !target.invincible && !target.hallucination &&
                    attacker.canAttack(target) && target.durability() > target.incomingDamage + committed &&
                    separation >= weapon.minRange && separation <= weapon.maxRange;
         });
     for (const auto& target : candidates) {
-        if (!target.visible || !target.detected || target.hallucination || target.invincible ||
+        if (!target.visible || !target.detected || target.loaded || target.hallucination || target.invincible ||
             !attacker.canAttack(target)) {
             continue;
         }
@@ -448,12 +449,16 @@ const UnitSnapshot* CombatEvaluator::selectTarget(
         const auto range = weaponDistance(attacker, target);
         if (hasCloseMeleeTarget && range > 224.0) continue;
         const auto weapon = target.flying ? attacker.airWeapon : attacker.groundWeapon;
-        if (range < weapon.minRange || (hasShot && range > weapon.maxRange + 32)) continue;
+        // A nearby legal hit is worth more than chasing a wounded unit through
+        // its entire army. Zealots likewise fight the blocking front rank.
+        if (range < weapon.minRange || (hasShot && range > weapon.maxRange)) continue;
         const auto splashTargets = attacker.kind == UnitKind::reaver
                                        ? std::ranges::count_if(
                                              candidates,
                                              [&target](const UnitSnapshot& candidate) {
                                                  return !candidate.flying && candidate.visible &&
+                                                        !candidate.loaded && !candidate.invincible &&
+                                                        !candidate.hallucination &&
                                                         distanceSquared(candidate.position,
                                                                         target.position) <=
                                                             96 * 96;
@@ -470,15 +475,19 @@ const UnitSnapshot* CombatEvaluator::selectTarget(
                                    : 0.0) +
                               static_cast<double>(splashTargets) * 0.9;
         const auto effectiveHealth = std::max(1.0, remainingHealth);
-        const auto killEfficiency = attackDamage(attacker, target, remainingHealth) / effectiveHealth;
+        const auto killEfficiency = std::min(1.0,
+            attackDamage(attacker, target, remainingHealth) / effectiveHealth);
         const auto inRange = range <= weapon.maxRange + 16 ? 2.0 : 0.0;
         const auto targetStability = target.id == attacker.orderTargetId &&
                                              range <= weapon.maxRange + 256
                                          ? 1.5
                                          : 0.0;
         const auto distanceDivisor = meleeAttacker ? 112.0 : 320.0;
+        const auto approachFrames = std::max(0.0, range - weapon.maxRange) /
+                                    std::max(0.5, attacker.topSpeed);
         const auto score = priority + killEfficiency * 4.0 + inRange + targetStability -
-                           range / distanceDivisor;
+                           range / distanceDivisor -
+                           approachFrames / std::max(12, weapon.cooldown) * 4.0;
         if (score > bestScore || (std::abs(score - bestScore) < 0.001 &&
                                   (best == nullptr || target.id < best->id))) {
             best = &target;
@@ -570,13 +579,16 @@ std::vector<Command> TacticalController::control(
     const Position formationCenter,
     const int latencyFrames,
     const bool psionicStormAvailable,
-    const DefenseArea defense, const TacticalIntent intent) const {
+    const DefenseArea defense, const TacticalIntent intent,
+    const std::span<const UnitSnapshot> support,
+    const NavigationGrid* navigation) const {
     std::vector<Command> commands;
     commands.reserve(friendly.size());
     CombatEvaluator evaluator;
     std::vector<TargetAllocation> allocations;
     allocations.reserve(enemy.size());
     std::vector<Position> plannedStorms;
+    const auto nearbyArmy = support.empty() ? friendly : support;
 
     std::vector<const UnitSnapshot*> ordered;
     ordered.reserve(friendly.size());
@@ -596,6 +608,61 @@ std::vector<Command> TacticalController::control(
         const auto localThreat = unit.flying ? local.airThreat : local.groundThreat;
         const auto protectedStep = [&defense](const Position proposed) {
             return defense.front.valid() && !defense.contains(proposed) ? defense.center : proposed;
+        };
+        const auto reposition = [&](const Position toward) {
+            // Small combat moves need a walkable segment, not just a safe
+            // destination across a cliff. Account for allies already moving
+            // this tick so retreating units do not all choose the same tile.
+            auto best = unit.position;
+            auto bestScore = std::numeric_limits<double>::infinity();
+            std::vector<Position> occupied;
+            for (const auto& ally : nearbyArmy) {
+                if (ally.id == unit.id || ally.flying != unit.flying || ally.loaded ||
+                    !ally.position.valid() || distanceSquared(unit.position, ally.position) > 160 * 160) continue;
+                const auto order = std::ranges::find(commands, ally.id, &Command::actor);
+                occupied.push_back(order != commands.end() && order->type == CommandType::move
+                    ? order->targetPosition : ally.position);
+            }
+            constexpr std::array<Position, 9> steps{{
+                {0, 0}, {-64, 0}, {64, 0}, {0, -64}, {0, 64},
+                {-45, -45}, {-45, 45}, {45, -45}, {45, 45}}};
+            for (const auto step : steps) {
+                const Position candidate{unit.position.x + step.x, unit.position.y + step.y};
+                if (!candidate.valid()) continue;
+                if (!unit.flying && navigation != nullptr && !navigation->empty()) {
+                    auto origin = unit.position;
+                    // The 32px grid is conservative. A legally observed unit
+                    // can stand on the passable edge of a rejected origin
+                    // cell. Admit that cell only, then check every following
+                    // cell; otherwise every escape direction is rejected.
+                    if (!navigation->walkable(origin)) {
+                        const auto cellSize = navigation->cellSize();
+                        for (auto stepDistance = 8; stepDistance <= cellSize * 2; stepDistance += 8) {
+                            const auto next = moveToward(unit.position, candidate, stepDistance);
+                            if (next.x / cellSize != unit.position.x / cellSize ||
+                                next.y / cellSize != unit.position.y / cellSize) {
+                                origin = next;
+                                break;
+                            }
+                        }
+                    }
+                    if (!navigation->lineWalkable(origin, candidate)) continue;
+                }
+                if (defense.active() && defense.contains(unit.position) && !defense.contains(candidate)) continue;
+                if (navigation != nullptr && !navigation->empty() &&
+                    (candidate.x >= navigation->width() * navigation->cellSize() ||
+                     candidate.y >= navigation->height() * navigation->cellSize())) continue;
+                const auto field = influence.at(candidate);
+                const auto threat = unit.flying ? field.airThreat : field.groundThreat;
+                auto crowding = 0.0;
+                for (const auto destination : occupied) {
+                    crowding += std::max(0.0, 48.0 - distance(candidate, destination)) / 48.0;
+                }
+                const auto score = threat * 5.0 + crowding * 0.8 +
+                    (distance(candidate, toward) - distance(unit.position, toward)) / 96.0;
+                if (score < bestScore) { bestScore = score; best = candidate; }
+            }
+            return best;
         };
         const auto fragile = unit.healthFraction() < 0.28;
         // Our BWAPI detected flag describes our own vision, not the enemy's.
@@ -662,8 +729,17 @@ std::vector<Command> TacticalController::control(
         // already shelling that unit or the economy. The old early return made
         // Dragoons walk away from a lone Tank on the ramp even after the fight
         // evaluator had accepted the engagement.
-        if (defense.active() && !covertAdvance && !defense.contains(unit.position) &&
-            !shellingDefender) {
+        const auto returningDefender = defense.active() && !covertAdvance &&
+            !defense.contains(unit.position) && !shellingDefender;
+        const auto readyDefensiveShot = !fragile && unit.weaponCooldown == 0 &&
+            std::ranges::any_of(enemy, [&unit](const UnitSnapshot& candidate) {
+                const auto& weapon = candidate.flying ? unit.airWeapon : unit.groundWeapon;
+                const auto range = weaponDistance(unit, candidate);
+                return candidate.visible && candidate.detected && !candidate.invincible &&
+                    !candidate.loaded && !candidate.hallucination && unit.canAttack(candidate) &&
+                    weapon.maxRange >= 96 && range >= weapon.minRange && range <= weapon.maxRange;
+            });
+        if (returningDefender && !readyDefensiveShot) {
             commands.push_back({unit.id, CommandType::move, -1,
                                 defense.center,
                                 UnitKind::unknown, 90, 0, "defense-return"});
@@ -757,7 +833,52 @@ std::vector<Command> TacticalController::control(
             }
         }
 
-        if (fragile || (!covertAdvance &&
+        const UnitSnapshot* closestThreat = nullptr;
+        auto nearestPressure = std::numeric_limits<double>::infinity();
+        auto pressurePower = 0.0;
+        auto pressureCount = 0;
+        for (const auto& threat : enemy) {
+            if (!threat.visible || !combatReady(threat) || threat.invincible ||
+                !threat.canAttack(unit)) continue;
+            const auto& response = unit.flying ? threat.airWeapon : threat.groundWeapon;
+            const auto separation = weaponDistance(unit, threat);
+            if (separation < response.minRange || separation > response.maxRange + 32) continue;
+            pressurePower += unitStats(threat.kind).combatValue * std::clamp(threat.healthFraction(), 0.5, 1.0);
+            ++pressureCount;
+            if (separation - response.maxRange < nearestPressure) {
+                closestThreat = &threat;
+                nearestPressure = separation - response.maxRange;
+            }
+        }
+        auto coveringPower = 0.0;
+        const UnitSnapshot* relief = nullptr;
+        auto reliefDistance = 224 * 224 + 1;
+        if (closestThreat != nullptr) {
+            for (const auto& ally : nearbyArmy) {
+                if (!combatReady(ally) || !ally.canAttack(*closestThreat)) continue;
+                const auto& weapon = closestThreat->flying ? ally.airWeapon : ally.groundWeapon;
+                const auto range = weaponDistance(ally, *closestThreat);
+                if (range >= weapon.minRange && range <= weapon.maxRange + 48)
+                    coveringPower += unitStats(ally.kind).combatValue * std::clamp(ally.healthFraction(), 0.5, 1.0);
+                const auto separation = distanceSquared(unit.position, ally.position);
+                if (ally.id == unit.id || ally.flying != unit.flying || isBuilding(ally.kind) ||
+                    ally.healthFraction() < 0.65 || ally.healthFraction() < unit.healthFraction() + 0.15 ||
+                    range > weapon.maxRange + 96 || separation < 32 * 32 || separation >= reliefDistance ||
+                    distance(ally.position, closestThreat->position) + 16 <
+                        distance(unit.position, closestThreat->position)) continue;
+                relief = &ally;
+                reliefDistance = separation;
+            }
+        }
+        const auto rotateWounded = !covertAdvance && relief != nullptr && unit.maxShields > 0 &&
+            unit.shields * 4 <= unit.maxShields && (unit.underAttack || unit.hitPoints * 5 < unit.maxHitPoints * 4);
+        const auto regroupFront = !covertAdvance && nearbyArmy.size() >= 3 && pressureCount >= 3 &&
+            formationCenter.valid() && closestThreat != nullptr &&
+            (closestThreat->flying ? unit.airWeapon.maxRange : unit.groundWeapon.maxRange) >= 96 &&
+            pressurePower > coveringPower * 1.6 &&
+            distance(formationCenter, closestThreat->position) > distance(unit.position, closestThreat->position) + 48;
+
+        if (fragile || returningDefender || rotateWounded || regroupFront || (!covertAdvance &&
                        (estimate.decision == FightDecision::retreat || locallyOverwhelmed))) {
             // Falling back must not silence a ready ranged volley. Only fire
             // at targets already in range; an attack order toward a distant
@@ -789,12 +910,15 @@ std::vector<Command> TacticalController::control(
                     continue;
                 }
             }
+            const auto fallback = returningDefender ? defense.center :
+                rotateWounded ? moveToward(relief->position, retreatPoint, 72) :
+                regroupFront ? formationCenter : retreatPoint;
             commands.push_back({
                 unit.id, CommandType::move, -1,
-                localThreat > 0.05F
-                    ? protectedStep(influence.safestStep(unit.position, retreatPoint, unit.flying))
-                    : protectedStep(retreatPoint),
-                UnitKind::unknown, fragile ? 100 : 86, 0, "combat-retreat",
+                localThreat > 0.05F || rotateWounded || regroupFront
+                    ? reposition(fallback) : protectedStep(fallback),
+                UnitKind::unknown, fragile ? 100 : 86, 0,
+                rotateWounded ? "rotate-wounded" : regroupFront ? "regroup-frontline" : "combat-retreat",
             });
             continue;
         }
@@ -913,7 +1037,7 @@ std::vector<Command> TacticalController::control(
                 };
                 commands.push_back({
                     unit.id, CommandType::move, -1,
-                    protectedStep(influence.safestStep(unit.position, away, unit.flying)),
+                    reposition(away),
                     UnitKind::unknown, 84, 0, "combat-kite",
                 });
             } else {

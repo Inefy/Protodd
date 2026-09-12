@@ -13,6 +13,7 @@
 
 #include <BWAPI.h>
 
+#include <functional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -49,9 +50,24 @@ struct MacroExecution {
     bool accepted{};
 };
 
+struct ActionDiagnostic {
+    UnitId actor{-1};
+    UnitId target{-1};
+    Position position{-1, -1};
+    std::string type;
+    std::string source;
+    std::string outcome;
+    int extra{};
+    bool attempted{};
+    bool accepted{};
+};
+
 class BwapiBridge {
 public:
     BwapiBridge() = default;
+
+    std::function<void(const ActionDiagnostic&)> actionDiagnostic;
+    [[nodiscard]] std::uint64_t diagnosticErrors() const noexcept { return diagnosticErrors_; }
 
     void onStart();
     [[nodiscard]] GameState observe();
@@ -111,12 +127,19 @@ private:
         Frame expires{};
     };
 
+    struct PlacementSearchState {
+        int offset{};
+        BWAPI::TilePosition fireFallback{BWAPI::TilePositions::None};
+        BWAPI::TilePosition laneFallback{BWAPI::TilePositions::None};
+    };
+
     struct ResourceSite {
         Position resourceCenter{-1, -1};
         Position depotCenter{-1, -1};
         Position mineralLine{-1, -1};
         BWAPI::TilePosition depotTile{BWAPI::TilePositions::None};
         std::vector<DefensivePosition> defenses{};
+        int groundDistanceFromStart{-1};
     };
 
     std::unordered_map<UnitId, UnitSnapshot> enemyMemory_;
@@ -125,12 +148,18 @@ private:
     std::unordered_map<int, Frame> baseLastConfirmedEmpty_;
     std::unordered_map<UnitKind, PendingBuild> pendingBuilds_;
     std::vector<FailedBuildSite> failedBuildSites_;
+    std::unordered_map<UnitKind, PlacementSearchState> placementSearches_;
     std::unordered_map<UnitId, Frame> unitCommandLocks_;
     std::vector<ResourceSite> resourceSites_;
     bool defensesInitialized_{};
     std::vector<SpellZone> recentAreaSpells_;
     std::string lastMacroStatus_{"idle"};
     std::vector<MacroExecution> macroExecutions_;
+    BWAPI::Error lastIssueError_{BWAPI::Errors::None};
+    std::uint64_t diagnosticErrors_{};
+
+    bool issue(const BWAPI::UnitCommand& command, std::string_view source);
+    bool reject(const Command& command, std::string_view reason);
 
     [[nodiscard]] static Race toRace(BWAPI::Race race) noexcept;
     [[nodiscard]] static DamageType toDamageType(BWAPI::DamageType type) noexcept;

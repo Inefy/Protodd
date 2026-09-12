@@ -113,6 +113,8 @@ economy, placement, and decision-conflict fixes, including failed experiments.
 The [opening and defense update](docs/report-improvements.md) records the
 report-driven opening guards, reinforcement budget, follow-up scouting, and
 local detection requirements, with regression and live-match validation.
+The [logging-driven strength pass](docs/logging-strength.md) records construction,
+supply, resource reservation, gas recovery, and scout fixes with frozen-binary tests.
 
 ## Local opponent ladder
 

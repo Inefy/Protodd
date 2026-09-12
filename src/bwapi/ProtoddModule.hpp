@@ -38,6 +38,8 @@ public:
     void onUnitDestroy(BWAPI::Unit unit) override;
     void onUnitMorph(BWAPI::Unit unit) override;
     void onUnitRenegade(BWAPI::Unit unit) override;
+    void onUnitCreate(BWAPI::Unit unit) override;
+    void onUnitComplete(BWAPI::Unit unit) override;
 
 private:
     BwapiBridge bridge_;
@@ -126,6 +128,22 @@ private:
     std::uint64_t commandsSuperseded_{};
     std::uint64_t commandsRedundant_{};
     std::uint64_t commandsDeferred_{};
+    std::map<std::string, std::uint64_t> actionTotals_;
+    struct LastAction { Frame frame{-1}; std::string source; std::string type; UnitId target{-1}; };
+    std::map<UnitId, LastAction> lastActions_;
+    std::map<UnitId, UnitSnapshot> damageSamples_;
+    std::map<std::string, DiagnosticEpisode> incidents_;
+    struct MotionSample { Position anchor{-1, -1}; Frame since{}; };
+    std::map<UnitId, MotionSample> motionSamples_;
+    const char* activePhase_{"startup"};
+    std::uint64_t caughtErrors_{};
+    std::uint64_t loggingErrors_{};
+
+    void logAction(const ActionDiagnostic& action) noexcept;
+    void logLifecycle(BWAPI::Unit unit, std::string_view event);
+    void logDamage();
+    void incident(std::string_view kind, UnitId unit, bool active, Frame threshold,
+                  std::string_view evidence);
 
     void runFrame();
     void updateStrategy();
@@ -143,7 +161,7 @@ private:
     void recordPerformance(Frame frame, std::int64_t elapsedUs);
     void flushPerformanceRecord();
     void trace(std::string key, std::string value, Frame heartbeat = 120,
-               std::string comparison = {});
+               std::string comparison = {}, Frame frame = -1);
 };
 
 }  // namespace protodd::bwapi

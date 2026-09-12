@@ -32,7 +32,7 @@ class DecisionTrace:
         self.health = deque(maxlen=10000)
         self.events = deque(maxlen=5000)
         self.squads = deque(maxlen=12000)
-        self.entities = deque(maxlen=720)
+        self.entities = deque(maxlen=1800)
         self.strategies = deque(maxlen=5000)
         self.macro_history = deque(maxlen=20000)
         self.belief_history = deque(maxlen=720)
@@ -53,6 +53,19 @@ class DecisionTrace:
         self.scouts = deque(maxlen=5000)
         self.decisions = {}
         self.transitions = deque(maxlen=12000)
+        self.diagnostics = {}
+        self.actions = deque(maxlen=12000)
+        self.action_totals = {}
+        self.action_examples = {}
+        self.incident_latest = {}
+        self.incident_totals = {}
+        self.damage_totals = Counter()
+        self.errors = deque(maxlen=1000)
+        self.error_count = 0
+        self.health_gaps = 0
+        self.largest_health_gap = 0
+        self.end_recorded = False
+        self.map_size = {"width": 2048, "height": 2048}
 
     def append(self, rows, item):
         if len(rows) == rows.maxlen:
@@ -67,9 +80,26 @@ class DecisionTrace:
             self.map = re.sub(r"[\x00-\x1f]", "", fields[1]) if len(fields) > 1 else "Unknown map"
             return
         if kind == "DIAGNOSTICS":
-            self.version = extras(fields[1:]).get("version")
+            self.diagnostics = extras(fields[1:])
+            self.version = self.diagnostics.get("version")
             return
-        supported = {"HEALTH", "SQUAD", "PHASE", "BELIEF", "ENTITY", "LOSS", "MACRO", "STRATEGY", "ORDER", "EVENT", "STATE", "WORKERS", "SCOUT"}
+        if kind == "MATCH":
+            metadata = extras(fields[1:])
+            for key in ("width", "height"):
+                value = metadata.get(key)
+                if isinstance(value, int) and value > 0:
+                    self.map_size[key] = value
+            return
+        if kind == "END":
+            try:
+                if fields[1] not in ("win", "loss") or int(fields[2]) < 0:
+                    raise ValueError("invalid end")
+                self.frame = max(self.frame, int(fields[2]))
+                self.end_recorded = True  # Not a verified runner outcome.
+            except (ValueError, IndexError):
+                self.malformed += 1
+            return
+        supported = {"HEALTH", "SQUAD", "PHASE", "BELIEF", "ENTITY", "LOSS", "MACRO", "STRATEGY", "ORDER", "EVENT", "STATE", "WORKERS", "SCOUT", "SNAPSHOT", "ACTION", "ACTION_TOTAL", "INCIDENT", "DAMAGE", "LIFECYCLE", "ERROR"}
         if kind not in supported:
             return
         try:
@@ -79,7 +109,70 @@ class DecisionTrace:
             self.frame = max(self.frame, frame)
             self.record_counts[kind] += 1
             if kind == "HEALTH":
+                if self.health:
+                    gap = frame - self.health[-1]["frame"]
+                    if gap > 48:
+                        self.health_gaps += 1
+                        self.largest_health_gap = max(self.largest_health_gap, gap)
                 self.append(self.health, {"frame": frame, **extras(fields[2:])})
+            elif kind == "SNAPSHOT":
+                if not self.entities or self.entities[-1]["frame"] != frame:
+                    self.append(self.entities, {"frame": frame, "units": []})
+            elif kind == "ACTION_TOTAL":
+                count = int(fields[5])
+                if count < 0 or fields[3] not in ("issued", "blocked"):
+                    raise ValueError("invalid action count")
+                self.action_totals[tuple(fields[2:5])] = {"count": count, "frame": frame}
+            elif kind == "ACTION":
+                row = {"frame": frame, "actor": int(fields[2]), "source": fields[3],
+                       "type": fields[4], "stage": fields[5], "outcome": fields[6], **extras(fields[7:])}
+                self.append(self.actions, row)
+                key = (row["source"], row["stage"], row["outcome"])
+                self.action_examples.setdefault(key, row)
+                self.append(self.events, {"frame": frame, "kind": "ACTION" if row["outcome"] == "accepted" else "ACTION_FAILURE",
+                    "actor": row["actor"], "text": f'#{row["actor"]} {row["source"]}: {row["type"]} → #{row.get("target", -1)} | {row["stage"]}: {row["outcome"]}'})
+            elif kind == "INCIDENT":
+                context = extras(fields[4:])
+                # Early v3 producers used unit= for the type name. It must
+                # never overwrite the positional unit ID or merge two units.
+                if "unit" in context:
+                    context["unitKind"] = context.pop("unit")
+                row = {**context, "frame": frame, "kind": fields[2], "unit": int(fields[3])}
+                since, duration = int(row["since"]), int(row["duration"])
+                if since < 0 or duration < 0 or since > frame or duration > frame - since:
+                    raise ValueError("invalid incident interval")
+                key = (row["kind"], row["unit"])
+                prior = self.incident_latest.get(key)
+                fresh = not prior or prior["since"] != since
+                total = self.incident_totals.setdefault(row["kind"],
+                    {"occurrences": 0, "duration_frames": 0, "first_frame": since, "last_frame": frame, "examples": []})
+                total["duration_frames"] += max(0, duration - (0 if fresh else prior["duration"]))
+                total["occurrences"] += int(fresh)
+                total["last_frame"] = frame
+                if fresh:
+                    total["examples"] = (total["examples"] + [row])[-5:]
+                self.incident_latest[key] = row
+                if fresh or not row.get("active"):
+                    self.append(self.events, {"frame": frame, "kind": "INCIDENT", "actor": row["unit"],
+                        "text": f'{row["kind"]} #{row["unit"]}: {duration / 24:.1f}s observed | ' +
+                                ("active" if row.get("active") else "resolved")})
+            elif kind == "DAMAGE":
+                row = {"frame": frame, "side": fields[2], "unit": int(fields[3]), "unit_kind": fields[4], **extras(fields[5:])}
+                amount = int(row["hpLoss"]) + int(row["shieldLoss"])
+                if amount < 0:
+                    raise ValueError("invalid damage")
+                self.damage_totals[(row["side"], str(row.get("lastAction", "unknown")))] += amount
+                self.append(self.events, {"frame": frame, "kind": "DAMAGE", "actor": row["unit"],
+                    "text": f'{row["side"]} {row["unit_kind"]} #{row["unit"]}: observed durability -{amount} | last action: {row.get("lastAction", "unknown")}'})
+            elif kind == "LIFECYCLE":
+                self.append(self.events, {"frame": frame, "kind": kind, "actor": int(fields[4]),
+                    "text": f'{fields[3]} {fields[5]} #{fields[4]}: {fields[2]} | ' + ", ".join(fields[6:])})
+            elif kind == "ERROR":
+                row = {"frame": frame, "message": fields[2], **extras(fields[3:])}
+                self.error_count = max(self.error_count + 1, int(row.get("total", 0)))
+                self.append(self.errors, row)
+                self.append(self.events, {"frame": frame, "kind": kind,
+                    "text": f'{row.get("phase", "unknown phase")}: {row["message"]}'})
             elif kind == "WORKERS":
                 self.worker_assignments = {"frame": frame, **extras(fields[2:])}
             elif kind == "SCOUT":
@@ -120,16 +213,28 @@ class DecisionTrace:
                 row = {"side": fields[2], "id": int(fields[3]), "kind": fields[4],
                        "x": int(fields[5]), "y": int(fields[6]), "hp": int(fields[7]),
                        "shields": int(fields[8]), "cooldown": int(fields[9]), "target": int(fields[10]),
-                       "lastSeen": int(fields[11]), "visible": bool(int(fields[12])), "order": fields[13]}
+                       "lastSeen": int(fields[11]), "visible": bool(int(fields[12])), "order": fields[13],
+                       **extras(fields[14:])}
+                self.map_size["width"] = max(self.map_size["width"], row["x"] + 32)
+                self.map_size["height"] = max(self.map_size["height"], row["y"] + 32)
                 if not self.entities or self.entities[-1]["frame"] != frame:
                     self.append(self.entities, {"frame": frame, "units": []})
                 self.entities[-1]["units"].append(row)
             elif kind == "LOSS":
                 row = {"frame": frame, "side": fields[2], "id": int(fields[3]), "kind": fields[4],
-                       "x": int(fields[5]), "y": int(fields[6]), "minerals": int(fields[7]), "gas": int(fields[8])}
+                       "x": int(fields[5]), "y": int(fields[6]), "minerals": int(fields[7]), "gas": int(fields[8]),
+                       **extras(fields[9:])}
+                # BWAPI prices Zerglings/Scourge by the two-unit egg. Older
+                # logs lack the explicit batch size but use the same prices.
+                batch_size = row.get("costBatchSize", 2 if row["kind"] in ("Zergling", "Scourge") else 1)
+                if batch_size not in (1, 2):
+                    raise ValueError("invalid loss cost batch size")
+                row["batch_minerals"], row["batch_gas"] = row["minerals"], row["gas"]
+                row["minerals"] /= batch_size
+                row["gas"] /= batch_size
                 self.losses.append(row)
                 self.append(self.events, {"frame": frame, "kind": kind,
-                    "text": f'{row["side"]} lost {row["kind"]} #{row["id"]} at {row["x"]},{row["y"]}'})
+                    "actor": row["id"], "text": f'{row["side"]} lost {row["kind"]} #{row["id"]} at {row["x"]},{row["y"]} | last action: {row.get("lastAction", "unknown")} | nearby visible enemies: {row.get("nearbyVisibleEnemies", "unknown")}'})
             elif kind == "MACRO":
                 key = "/".join(fields[2:5])
                 row = {"frame": frame, "target": fields[3], "technology": int(fields[4]), "status": fields[5],
@@ -198,10 +303,57 @@ class DecisionTrace:
                     "window_complete": self.frame >= squad["frame"] + 240})
         attempted = health.get("commandsAttempted")
         accepted = health.get("commandsAccepted")
+        action_outcomes = [{"source": source, "stage": stage, "outcome": outcome, **value,
+                            "first_frame": self.action_examples.get((source, stage, outcome), {}).get("frame")}
+                           for (source, stage, outcome), value in self.action_totals.items()]
+        rejected = sorted((r for r in action_outcomes if r["stage"] == "issued" and r["outcome"] != "accepted"),
+                          key=lambda r: -r["count"])
+        caught = max(self.error_count, int(health.get("caughtErrors", 0)))
+        checks = {
+            "idle-worker": "Inspect the worker assignment, resource target, builder/scout lease, and command outcome.",
+            "idle-production-with-bank": "Check unit demand, reserved resources, gas, supply, prerequisites, and the producer queue.",
+            "unpowered-building": "Review Pylon placement and losses, and whether production or detection lost power.",
+            "empty-ammunition": "Inspect ammunition funding and train outcomes before sending this unit into combat.",
+            "movement-stalled": "Review the movement destination, terrain, unit congestion, and repeated orders.",
+            "supply-blocked": "Compare Pylon intent, build acceptance, completion, and supply growth.",
+            "mineral-bank": "Compare spending goals, reservations, production capacity, and build failures.",
+            "expansion-stalled": "Inspect the builder's route, footprint, command outcome, and expansion cancellation.",
+        }
+        candidates = []
+        if caught:
+            candidates.append({"kind": "runtime-exception", "severity": "high", "frame": self.errors[0]["frame"] if self.errors else self.frame,
+                "evidence": f"{caught} caught exceptions; a subsystem may have skipped its update.",
+                "check": "Inspect ERROR phase and message, then the surrounding actions and state."})
+        for row in rejected[:8]:
+            candidates.append({"kind": "command-rejection", "severity": "high", "frame": row["first_frame"] if row["first_frame"] is not None else row["frame"],
+                "evidence": f'{row["source"]}: {row["count"]} BWAPI rejections ({row["outcome"]}).',
+                "check": "Inspect actor state and command target. Acceptance is a separate measure from completion."})
+        for kind, item in sorted(self.incident_totals.items(), key=lambda pair: -pair[1]["duration_frames"]):
+            candidates.append({"kind": kind, "severity": "review", "frame": item["first_frame"],
+                "evidence": f'{item["occurrences"]} episodes; {item["duration_frames"] / 24:.1f} observed unit-seconds.',
+                "check": checks.get(kind, "Inspect the incident's state and surrounding decisions.")})
+        for window in sorted(windows, key=lambda r: -r["own_resource_cost"])[:5]:
+            candidates.append({"kind": "costly-engagement", "severity": "review", "frame": window["frame"],
+                "evidence": f'{window["own_losses_next_10s"]} squad members lost, costing {window["own_resource_cost"]} minerals + gas, within the next 10 seconds.',
+                "check": "Compare the fight estimate, detection, damage, retreat orders, and loss context; this is correlation."})
+        unassigned_losses = [row for row in self.losses if row["side"] == "self" and
+                             (row["id"], row["frame"]) not in attributed]
+        for row in sorted(unassigned_losses, key=lambda r: -(r["minerals"] + r["gas"]))[:5]:
+            candidates.append({"kind": "unit-loss-outside-engagement-window", "severity": "review", "frame": row["frame"],
+                "evidence": f'{row["kind"]} #{row["id"]} lost; last accepted action: {row.get("lastAction", "unknown")}.',
+                "check": "Inspect this unit's damage and order history, nearby visible enemies, and assigned role."})
         return {"diagnostics_version": self.version, "last_frame": self.frame,
-            "supply_tight_seconds": health.get("supplyTightFrames", 0) / 24 if self.version else None,
-            "idle_gateway_seconds": health.get("idleGatewayFrames", 0) / 24 if self.version else None,
-            "idle_worker_seconds": health.get("idleWorkerFrames", 0) / 24 if self.version else None,
+            "supply_tight_seconds": health["supplyTightFrames"] / 24 if "supplyTightFrames" in health else None,
+            "idle_gateway_seconds": health["idleGatewayFrames"] / 24 if "idleGatewayFrames" in health else None,
+            "idle_worker_seconds": health["idleWorkerFrames"] / 24 if "idleWorkerFrames" in health else None,
+            "action_outcomes": action_outcomes, "rejected_commands": rejected,
+            "incidents": self.incident_totals, "improvement_candidates": candidates,
+            "observed_durability_decreases": [{"side": side, "last_action": source, "amount": value}
+                for (side, source), value in self.damage_totals.most_common()],
+            "caught_errors": caught, "logging_errors": health.get("loggingErrors"),
+            "health_gaps": self.health_gaps, "largest_health_gap_frames": self.largest_health_gap,
+            "end_recorded": self.end_recorded, "last_health_frame": health.get("frame"),
+            "entity_sample_frames": self.diagnostics.get("entityFrames"),
             "combat_command_acceptance": accepted / attempted if attempted else None,
             "combat_command_pipeline": {k: health.get(k) for k in ("commandsProposed", "commandsSuperseded",
                 "commandsRedundant", "commandsDeferred", "commandsAttempted", "commandsAccepted")},
@@ -217,8 +369,9 @@ class DecisionTrace:
             "retention_limited": self.retention_limited, "record_counts": dict(self.record_counts)}
 
     def payload(self, manifest=None):
-        return {"map": self.map, "frame": self.frame, "health": list(self.health),
+        return {"map": self.map, "mapSize": self.map_size, "frame": self.frame, "health": list(self.health),
             "events": list(self.events), "squads": list(self.squads), "entities": list(self.entities),
+            "actions": list(self.actions), "losses": self.losses,
             "scouts": list(self.scouts),
             "strategies": list(self.strategies), "macroHistory": list(self.macro_history),
             "beliefHistory": list(self.belief_history),
@@ -284,6 +437,114 @@ def render(payload=None):
 
 
 class DecisionReportTests(unittest.TestCase):
+    def test_losses_price_individual_units_from_paired_eggs(self):
+        trace = DecisionTrace()
+        trace.feed("LOSS,24,enemy,1,Zergling,100,100,50,0")
+        trace.feed("LOSS,24,enemy,2,Scourge,100,100,25,75,costBatchSize=2")
+        trace.feed("LOSS,24,self,3,Dragoon,100,100,125,50,costBatchSize=1")
+        self.assertEqual([(r["minerals"], r["gas"]) for r in trace.losses],
+                         [(25, 0), (12.5, 37.5), (125, 50)])
+
+    def test_explicit_individual_loss_prices_are_not_halved_again(self):
+        trace = DecisionTrace()
+        trace.feed("LOSS,24,enemy,1,Zergling,100,100,25,0,costBatchSize=1")
+        self.assertEqual(trace.losses[0]["minerals"], 25)
+        trace.feed("LOSS,24,enemy,2,Zergling,100,100,50,0,costBatchSize=0")
+        self.assertEqual(trace.malformed, 1)
+
+    def test_exact_action_counts_are_separate_from_sampled_detail(self):
+        trace = DecisionTrace()
+        for line in (
+            "DIAGNOSTICS,version=3,entityFrames=24",
+            "ACTION,10,7,worker-gas,Gather,issued,Unit Busy,target=9,hp=20",
+            "ACTION_TOTAL,24,worker-gas,issued,Unit Busy,12",
+            "ACTION_TOTAL,48,worker-gas,issued,Unit Busy,20",
+            "ACTION_TOTAL,48,combat,blocked,spell-command-lock,30",
+            "ACTION_TOTAL,48,worker-minerals,issued,accepted,50",
+        ):
+            trace.feed(line)
+        summary = trace.summary()
+        self.assertEqual(len(trace.actions), 1)
+        self.assertEqual(len(summary["rejected_commands"]), 1)
+        self.assertEqual(summary["rejected_commands"][0]["count"], 20)
+        self.assertEqual(summary["improvement_candidates"][0]["frame"], 10)
+        self.assertEqual(summary["entity_sample_frames"], 24)
+
+    def test_incident_heartbeats_do_not_double_count_duration(self):
+        trace = DecisionTrace()
+        for line in (
+            "INCIDENT,72,idle-worker,7,since=0,duration=72,active=1",
+            "INCIDENT,192,idle-worker,7,since=0,duration=192,active=1",
+            "INCIDENT,192,idle-worker,7,since=0,duration=192,active=1",
+            "INCIDENT,216,idle-worker,7,since=0,duration=216,active=0",
+            "INCIDENT,312,idle-worker,7,since=240,duration=72,active=1",
+            "HEALTH,1000,minerals=50",
+        ):
+            trace.feed(line)
+        total = trace.summary()["incidents"]["idle-worker"]
+        self.assertEqual(total["occurrences"], 2)
+        self.assertEqual(total["duration_frames"], 288)
+        self.assertEqual(total["last_frame"], 312)  # No extrapolation to EOF.
+
+    def test_incident_context_cannot_overwrite_unit_identity(self):
+        trace = DecisionTrace()
+        trace.feed("INCIDENT,120,idle-production-with-bank,7,since=0,duration=120,active=1,unit=Protoss_Gateway")
+        trace.feed("INCIDENT,120,idle-production-with-bank,8,since=0,duration=120,active=1,unitKind=Protoss_Gateway")
+        total = trace.summary()["incidents"]["idle-production-with-bank"]
+        self.assertEqual(total["occurrences"], 2)
+        self.assertEqual(total["duration_frames"], 240)
+        self.assertEqual(total["examples"][0]["unit"], 7)
+        self.assertEqual(trace.events[0]["actor"], 7)
+
+    def test_global_counters_survive_detail_retention(self):
+        trace = DecisionTrace()
+        trace.events = deque(maxlen=1)
+        trace.feed("INCIDENT,120,idle-worker,7,since=0,duration=120,active=1")
+        trace.feed("ACTION_TOTAL,120,worker-gas,issued,Unit_Busy,40")
+        trace.feed("EVENT,144,plan,changed")
+        self.assertTrue(trace.summary()["retention_limited"])
+        self.assertEqual(trace.summary()["incidents"]["idle-worker"]["duration_frames"], 120)
+        self.assertEqual(trace.summary()["rejected_commands"][0]["count"], 40)
+
+    def test_loss_context_damage_and_empty_snapshot_survive(self):
+        trace = DecisionTrace()
+        for line in (
+            "SNAPSHOT,24",
+            "ENTITY,24,self,7,Probe,100,100,20,10,0,-1,24,1,worker-gas,nativeOrder=Move,queue=,energy=0",
+            "DAMAGE,25,self,7,Probe,hpLoss=4,shieldLoss=10,lastAction=worker-gas",
+            "LOSS,26,self,7,Probe,100,100,50,0,lastAction=worker-gas,actionFrame=10,nearbyVisibleEnemies=8:Zealot;",
+            "SNAPSHOT,48",
+        ):
+            trace.feed(line)
+        self.assertEqual(trace.entities[0]["units"][0]["nativeOrder"], "Move")
+        self.assertEqual(trace.entities[-1]["units"], [])
+        self.assertEqual(trace.payload()["losses"][0]["actionFrame"], 10)
+        self.assertEqual(trace.summary()["observed_durability_decreases"][0]["amount"], 14)
+
+    def test_interrupted_logs_keep_issues_and_report_missing_coverage(self):
+        trace = DecisionTrace()
+        for line in ("DIAGNOSTICS,version=3", "HEALTH,24,minerals=0,caughtErrors=0",
+                     "ERROR,48,failed,phase=macro,total=4", "HEALTH,240,caughtErrors=8"):
+            trace.feed(line)
+        summary = trace.summary()
+        self.assertEqual(summary["caught_errors"], 8)
+        self.assertEqual(summary["health_gaps"], 1)
+        self.assertIsNone(summary["idle_worker_seconds"])
+        self.assertFalse(summary["end_recorded"])
+        trace.feed("END,loss,250")
+        self.assertTrue(trace.summary()["end_recorded"])
+        self.assertIsNone(trace.payload()["outcome"])
+        self.assertEqual(trace.frame, 250)
+
+    def test_new_records_validate_required_fields(self):
+        trace = DecisionTrace()
+        for line in ("INCIDENT,24,idle-worker,7,since=30,duration=-6,active=1",
+                     "ACTION_TOTAL,24,worker-gas,issued,error,-1", "ACTION,24,7",
+                     "DAMAGE,24,self,7,Probe,hpLoss=bad,shieldLoss=10"):
+            trace.feed(line)
+        self.assertEqual(trace.malformed, 4)
+        json.dumps(trace.payload(), allow_nan=False)
+
     def test_partial_and_replaced_live_file(self):
         import tempfile
         with tempfile.TemporaryDirectory() as folder:
