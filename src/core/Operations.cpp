@@ -69,7 +69,7 @@ std::vector<Command> clearExpansionFootprint(
         return unit.kind == UnitKind::nexus && distanceSquared(site, unit.position) < 96 * 96;
     })) return result;
     for (const auto& unit : state.self.units) {
-        if (!unit.completed || unit.loaded || unit.flying || unit.disabled || unit.attackFrame ||
+        if (!unit.completed || unit.loaded || unit.flying || unit.disabled || unit.attackFrame || unit.attackWindup ||
             unit.underAttack || !isCombatUnit(unit.kind) || isBuilding(unit.kind) ||
             !unit.position.valid() || std::abs(unit.position.x - site.x) > 104 ||
             std::abs(unit.position.y - site.y) > 88) continue;

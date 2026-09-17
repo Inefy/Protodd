@@ -63,6 +63,8 @@ public:
 
     [[nodiscard]] static DefenseArea defensiveArea(
         const GameState& state, Position rally);
+    [[nodiscard]] static bool shouldCoverExpansion(
+        const GameState& state, const StrategicPlan& plan) noexcept;
     [[nodiscard]] static DefenseArea expansionDefense(
         const Squad& squad, Position assembly, Position expansion,
         DefenseArea currentDefense = {}) noexcept;
@@ -78,6 +80,10 @@ public:
 
     [[nodiscard]] static bool canCounterattack(
         const Squad& squad, const CombatEstimate& estimate, const StrategicPlan& plan);
+    [[nodiscard]] static DefenseArea defensiveEngagementArea(
+        const Squad& squad, const CombatEstimate& estimate);
+    [[nodiscard]] static Position reinforcementDestination(
+        const Squad& squad, const Squad& vanguard, Position attackTarget);
 
 private:
     mutable HarassmentPlanner harassment_;

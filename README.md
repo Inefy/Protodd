@@ -115,6 +115,8 @@ report-driven opening guards, reinforcement budget, follow-up scouting, and
 local detection requirements, with regression and live-match validation.
 The [logging-driven strength pass](docs/logging-strength.md) records construction,
 supply, resource reservation, gas recovery, and scout fixes with frozen-binary tests.
+The [army control validation](docs/army-control-validation.md) records order
+persistence, retreat, staging, perimeter control and the latest actual match results.
 
 ## Local opponent ladder
 

@@ -204,7 +204,7 @@ std::vector<Command> TransportController::control(
                                        (economicTargets && !harassmentRouteSafe(state, *reaver, reaver->position)) ||
                                        !enemyNear(state, reaver->position, 448);
             if (shouldExtract) {
-                if (reaver->attackFrame && !dangerous && reaver->healthFraction() >= 0.58) {
+                if ((reaver->attackFrame || reaver->attackWindup) && !dangerous && reaver->healthFraction() >= 0.58) {
                     commands.push_back(moveCommand(shuttleId, reaver->position, 98, "shuttle-extract"));
                 } else if (separation <= 80 * 80) {
                     commands.push_back({shuttleId, CommandType::load, reaver->id,

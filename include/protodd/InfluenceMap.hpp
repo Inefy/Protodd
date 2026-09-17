@@ -19,6 +19,8 @@ public:
 
     void resize(int widthPixels, int heightPixels);
     void update(const GameState& state);
+    void updateStorms(std::span<const Position> storms);
+    [[nodiscard]] float stormDanger(Position position) const noexcept;
 
     [[nodiscard]] InfluenceCell at(Position position) const noexcept;
     [[nodiscard]] float maximumGroundThreat(
@@ -37,6 +39,7 @@ private:
     int width_{};
     int height_{};
     std::vector<InfluenceCell> cells_;
+    std::vector<Position> storms_;
 
     [[nodiscard]] std::size_t offset(int x, int y) const noexcept;
     void addThreat(const UnitSnapshot& unit, Frame currentFrame);

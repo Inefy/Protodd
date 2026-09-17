@@ -60,6 +60,28 @@ Squad records additionally expose `travelGoal` and `travelReason` (the mission
 destination and its owner), `objective` (which may be a short navigation waypoint),
 `retreat`, and `defenseCenter`. Compare these with actual `ENTITY` positions and
 accepted `ACTION` records; an Attack posture alone does not prove army movement.
+The viewer's Movement destination column shows the destination and whether it
+comes from attacking, assembling, joining the forward army, or expansion cover.
+
+Unit snapshots also record `groundRange`, `groundDamage`, `airRange`,
+`airDamage`, `armor`, `shieldArmor`, and `topSpeed`. Enemy values include the
+upgrade information BWAPI exposes for visible completed units and retain that
+observation in fog. Enemy resources, queues, and unobserved technology are not queried.
+
+Combat commands confirmed as still active in the engine count as redundant.
+They retain their priority in unit ownership without issuing another attack,
+move, or hold command. `attackWindup` separately identifies a just-issued,
+in-range own attack protected through latency plus ten frames; `attackFrame`
+still means the native BWAPI flag. Routine retargeting waits for that short
+windup, while Storm escape, critical-health escape and mission extraction can
+interrupt it. Stopped out-of-range attackers remain eligible for path retries.
+
+Visible Psionic Storm bullets from either player enter the hazard map. Escape
+uses exact spell positions with a clearance margin, terrain checks and local
+crowding; pursuit avoids stepping straight back into an active Storm. The fight
+simulation includes discounted enemy-only radial splash for Scarabs, Archons and
+Corsairs. It still uses fixed positions and does not model full pathing, projectile
+collisions, future spell casts or every weapon's splash geometry.
 
 `ORDER` rows are emitted when a unit's semantic intent changes and as a
 five-second heartbeat; small coordinate changes do not create a new row.

@@ -1,4 +1,5 @@
 #include "protodd/Strategy.hpp"
+#include "protodd/Technology.hpp"
 #include "protodd/Combat.hpp"
 #include "protodd/Harassment.hpp"
 
@@ -410,8 +411,11 @@ StrategicPlan StrategyEngine::plan(
     const auto establishedRangedLead = count(state, UnitKind::dragoon, true) >= 8 &&
         count(state, UnitKind::observer, true) > 0 && recentEnemyMobilePower > 0.0 &&
         ownMobilePower >= recentEnemyMobilePower * 3.0;
+    const auto splashScreenTarget = recentEnemyCount(state, UnitKind::dragoon) >= 5 ||
+        recentEnemyCount(state, UnitKind::reaver) > 0 ? 2 : 1;
     if (existingNexuses == 1 && result.desiredBases > 1 && rangedMirrorExpansion &&
-        count(state, UnitKind::reaver, true) == 0 && !establishedRangedLead && minute(state) < 12) {
+        count(state, UnitKind::reaver, true) < splashScreenTarget &&
+        !establishedRangedLead && minute(state) < 12) {
         // A six-Dragoon screen is not yet the planned combined army. Buying
         // the natural first outranks Robotics and moves those Dragoons away
         // from home while the first Reaver is still several production steps
@@ -428,8 +432,8 @@ StrategicPlan StrategyEngine::plan(
                  "splash screen before the natural", true);
             goal(result, GoalKind::build, UnitKind::roboticsSupportBay, 1, 113,
                  "complete splash support before the natural", true);
-            goal(result, GoalKind::train, UnitKind::reaver, 1, 114,
-                 "first splash defender before expansion", true);
+            goal(result, GoalKind::train, UnitKind::reaver, splashScreenTarget, 114,
+                 "complete the splash screen before expansion", true);
         }
     }
     if (existingNexuses == 1 && result.desiredBases > 1) {
@@ -437,6 +441,38 @@ StrategicPlan StrategyEngine::plan(
         // Always take the nearest resource base so matchup-specific danger or
         // richness scoring cannot skip the natural for a third/fourth location.
         result.expansionTarget = nearestExpansionSite(state);
+    }
+    auto exposedEconomy = false;
+    for (const auto& base : state.bases) {
+        if (base.ownerId != state.self.id) continue;
+        auto attackers = 0.0;
+        auto defenders = 0.0;
+        auto breached = false;
+        for (const auto& enemy : state.enemy.units) {
+            if (!enemy.visible || !enemy.completed || enemy.disabled || enemy.hallucination ||
+                !enemy.position.valid() || enemy.groundWeapon.damage <= 0 || isWorker(enemy.kind) ||
+                distanceSquared(enemy.position, base.center) > 640 * 640) continue;
+            attackers += unitStats(enemy.kind).combatValue * std::clamp(enemy.healthFraction(), 0.25, 1.0);
+            breached = breached || distanceSquared(enemy.position, base.center) <= 320 * 320;
+        }
+        if (attackers <= 0.0) continue;
+        for (const auto& ally : state.self.units) {
+            if (!ally.completed || ally.disabled || ally.loaded || ally.hallucination ||
+                (!isCombatUnit(ally.kind) && !isStaticDefense(ally.kind)) ||
+                distanceSquared(ally.position, base.center) > 800 * 800) continue;
+            defenders += unitStats(ally.kind).combatValue * std::clamp(ally.healthFraction(), 0.25, 1.0);
+        }
+        exposedEconomy = exposedEconomy || breached || attackers >= std::max(1.0, defenders * 0.65);
+    }
+    if (exposedEconomy) {
+        // An attack on the natural is an economic emergency too. The main-only
+        // threat classifier used to keep banking another Nexus and training
+        // Probes at every base while the mobile army defending it collapsed.
+        result.desiredBases = std::min(result.desiredBases, existingNexuses);
+        result.expansionTarget = {-1, -1};
+        result.sustainEconomy = false;
+        result.desiredWorkers = std::min(result.desiredWorkers, std::max(12, count(state, UnitKind::probe)));
+        result.name += " [reinforce threatened economy]";
     }
     if (!result.expansionTarget.valid()) {
         for (const auto& nexus : state.self.units) {
@@ -474,7 +510,7 @@ StrategicPlan StrategyEngine::plan(
     }
     addInfrastructure(result, state, threat);
 
-    result.prioritizeReinforcements = hardBreachAtMain(state) ||
+    result.prioritizeReinforcements = exposedEconomy || hardBreachAtMain(state) ||
         threat.combatEnemiesNearMain > 0 || activeApproach(state, threat) ||
         threat.immediateGround > 0.45 || threat.workerRush > 0.30 ||
         threat.proxy + threat.staticContain > 0.34;
@@ -560,6 +596,17 @@ StrategicPlan StrategyEngine::plan(
         suppressNew(UnitKind::observer, "fund six Dragoons before optional scouting detection");
         suppressNew(UnitKind::observatory, "defer optional detection until the ranged screen is ready");
     }
+    if (state.enemy.race == Race::protoss && count(state, UnitKind::roboticsFacility) > 0 &&
+        (result.requireMobileDetection || count(state, UnitKind::dragoon, true) >= 6 || minute(state) >= 10) &&
+        count(state, UnitKind::observer) == 0 &&
+        std::ranges::count(state.self.queuedUnits, UnitKind::observer) == 0) {
+        // The first detector is a completed-screen checkpoint. Lower-priority
+        // Observatory goals otherwise lose each gas deposit to splash and
+        // Gateway production until a hidden DT is already killing workers.
+        // A train demand also reserves its missing prerequisite at this tier.
+        goal(result, GoalKind::train, UnitKind::observer, 1, 124,
+             "complete the first detector before further splash and Gateway cycles", true);
+    }
     if (state.enemy.race == Race::protoss && minute(state) < 6 &&
         !rangedMirrorExpansion && recentEnemyCount(state, UnitKind::gateway) >= 2 &&
         count(state, UnitKind::forge) > 0 && count(state, UnitKind::photonCannon) == 0 &&
@@ -567,19 +614,34 @@ StrategicPlan StrategyEngine::plan(
         goal(result, GoalKind::build, UnitKind::photonCannon, 1, 122,
              "complete the first melee-rush anchor before further Gateway cycles", true);
     }
+    const auto rangeCommitted = technologyLevel(state.self, TechnologyKind::singularityCharge) > 0 ||
+        technologyInProgress(state.self, TechnologyKind::singularityCharge);
+    if (rangedMirrorExpansion && !hardBreachAtMain(state) && rangeCommitted &&
+        count(state, UnitKind::dragoon, true) >= 2 && count(state, UnitKind::dragoon) >= 4 &&
+        count(state, UnitKind::reaver) == 0) {
+        // The four committed Dragoons already own their production resources.
+        // Start the splash chain while they finish instead of buying several
+        // further Gateway cycles before even reserving Robotics gas.
+        goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 122,
+             "overlap splash technology with the committed ranged screen", true);
+        if (count(state, UnitKind::roboticsFacility) > 0)
+            goal(result, GoalKind::build, UnitKind::roboticsSupportBay, 1, 122,
+                 "finish splash technology before further Gateway cycles", true);
+    }
     const auto reaversCommitted = count(state, UnitKind::reaver) +
         static_cast<int>(std::ranges::count(state.self.queuedUnits, UnitKind::reaver));
-    if (state.enemy.race == Race::protoss && reaversCommitted == 0 &&
+    const auto fundedSplashTarget = count(state, UnitKind::dragoon, true) >= 6 ? splashScreenTarget : 1;
+    if (state.enemy.race == Race::protoss && reaversCommitted < fundedSplashTarget &&
         count(state, UnitKind::roboticsFacility) > 0 && count(state, UnitKind::roboticsSupportBay) > 0) {
         // Once the splash chain is paid for, four Gateway reinforcement goals
-        // must not spend every new 50 gas before the first 100-gas Reaver.
+        // must not spend every new 50 gas before the planned Reaver screen.
         // One urgent detector still comes first; its backups can follow splash.
         for (auto& demand : result.goals) {
             if (demand.goal == GoalKind::train && demand.target == UnitKind::observer)
                 demand.desiredCount = std::min(1, demand.desiredCount);
         }
-        goal(result, GoalKind::train, UnitKind::reaver, 1, 122,
-             "complete the paid-for splash transition before further Gateway cycles", true);
+        goal(result, GoalKind::train, UnitKind::reaver, fundedSplashTarget, 122,
+             "complete the paid-for splash screen before further Gateway cycles", true);
     }
     if ((result.posture == Posture::hold || result.posture == Posture::defend) &&
         !result.expansionTarget.valid() && !hardBreachAtMain(state)) {
@@ -588,6 +650,38 @@ StrategicPlan StrategyEngine::plan(
                    distanceSquared(candidate.center, home) <= 320 * 320;
         });
         if (base != state.bases.end()) result.rallyPoint = base->defense.anchor;
+    }
+    if (count(state, UnitKind::nexus, true) >= 2 && result.expansionTarget.valid() &&
+        result.rallyPoint == result.expansionTarget && result.attackTarget.valid()) {
+        const BaseSnapshot* front = nullptr;
+        for (const auto& base : state.bases) {
+            if (base.ownerId != state.self.id) continue;
+            if (front == nullptr || distanceSquared(base.center, result.attackTarget) <
+                                    distanceSquared(front->center, result.attackTarget)) front = &base;
+        }
+        if (front != nullptr)
+            result.rallyPoint = front->defense.valid() ? front->defense.anchor : front->center;
+    }
+    const auto spellEconomy = (count(state, UnitKind::nexus, true) >= 2 && count(state, UnitKind::probe) >= 28) ||
+        (minute(state) >= 9 && count(state, UnitKind::probe) >= 22 && !hardBreachAtMain(state));
+    const auto templarTransition = state.enemy.race == Race::protoss && spellEconomy &&
+        ((count(state, UnitKind::reaver, true) >= 2 &&
+          count(state, UnitKind::dragoon, true) + count(state, UnitKind::zealot, true) >= 10) ||
+         count(state, UnitKind::templarArchives) > 0);
+    if (templarTransition) {
+        // The economic transition replaces the opening composition. Reattach
+        // its spell capability here so a two-base army does not fight forever
+        // with only Gateway units and Reavers against a mature Protoss army.
+        goal(result, GoalKind::build, UnitKind::citadelOfAdun, 1, 123,
+             "unlock Storm for the established combined army", true);
+        goal(result, GoalKind::build, UnitKind::templarArchives, 1, 123,
+             "complete the combined army's spell technology", true);
+        technologyGoal(result, TechnologyKind::psionicStorm, 1, 123,
+                       "fund Storm before another economic expansion", true);
+        goal(result, GoalKind::train, UnitKind::highTemplar, 2, 121,
+             "field the first pair of army spellcasters", true);
+        setCompositionWeight(result, UnitKind::highTemplar, 0.12);
+        normalizeComposition(result);
     }
     addHarassmentProduction(result, state);
     std::ranges::stable_sort(result.goals, std::greater{}, &ProductionGoal::priority);
@@ -965,6 +1059,10 @@ StrategicPlan StrategyEngine::planPvP(
             goal(opening, GoalKind::build, UnitKind::gateway, 1, 100, "opening Gateway", true);
         if (supplyAtLeast(state, 12))
             goal(opening, GoalKind::build, UnitKind::assimilator, 1, 99, "opening gas", true);
+        if (supplyAtLeast(state, 12) && count(state, UnitKind::assimilator) > 0 &&
+            count(state, UnitKind::gateway) > 0)
+            goal(opening, GoalKind::build, UnitKind::cyberneticsCore, 1, 101,
+                 "ranged mirror Core before the optional melee queue", true);
         if (supplyAtLeast(state, 14)) {
             goal(opening, GoalKind::train, UnitKind::zealot, 1, 98, "opening bodyguard", true);
             goal(opening, GoalKind::build, UnitKind::cyberneticsCore, 1, 97, "timely ranged access", true);

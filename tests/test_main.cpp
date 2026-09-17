@@ -1665,6 +1665,19 @@ void testInfluenceAndCombat() {
         casters, meleeForce, estimate, {900, 900}, {100, 100}, emptyInfluence, {400, 400});
     expect(casterOrders.size() == 1 && casterOrders.front().source == "spellcaster-screen",
            "high-value spellcasters stay behind the formation screen");
+    for (const auto kind : {protodd::UnitKind::highTemplar, protodd::UnitKind::darkArchon,
+                            protodd::UnitKind::arbiter}) {
+        const auto isolated = unit(60, kind, true, {400, 3000});
+        const std::vector<protodd::UnitSnapshot> isolatedCaster{isolated};
+        protodd::CombatEstimate clearTravel;
+        clearTravel.decision = protodd::FightDecision::engage;
+        const protodd::Position destination{3000, 400};
+        const auto travelOrders = tactics.control(isolatedCaster, {}, clearTravel,
+            destination, {300, 3120}, emptyInfluence, isolated.position);
+        expect(travelOrders.size() == 1 && travelOrders.front().source == "spellcaster-travel" &&
+                   travelOrders.front().targetPosition == destination,
+               "an isolated support caster follows its regroup destination instead of holding at its own center");
+    }
 
     auto stormTemplar = templar;
     stormTemplar.energy = 100;
@@ -2876,7 +2889,8 @@ void testRangedDefense() {
     defender.position = {900, 500};
     orders = tactics.control(std::vector{defender}, std::vector{bait}, engage,
                              bait.position, area.center, influence, {}, 3, false, area);
-    expect(orders.size() == 1 && orders.front().source == "defense-return",
+    expect(orders.size() == 1 && orders.front().type == CommandType::move &&
+               distance(orders.front().targetPosition, area.center) < distance(defender.position, area.center),
            "an already drawn-out defender returns even when the local fight looks favorable");
     defender.position = {750, 500};
     defender.kind = UnitKind::dragoon;
@@ -3643,6 +3657,33 @@ void testContainmentRecovery() {
     expect(squads.size() == 1 && squads.front().role == SquadRole::mainArmy &&
                squads.front().units.size() == army.size(),
            "breaking containment keeps the assembled army together and releases its base leash");
+    auto assembledArmy = army;
+    for (auto& fighter : assembledArmy) fighter.position = {450, 512};
+    const auto assembledSquads = SquadPlanner{}.form(state, assembledArmy, state.enemy.units, plan, {512, 512});
+    expect(assembledSquads.size() == 1 && assembledSquads.front().role == SquadRole::mainArmy,
+        "an army assembled behind its choke can break out before reaching firing range");
+    auto distantArmy = army;
+    for (auto& fighter : distantArmy) fighter.position = {3000, 2000};
+    auto distantDefense = SquadPlanner{}.form(state, distantArmy, state.enemy.units, plan, {512, 512});
+    expect(std::ranges::any_of(distantDefense, [](const Squad& squad) {
+        return squad.role == SquadRole::baseDefense && !squad.units.empty();
+    }), "a breakout flag cannot leave the economy exposed while the field army is elsewhere");
+    auto recentThreat = state.enemy.units.front();
+    recentThreat.visible = false;
+    recentThreat.lastSeen = state.frame - 3 * 24;
+    distantDefense = SquadPlanner{}.form(state, distantArmy, std::vector{recentThreat}, plan, {512, 512});
+    expect(std::ranges::any_of(distantDefense, [](const Squad& squad) {
+        return squad.role == SquadRole::baseDefense && !squad.units.empty();
+    }), "a brief loss of sight cannot cancel the economic defense recall");
+    expect(SquadPlanner::shouldCoverExpansion(state, plan),
+        "the first natural establishes a new army screen");
+    auto expanded = state;
+    expanded.self.units.push_back(unit(400, UnitKind::nexus, true, {1536, 512}));
+    expect(!SquadPlanner::shouldCoverExpansion(expanded, plan),
+        "a later economic request cannot redirect the entire established field army");
+    expanded.self.units.back().completed = false;
+    expect(SquadPlanner::shouldCoverExpansion(expanded, plan),
+        "the first natural keeps its cover while construction finishes");
     auto timing = plan;
     timing.breakContainment = false;
     timing.minimumAttackSize = 8;
@@ -3659,8 +3700,17 @@ void testContainmentRecovery() {
            "retreating out of vision retains enemy risk without targeting hidden units");
     fog.lastSeen = state.frame - 9 * 24;
     fogSquads = SquadPlanner{}.form(state, army, std::vector{fog}, plan, {512, 512});
+    expect(fogSquads.front().enemies.size() == 1 &&
+               CombatEvaluator{}.selectTarget(army.front(), fogSquads.front().enemies) == nullptr,
+           "a ranged contain does not disappear after a brief loss of vision");
+    fog.lastSeen = state.frame - 21 * 24;
+    fogSquads = SquadPlanner{}.form(state, army, std::vector{fog}, plan, {512, 512});
     expect(fogSquads.front().enemies.empty(),
-           "short combat memory expires instead of creating a permanent ghost contain");
+           "bounded ranged memory expires instead of creating a permanent ghost contain");
+    fog.groundWeapon.maxRange = 32;
+    fog.lastSeen = state.frame - 9 * 24;
+    fogSquads = SquadPlanner{}.form(state, army, std::vector{fog}, plan, {512, 512});
+    expect(fogSquads.front().enemies.empty(), "melee sightings retain their shorter expiry");
     StrategicDirector director;
     static_cast<void>(director.stabilize({}, state, {}));
     expect(director.stabilize(plan, state, threat).posture == Posture::pressure,
@@ -3747,7 +3797,8 @@ void testContainmentRecovery() {
     for (const auto& order : escortOrders) travelBus.submit(order);
     const auto travelOrders = travelBus.finalize();
     expect(std::ranges::count_if(travelOrders, [destination](const Command& command) {
-        return command.type == CommandType::attackMove && command.targetPosition == destination;
+        return (command.type == CommandType::attackMove || command.type == CommandType::move) &&
+            command.targetPosition == destination;
     }) == 11, "eleven of thirteen units retain their forward destination while only two escort");
     travelling.enemies.push_back(unit(10, UnitKind::dragoon, false, {1200, 512}));
     expect(SquadPlanner::supportEscorts(travelling, destination).empty(),
@@ -3778,6 +3829,16 @@ void testOpeningRangedCommitment() {
     }
     state.bases = {{1, {512, 512}, {512, 600}, 8000, 5000, 1, 0, true, false, 8, 1}};
     state.self.busyProducers = {UnitKind::nexus};
+    auto coreTiming = state;
+    coreTiming.frame = 3100;
+    std::erase_if(coreTiming.self.units, [](const UnitSnapshot& own) {
+        return own.kind == UnitKind::cyberneticsCore || own.kind == UnitKind::zealot;
+    });
+    ResourceLedger coreBank{200, 100};
+    const auto coreActions = MacroPlanner{}.reconcile(coreTiming, StrategyEngine{}.plan(coreTiming, {}), coreBank);
+    expect(std::ranges::any_of(coreActions, [](const MacroAction& action) {
+        return action.target == UnitKind::cyberneticsCore && action.reserved && action.executable;
+    }), "the quiet ranged opener funds its Core as soon as the Gateway and gas are committed");
     state.self.units[3].completed = false;
     state.self.units[3].buildProgress = 50;
     MacroPlanner macro;
@@ -3864,7 +3925,9 @@ void testDefensiveTerrain() {
     const auto squads = SquadPlanner{}.form(state, army, state.enemy.units, plan, home);
     const auto defense = std::ranges::find(squads, SquadRole::baseDefense, &Squad::role);
     expect(defense != squads.end() && defense->defense.front == position.entrance &&
-               defense->retreat == position.anchor && !SquadPlanner::mustHoldDefensiveScreen(*defense),
+               distance(defense->retreat, home) <= 145 &&
+               distance(defense->retreat, enemy.position) > distance(position.anchor, enemy.position) &&
+               !SquadPlanner::mustHoldDefensiveScreen(*defense),
            "threats at a distant choke activate defense without forcing a losing downhill charge");
     if (defense != squads.end()) {
         expect(!defense->defense.contains(enemy.position) && defense->defense.contains(position.anchor),
@@ -4754,6 +4817,105 @@ void testLoggingStrengthRegressions() {
     expect(std::ranges::any_of(actions, [](const MacroAction& action) {
         return action.target == UnitKind::observer && action.reserved;
     }), "the first required mobile detector retains priority over splash");
+    auto hiddenTech = splash;
+    std::erase_if(hiddenTech.self.units, [](const UnitSnapshot& own) {
+        return own.kind == UnitKind::observatory;
+    });
+    auto hiddenTechPlan = StrategyEngine{}.plan(hiddenTech, {});
+    ResourceLedger detectionLedger{500, 100};
+    actions = MacroPlanner{}.reconcile(hiddenTech, hiddenTechPlan, detectionLedger);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::observatory && action.reserved;
+    }), "a completed ranged screen funds its first Observatory before splash without waiting to see a DT");
+    hiddenTech.self.units.push_back(unit(81, UnitKind::observatory, true));
+    hiddenTechPlan = StrategyEngine{}.plan(hiddenTech, {});
+    detectionLedger = {500, 75};
+    actions = MacroPlanner{}.reconcile(hiddenTech, hiddenTechPlan, detectionLedger);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::observer && action.reserved;
+    }), "the first preventive Observer receives its gas before Gateway reinforcement cycles");
+    auto rangedContain = hiddenTech;
+    rangedContain.self.units.push_back(unit(82, UnitKind::observer, true));
+    rangedContain.self.units.push_back(unit(83, UnitKind::reaver, true));
+    rangedContain.enemy.units.clear();
+    for (int i = 0; i < 6; ++i)
+        rangedContain.enemy.units.push_back(unit(90 + i, UnitKind::dragoon, false, {600 + i * 32, 2200}));
+    auto containPlan = StrategyEngine{}.plan(rangedContain, {});
+    ResourceLedger secondSplashBank{500, 100};
+    actions = MacroPlanner{}.reconcile(rangedContain, containPlan, secondSplashBank);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::reaver && action.reserved;
+    }), "a second splash unit receives gas before repeated Gateway cycles against a ranged contain");
+    expect(containPlan.desiredBases == 1 && !containPlan.expansionTarget.valid(),
+           "one Reaver does not send the whole screen through an established ranged contain to expand");
+    auto naturalAttack = mirror;
+    naturalAttack.frame = 14 * 60 * 24;
+    naturalAttack.self.supplyUsed = 160;
+    naturalAttack.self.supplyTotal = 260;
+    naturalAttack.self.units.push_back(unit(900, UnitKind::nexus, true, {400, 2200}));
+    naturalAttack.bases[1].ownerId = naturalAttack.self.id;
+    naturalAttack.bases.push_back({3, {1500, 3000}, {1500, 3100}, 8000, 5000, -1, 0, false, false, 8, 1});
+    naturalAttack.enemy.units = {unit(901, UnitKind::dragoon, false, {500, 2150})};
+    naturalAttack.enemy.units.front().groundWeapon = {20, 30, 0, 192, DamageType::normal, false, true};
+    const auto naturalDefensePlan = StrategyEngine{}.plan(naturalAttack, {});
+    expect(naturalDefensePlan.prioritizeReinforcements && !naturalDefensePlan.sustainEconomy &&
+        naturalDefensePlan.desiredWorkers == 22 && naturalDefensePlan.desiredBases <= 2 &&
+        !naturalDefensePlan.expansionTarget.valid(),
+        "an attack at the natural funds defenders before more Probes or a third Nexus even when the main is clear");
+    naturalAttack.enemy.units.clear();
+    expect(StrategyEngine{}.plan(naturalAttack, {}).desiredWorkers > 22,
+        "worker growth resumes when the economic attack clears");
+    auto earlyRobo = mirror;
+    earlyRobo.frame = 6500;
+    std::erase_if(earlyRobo.self.units, [](const UnitSnapshot& own) {
+        return own.kind == UnitKind::roboticsFacility || own.kind == UnitKind::roboticsSupportBay ||
+            own.kind == UnitKind::reaver || (own.kind == UnitKind::dragoon && own.id >= 54);
+    });
+    for (auto& own : earlyRobo.self.units)
+        if (own.kind == UnitKind::dragoon && own.id >= 52) own.completed = false;
+    earlyRobo.self.technologies = {{TechnologyKind::singularityCharge, 0, true}};
+    ResourceLedger earlyTechBank{500, 200};
+    actions = MacroPlanner{}.reconcile(earlyRobo, StrategyEngine{}.plan(earlyRobo, {}), earlyTechBank);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::roboticsFacility && action.reserved;
+    }), "four committed Dragoons can fund Robotics while the last two finish instead of buying another Gateway cycle");
+    auto spellArmy = naturalAttack;
+    spellArmy.enemy.units.clear();
+    spellArmy.self.units.push_back(unit(910, UnitKind::reaver, true));
+    spellArmy.self.units.push_back(unit(911, UnitKind::observer, true));
+    spellArmy.self.units.push_back(unit(912, UnitKind::observatory, true));
+    for (int i = 0; i < 6; ++i) spellArmy.self.units.push_back(unit(920 + i, UnitKind::probe, true, {400, 2200}));
+    for (int i = 0; i < 4; ++i) spellArmy.self.units.push_back(unit(930 + i, UnitKind::dragoon, true, {400, 2200}));
+    auto spellPlan = StrategyEngine{}.plan(spellArmy, {});
+    ResourceLedger spellBank{500, 200};
+    actions = MacroPlanner{}.reconcile(spellArmy, spellPlan, spellBank);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::citadelOfAdun && action.reserved;
+    }), "a two-base combined army funds its spell technology before another Nexus");
+    auto containedSpellArmy = spellArmy;
+    containedSpellArmy.frame = 9 * 60 * 24;
+    std::erase_if(containedSpellArmy.self.units, [](const UnitSnapshot& own) { return own.kind == UnitKind::nexus; });
+    containedSpellArmy.self.units.push_back(unit(942, UnitKind::nexus, true, {400, 2200}));
+    spellBank = {500, 200};
+    actions = MacroPlanner{}.reconcile(containedSpellArmy, StrategyEngine{}.plan(containedSpellArmy, {}), spellBank);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::citadelOfAdun && action.reserved;
+    }), "an established combined army can fund a containment-breaking spell transition without waiting for a second completed economy");
+    spellArmy.self.units.push_back(unit(940, UnitKind::citadelOfAdun, true));
+    spellArmy.self.units.push_back(unit(941, UnitKind::templarArchives, true));
+    spellPlan = StrategyEngine{}.plan(spellArmy, {});
+    spellBank = {500, 200};
+    actions = MacroPlanner{}.reconcile(spellArmy, spellPlan, spellBank);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.technology == TechnologyKind::psionicStorm && action.reserved;
+    }), "the completed Archives receive Storm funding before routine expansion and production");
+    spellArmy.self.technologies = {{TechnologyKind::psionicStorm, 1, false}};
+    spellPlan = StrategyEngine{}.plan(spellArmy, {});
+    spellBank = {500, 300};
+    actions = MacroPlanner{}.reconcile(spellArmy, spellPlan, spellBank);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::highTemplar && action.reserved;
+    }), "the completed spell is paired with real casters before more economic expansion");
     auto melee = mirror;
     melee.frame = 4400;
     std::erase_if(melee.self.units, [](const UnitSnapshot& own) { return isCombatUnit(own.kind); });
@@ -4862,6 +5024,25 @@ void testArmyUnitValue() {
     auto reaver = unit(3, UnitKind::reaver, true, {500, 500});
     reaver.ammo = 2;
     reaver.groundWeapon = {100, 60, 0, 256, DamageType::normal, false, true};
+    auto splashArmy = std::vector{reaver, dragoon};
+    std::vector<UnitSnapshot> packedEnemies;
+    for (int i = 0; i < 6; ++i) {
+        auto clustered = unit(970 + i, UnitKind::zealot, false, {700 + (i % 2) * 16, 480 + (i / 2) * 16});
+        clustered.groundWeapon = zealot.groundWeapon;
+        packedEnemies.push_back(clustered);
+    }
+    const auto withoutSplash = evaluator.evaluate(splashArmy, packedEnemies, 1.2, 0.0);
+    splashArmy.front().groundWeapon.splashInner = 20;
+    splashArmy.front().groundWeapon.splashMiddle = 40;
+    splashArmy.front().groundWeapon.splashOuter = 60;
+    const auto withSplash = evaluator.evaluate(splashArmy, packedEnemies, 1.2, 0.0);
+    expect(withSplash.simulatedEnemyRemaining < withoutSplash.simulatedEnemyRemaining &&
+        withSplash.ratio > withoutSplash.ratio,
+        "the fight simulation accounts for conservative Scarab collateral against a packed melee wave");
+    splashArmy.front().ammo = 0;
+    const auto emptySplash = evaluator.evaluate(splashArmy, packedEnemies, 1.2, 0.0);
+    expect(emptySplash.ratio < withSplash.ratio,
+        "splash evaluation cannot invent ammunition for an empty Reaver");
     auto worker = unit(103, UnitKind::probe, false, {500, 700});
     worker.hitPoints = 1;
     auto cluster = std::vector{close, blocker, worker};
@@ -4909,6 +5090,142 @@ void testArmyUnitValue() {
             {900, 500}, {200, 500}, InfluenceMap{}).empty(),
             "unit rotation preserves the entire attack animation, including melee hits");
     }
+
+    auto windingUp = dragoon;
+    windingUp.attackWindup = true;
+    expect(tactics.control(std::vector{windingUp}, std::vector{close}, engage,
+        {900, 500}, {200, 500}, InfluenceMap{}).empty(),
+        "a ready attack finishes its windup before ordinary target selection changes it");
+    auto withdrawing = engage;
+    withdrawing.decision = FightDecision::retreat;
+    expect(tactics.control(std::vector{windingUp}, std::vector{close}, withdrawing,
+        {900, 500}, {200, 500}, InfluenceMap{}).empty(),
+        "a brief squad retreat flip cannot cancel a healthy unit's in-range shot windup");
+    windingUp.underStorm = true;
+    const auto windupEscape = tactics.control(std::vector{windingUp}, std::vector{close}, engage,
+        {900, 500}, {200, 500}, InfluenceMap{});
+    expect(windupEscape.size() == 1 && windupEscape.front().source == "storm-escape",
+        "Storm escape still interrupts an unfinished attack immediately");
+    windingUp.underStorm = false;
+    windingUp.hitPoints = 10;
+    windingUp.shields = 0;
+    const auto woundedWindup = tactics.control(std::vector{windingUp}, std::vector{close}, engage,
+        {900, 500}, {200, 500}, InfluenceMap{});
+    expect(woundedWindup.size() == 1 && woundedWindup.front().type == CommandType::move,
+        "critically wounded units can abandon a shot windup to escape");
+
+    GameState stormState;
+    stormState.mapWidthPixels = stormState.mapHeightPixels = 2048;
+    stormState.storms = {{500, 500}, {540, 510}};
+    InfluenceMap stormField;
+    stormField.update(stormState);
+    expect(stormField.at({500, 500}).groundThreat > 10.0F &&
+        stormField.at({500, 500}).airThreat > 10.0F,
+        "visible Storms threaten both ground and air units, regardless of their caster");
+    auto stormVictim = dragoon;
+    stormVictim.attackWindup = true;
+    // The protected rally is itself in the spell; escape must use the hazard
+    // geometry instead of oscillating toward that nominally safe anchor.
+    auto hazardOrders = tactics.control(std::vector{stormVictim}, {}, engage,
+        {900, 500}, {540, 510}, stormField);
+    expect(hazardOrders.size() == 1 && hazardOrders.front().source == "storm-escape" &&
+        stormField.stormDanger(hazardOrders.front().targetPosition) < stormField.stormDanger(stormVictim.position),
+        "a visible overlapping Storm interrupts windup and escapes before the first underStorm damage flag");
+    stormVictim.attackWindup = false;
+    stormVictim.position = hazardOrders.front().targetPosition;
+    hazardOrders = tactics.control(std::vector{stormVictim}, {}, engage,
+        {900, 500}, {540, 510}, stormField);
+    expect(hazardOrders.size() == 1 &&
+        stormField.stormDanger(hazardOrders.front().targetPosition) < stormField.stormDanger(stormVictim.position),
+        "the next escape step keeps leaving overlapping Storms instead of returning toward the rally");
+    auto pursuitTarget = close;
+    pursuitTarget.position = {780, 500};
+    stormVictim.position = {370, 500};
+    hazardOrders = tactics.control(std::vector{stormVictim}, std::vector{pursuitTarget}, engage,
+        {900, 500}, {200, 500}, stormField);
+    expect(hazardOrders.size() == 1 && hazardOrders.front().source == "avoid-storm" &&
+        stormField.stormDanger(hazardOrders.front().targetPosition) == 0.0F,
+        "an out-of-range target cannot pull an escaped unit back through a live Storm");
+    stormState.storms.clear();
+    stormField.update(stormState);
+    expect(stormField.stormDanger({500, 500}) == 0.0F && stormField.at({500, 500}).groundThreat == 0.0F,
+        "expired Storm observations release the route immediately");
+
+    auto endangered = dragoon;
+    endangered.hitPoints = 10;
+    endangered.shields = 0;
+    auto ahead = close;
+    ahead.position = {750, 500};
+    const auto safeRetreat = tactics.control(std::vector{endangered}, std::vector{ahead}, engage,
+        {1000, 500}, {900, 500}, InfluenceMap{});
+    expect(safeRetreat.size() == 1 && safeRetreat.front().type == CommandType::move &&
+        safeRetreat.front().targetPosition.x < endangered.position.x,
+        "a wounded unit retreats away from fire when its strategic rally lies behind the enemy");
+    const DefenseArea pursuitBoundary{{600, 500}, 100};
+    std::vector<UnitSnapshot> assemblingArmy;
+    for (int i = 0; i < 20; ++i) {
+        auto assembling = dragoon;
+        assembling.id = 1100 + i;
+        assembling.position = {500, 500};
+        assemblingArmy.push_back(assembling);
+    }
+    const DefenseArea assemblyArea{{500, 500}, 320};
+    const auto assemblyOrders = tactics.control(assemblingArmy, {}, engage,
+        {500, 500}, {200, 500}, InfluenceMap{}, {}, 3, false, assemblyArea);
+    std::vector<Position> destinations;
+    for (const auto& command : assemblyOrders)
+        if (command.type == CommandType::move) destinations.push_back(command.targetPosition);
+    std::ranges::sort(destinations, [](const Position a, const Position b) {
+        return a.x != b.x ? a.x < b.x : a.y < b.y;
+    });
+    expect(destinations.size() >= 16 && std::adjacent_find(destinations.begin(), destinations.end()) == destinations.end() &&
+        std::ranges::all_of(destinations, [&assemblyArea](const Position point) { return assemblyArea.contains(point); }),
+        "a large idle army receives distinct valid staging positions instead of collapsing onto one hold point");
+    std::ranges::reverse(assemblingArmy);
+    const auto reorderedAssembly = tactics.control(assemblingArmy, {}, engage,
+        {500, 500}, {200, 500}, InfluenceMap{}, {}, 3, false, assemblyArea);
+    expect(assemblyOrders == reorderedAssembly,
+        "staging assignments stay stable when snapshot iteration order changes");
+    auto gatewayObstacle = unit(1200, UnitKind::gateway, true, {500, 500});
+    gatewayObstacle.dimensionLeft = gatewayObstacle.dimensionRight = 64;
+    gatewayObstacle.dimensionUp = gatewayObstacle.dimensionDown = 48;
+    const auto occupiedAssembly = tactics.control(assemblingArmy, {}, engage,
+        {500, 500}, {200, 500}, InfluenceMap{}, {}, 3, false,
+        {{500, 500}, 320, {500, 300}}, TacticalIntent::battle, {}, nullptr, std::vector{gatewayObstacle});
+    expect(std::ranges::all_of(occupiedAssembly, [](const Command& command) {
+        const auto point = command.targetPosition;
+        return command.type != CommandType::move ||
+            ((std::abs(point.x - 500) > 96 || std::abs(point.y - 500) > 80) &&
+             (std::abs(point.x - 500) > 112 || std::abs(point.y - 300) > 96));
+    }), "staging excludes both actual buildings and a reserved Nexus footprint so clearing cannot fight assembly");
+    auto safeRear = dragoon;
+    safeRear.position = {300, 500};
+    const DefenseArea forwardScreen{{600, 500}, 100, {200, 500}, {650, 500}};
+    const auto rearRetreat = tactics.control(std::vector{safeRear}, {}, withdrawing,
+        {900, 500}, {200, 500}, InfluenceMap{}, {}, 3, false, forwardScreen);
+    expect(rearRetreat.size() == 1 && rearRetreat.front().targetPosition.x <= safeRear.position.x,
+        "a losing squad's safe rear units retreat home instead of being recalled to a forward terrain screen");
+    auto boundaryRetreat = tactics.control(std::vector{endangered}, std::vector{ahead}, engage,
+        {900, 500}, {900, 500}, InfluenceMap{}, {}, 3, false, pursuitBoundary);
+    expect(boundaryRetreat.size() == 1 && boundaryRetreat.front().targetPosition.x < endangered.position.x,
+        "a pursuit boundary cannot trap a wounded defender at the edge of incoming fire");
+    endangered.position = {436, 500};
+    boundaryRetreat = tactics.control(std::vector{endangered}, std::vector{ahead}, engage,
+        {900, 500}, {900, 500}, InfluenceMap{}, {}, 3, false, pursuitBoundary);
+    expect(boundaryRetreat.size() == 1 && boundaryRetreat.front().targetPosition.x < endangered.position.x,
+        "crossing the pursuit boundary during retreat does not immediately command a return into fire");
+    auto casterOutside = unit(945, UnitKind::highTemplar, true, {800, 500});
+    casterOutside.energy = 100;
+    std::vector<UnitSnapshot> spellTargets;
+    for (int i = 0; i < 3; ++i) {
+        auto meleeTarget = unit(950 + i, UnitKind::zealot, false, {1040, 490 + i * 10});
+        meleeTarget.groundWeapon = {8, 22, 0, 32, DamageType::normal, false, true, 2};
+        spellTargets.push_back(meleeTarget);
+    }
+    const auto boundarySpell = tactics.control(std::vector{casterOutside}, spellTargets, engage,
+        {1040, 500}, {500, 500}, InfluenceMap{}, {}, 3, true, {{500, 500}, 256});
+    expect(boundarySpell.size() == 1 && boundarySpell.front().technology == TechnologyKind::psionicStorm,
+        "a ready Storm takes priority over recalling its caster across a pursuit boundary");
 
     auto frontline = dragoon;
     frontline.weaponCooldown = 20;
@@ -5015,9 +5332,140 @@ void testArmyUnitValue() {
     bus.beginFrame(180, 3);
     bus.submit(hold);
     expect(bus.finalize().size() == 1, "a unit can immediately return to holding after an intervening order");
+    bus.clear();
+    auto activeAttack = attack;
+    activeAttack.alreadyActive = true;
+    bus.beginFrame(500, 3);
+    bus.submit(activeAttack);
+    bus.submit({1, CommandType::move, -1, {200, 500}, UnitKind::unknown, 79, 0, "support-escort"});
+    expect(bus.finalize().empty() && bus.stats().redundant == 1,
+        "an engine-confirmed attack continues without reissue and still prevents a lower-priority escort from taking the unit");
+    bus.beginFrame(503, 3);
+    bus.submit(activeAttack);
+    bus.submit({1, CommandType::move, -1, {200, 500}, UnitKind::unknown, 110, 0, "storm-escape"});
+    expect(bus.finalize().size() == 1,
+        "an active persistent attack never blocks a higher-priority escape");
+    bus.beginFrame(506, 3);
+    bus.submit(retarget);
+    expect(bus.finalize().size() == 1,
+        "a new target is issued immediately when the native order no longer matches the desired attack");
+}
+
+void testDefensivePerimeterBreakout() {
+    using namespace protodd;
+    Squad squad;
+    squad.role = SquadRole::baseDefense;
+    const Position home{1000, 1000};
+    squad.defense = {home, 256, home};
+    squad.objective = {1650, 1000};
+    squad.retreat = home;
+    auto marine = unit(90, UnitKind::marine, false, squad.objective);
+    marine.groundWeapon = {6, 15, 0, 128, DamageType::normal, false, true};
+    squad.enemies = {marine};
+    for (int i = 0; i < 16; ++i) {
+        auto zealot = unit(100 + i, UnitKind::zealot, true, {1200, 850 + i * 24});
+        zealot.groundWeapon = {8, 22, 0, 32, DamageType::normal, false, true, 2};
+        squad.units.push_back(zealot);
+    }
+    CombatEstimate estimate;
+    estimate.decision = FightDecision::engage;
+    estimate.ratio = 2.0;
+    auto perimeter = SquadPlanner::defensiveEngagementArea(squad, estimate);
+    expect(perimeter.contains(marine.position) && !perimeter.contains({2100, 1000}),
+        "a strong mobile defense can clear nearby ranged containment but cannot chase across the map");
+    auto orders = TacticalController{}.control(squad.units, squad.enemies, estimate,
+        squad.objective, home, InfluenceMap{}, home, 3, false, perimeter);
+    expect(std::ranges::any_of(orders, [](const Command& command) {
+        return command.type == CommandType::attackUnit;
+    }), "reallocated defenders keep engaging a perimeter enemy instead of being recalled to Cannons");
+    estimate.decision = FightDecision::retreat;
+    perimeter = SquadPlanner::defensiveEngagementArea(squad, estimate);
+    expect(perimeter.pursuitRadius == 256, "a losing defense retains the protected screen");
+    estimate.decision = FightDecision::engage;
+    estimate.advanceBlocked = true;
+    expect(SquadPlanner::defensiveEngagementArea(squad, estimate).pursuitRadius == 256,
+        "a blocked advance cannot bypass detection readiness");
+    estimate.advanceBlocked = false;
+    const auto mobileArmy = squad.units;
+    squad.units.resize(6);
+    expect(SquadPlanner::defensiveEngagementArea(squad, estimate).pursuitRadius == 256,
+        "a small home guard cannot chase ranged bait on a favorable ratio alone");
+    squad.units = mobileArmy;
+    for (int i = 0; i < 14; ++i)
+        squad.units.push_back(unit(200 + i, UnitKind::photonCannon, true, home));
+    expect(SquadPlanner::defensiveEngagementArea(squad, estimate).pursuitRadius == 256,
+        "static defenses cannot inflate the mobile breakout force");
+}
+
+void testForwardReinforcementOwnership() {
+    using namespace protodd;
+    Squad front;
+    front.center = {3500, 500};
+    Squad rear;
+    rear.center = {1700, 500};
+    const Position enemyBase{3800, 500};
+    for (int i = 0; i < 13; ++i) {
+        auto fighter = unit(100 + i, UnitKind::dragoon, true, front.center);
+        fighter.groundWeapon = {20, 30, 0, 192, DamageType::explosive, false, true};
+        front.units.push_back(fighter);
+    }
+    expect(SquadPlanner::reinforcementDestination(front, rear, enemyBase) == enemyBase,
+        "a larger rear vanguard cannot recall thirteen uncontested fighters already at the enemy base");
+    auto trailing = front;
+    trailing.center = {900, 500};
+    expect(SquadPlanner::reinforcementDestination(trailing, rear, enemyBase) == rear.center,
+        "a trailing reinforcement group still joins the main army");
+    front.units.resize(1);
+    expect(SquadPlanner::reinforcementDestination(front, rear, enemyBase) == rear.center,
+        "an isolated forward unit still regroups instead of starting an unsupported attack");
+    front.units.assign(13, unit(200, UnitKind::highTemplar, true, front.center));
+    expect(SquadPlanner::reinforcementDestination(front, rear, enemyBase) == rear.center,
+        "support casters alone cannot qualify as an independent assault force");
+}
+
+void testPayloadReloadTravel() {
+    using namespace protodd;
+    const Position objective{1600, 800};
+    const Position retreat{200, 800};
+    CombatEstimate estimate;
+    estimate.decision = FightDecision::engage;
+    for (const auto kind : {UnitKind::reaver, UnitKind::carrier}) {
+        auto payload = unit(1, kind, true, {800, 800});
+        payload.flying = kind == UnitKind::carrier;
+        payload.groundWeapon = {100, 60, 0, 256, DamageType::normal, false, true};
+        payload.ammo = 0;
+        auto commands = TacticalController{}.control(std::vector{payload}, {}, estimate,
+            objective, retreat, InfluenceMap{});
+        expect(commands.size() == 1 && commands.front().type == CommandType::move &&
+            commands.front().targetPosition == objective,
+            "empty payload units continue their mission with a legal move while reloading");
+        payload.ammo = 1;
+        commands = TacticalController{}.control(std::vector{payload}, {}, estimate,
+            objective, retreat, InfluenceMap{});
+        expect(commands.size() == 1 && commands.front().type == CommandType::attackMove &&
+            commands.front().targetPosition == objective,
+            "reloaded payload units resume attack-move on the same mission");
+        auto target = unit(2, UnitKind::dragoon, false, {950, 800});
+        commands = TacticalController{}.control(std::vector{payload}, std::vector{target}, estimate,
+            objective, retreat, InfluenceMap{});
+        expect(commands.size() == 1 && commands.front().type == CommandType::attackUnit &&
+            commands.front().targetUnit == target.id,
+            "a replenished payload immediately attacks an available local target");
+        payload.ammo = 0;
+        auto withdrawing = estimate;
+        withdrawing.decision = FightDecision::retreat;
+        commands = TacticalController{}.control(std::vector{payload}, {}, withdrawing,
+            objective, retreat, InfluenceMap{});
+        expect(commands.size() == 1 && commands.front().type == CommandType::move &&
+            commands.front().targetPosition == retreat,
+            "reload travel never overrides a tactical retreat");
+    }
 }
 
 int main() {
+    testForwardReinforcementOwnership();
+    testDefensivePerimeterBreakout();
+    testPayloadReloadTravel();
     testArmyUnitValue();
     testLoggingStrengthRegressions();
     testDedicatedHarassmentAndMapEconomy();

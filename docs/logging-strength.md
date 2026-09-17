@@ -35,6 +35,8 @@ DLLs, fresh learning on both sides, and pre-cleanup results from the direct runn
 | `LOSS` used BWAPI's whole-egg purchase price for each destroyed Zergling or Scourge. | Record the production batch size and normalize reports to individual units, including older traces and fractional Scourge prices. |
 | In v5's full-supply Protoss game, an uncontested 33–51-unit army repeatedly received a destination behind itself to rendezvous with a trailing Reaver. | Replace whole-army rendezvous with individual orders for at most two nearby bodyguards per squad. New/detached/transport-owned Reavers cannot recall the army. |
 | Spare-fighter raids could recruit units from a full-army attack, then send them home on extraction. | A committed Attack posture starts no new spare-fighter raids; healthy active raiders join the main attack. Existing emergency withdrawals remain latched. |
+| In v7, two Dark Templar killed the workers while 21 combat units remained alive. The first Observatory/Observer kept losing gas to splash and Gateway cycles before the cloak alarm. | Once Robotics and six completed Dragoons are committed, protect the first Observer and its prerequisite above those repeated cycles. A required detector or ten-minute timing also enables the checkpoint. Backup detectors still yield to the first Reaver. |
+| In v8, a detached High Templar's squad repeatedly requested `join-vanguard`, but tactical control anchored it to its own center and held it near home. | High Templar, Dark Archons, and Arbiters use the squad's full destination during clear travel. Rear-screen positioning resumes on contact; existing retreat, Storm, and defensive restrictions retain precedence. |
 
 The supply forecast remains a heuristic rather than an income/placement simulation.
 Refinery threat checks use legal visible observations and eight seconds of enemy
@@ -151,7 +153,68 @@ v6 passed checks for the expansion handoff, conservative terrain origin, and
 paired-egg loss accounting. Its queued games were replaced before starting.
 v7 includes those fixes plus bounded escorts and attack/raid ownership. New
 `SQUAD.travelGoal`, `travelReason`, `retreat`, and `defenseCenter` fields distinguish
-the mission destination from a short navigation waypoint. Its game validation is pending.
+the mission destination from a short navigation waypoint.
+
+| v7 opponent | Natural result |
+| --- | --- |
+| UAB Protoss | Loss at 17,238 |
+| BananaBrain | Loss at 14,200 |
+| UAB Zerg | Loss at 11,844 |
+
+These games ended before a large late-game attack. Their absence of backward
+attack goals does not validate departure or sustained forward movement. The
+BananaBrain trace showed a different failure from the earlier ranged fights:
+two undetected Dark Templar entered the mineral line while the mobile army
+waited for detection. At frame 11,040, 21 combat units remained but only one
+Probe survived. v8 adds the first-detector checkpoint and passes both its
+missing-Observatory and ready-Observatory resource-allocation regressions.
+Its Terran game won at 36,768; BananaBrain won at 20,493. The first Observatory
+completed at 9,312 and Observer at 9,936 in the BananaBrain game. That game had
+no observed Dark Templar, so it validates the earlier detection timing, not
+defense against the previous game's DT attack. It still lost the larger ranged
+fight and its economy. The Terran trace has a 16.270 ms whole-frame peak and zero
+frames at least 42 ms.
+
+The v8 Terran run validates actual late army departure: at frame 35,832 a
+56-unit army centered at 3495x836 was attacking toward 3808x464. From the
+closeout transition at 32,040 through the win, none of 197 sampled frames with
+at least eight older combat units had a quarter of them within 768 pixels of
+the main Nexus. v5 Terran had 16 such samples out of 273. Units completed less
+than 720 frames earlier are excluded from this older-unit measurement. This
+does not measure time in transit around every expansion or establish a win rate.
+
+The raw travel audit reports six apparent backward-goal samples in v8 Terran;
+all occur during cleanup at the enemy base (frames 36,384–36,720). Inspection
+shows the mission switching between 3808x464 and a remaining structure at
+3808x144, ahead of the next five-second `STATE` sample. They are not returns
+home. Recorded late-attack `raid-extract` unit snapshots fell from 990 in v5
+Terran to eight in v8; this includes the tail of already-latched withdrawals
+and comes from games of different duration.
+
+Earlier in that same v8 win, High Templar 595 remained within the main's
+768-pixel radius from completion at 23,832 through 28,416. It appeared in 182
+uncontested squad samples during that period. For example, its one-unit squad
+was centered at 408x3368 with a `join-vanguard` goal at 592x1948, yet the caster
+held its own rear screen. This is distinct from the Reaver rendezvous fault.
+v9 corrects clear travel for all three support-caster types and passes isolated
+caster regressions while retaining the existing combat-screen and Storm tests.
+Its Terran follow-up lost at 15,998, with a peak army of six and no Templar
+production. Therefore the new caster path has regression coverage but no live
+game coverage in this pass. Its whole-frame peak was 14.432 ms with no frames
+at least 42 ms. The earlier v8 win demonstrates the large-army travel fixes;
+it must not be presented as a v9 win.
+
+There were 23 completed development games across the frozen builds: six wins
+and 17 losses, with no interrupted/timeout results counted. All 23 traces have
+zero caught errors, logging errors, malformed records, or health gaps. The
+v5 Terran win had three frames at least 42 ms and one at least 55 ms (90.746 ms
+peak); its later v8 game had none. These are whole-game observations under
+different battlefield states, not isolated performance or win-rate comparisons.
+
+The confirmed army-destination, raid-ownership, and isolated-caster faults are
+corrected. Reliable early-rush defense and beating BananaBrain remain unresolved:
+all eight BananaBrain development games were losses. One map/seed and individual
+games per candidate cannot establish general playing strength or ensure every win.
 
 ## Reproduction and artifacts
 
@@ -163,18 +226,24 @@ v3 is `43D7A8B73717EC27904F0DF48E79CF16DC0BC2F157D5515A134F810C58452A05`;
 v4 is `623D39B28A17C8B373042768582DB8FB10C4269CCDC5D5DBC27960BD7A33FA1B`;
 v5 is `240E555C58352694783127AB5AE897DA5BDACF9A34D6312294A670C718E9A83C`;
 v6 is `057043D4C4635F622200296E260C03807FE6F9F4B24F4BB81F88EF8FE0FEAA77`;
-v7 is `C9BDCB79C2469A211F8DE9D517CA47A6F68544B4AF9CF8A6678FE47BF27674EF`.
+v7 is `C9BDCB79C2469A211F8DE9D517CA47A6F68544B4AF9CF8A6678FE47BF27674EF`;
+v8 is `49E1C91E4FA3CD0FEDDCEF25218BB417DF2CAF45F84B721129D6D04C3889F45D`;
+v9 is `B1541F6E62CC733DCC97B68427FECA42F455F2B7D21984C9D1C6B8FF143A5EB9`.
 
 ```powershell
 ./scripts/direct-match.ps1 -OpponentName BananaBrain -OpponentRace Protoss `
   -OpponentOpening PvP_nzcore -Seed 43 -Label unique-test-label `
-  -BotDll build/logging-strength/candidate-v7.dll -FrameLimit 43200
+  -BotDll build/logging-strength/candidate-v9.dll -FrameLimit 43200
 ```
 
 Authoritative manifests, archived traces, and offline decision reports are under
 `build/direct-logs/logging-strength-*`. Opponent/map/configuration hashes and
 the observed seed are in each manifest. Generated comparison data are under
 `build/logging-strength/`; local game/opponent assets remain Git-ignored.
+`metrics.json`, `unit-value.json`, `travel-audit.json`, and `caster-audit.json`
+preserve the measurements and their scope. The final default DLL is v9 at
+`build/tournament/Release/Protodd.dll`; its frozen binary, complete source ZIP,
+and file-hash manifest are retained as `candidate-v9*`.
 
 Regression scenarios cover structure priority tiers, supply during Gateway
 completion, pending Pylon credit, the first hull damage and Core warning, orphaned
@@ -183,7 +252,10 @@ pressure, nearby support, expansion release, early bio priorities, and complete
 coverage of bounded placement scans. Army-control regressions cover in-range
 target choice, pursuit cost, melee blockers, splash overkill, loaded targets,
 melee/ground/air relief, attack animations, unsupported frontline regrouping,
-ready defensive volleys, cliffs, latency, and emergency overrides.
+ready defensive volleys, cliffs, latency, emergency overrides, bounded Reaver
+escorts, attack/raid ownership, expansion handoff, first detection, and detached
+support-caster travel. The viewer exposes movement reasons and destinations;
+its updated JavaScript also passes Node's syntax check.
 All five Release CTest suites and the strict verifier pass. The verifier
 includes C++ warning-as-error compilation, BWAPI adapter compilation, 38 Python
 regressions, privacy checks, and whitespace checks.

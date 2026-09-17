@@ -233,6 +233,11 @@ GameState BwapiBridge::observe() {
         defensesInitialized_ = true;
     }
     state.bases = snapshotBases(state);
+    for (const auto bullet : Broodwar->getBullets()) {
+        if (bullet != nullptr && bullet->exists() && bullet->isVisible() &&
+            bullet->getType() == BulletTypes::Psionic_Storm && bullet->getPosition().isValid())
+            state.storms.push_back(fromBwapi(bullet->getPosition()));
+    }
     return state;
 }
 
@@ -317,6 +322,46 @@ bool BwapiBridge::reject(const Command& command, const std::string_view reason) 
         command.source, std::string(reason), static_cast<int>(command.technology), false, false});
     } catch (...) { ++diagnosticErrors_; }
     return false;
+}
+
+bool BwapiBridge::commandActive(const Command& command) const {
+    const auto actor = Broodwar->getUnit(command.actor);
+    if (actor == nullptr || !actor->exists() || actor->getPlayer() != Broodwar->self() ||
+        !actor->isCompleted() || actor->isLoaded()) return false;
+    const auto last = actor->getLastCommand();
+    const auto order = actor->getOrder();
+    const auto moving = std::hypot(actor->getVelocityX(), actor->getVelocityY()) > 0.1;
+    const auto sameDestination = command.targetPosition.valid() &&
+        distanceSquared(command.targetPosition, fromBwapi(last.getTargetPosition())) <= 8 * 8;
+    if (command.type == CommandType::move) {
+        // A stationary blocked mover remains eligible for a route retry.
+        return last.getType() == UnitCommandTypes::Move && sameDestination && moving &&
+            (order == Orders::Move || order == Orders::ReaverCarrierMove);
+    }
+    if (command.type == CommandType::attackMove) {
+        return last.getType() == UnitCommandTypes::Attack_Move && sameDestination && !actor->isIdle() &&
+            (moving || actor->isAttacking() || actor->isStartingAttack());
+    }
+    if (command.type == CommandType::attackUnit) {
+        const auto target = Broodwar->getUnit(command.targetUnit);
+        if (target == nullptr || !target->exists() || !target->isVisible() ||
+            last.getType() != UnitCommandTypes::Attack_Unit || last.getTarget() != target ||
+            (actor->getOrderTarget() != target && actor->getTarget() != target)) return false;
+        // BWAPI normalizes Carrier/Reaver attack states to AttackUnit.
+        if (order != Orders::AttackUnit) return false;
+        const auto type = actor->getType();
+        const auto payload = type == UnitTypes::Protoss_Reaver || type == UnitTypes::Protoss_Carrier;
+        const auto weaponType = target->isFlying() ? type.airWeapon() : type.groundWeapon();
+        const auto range = payload ? 8 * 32 : actor->getPlayer()->weaponMaxRange(weaponType);
+        // A stopped attacker outside weapon range is not an active volley.
+        // It may have lost its path and must remain eligible for a retry.
+        const auto waitingInRange = !actor->isMoving() && !actor->isStuck() &&
+            actor->getDistance(target) <= range;
+        return waitingInRange || moving || actor->isAttacking() || actor->isStartingAttack() ||
+            Broodwar->getFrameCount() - actor->getLastCommandFrame() <= 48;
+    }
+    return command.type == CommandType::hold && last.getType() == UnitCommandTypes::Hold_Position &&
+        order == Orders::HoldPosition;
 }
 
 bool BwapiBridge::execute(const Command& command) {
@@ -994,9 +1039,16 @@ WeaponSnapshot BwapiBridge::weapon(const BWAPI::WeaponType type) noexcept {
     if (type == WeaponTypes::None || type == WeaponTypes::Unknown) {
         return {};
     }
-    return {type.damageAmount(), type.damageCooldown(), type.minRange(), type.maxRange(),
+    auto result = WeaponSnapshot{type.damageAmount(), type.damageCooldown(), type.minRange(), type.maxRange(),
             toDamageType(type.damageType()), type.targetsAir(), type.targetsGround(),
             type.damageFactor()};
+    if (type == WeaponTypes::Scarab || type == WeaponTypes::Psionic_Shockwave ||
+        type == WeaponTypes::Neutron_Flare) {
+        result.splashInner = type.innerSplashRadius();
+        result.splashMiddle = type.medianSplashRadius();
+        result.splashOuter = type.outerSplashRadius();
+    }
+    return result;
 }
 
 UnitSnapshot BwapiBridge::snapshotUnit(const BWAPI::Unit unit, const bool ours) {
@@ -1076,11 +1128,17 @@ UnitSnapshot BwapiBridge::snapshotUnit(const BWAPI::Unit unit, const bool ours) 
         result.groundWeapon = garrison;
         result.airWeapon = garrison;
     }
-    if (ours && unit->getPlayer() != nullptr) {
+    // BWAPI 4.4 exposes enemy upgrade levels when a completed unit using the
+    // upgrade is visible (PlayerImpl::updateData). Use that legal observation
+    // instead of treating every enemy as permanently unupgraded. Fog snapshots
+    // retain these observed values; they never query an unseen player's tech.
+    if ((ours || (result.visible && result.detected && result.completed)) &&
+        unit->getPlayer() != nullptr) {
         const auto owner = unit->getPlayer();
         result.armor = owner->armor(type);
         result.shieldArmor = owner->getUpgradeLevel(UpgradeTypes::Protoss_Plasma_Shields);
         result.topSpeed = owner->topSpeed(type);
+        result.sightRange = owner->sightRange(type);
         if (kind == UnitKind::reaver) {
             result.groundWeapon.damage = unit->getPlayer()->damage(WeaponTypes::Scarab);
         } else if (kind == UnitKind::carrier) {
@@ -1097,6 +1155,19 @@ UnitSnapshot BwapiBridge::snapshotUnit(const BWAPI::Unit unit, const bool ours) 
             result.airWeapon.damage = owner->damage(type.airWeapon()) /
                                       std::max(1, type.airWeapon().damageFactor());
             result.airWeapon.maxRange = owner->weaponMaxRange(type.airWeapon());
+        }
+    }
+    if (ours && result.weaponCooldown == 0) {
+        const auto lastAttack = unit->getLastCommand();
+        const auto target = lastAttack.getTarget();
+        const auto age = Broodwar->getFrameCount() - unit->getLastCommandFrame();
+        if (lastAttack.getType() == UnitCommandTypes::Attack_Unit && target != nullptr &&
+            target->exists() && target->isVisible() && target->isDetected() &&
+            age >= 0 && age <= Broodwar->getLatencyFrames() + 10) {
+            const auto& attack = target->isFlying() ? result.airWeapon : result.groundWeapon;
+            const auto separation = unit->getDistance(target);
+            result.attackWindup = attack.damage > 0 && separation >= attack.minRange &&
+                separation <= attack.maxRange;
         }
     }
     return result;
@@ -1222,7 +1293,13 @@ std::vector<BaseSnapshot> BwapiBridge::snapshotBases(const GameState& state) {
                 ++mineralPatches;
             }
         }
-        for (const auto geyser : Broodwar->getGeysers()) {
+        // Refinery construction removes the neutral unit from getGeysers().
+        // The site's gas geometry is permanent: otherwise our own Assimilator
+        // makes the natural look mineral-only and redirects its pending Nexus
+        // (and the covering army) to a distant, supposedly gas-bearing base.
+        // Static resources are initial map information; getResources retains
+        // BWAPI's legally observed amount, including when the unit is hidden.
+        for (const auto geyser : Broodwar->getStaticGeysers()) {
             if (closeTo(site.resourceCenter, fromBwapi(geyser->getInitialPosition()), 352)) {
                 gas += geyser->getResources();
                 ++geysers;

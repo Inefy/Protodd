@@ -84,6 +84,7 @@ void CommandBus::clear() {
 }
 
 bool CommandBus::redundant(const Command& command) const {
+    if (command.alreadyActive) return true;
     const auto found = lastIssued_.find(command.actor);
     if (found == lastIssued_.end()) {
         return false;

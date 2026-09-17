@@ -538,6 +538,7 @@ void ProtoddModule::updateCombat(
     const bool runSimulation,
     const int navigationInterval,
     const std::size_t commandLimit) {
+    influence_.updateStorms(state_.storms);
     const auto transportOrders = transports_.control(
         state_, plan_.attackTarget, retreatPoint(), influence_,
         plan_.prioritizeReinforcements ? 100 : (state_.enemy.race == Race::protoss ? 2 : 1), true, &navigation_);
@@ -562,10 +563,15 @@ void ProtoddModule::updateCombat(
         navigationRefresh_ = state_.frame;
     }
     commands_.beginFrame(state_.frame, state_.latencyFrames);
+    const auto submit = [this](Command command) {
+        command.alreadyActive = bridge_.commandActive(command);
+        commands_.submit(std::move(command));
+    };
     fight_ = {};
     auto debugSquadSize = std::size_t{0};
     const auto logSquads = lastSquadLogFrame_ < 0 || state_.frame - lastSquadLogFrame_ >= 24;
     const auto* vanguard = SquadPlanner::selectVanguard(formed, plan_.attackTarget);
+    const auto coverExpansion = SquadPlanner::shouldCoverExpansion(state_, plan_);
     for (std::size_t squadIndex = 0; squadIndex < formed.size(); ++squadIndex) {
         const auto& squad = formed[squadIndex];
         auto requiredRatio = squad.requiredRatio;
@@ -580,7 +586,7 @@ void ProtoddModule::updateCombat(
         }
         if (squad.role == SquadRole::mainArmy) {
             travelReason = "attack-target";
-            if (plan_.expansionTarget.valid() && plan_.posture != Posture::attack)
+            if (coverExpansion)
                 objective = expansionAssemblyPoint(state_, plan_.expansionTarget, retreatPoint());
             const auto undersizedVanguard =
                 vanguard == &squad &&
@@ -595,7 +601,7 @@ void ProtoddModule::updateCombat(
                 requiredRatio = squad.enemies.empty()
                                     ? 0.88
                                     : (undersizedVanguard ? 1.18 : 1.05);
-                objective = plan_.expansionTarget.valid()
+                objective = coverExpansion
                     ? expansionAssemblyPoint(state_, plan_.expansionTarget, retreatPoint()) : plan_.rallyPoint;
                 defense = SquadPlanner::defensiveArea(state_, plan_.rallyPoint);
             } else if (vanguard != nullptr && vanguard != &squad &&
@@ -603,11 +609,10 @@ void ProtoddModule::updateCombat(
                 // Detached reinforcements join the strongest mobile component
                 // instead of launching a second, usually losing attack wave.
                 requiredRatio = 0.88;
-                objective = vanguard->center;
-                travelReason = "join-vanguard";
+                objective = SquadPlanner::reinforcementDestination(squad, *vanguard, plan_.attackTarget);
+                travelReason = objective == plan_.attackTarget ? "continue-assault" : "join-vanguard";
             }
-            if (plan_.expansionTarget.valid() && plan_.posture != Posture::attack &&
-                vanguard == &squad) {
+            if (coverExpansion && vanguard == &squad) {
                 const auto assembly = expansionAssemblyPoint(
                     state_, plan_.expansionTarget, retreatPoint());
                 objective = assembly;
@@ -665,6 +670,14 @@ void ProtoddModule::updateCombat(
         estimate.holdScreen = SquadPlanner::mustHoldDefensiveScreen(squad);
         estimate.advanceBlocked = squad.role != SquadRole::baseDefense &&
             !SquadPlanner::mobileDetectionReady(state_, squad);
+        if (squad.role == SquadRole::baseDefense &&
+            SquadPlanner::mobileDetectionReady(state_, squad)) {
+            const auto perimeter = SquadPlanner::defensiveEngagementArea(squad, estimate);
+            if (perimeter.pursuitRadius > defense.pursuitRadius) {
+                defense = perimeter;
+                travelReason = "clear-base-perimeter";
+            }
+        }
         if (!estimate.advanceBlocked && supportedArmy.size() == squad.units.size() &&
             SquadPlanner::canCounterattack(squad, estimate, plan_)) {
             // A global defense response must not trap an independently strong
@@ -686,7 +699,7 @@ void ProtoddModule::updateCombat(
             estimate.decision == FightDecision::kite ? "Fire and reposition" :
             !squad.enemies.empty() ? "Local fight accepted" :
             defense.front.valid() ? "Occupy defensive terrain" :
-            plan_.expansionTarget.valid() && plan_.posture != Posture::attack
+            coverExpansion
                 ? "Cover expansion" : "Assemble / advance";
         if (log_ && logSquads) {
             log_ << "SQUAD," << state_.frame << ',' << squadRoleName(squad.role)
@@ -723,29 +736,29 @@ void ProtoddModule::updateCombat(
                  technologyLevel(state_.self, TechnologyKind::psionicStorm) > 0,
                  defense, squad.withdrawing ? TacticalIntent::withdraw :
                      squad.role == SquadRole::harassment ? TacticalIntent::raid : TacticalIntent::battle,
-                 supportedArmy, &navigation_)) {
-            commands_.submit(order);
+                 supportedArmy, &navigation_, state_.self.units)) {
+            submit(order);
         }
         if (aggressive)
-            for (const auto& order : SquadPlanner::supportEscorts(squad, objective)) commands_.submit(order);
+            for (const auto& order : SquadPlanner::supportEscorts(squad, objective)) submit(order);
     }
     if (logSquads) lastSquadLogFrame_ = state_.frame;
 
     for (const auto& order : clearExpansionFootprint(state_, plan_.expansionTarget,
-             expansionAssemblyPoint(state_, plan_.expansionTarget, retreatPoint()))) commands_.submit(order);
+             expansionAssemblyPoint(state_, plan_.expansionTarget, retreatPoint()))) submit(order);
 
     for (const auto& order : tactics_.recharge(state_.self.units,
                                               plan_.posture == Posture::defend)) {
-        commands_.submit(order);
+        submit(order);
     }
 
     detectorEscorts_.clear();
     for (const auto& order : squads_.detectorEscorts(state_, formed, influence_)) {
         detectorEscorts_.push_back(order.actor);
-        commands_.submit(order);
+        submit(order);
     }
     for (const auto& order : transportOrders) {
-        commands_.submit(order);
+        submit(order);
     }
     // BWAPI calls are capped per combat tick. Priority-aware rotation keeps
     // retreat and detector orders immediate while bounding large-army spikes.
@@ -1138,7 +1151,14 @@ void ProtoddModule::logDiagnostics() {
                      << ",loaded=" << unit.loaded << ",transport=" << unit.transportId
                      << ",underAttack=" << unit.underAttack << ",underStorm=" << unit.underStorm
                      << ",detected=" << unit.detected << ",cloaked=" << unit.cloaked
-                     << ",attackFrame=" << unit.attackFrame;
+                     << ",attackFrame=" << unit.attackFrame
+                     << ",attackWindup=" << unit.attackWindup
+                     << ",groundRange=" << unit.groundWeapon.maxRange
+                     << ",groundDamage=" << unit.groundWeapon.damage
+                     << ",airRange=" << unit.airWeapon.maxRange
+                     << ",airDamage=" << unit.airWeapon.damage
+                     << ",armor=" << unit.armor << ",shieldArmor=" << unit.shieldArmor
+                     << ",topSpeed=" << unit.topSpeed;
                 // Enemy queues and orders in fog are never queried.
                 if (unit.ours) {
                     const auto native = BWAPI::Broodwar->getUnit(unit.id);

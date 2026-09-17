@@ -19,6 +19,7 @@ void InfluenceMap::resize(const int widthPixels, const int heightPixels) {
 }
 
 void InfluenceMap::update(const GameState& state) {
+    updateStorms(state.storms);
     if (width_ * cellSize_ < state.mapWidthPixels ||
         height_ * cellSize_ < state.mapHeightPixels || cells_.empty()) {
         resize(state.mapWidthPixels, state.mapHeightPixels);
@@ -49,7 +50,26 @@ InfluenceCell InfluenceMap::at(const Position position) const noexcept {
     }
     const auto x = std::clamp(position.x / cellSize_, 0, width_ - 1);
     const auto y = std::clamp(position.y / cellSize_, 0, height_ - 1);
-    return cells_[offset(x, y)];
+    auto result = cells_[offset(x, y)];
+    const auto hazard = stormDanger(position) * 16.0F;
+    result.groundThreat += hazard;
+    result.airThreat += hazard;
+    return result;
+}
+
+void InfluenceMap::updateStorms(const std::span<const Position> storms) {
+    storms_.assign(storms.begin(), storms.end());
+}
+
+float InfluenceMap::stormDanger(const Position position) const noexcept {
+    auto danger = 0.0F;
+    for (const auto center : storms_) {
+        if (!center.valid()) continue;
+        // Include the unit footprint and a small clearance margin. Use exact
+        // coordinates so a coarse cell boundary cannot reverse an escape.
+        danger += static_cast<float>(std::max(0.0, 112.0 - distance(position, center)) / 112.0);
+    }
+    return danger;
 }
 
 float InfluenceMap::maximumGroundThreat(

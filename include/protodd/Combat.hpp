@@ -143,7 +143,8 @@ public:
         DefenseArea defense = {},
         TacticalIntent intent = TacticalIntent::battle,
         std::span<const UnitSnapshot> support = {},
-        const NavigationGrid* navigation = nullptr) const;
+        const NavigationGrid* navigation = nullptr,
+        std::span<const UnitSnapshot> obstacles = {}) const;
 };
 
 }  // namespace protodd

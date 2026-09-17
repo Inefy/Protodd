@@ -42,7 +42,9 @@ double allocationPower(const UnitSnapshot& unit) {
 }
 
 Position defensiveScreen(const GameState& state, const BaseSnapshot& base) {
-    if (base.defense.valid()) return base.defense.anchor;
+    // The terrain anchor can be hundreds of pixels ahead of this economy.
+    // It is an assembly position, not a safe destination for a losing army.
+    if (base.defense.valid()) return moveToward(base.center, base.defense.anchor, 144.0);
     if (!base.mineralLine.valid() || base.mineralLine == base.center) return base.center;
     const Position away{
         base.center.x + base.center.x - base.mineralLine.x,
@@ -94,9 +96,8 @@ std::vector<Squad> SquadPlanner::form(
     std::unordered_set<UnitId> assigned;
     auto nextId = 1;
 
-    // Build a defense detachment only for a real, visible threat near an owned
-    // base. Size it by combat value rather than headcount: three tanks require
-    // a very different response from three Zerglings.
+    // Size economic defense by recently observed combat value. Briefly losing
+    // sight of a ranged contain must not release its defenders across the map.
     struct BaseThreat {
         const BaseSnapshot* base{};
         std::vector<UnitSnapshot> enemies;
@@ -108,7 +109,8 @@ std::vector<Squad> SquadPlanner::form(
         std::vector<UnitSnapshot> nearby;
         auto threatPower = 0.0;
         for (const auto& unit : enemy) {
-            if (!unit.visible || !unit.position.valid() || !unit.completed ||
+            if ((!unit.visible && state.frame - unit.lastSeen > 3 * 24) ||
+                !unit.position.valid() || !unit.completed ||
                 unit.disabled || (unit.groundWeapon.damage <= 0 &&
                                   unit.role != UnitRole::spellcaster) ||
                 nearestOwnedBase(state, unit.position) != &base ||
@@ -116,12 +118,33 @@ std::vector<Squad> SquadPlanner::form(
                  (!base.defense.valid() || distanceSquared(unit.position, base.defense.entrance) > 640 * 640))) {
                 continue;
             }
-            // A stabilized field army contests a perimeter contain as one
-            // group. Only an actual base breach creates a tethered detachment.
-            if (plan.breakContainment &&
-                distanceSquared(unit.position, base.center) > 320 * 320) continue;
             nearby.push_back(unit);
             threatPower += allocationPower(unit);
+        }
+        // The breakout exemption requires an army actually contesting this
+        // perimeter. A strategic flag cannot leave a natural undefended while
+        // that army travels to a distant expansion or fights somewhere else.
+        if (plan.breakContainment && !nearby.empty() &&
+            std::ranges::none_of(nearby, [&base](const UnitSnapshot& unit) {
+                return distanceSquared(unit.position, base.center) <= 320 * 320;
+            })) {
+            auto fieldPower = 0.0;
+            auto mobilePower = 0.0;
+            for (const auto& ally : friendly) {
+                if (!ally.completed || ally.disabled || ally.loaded || ally.hallucination ||
+                    isStaticDefense(ally.kind) || !isCombatUnit(ally.kind)) continue;
+                const auto power = allocationPower(ally);
+                mobilePower += power;
+                // An army behind its own choke is present even when no shot
+                // is in range yet. Requiring enemy proximity here would make
+                // the defensive leash prevent its own breakout condition.
+                if (distanceSquared(ally.position, base.center) <= 960 * 960 ||
+                    std::ranges::any_of(nearby, [&ally](const UnitSnapshot& unit) {
+                        return ally.canAttack(unit) &&
+                            distanceSquared(ally.position, unit.position) <= 640 * 640;
+                    })) fieldPower += power;
+            }
+            if (fieldPower > 0.0 && fieldPower >= mobilePower * 0.60) continue;
         }
         if (threatPower > 0.0) threats.push_back({&base, std::move(nearby), threatPower});
     }
@@ -480,7 +503,7 @@ std::vector<Command> SquadPlanner::supportEscorts(
     for (const auto& unit : squad.units) {
         if ((unit.kind != UnitKind::dragoon && unit.kind != UnitKind::zealot) ||
             !unit.completed || unit.loaded || unit.disabled || unit.hallucination ||
-            unit.attackFrame || unit.underAttack || unit.underStorm || unit.healthFraction() < 0.65 ||
+            unit.attackFrame || unit.attackWindup || unit.underAttack || unit.underStorm || unit.healthFraction() < 0.65 ||
             distanceSquared(unit.position, support->position) > 768 * 768 ||
             distance(unit.position, objective) + 192 >= rearDistance) continue;
         escorts.push_back(&unit);
@@ -500,6 +523,51 @@ std::vector<Command> SquadPlanner::supportEscorts(
         result.push_back({escort->id, CommandType::move, -1, anchor,
                           UnitKind::unknown, 64, 0, "support-escort"});
     return result;
+}
+
+Position SquadPlanner::reinforcementDestination(
+    const Squad& squad, const Squad& vanguard, const Position attackTarget) {
+    const auto fighters = std::ranges::count_if(squad.units, [](const UnitSnapshot& unit) {
+        return isCombatUnit(unit.kind) && !isBuilding(unit.kind) && unit.completed &&
+            !unit.disabled && !unit.loaded && !unit.hallucination &&
+            (unit.groundWeapon.damage > 0 || unit.airWeapon.damage > 0);
+    });
+    // Reinforcement growth can make a rear component the largest army. That
+    // must not recall an already viable assault group from the enemy doorstep.
+    // Tiny detachments still regroup; contact is evaluated before this policy.
+    if (fighters >= 6 && attackTarget.valid() && squad.center.valid() &&
+        vanguard.center.valid() && distance(squad.center, attackTarget) + 192 <
+            distance(vanguard.center, attackTarget)) return attackTarget;
+    return vanguard.center;
+}
+
+DefenseArea SquadPlanner::defensiveEngagementArea(
+    const Squad& squad, const CombatEstimate& estimate) {
+    if (squad.role != SquadRole::baseDefense || !squad.defense.economyCenter.valid() ||
+        squad.enemies.empty() || estimate.decision != FightDecision::engage ||
+        estimate.advanceBlocked || estimate.ratio < 1.5) return squad.defense;
+    auto mobileCount = 0;
+    auto mobilePower = 0.0;
+    auto staticPower = 0.0;
+    for (const auto& member : squad.units) {
+        if (!member.completed || member.disabled || member.loaded || member.hallucination) continue;
+        if (isBuilding(member.kind)) {
+            staticPower += allocationPower(member);
+        } else if (isCombatUnit(member.kind) &&
+            distanceSquared(member.position, squad.defense.economyCenter) <= 960 * 960 &&
+            std::ranges::any_of(squad.enemies, [&member](const UnitSnapshot& target) {
+                return target.visible && target.detected && member.canAttack(target);
+            })) {
+            ++mobileCount;
+            mobilePower += allocationPower(member);
+        }
+    }
+    // A large mobile army must be able to clear its own perimeter. Otherwise
+    // fresh vision reallocates the advancing force into a 256px Cannon leash,
+    // pulling it home and leaving the remaining main squad too weak to fight.
+    // Small guards and forces relying on static fire retain their tight screen.
+    if (mobileCount < 12 || mobilePower < staticPower * 3.0) return squad.defense;
+    return {squad.defense.economyCenter, 960, squad.defense.economyCenter};
 }
 
 bool SquadPlanner::canCounterattack(
@@ -562,6 +630,17 @@ std::vector<UnitSnapshot> SquadPlanner::combatSupport(
         if (supportsFight) result.push_back(ally);
     }
     return result;
+}
+
+bool SquadPlanner::shouldCoverExpansion(
+    const GameState& state, const StrategicPlan& plan) noexcept {
+    // Establishing the natural moves the whole defensive line out of the main.
+    // Subsequent economic requests must not recall that field army, especially
+    // to an unbuilt third behind an already secured front.
+    return plan.expansionTarget.valid() && plan.posture != Posture::attack &&
+        std::ranges::count_if(state.self.units, [](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::nexus && unit.completed;
+        }) < 2;
 }
 
 DefenseArea SquadPlanner::expansionDefense(
@@ -672,8 +751,12 @@ std::vector<UnitSnapshot> SquadPlanner::localEnemies(
     std::vector<UnitSnapshot> result;
     for (const auto& enemy : enemies) {
         const auto age = frame - enemy.lastSeen;
+        // A ranged contain remains dangerous when its rear units step out of
+        // sight. Dropping them after eight seconds repeatedly made the front
+        // look beatable, then reversed the army as soon as it gained vision.
+        const auto memoryFrames = enemy.groundWeapon.maxRange >= 96 ? 20 * 24 : 8 * 24;
         if (!enemy.position.valid() || (!enemy.visible &&
-            (age < 0 || (!isBuilding(enemy.kind) && age > 8 * 24)))) continue;
+            (age < 0 || (!isBuilding(enemy.kind) && age > memoryFrames)))) continue;
         // Losing vision while retreating is not evidence that the opposing
         // army vanished. Keep its last legal observation briefly in the fight
         // estimate, with a bounded possible approach distance. Target selection

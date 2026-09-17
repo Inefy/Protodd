@@ -36,6 +36,9 @@ struct Command {
     Frame earliestFrame{};
     std::string source;
     TechnologyKind technology{TechnologyKind::none};
+    // The adapter can confirm a persistent engine order is still executing.
+    // It retains ownership in arbitration without sending another command.
+    bool alreadyActive{};
 
     friend bool operator==(const Command&, const Command&) = default;
 };

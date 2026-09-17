@@ -176,6 +176,11 @@ struct WeaponSnapshot {
     bool targetsAir{};
     bool targetsGround{};
     int hits{1};
+    // Enemy-only radial splash. Friendly-fire/line/bounce weapons need their
+    // own geometry and are deliberately not represented as this shape.
+    int splashInner{};
+    int splashMiddle{};
+    int splashOuter{};
 };
 
 struct UnitSnapshot {
@@ -234,6 +239,9 @@ struct UnitSnapshot {
     double incomingDamage{};
     // Own production only; never query hidden opponent training timers.
     int remainingTrainFrames{};
+    // A just-issued, in-range own attack is turning/winding up before the
+    // engine's single attack frame. Never inferred for enemy units.
+    bool attackWindup{};
 
     void inheritObservationHistory(const UnitSnapshot& previous) noexcept;
 
@@ -299,6 +307,8 @@ struct GameState {
     PlayerSnapshot self;
     PlayerSnapshot enemy;
     std::vector<BaseSnapshot> bases;
+    // Currently visible area spells, including friendly Storms (friendly fire).
+    std::vector<Position> storms;
 
     [[nodiscard]] std::span<const UnitSnapshot> ourUnits() const noexcept {
         return self.units;

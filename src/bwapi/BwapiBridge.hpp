@@ -80,6 +80,7 @@ public:
     }
 
     [[nodiscard]] bool execute(const Command& command);
+    [[nodiscard]] bool commandActive(const Command& command) const;
     [[nodiscard]] ExpansionFeedback expansionFeedback() const;
     [[nodiscard]] bool cancelExpansion();
     [[nodiscard]] const std::vector<MacroExecution>& macroExecutions() const noexcept {
