@@ -103,6 +103,41 @@ def validate_bot_name(name: str) -> None:
         raise LadderError(f"Unsafe bot name: {name}")
 
 
+def validate_proxy_launcher(name: str, launcher: Path) -> None:
+    """Reject known local launch failures without executing opponent code.
+
+    The manager invokes this batch file from the client's StarCraft directory
+    and discards its exit status/output. A NORMAL game end therefore does not
+    establish that the proxy ever started. This is a deliberately limited
+    preflight for literal commands, not a batch interpreter or a liveness test.
+    Dependencies must also be installed on every actual tournament client.
+    """
+    for line in launcher.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        command = line.strip().lstrip("@").strip()
+        if not command or re.match(r"(?i)(?:rem\b|::|echo\b)", command):
+            continue
+        # Imported launchers sometimes hard-code the organizer's installation.
+        # That can launch from the wrong client even if the directory exists.
+        if re.match(r'(?i)(?:cd|chdir)\s+(?:/d\s+)?"?[A-Z]:[\\/]', command):
+            raise LadderError(
+                f"Proxy bot {name}: {launcher} hard-codes a client working directory; "
+                'use a launcher-relative directory (for example cd /d "%~dp0")'
+            )
+        executable = re.match(r'^"([^"]+)"|^([^\s]+)', command)
+        if executable is None:
+            continue
+        program = executable.group(1) or executable.group(2)
+        if program.lower() in {"java", "java.exe", "javaw", "javaw.exe"}:
+            if shutil.which(program) is None:
+                raise LadderError(
+                    f"Proxy bot {name}: {launcher} requires {program} on the client PATH; "
+                    "starting Tournament Manager with an absolute Java path does not set PATH. "
+                    "Configure the proxy runtime on every client before preparing the run."
+                )
+        elif re.match(r"(?i)^[A-Z]:[\\/]", program) and not Path(program).is_file():
+            raise LadderError(f"Proxy bot {name}: {launcher} references missing executable {program}")
+
+
 def validate_bot(bot: dict[str, Any], root: Path) -> None:
     required = ("name", "race", "type", "bwapi_version")
     missing = [field for field in required if not bot.get(field)]
@@ -307,6 +342,8 @@ def command_prepare(args: argparse.Namespace) -> None:
     for opponent in config["opponents"]:
         source = resolve_from(config_path, str(opponent.get("directory", "")))
         validate_bot(opponent, source)
+        if opponent["type"] == "proxy":
+            validate_proxy_launcher(opponent["name"], source / "AI" / "run_proxy.bat")
         opponent_sources.append((opponent, source))
     archive = None
     archive_value = config.get("maps_archive")

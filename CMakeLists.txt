@@ -24,6 +24,7 @@ add_library(protodd_core OBJECT
     src/core/Workers.cpp
     src/core/Scouting.cpp
     src/core/Learning.cpp
+    src/core/PolicyLearning.cpp
     src/core/Runtime.cpp
     src/core/Squads.cpp
     src/core/Transport.cpp
@@ -77,6 +78,7 @@ if(PROTODD_BUILD_BWAPI_MODULE)
         src/bwapi/ProtoddModule.cpp
         src/bwapi/BwapiBridge.cpp
         src/bwapi/Entry.cpp
+        src/bwapi/PolicyRuntime.cpp
     )
     target_include_directories(protodd_bwapi PRIVATE
         "${BWAPI_INCLUDE_DIR}"
@@ -91,7 +93,26 @@ if(PROTODD_BUILD_BWAPI_MODULE)
         PREFIX ""
         SUFFIX ".dll"
     )
+    foreach(race IN ITEMS Terran Zerg)
+        if(race STREQUAL "Terran")
+            set(race_id 1)
+        else()
+            set(race_id 2)
+        endif()
+        add_library(${race}Todd MODULE src/bwapi/RaceBotModule.cpp
+            src/bwapi/RaceBotEntry.cpp src/bwapi/PolicyRuntime.cpp)
+        target_include_directories(${race}Todd PRIVATE "${BWAPI_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src/bwapi")
+        target_link_libraries(${race}Todd PRIVATE Protodd::Core "${BWAPI_LIBRARY}")
+        target_compile_features(${race}Todd PRIVATE cxx_std_20)
+        target_compile_definitions(${race}Todd PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX PROTODD_BOT_RACE=${race_id})
+        protodd_enable_warnings(${race}Todd)
+        set_target_properties(${race}Todd PROPERTIES PREFIX "" SUFFIX ".dll")
+    endforeach()
 endif()
+
+add_executable(policy_trainer tools/policy_trainer.cpp)
+target_link_libraries(policy_trainer PRIVATE Protodd::Core)
+target_compile_features(policy_trainer PRIVATE cxx_std_20)
 
 if(PROTODD_BUILD_TESTS)
     enable_testing()
@@ -106,6 +127,13 @@ if(PROTODD_BUILD_TESTS)
     endif()
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME protodd_policy_dataset_tests
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_train_policy.py")
+        add_test(NAME protodd_training_validation_tests
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_train_openings.py")
+        add_test(NAME protodd_policy_pipeline_test
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_policy_pipeline.py"
+                "$<TARGET_FILE:policy_trainer>")
         add_test(NAME protodd_decision_report_tests
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/decision_report.py" --self-test)
         add_test(

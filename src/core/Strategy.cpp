@@ -515,6 +515,34 @@ StrategicPlan StrategyEngine::plan(
         threat.immediateGround > 0.45 || threat.workerRush > 0.30 ||
         threat.proxy + threat.staticContain > 0.34;
     if (result.sustainEconomy) result.prioritizeReinforcements = false;
+    // A two-Gateway Core opening showing only a token army can hide DT tech.
+    // One observed Dragoon does not rule it out: in the Venator loss the
+    // quiet opening waited for six completed Dragoons, then first saw a DT
+    // with Robotics still unfinished. The remaining detector chain took
+    // longer than the defending army survived. Buy one insurance Observer
+    // after the initial ranged screen, using only our scouting evidence.
+    // Failed scouting must not be treated as evidence that tech is absent.
+    // In the archived RL Venator loss we had two Dragoons at6326 but had
+    // scouted only a Pylon/Zealot; the first DT arrived8099, Observer9878.
+    // Buy the same single detector in a quiet, poorly scouted mirror after
+    // establishing a ranged screen and economy. Visible pressure still wins.
+    const auto unscoutedMirrorTech = threat.uncertainty > 0.65 &&
+        count(state, UnitKind::probe, true) >= 18 &&
+        std::ranges::count(state.enemy.units, UnitKind::cyberneticsCore, &UnitSnapshot::kind) == 0;
+    const auto scoutedMirrorTech =
+        std::ranges::count(state.enemy.units, UnitKind::gateway, &UnitSnapshot::kind) >= 2 &&
+        std::ranges::count(state.enemy.units, UnitKind::cyberneticsCore, &UnitSnapshot::kind) > 0;
+    const auto mirrorTechGap = state.enemy.race == Race::protoss &&
+        state.frame >= 4 * 60 * 24 + 12 * 24 && minute(state) < 8 &&
+        count(state, UnitKind::cyberneticsCore, true) > 0 &&
+        count(state, UnitKind::dragoon, true) >= 2 &&
+        (scoutedMirrorTech || unscoutedMirrorTech) &&
+        recentEnemyCount(state, UnitKind::dragoon) <= 1 &&
+        recentEnemyCount(state, UnitKind::zealot) <= 1 &&
+        !hardBreachAtMain(state) && threat.combatEnemiesNearMain == 0 &&
+        !activeApproach(state, threat) && threat.immediateGround <= 0.45 &&
+        threat.workerRush <= 0.30 && threat.proxy + threat.staticContain <= 0.34 &&
+        threat.mostLikely != EnemyPlan::fastRush;
     result.requireMobileDetection = threat.cloak > 0.28 ||
         recentEnemyCount(state, UnitKind::spiderMine) > 0 ||
         recentEnemyCount(state, UnitKind::lurker) > 0 ||
@@ -524,13 +552,16 @@ StrategicPlan StrategyEngine::plan(
            !activeApproach(state, threat) && threat.immediateGround <= 0.45) ||
           recentEnemyCount(state, UnitKind::factory) >= 2 ||
           recentEnemyCount(state, UnitKind::starport) > 0));
+    const auto insuranceDetectorOnly = mirrorTechGap && !result.requireMobileDetection;
+    result.requireMobileDetection = result.requireMobileDetection || mirrorTechGap;
     if (result.requireMobileDetection) {
         result.desiredGasWorkers = std::max(3, result.desiredGasWorkers);
         goal(result, GoalKind::build, UnitKind::assimilator, 1, 123,
              "fund required mobile detection", true);
         goal(result, GoalKind::train, UnitKind::observer,
-             count(state, UnitKind::nexus) >= 2 ? 3 : 2, 124,
-             "replace and maintain mission detectors", true);
+             insuranceDetectorOnly ? 1 : (count(state, UnitKind::nexus) >= 2 ? 3 : 2), 124,
+             insuranceDetectorOnly ? "first Observer against a mirror tech information gap"
+                                   : "replace and maintain mission detectors", true);
     }
 
     if (state.enemy.race == Race::protoss && count(state, UnitKind::reaver, true) < 2)
@@ -580,8 +611,21 @@ StrategicPlan StrategyEngine::plan(
          recentEnemyCount(state, UnitKind::dragoon) >= 2 * recentEnemyCount(state, UnitKind::zealot)) &&
         threat.workerRush <= 0.30 && threat.air <= 0.30;
     if (containedByRanged) {
-        suppressNew(UnitKind::photonCannon, "break ranged containment with mobile units");
-        suppressNew(UnitKind::forge, "fund the mobile breakout before more static defense");
+        // A ranged escort does not make an undetected DT contain a ranged-only
+        // fight. Keep the existing emergency static detector goals until the
+        // cloaked attacker is actually covered. `detected` is the legal local
+        // observation; an Observer elsewhere (or still building) is no cover.
+        const auto undetectedCloakedContact = home.valid() && std::ranges::any_of(
+            state.enemy.units, [home](const UnitSnapshot& enemy) {
+                return enemy.visible && enemy.completed && !enemy.detected &&
+                    (enemy.cloaked || enemy.burrowed || enemy.kind == UnitKind::darkTemplar) &&
+                    isCombatUnit(enemy.kind) && enemy.position.valid() &&
+                    distanceSquared(home, enemy.position) <= 1200 * 1200;
+            });
+        if (!undetectedCloakedContact) {
+            suppressNew(UnitKind::photonCannon, "break ranged containment with mobile units");
+            suppressNew(UnitKind::forge, "fund the mobile breakout before more static defense");
+        }
         if (!result.sustainEconomy) result.prioritizeReinforcements = true;
         result.desiredGasWorkers = std::max(3, result.desiredGasWorkers);
         goal(result, GoalKind::train, UnitKind::dragoon, std::max(6, count(state, UnitKind::dragoon) + 1),

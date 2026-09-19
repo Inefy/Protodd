@@ -18,6 +18,77 @@ import ladder  # noqa: E402
 
 
 class LadderTests(unittest.TestCase):
+    def test_proxy_java_requires_path_even_when_manager_has_java(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            launcher = Path(temporary) / "run_proxy.bat"
+            for program in ("java", "java.exe", '"java.exe"'):
+                with self.subTest(program=program):
+                    launcher.write_text(f"@echo off\n{program} -jar ./bwapi-data/AI/bot.jar\n")
+                    with patch.object(ladder.shutil, "which", return_value=None), self.assertRaisesRegex(
+                        ladder.LadderError, "absolute Java path does not set PATH"
+                    ):
+                        ladder.validate_proxy_launcher("JavaBot", launcher)
+                    with patch.object(ladder.shutil, "which", return_value="C:/Java/bin/java.exe"):
+                        ladder.validate_proxy_launcher("JavaBot", launcher)
+
+    def test_proxy_rejects_fixed_client_directory_even_if_it_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            launcher = Path(temporary) / "run_proxy.bat"
+            for change_directory in ('cd c:\\TM\\Starcraft\\bwapi-data\\AI\\',
+                                     '@CD /D "C:\\TM\\Starcraft\\bwapi-data\\AI"',
+                                     'chdir "D:/StarCraft/AI"'):
+                with self.subTest(command=change_directory):
+                    launcher.write_text(change_directory + "\nUAlbertaBot.exe\n")
+                    with patch.object(Path, "is_dir", return_value=True), self.assertRaisesRegex(
+                        ladder.LadderError, "hard-codes a client working directory"
+                    ):
+                        ladder.validate_proxy_launcher("UAlbertaBot", launcher)
+
+    def test_proxy_accepts_portable_native_launcher_without_java(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            launcher = Path(temporary) / "run_proxy.bat"
+            launcher.write_text('@echo off\nrem java is not needed\n:: java.exe\ncd /d "%~dp0"\nUAlbertaBot.exe\n')
+            with patch.object(ladder.shutil, "which", return_value=None) as lookup:
+                ladder.validate_proxy_launcher("UAlbertaBot", launcher)
+            lookup.assert_not_called()
+
+    def test_proxy_rejects_missing_absolute_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            launcher = Path(temporary) / "run_proxy.bat"
+            launcher.write_text('"C:\\missing runtime\\java.exe" -jar bot.jar\n')
+            with patch.object(Path, "is_file", return_value=False), self.assertRaisesRegex(
+                ladder.LadderError, "missing executable"
+            ):
+                ladder.validate_proxy_launcher("JavaBot", launcher)
+
+    def test_prepare_rejects_broken_proxy_before_creating_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = root / "Protodd.dll"
+            artifact.write_bytes(b"unchanged protodd")
+            ai = root / "bots" / "Proxy" / "AI"
+            ai.mkdir(parents=True)
+            (ai / "Proxy.dll").write_bytes(b"unchanged proxy")
+            launcher = ai / "run_proxy.bat"
+            config = root / "config.json"
+            config.write_text(json.dumps({
+                "our_bot": {"name": "Protodd", "artifact": "Protodd.dll"},
+                "opponents": [{"name": "Proxy", "type": "proxy", "race": "Random",
+                               "bwapi_version": "BWAPI_440", "directory": "bots/Proxy"}],
+                "maps": ["Python.scx"], "rounds": 1,
+            }))
+            for script in ("java -jar bot.jar\n", "cd c:\\TM\\Starcraft\\bwapi-data\\AI\\\nUAlbertaBot.exe\n"):
+                with self.subTest(script=script):
+                    launcher.write_text(script)
+                    before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+                    with patch.object(ladder, "REPO_ROOT", root), patch.object(
+                        ladder.shutil, "which", return_value=None
+                    ), patch.object(ladder.subprocess, "run") as process, self.assertRaises(ladder.LadderError):
+                        ladder.command_prepare(Namespace(config=str(config), label="blocked"))
+                    process.assert_not_called()
+                    self.assertFalse((root / "ladder" / "runs").exists())
+                    self.assertEqual(before, {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()})
+
     def test_schedule_is_deterministic_and_balances_host(self) -> None:
         opponents = [{"name": "Iron"}, {"name": "Steamhammer"}]
         maps = ["maps/aiide/Benzene.scx", "maps/aiide/Python.scx"]

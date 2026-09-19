@@ -277,10 +277,27 @@ void accountIncomingDamage(GameState& state,
 
 CombatEstimate CombatEvaluator::evaluate(
     const std::span<const UnitSnapshot> friendly,
-    const std::span<const UnitSnapshot> enemy,
+    std::span<const UnitSnapshot> enemy,
     const double requiredRatio,
     const double uncertainty,
     const bool runSimulation) const {
+    // BWAPI reports zero HP/shields when enemy detection access is unavailable.
+    // Treat that sentinel as unknown health, not a nearly dead attacker. Keep
+    // the conservative estimate local so observations and targetability remain
+    // unchanged, and static power, simulation selection and damage all agree.
+    const auto unknownHealth = [](const UnitSnapshot& unit) {
+        return !unit.ours && !unit.detected && unit.hitPoints == 0 && unit.shields == 0;
+    };
+    std::vector<UnitSnapshot> estimatedEnemy;
+    if (std::ranges::any_of(enemy, unknownHealth)) {
+        estimatedEnemy.assign(enemy.begin(), enemy.end());
+        for (auto& unit : estimatedEnemy) {
+            if (!unknownHealth(unit)) continue;
+            unit.hitPoints = unit.maxHitPoints;
+            unit.shields = unit.maxShields;
+        }
+        enemy = estimatedEnemy;
+    }
     CombatEstimate result;
     for (const auto& unit : friendly) {
         result.friendlyPower += unitPower(unit, enemy);

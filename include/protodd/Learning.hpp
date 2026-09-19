@@ -28,7 +28,8 @@ public:
     [[nodiscard]] OpeningStyle choose(
         std::string_view opponent,
         std::string_view map,
-        std::uint64_t deterministicSeed) const;
+        std::uint64_t deterministicSeed,
+        bool explore = true) const;
     void record(
         std::string_view opponent,
         std::string_view map,

@@ -197,11 +197,20 @@ void ProtoddModule::onStart() {
     slowWindowLoad_ = RuntimeLoad::normal;
 
     const auto historyFile = OpponentHistory::filename(opponentName_);
+    policy_.start();
+    // Controlled training imports only externally validated results. onEnd
+    // alone cannot distinguish a strategic win from an opponent crash.
+    const auto learningMode = readFile("bwapi-data/read/Protodd-learning-mode.txt");
+    const bool frozenLearning = learningMode.starts_with("frozen");
+    validatedLearning_ = frozenLearning || learningMode.starts_with("validated-train") || policy_.enabled();
     history_.parse(readFile(std::filesystem::path("bwapi-data/read") / historyFile));
-    history_.merge(readFile(std::filesystem::path("bwapi-data/write") / historyFile));
+    if (!validatedLearning_)
+        history_.merge(readFile(std::filesystem::path("bwapi-data/write") / historyFile));
     openingStyle_ = history_.choose(opponentName_, mapName_,
-                                    stableSeed(opponentName_ + "|" + mapName_));
+                                    stableSeed(opponentName_ + "|" + mapName_), !frozenLearning);
     if (log_) {
+        log_ << "LEARNING,mode=" << (frozenLearning ? "frozen" :
+                    validatedLearning_ ? "validated-train" : "online") << '\n';
         log_ << "START," << csvSafe(BWAPI::Broodwar->mapName()) << ','
              << csvSafe(opponentName_) << ',' << openingStyleName(openingStyle_) << '\n';
         log_ << "MATCH,seed=" << BWAPI::Broodwar->getRandomSeed()
@@ -215,14 +224,17 @@ void ProtoddModule::onStart() {
 }
 
 void ProtoddModule::onEnd(const bool winner) {
+    policy_.end(winner);
     state_.frame = BWAPI::Broodwar->getFrameCount();
     sampleTelemetry();
     logDiagnostics();
-    history_.record(opponentName_, mapName_, openingStyle_, winner);
-    std::ofstream historyOutput(std::filesystem::path("bwapi-data/write") /
+    if (!validatedLearning_) {
+        history_.record(opponentName_, mapName_, openingStyle_, winner);
+        std::ofstream historyOutput(std::filesystem::path("bwapi-data/write") /
                                     OpponentHistory::filename(opponentName_),
                                 std::ios::binary | std::ios::trunc);
-    if (historyOutput) historyOutput << history_.serialize();
+        if (historyOutput) historyOutput << history_.serialize();
+    }
     if (log_) {
         flushPerformanceRecord();
         const auto& runtime = frameBudget_.stats();
@@ -412,7 +424,14 @@ void ProtoddModule::onUnitRenegade(const BWAPI::Unit unit) {
 }
 
 void ProtoddModule::updateStrategy() {
-    auto candidate = strategy_.plan(state_, opponent_.assessment(), openingStyle_);
+    const auto action = policy_.decision();
+    const auto style = !policy_.enabled() ? openingStyle_ :
+        action == PolicyAction::pressure ? OpeningStyle::aggressive :
+        action == PolicyAction::economy ? OpeningStyle::economic : OpeningStyle::standard;
+    auto candidate = strategy_.plan(state_, opponent_.assessment(), style);
+    if (policy_.enabled() && action == PolicyAction::defend &&
+        candidate.posture != Posture::defend && candidate.posture != Posture::recover)
+        candidate.posture = Posture::hold;
     const auto proposed = candidate.posture;
     plan_ = strategicDirector_.stabilize(std::move(candidate), state_, opponent_.assessment());
     expansion_.update(plan_, state_, bridge_.expansionFeedback());

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BwapiBridge.hpp"
+#include "PolicyRuntime.hpp"
 
 #include "protodd/Combat.hpp"
 #include "protodd/Diagnostics.hpp"
@@ -65,6 +66,8 @@ private:
     GameState state_;
     DebugOverlay debug_;
     OpponentHistory history_;
+    PolicyRuntime policy_;
+    bool validatedLearning_{false};
     OpeningStyle openingStyle_{OpeningStyle::standard};
     std::string opponentName_;
     std::string mapName_;

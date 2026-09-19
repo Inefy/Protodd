@@ -1421,6 +1421,25 @@ void testMacroReservations() {
 }
 
 void testOpponentLearning() {
+    protodd::OpponentHistory transfer;
+    transfer.parse("Bot,Old,aggressive,8,0\r\nOther,New,economic,100,0\n");
+    expect(transfer.choose("Bot", "New", 0) == protodd::OpeningStyle::aggressive,
+           "same-opponent successes transfer to an unseen map");
+    expect(transfer.choose("Unknown", "New", 0) == protodd::OpeningStyle::standard,
+           "transfer never leaks across opponents");
+    expect(transfer.choose("Bot", "Old", 0, false) == protodd::OpeningStyle::aggressive,
+           "frozen evaluation exploits without exploring unseen arms");
+    transfer.merge("Bot,New,aggressive,0,20\nBot,New,standard,20,0\n");
+    expect(transfer.choose("Bot", "New", 0, false) == protodd::OpeningStyle::standard,
+           "map-specific outcomes override the capped transfer prior");
+    const auto snapshot = transfer.serialize();
+    static_cast<void>(transfer.choose("Bot", "New", 42, false));
+    expect(transfer.serialize() == snapshot, "evaluation does not mutate the policy");
+    protodd::OpponentHistory malformed;
+    malformed.parse("Bot,Map,typo,100,0\nBot,Map,standard,1,0,extra\n"
+                    "Bot,Map,standard,2147483647,1\n");
+    expect(malformed.lookup("Bot", "Map", protodd::OpeningStyle::standard).games() == 0,
+           "malformed training rows cannot reward the standard arm or overflow counts");
     protodd::OpponentHistory history;
     history.parse(
         "Bot,Map,standard,8,2\n"
@@ -5462,7 +5481,190 @@ void testPayloadReloadTravel() {
     }
 }
 
+void testVenatorCloakedContainment() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 7680;
+    state.self.race = state.enemy.race = Race::protoss;
+    state.self.supplyUsed = 80;
+    state.self.supplyTotal = 98;
+    const Position home{3808, 3824};
+    state.self.units = {unit(1, UnitKind::nexus, true, home),
+        unit(2, UnitKind::pylon, true, home), unit(3, UnitKind::gateway, true, home),
+        unit(4, UnitKind::cyberneticsCore, true, home),
+        unit(5, UnitKind::assimilator, true, home),
+        unit(6, UnitKind::zealot, true, {3824, 3280}),
+        unit(7, UnitKind::roboticsFacility, true, {3568, 3552})};
+    state.self.units.back().completed = false;
+    state.self.units.back().buildProgress = 60;
+    for (int i = 0; i < 5; ++i)
+        state.self.units.push_back(unit(20 + i, UnitKind::dragoon, true, {3824, 3280}));
+    for (int i = 0; i < 22; ++i)
+        state.self.units.push_back(unit(100 + i, UnitKind::probe, true, home));
+    state.enemy.units = {unit(200, UnitKind::gateway, false, {3648, 368}),
+        unit(201, UnitKind::gateway, false, {3808, 400}),
+        unit(202, UnitKind::cyberneticsCore, false, {3664, 160}),
+        unit(203, UnitKind::dragoon, false, {3665, 3124}),
+        unit(204, UnitKind::darkTemplar, false, {3704, 3148})};
+    state.enemy.units[3].groundWeapon = {20, 30, 0, 128, DamageType::explosive, false, true};
+    state.enemy.units.back().cloaked = true;
+    state.enemy.units.back().detected = false;
+    ThreatAssessment threat;
+    threat.cloak = 0.9;
+    threat.mostLikely = EnemyPlan::cloakedTech;
+    const auto wantsStatic = [](const StrategicPlan& plan, const UnitKind kind) {
+        return std::ranges::any_of(plan.goals, [kind](const ProductionGoal& goal) {
+            return goal.target == kind && goal.desiredCount > 0 && goal.blocking;
+        });
+    };
+    auto plan = StrategyEngine{}.plan(state, threat);
+    expect(plan.name.find("mobile breakout") != std::string::npos &&
+        plan.requireMobileDetection && wantsStatic(plan, UnitKind::forge) &&
+        wantsStatic(plan, UnitKind::photonCannon),
+        "Venator undetected DT preserves static detection despite the ranged perimeter contain");
+    MacroPlanner macro;
+    ResourceLedger bank{150, 68};
+    auto actions = macro.reconcile(state, plan, bank);
+    const auto funds = [](const std::vector<MacroAction>& candidates, const UnitKind kind) {
+        return std::ranges::any_of(candidates, [kind](const MacroAction& action) {
+            return action.target == kind && action.reserved && action.executable;
+        });
+    };
+    expect(funds(actions, UnitKind::forge),
+        "confirmed undetected DT funds Forge while the mobile detector chain is unavailable");
+    state.self.units.push_back(unit(8, UnitKind::forge, true, home));
+    ++state.frame;
+    plan = StrategyEngine{}.plan(state, threat);
+    bank = {150, 68};
+    actions = macro.reconcile(state, plan, bank);
+    expect(funds(actions, UnitKind::photonCannon),
+        "confirmed undetected DT funds the first Cannon before further Gateway cycles");
+    state.self.units.pop_back();
+    state.self.units.push_back(unit(9, UnitKind::observer, true, {500, 500}));
+    plan = StrategyEngine{}.plan(state, threat);
+    expect(wantsStatic(plan, UnitKind::photonCannon),
+        "a distant completed Observer does not imply local detection of the DT");
+    state.enemy.units.back().detected = true;
+    plan = StrategyEngine{}.plan(state, threat);
+    expect(!wantsStatic(plan, UnitKind::photonCannon) && !wantsStatic(plan, UnitKind::forge),
+        "an actually detected DT permits the ranged breakout to suppress new static spending");
+    state.enemy.units.pop_back();
+    plan = StrategyEngine{}.plan(state, threat);
+    expect(!wantsStatic(plan, UnitKind::photonCannon),
+        "cloak belief alone does not reopen static spending against an ordinary ranged contain");
+}
+
+void testVenatorDetectionDeadline() {
+    using namespace protodd;
+    // Legal observations at frame 6120: the second enemy Gateway and Core
+    // were last seen unfinished; no Citadel, Archives, or DT was scouted.
+    GameState state;
+    state.frame = 6120;
+    state.self.race = state.enemy.race = Race::protoss;
+    state.self.supplyUsed = 60;
+    state.self.supplyTotal = 82;
+    state.self.units = {unit(1, UnitKind::nexus, true),
+        unit(2, UnitKind::pylon, true), unit(3, UnitKind::gateway, true),
+        unit(4, UnitKind::cyberneticsCore, true), unit(5, UnitKind::assimilator, true),
+        unit(6, UnitKind::zealot, true), unit(7, UnitKind::dragoon, true),
+        unit(8, UnitKind::dragoon, true)};
+    for (int i = 0; i < 22; ++i)
+        state.self.units.push_back(unit(100 + i, UnitKind::probe, true));
+    state.enemy.units = {unit(200, UnitKind::gateway, false, {3000, 3000}),
+        unit(201, UnitKind::gateway, false, {3000, 3100}),
+        unit(202, UnitKind::cyberneticsCore, false, {3100, 3000}),
+        unit(203, UnitKind::zealot, false, {2800, 2800}),
+        unit(204, UnitKind::dragoon, false, {2800, 2900})};
+    for (auto& enemy : state.enemy.units) {
+        enemy.visible = false;
+        enemy.lastSeen = 5998;
+    }
+    state.enemy.units[1].completed = false;
+    state.enemy.units[2].completed = false;
+    ThreatAssessment threat;
+    threat.mostLikely = EnemyPlan::heavyPressure;
+    threat.uncertainty = 0.947944;
+    const auto needsObserver = [](const StrategicPlan& plan) {
+        return plan.requireMobileDetection && std::ranges::any_of(plan.goals,
+            [](const ProductionGoal& goal) {
+                return goal.target == UnitKind::observer && goal.blocking &&
+                    goal.desiredCount == 1 && goal.priority >= 124;
+            });
+    };
+    auto plan = StrategyEngine{}.plan(state, threat);
+    expect(needsObserver(plan),
+        "Venator two-Gateway tech gap funds a first detector before six Dragoons or a visible DT");
+    const auto funded = [](const std::vector<MacroAction>& actions, const UnitKind kind) {
+        return std::ranges::any_of(actions, [kind](const MacroAction& action) {
+            return action.target == kind && action.reserved && action.executable &&
+                action.priority >= 124;
+        });
+    };
+    MacroPlanner macro;
+    ResourceLedger bank{200, 200};
+    auto actions = macro.reconcile(state, plan, bank);
+    expect(funded(actions, UnitKind::roboticsFacility),
+        "first detector reserves Robotics before another Gateway or Dragoon");
+    state.self.units.push_back(unit(9, UnitKind::roboticsFacility, true));
+    ++state.frame;
+    plan = StrategyEngine{}.plan(state, threat);
+    bank = {150, 100};
+    actions = macro.reconcile(state, plan, bank);
+    expect(funded(actions, UnitKind::observatory),
+        "detector checkpoint reserves Observatory before splash support");
+    state.self.units.push_back(unit(10, UnitKind::observatory, true));
+    ++state.frame;
+    plan = StrategyEngine{}.plan(state, threat);
+    bank = {125, 75};
+    actions = macro.reconcile(state, plan, bank);
+    expect(funded(actions, UnitKind::observer),
+        "first Observer actually receives the gas ahead of Gateway production");
+
+    auto unscouted = state;
+    unscouted.frame = 6336;
+    std::erase_if(unscouted.self.units, [](const UnitSnapshot& own) {
+        return own.kind == UnitKind::roboticsFacility || own.kind == UnitKind::observatory;
+    });
+    unscouted.enemy.units = {unit(250, UnitKind::pylon, false, {3000, 3000})};
+    auto unknownPlan = StrategyEngine{}.plan(unscouted, threat);
+    expect(needsObserver(unknownPlan),
+        "quiet mirror with missing tech scouting buys detection after two Dragoons");
+    bank = {200, 200};
+    actions = macro.reconcile(unscouted, unknownPlan, bank);
+    expect(funded(actions, UnitKind::roboticsFacility),
+        "unscouted detector deadline funds Robotics rather than only declaring intent");
+    auto pressured = threat;
+    pressured.immediateGround = 0.8;
+    pressured.combatEnemiesNearMain = 3;
+    expect(!needsObserver(StrategyEngine{}.plan(unscouted, pressured)),
+        "unscouted insurance does not divert the emergency combat budget");
+    std::erase_if(unscouted.self.units, [](const UnitSnapshot& own) {
+        return own.kind == UnitKind::dragoon;
+    });
+    expect(!needsObserver(StrategyEngine{}.plan(unscouted, threat)),
+        "failed scouting alone cannot preempt the initial ranged screen");
+
+    auto control = state;
+    control.frame = 4 * 60 * 24;
+    expect(!needsObserver(StrategyEngine{}.plan(control, threat)),
+        "tech-gap insurance does not preempt the early opening");
+    control = state;
+    control.enemy.units.erase(control.enemy.units.begin() + 1);
+    expect(!needsObserver(StrategyEngine{}.plan(control, threat)),
+        "one scouted Gateway is insufficient for the tech-gap checkpoint");
+    control = state;
+    control.enemy.units.push_back(unit(205, UnitKind::zealot, false, {2800, 2800}));
+    expect(!needsObserver(StrategyEngine{}.plan(control, threat)),
+        "observed melee production retains the existing rush response");
+    control = state;
+    control.enemy.units.push_back(unit(205, UnitKind::dragoon, false, {2800, 2800}));
+    expect(!needsObserver(StrategyEngine{}.plan(control, threat)),
+        "observed ranged production retains the existing ranged opening");
+}
+
 int main() {
+    testVenatorCloakedContainment();
+    testVenatorDetectionDeadline();
     testForwardReinforcementOwnership();
     testDefensivePerimeterBreakout();
     testPayloadReloadTravel();
