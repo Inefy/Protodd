@@ -26,7 +26,7 @@ OpeningStyle parseStyle(const std::string_view value) {
         const auto style = static_cast<OpeningStyle>(raw);
         if (openingStyleName(style) == value) return style;
     }
-    return OpeningStyle::standard;
+    return OpeningStyle::count;
 }
 
 bool parseInt(const std::string_view value, int& output) {
@@ -50,6 +50,7 @@ void OpponentHistory::merge(const std::string_view csv) {
     std::istringstream input{std::string(csv)};
     std::string line;
     while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         if (line.empty() || line.starts_with('#')) continue;
         std::array<std::string_view, 5> fields;
         auto remaining = std::string_view(line);
@@ -67,6 +68,8 @@ void OpponentHistory::merge(const std::string_view csv) {
         int losses = 0;
         if (!valid || !parseInt(fields[3], wins) || !parseInt(fields[4], losses)) continue;
         const auto style = parseStyle(fields[2]);
+        if (style == OpeningStyle::count || !remaining.empty() ||
+            wins > 1000000 || losses > 1000000) continue;
         auto& record = records_[key(fields[0], fields[1], style)];
         // Each file is a cumulative snapshot. Component-wise maxima merge an
         // immutable tournament read baseline with a newer local write snapshot
@@ -103,7 +106,28 @@ std::string OpponentHistory::filename(const std::string_view opponent) {
 OpeningStyle OpponentHistory::choose(
     const std::string_view opponent,
     const std::string_view map,
-    const std::uint64_t deterministicSeed) const {
+    const std::uint64_t deterministicSeed,
+    const bool explore) const {
+    // Transfer only same-opponent evidence from OTHER maps. Cap its influence
+    // at four virtual games per arm, so local outcomes can override it.
+    std::array<double, static_cast<std::size_t>(OpeningStyle::count)> priorWins{};
+    std::array<double, static_cast<std::size_t>(OpeningStyle::count)> priorGames{};
+    const auto prefix = clean(opponent) + ',';
+    for (auto raw = 0; raw < static_cast<int>(OpeningStyle::count); ++raw) {
+        const auto style = static_cast<OpeningStyle>(raw);
+        const auto suffix = ',' + std::string(openingStyleName(style));
+        double wins = 0.0;
+        double games = 0.0;
+        for (const auto& [recordKey, record] : records_) {
+            if (recordKey.starts_with(prefix) && recordKey.ends_with(suffix) &&
+                recordKey != key(opponent, map, style)) {
+                wins += record.wins;
+                games += record.games();
+            }
+        }
+        priorGames[raw] = std::min(4.0, games);
+        priorWins[raw] = games > 0.0 ? priorGames[raw] * wins / games : 0.0;
+    }
     auto totalGames = 0;
     for (auto raw = 0; raw < static_cast<int>(OpeningStyle::count); ++raw) {
         totalGames += lookup(opponent, map, static_cast<OpeningStyle>(raw)).games();
@@ -112,7 +136,23 @@ OpeningStyle OpponentHistory::choose(
     // Start unknown opponents from the balanced arm. Exploration still begins
     // after that evidence-bearing baseline game, but never spends the first
     // and least-informed tournament game on arbitrary greed or deception.
-    if (totalGames == 0) return OpeningStyle::standard;
+    const auto posterior = [&](const OpeningStyle style) {
+        const auto raw = static_cast<std::size_t>(style);
+        const auto local = lookup(opponent, map, style);
+        return (local.wins + priorWins[raw] + 1.0) /
+               (local.games() + priorGames[raw] + 2.0);
+    };
+    if (!explore || totalGames == 0) {
+        auto best = OpeningStyle::standard;
+        for (auto raw = 1; raw < static_cast<int>(OpeningStyle::count); ++raw) {
+            const auto style = static_cast<OpeningStyle>(raw);
+            // A training cold start needs at least four cross-map observations
+            // before departing from the robust standard opening.
+            if (( !explore || priorGames[raw] >= 4.0) && posterior(style) > posterior(best))
+                best = style;
+        }
+        return best;
+    }
 
     // Try each remaining style once in a deterministic opponent/map-specific order.
     const auto offset = static_cast<int>(deterministicSeed %
@@ -130,7 +170,7 @@ OpeningStyle OpponentHistory::choose(
         const auto record = lookup(opponent, map, style);
         const auto exploration = std::sqrt(2.0 * std::log(static_cast<double>(totalGames)) /
                                            static_cast<double>(record.games()));
-        const auto score = record.winRate() + exploration;
+        const auto score = posterior(style) + exploration;
         if (score > bestScore) {
             bestScore = score;
             best = style;

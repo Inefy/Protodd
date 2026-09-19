@@ -1,4 +1,7 @@
 #include "protodd/UnitCatalog.hpp"
+#include "../src/bwapi/ProductionCount.hpp"
+#include "../src/bwapi/TerranDetection.hpp"
+#include "../src/bwapi/SupplyPlanning.hpp"
 
 #include <BWAPI/UnitType.h>
 #include <BWAPI/UnitCommand.h>
@@ -42,6 +45,39 @@ int main() {
         std::pair{UnitKind::arbiter, Protoss_Arbiter},
     };
     auto failures = 0;
+    using protodd::bwapi::supplyPlanningBuffer;
+    if (supplyPlanningBuffer(true, 8) != 12 ||
+        supplyPlanningBuffer(true, 30) != 12 ||
+        supplyPlanningBuffer(true, 192) != 20 ||
+        supplyPlanningBuffer(true, 400) != 20 ||
+        supplyPlanningBuffer(false, 8) != 4 ||
+        supplyPlanningBuffer(false, 36) != 7) {
+        std::cerr << "Supply planning buffer mismatch\n";
+        ++failures;
+    }
+    using protodd::bwapi::wantsTerranDetection;
+    if (!wantsTerranDetection(true, 5760, 14, 8) ||
+        wantsTerranDetection(false, 5760, 14, 8) ||
+        wantsTerranDetection(true, 5759, 14, 8) ||
+        wantsTerranDetection(true, 5760, 13, 8) ||
+        wantsTerranDetection(true, 5760, 14, 7)) {
+        std::cerr << "Terran detection insurance guard mismatch\n";
+        ++failures;
+    }
+    const auto checkPending = [&](BWAPI::UnitType producer, BWAPI::UnitType target,
+                                  BWAPI::UnitType morph, int queued, int expected) {
+        if (protodd::bwapi::pendingProductionCount(producer, target, morph, queued) != expected) {
+            std::cerr << "Pending production count mismatch\n";
+            ++failures;
+        }
+    };
+    checkPending(Zerg_Drone, Zerg_Spawning_Pool, Zerg_Spawning_Pool, 1, 0);
+    checkPending(Zerg_Egg, Zerg_Zergling, Zerg_Zergling, 1, 2);
+    checkPending(Zerg_Egg, Zerg_Drone, Zerg_Drone, 1, 1);
+    checkPending(Zerg_Egg, Zerg_Drone, Zerg_Overlord, 1, 0);
+    checkPending(Terran_Barracks, Terran_Marine, None, 3, 3);
+    checkPending(Terran_SCV, Terran_Barracks, Terran_Barracks, 1, 0);
+    checkPending(Zerg_Hatchery, Zerg_Drone, None, 1, 0);
     for (const auto type : {Protoss_Pylon, Protoss_Gateway, Protoss_Nexus}) {
         const BWAPI::TilePosition tile{17, 23};
         const auto command = BWAPI::UnitCommand::build(nullptr, tile, type);

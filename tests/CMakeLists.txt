@@ -7,3 +7,14 @@ protodd_enable_warnings(protodd_tests)
 
 add_test(NAME protodd_core_tests COMMAND protodd_tests)
 
+add_executable(protodd_hidden_health_tests test_hidden_health.cpp)
+target_link_libraries(protodd_hidden_health_tests PRIVATE Protodd::Core)
+target_compile_features(protodd_hidden_health_tests PRIVATE cxx_std_20)
+protodd_enable_warnings(protodd_hidden_health_tests)
+add_test(NAME protodd_hidden_health_tests COMMAND protodd_hidden_health_tests)
+
+add_executable(protodd_policy_tests test_policy_learning.cpp)
+target_link_libraries(protodd_policy_tests PRIVATE Protodd::Core)
+target_compile_features(protodd_policy_tests PRIVATE cxx_std_20)
+protodd_enable_warnings(protodd_policy_tests)
+add_test(NAME protodd_policy_tests COMMAND protodd_policy_tests)
