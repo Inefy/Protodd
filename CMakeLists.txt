@@ -25,6 +25,8 @@ add_library(protodd_core OBJECT
     src/core/Scouting.cpp
     src/core/Learning.cpp
     src/core/PolicyLearning.cpp
+    src/core/ObservationEncoder.cpp
+    src/core/LearnedPolicy.cpp
     src/core/Runtime.cpp
     src/core/Squads.cpp
     src/core/Transport.cpp
@@ -79,6 +81,7 @@ if(PROTODD_BUILD_BWAPI_MODULE)
         src/bwapi/BwapiBridge.cpp
         src/bwapi/Entry.cpp
         src/bwapi/PolicyRuntime.cpp
+        src/bwapi/ModelRuntime.cpp
     )
     target_include_directories(protodd_bwapi PRIVATE
         "${BWAPI_INCLUDE_DIR}"
@@ -114,9 +117,19 @@ add_executable(policy_trainer tools/policy_trainer.cpp)
 target_link_libraries(policy_trainer PRIVATE Protodd::Core)
 target_compile_features(policy_trainer PRIVATE cxx_std_20)
 
+add_executable(model_tool tools/model_tool.cpp)
+target_link_libraries(model_tool PRIVATE Protodd::Core)
+target_compile_features(model_tool PRIVATE cxx_std_20)
+protodd_enable_warnings(model_tool)
+
 if(PROTODD_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+    find_program(PROTODD_NODE_EXECUTABLE node)
+    if(PROTODD_NODE_EXECUTABLE)
+        add_test(NAME protodd_replay_comparison_tests
+            COMMAND "${PROTODD_NODE_EXECUTABLE}" --test "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_replay_comparison.mjs")
+    endif()
     if(PROTODD_BUILD_BWAPI_MODULE)
         add_executable(protodd_bwapi_catalog_tests tests/bwapi_catalog.cpp)
         target_include_directories(protodd_bwapi_catalog_tests PRIVATE "${BWAPI_INCLUDE_DIR}")
@@ -127,6 +140,43 @@ if(PROTODD_BUILD_TESTS)
     endif()
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+        foreach(PROTODD_NEW_TEST IN ITEMS data_release dataset_analysis ladder arena)
+            add_test(NAME "protodd_${PROTODD_NEW_TEST}_tests"
+                COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+                    -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p "test_${PROTODD_NEW_TEST}.py")
+            set_tests_properties("protodd_${PROTODD_NEW_TEST}_tests" PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        endforeach()
+        add_test(NAME protodd_replay_pipeline_tests
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_replay_pipeline.py")
+        add_test(NAME protodd_parallel_validation_tests
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_parallel_validation.py")
+        add_test(NAME protodd_replay_catalog_tests
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_replay_catalog.py")
+        add_test(NAME protodd_replay_playback_tests
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_replay_playback.py")
+        add_test(NAME protodd_replay_audit_tests
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_replay_audit.py")
+        add_test(NAME protodd_model_dataset_tests
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_model_dataset.py"
+                "$<TARGET_FILE:model_tool>")
+        execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import torch, numpy"
+            RESULT_VARIABLE PROTODD_MODEL_TRAINING_AVAILABLE OUTPUT_QUIET ERROR_QUIET)
+        if(PROTODD_MODEL_TRAINING_AVAILABLE EQUAL 0)
+            add_test(NAME protodd_tensor_shards_tests
+                COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+                    -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p test_tensor_shards.py)
+            set_tests_properties(protodd_tensor_shards_tests PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+            add_test(NAME protodd_shard_training_tests
+                COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+                    -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p test_shard_training.py)
+            set_tests_properties(protodd_shard_training_tests PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+            add_test(NAME protodd_model_training_tests
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_model_training.py"
+                    "$<TARGET_FILE:model_tool>")
+        endif()
         add_test(NAME protodd_policy_dataset_tests
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_train_policy.py")
         add_test(NAME protodd_training_validation_tests

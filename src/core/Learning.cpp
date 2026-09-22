@@ -125,8 +125,9 @@ OpeningStyle OpponentHistory::choose(
                 games += record.games();
             }
         }
-        priorGames[raw] = std::min(4.0, games);
-        priorWins[raw] = games > 0.0 ? priorGames[raw] * wins / games : 0.0;
+        const auto index = static_cast<std::size_t>(raw);
+        priorGames[index] = std::min(4.0, games);
+        priorWins[index] = games > 0.0 ? priorGames[index] * wins / games : 0.0;
     }
     auto totalGames = 0;
     for (auto raw = 0; raw < static_cast<int>(OpeningStyle::count); ++raw) {
@@ -148,7 +149,7 @@ OpeningStyle OpponentHistory::choose(
             const auto style = static_cast<OpeningStyle>(raw);
             // A training cold start needs at least four cross-map observations
             // before departing from the robust standard opening.
-            if (( !explore || priorGames[raw] >= 4.0) && posterior(style) > posterior(best))
+            if ((!explore || priorGames[static_cast<std::size_t>(raw)] >= 4.0) && posterior(style) > posterior(best))
                 best = style;
         }
         return best;

@@ -80,8 +80,8 @@ std::optional<PolicyAction> PolicyLearner::choose(std::string_view context, int 
         if (values[i] > bestValue) { best = action; bestValue = values[i]; }
     }
     if (training && !frozen_ && config_.epsilon > 0.0) {
-        for (unsigned char byte : context) {
-            seed ^= byte;
+        for (const char byte : context) {
+            seed ^= static_cast<unsigned char>(byte);
             seed *= UINT64_C(0x100000001b3);
         }
         seed ^= static_cast<std::uint64_t>(static_cast<std::int64_t>(state));

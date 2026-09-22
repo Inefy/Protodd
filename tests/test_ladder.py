@@ -152,6 +152,68 @@ class LadderTests(unittest.TestCase):
         self.assertEqual(summary["scored_games"], 0)
         self.assertEqual(summary["excluded_incomplete_games"], 1)
 
+    def test_failure_points_are_separate_from_strategic_results(self) -> None:
+        def game(index: int, won: bool, **changes: object) -> dict:
+            return dict(game_id=index, round=index, opponent="Iron", map="Python",
+                        won=won, frames=7200, complete=True, end_type="NORMAL", **changes)
+
+        records = [game(0, False), game(1, True, opponent_crash=True),
+                   game(2, True, opponent_timeout=True), game(3, False, our_crash=True),
+                   game(4, False, our_timeout=True), game(5, True, game_timeout=True)]
+        report = ladder.summarize(records, "Protodd")
+        summary = report["summary"]
+        self.assertEqual(summary["outcome_basis"], "normal_gameplay")
+        self.assertEqual((summary["wins"], summary["losses"], summary["scored_games"]), (0, 1, 1))
+        self.assertEqual(summary["excluded_non_strategic_games"], 5)
+        self.assertEqual(summary["excluded_incomplete_games"], 0)
+        self.assertEqual(report["operational_summary"]["wins"], 3)
+        self.assertEqual(report["operational_summary"]["scored_games"], 6)
+        self.assertEqual(report["by_opponent"]["Iron"]["games"], 1)
+        self.assertEqual([record["strategic_result"] for record in report["games"]], [True] + [False] * 5)
+        self.assertIn("Operational score including failures: 3-3", ladder.report_markdown(report))
+        self.assertIn("Strategic win rate", ladder.report_html(report))
+
+    def test_abnormal_end_without_failure_flag_is_not_strategic(self) -> None:
+        record = dict(game_id=0, round=0, opponent="Iron", map="Python", won=True,
+                      frames=7200, complete=True, end_type="STARCRAFT_CRASH")
+        report = ladder.summarize([record], "Protodd")
+        self.assertEqual(report["summary"]["scored_games"], 0)
+        self.assertEqual(report["operational_summary"]["wins"], 1)
+
+    def test_comparison_blocks_our_failures_despite_strategic_improvement(self) -> None:
+        def report(wins: int) -> dict:
+            records = [dict(game_id=index, round=index, opponent="Iron", map="Python",
+                            won=index < wins, frames=7200, complete=True, end_type="NORMAL")
+                       for index in range(100)]
+            return ladder.summarize(records, "Protodd")
+
+        for failure in ("our_crashes", "our_timeouts", "excluded_incomplete_games", "missing_scheduled_games"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                baseline = report(20)
+                candidate = report(80)
+                candidate["summary"][failure] = 1
+                (root / "baseline.json").write_text(json.dumps(baseline), encoding="utf-8")
+                (root / "candidate.json").write_text(json.dumps(candidate), encoding="utf-8")
+                with redirect_stdout(io.StringIO()):
+                    ladder.command_compare(Namespace(baseline=str(root / "baseline.json"),
+                        candidate=str(root / "candidate.json"), output=str(root / "compare.json"),
+                        allow_mismatch=False))
+                comparison = json.loads((root / "compare.json").read_text(encoding="utf-8"))
+                self.assertEqual(comparison["strength_verdict"], "likely improvement")
+                self.assertTrue(comparison["verdict"].startswith("blocked"))
+                self.assertTrue(any(failure in reason for reason in comparison["promotion_blockers"]))
+
+    def test_comparison_rejects_legacy_reports_with_mixed_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            legacy = dict(summary=dict(wins=80, scored_games=100))
+            path = root / "legacy.json"
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            with self.assertRaisesRegex(ladder.LadderError, "legacy reports mix"):
+                ladder.command_compare(Namespace(baseline=str(path), candidate=str(path),
+                                                 output=None, allow_mismatch=False))
+
     def test_detailed_results_javascript_is_supported(self) -> None:
         payload = [{
             "gameID": 2, "round": 0, "bots": ["Protodd", "Steamhammer"],

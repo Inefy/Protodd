@@ -1,0 +1,2458 @@
+{
+  "version": "protodd-macro-v1",
+  "fingerprint": "cbd92cbf5d7dd089",
+  "clip": [
+    0,
+    16
+  ],
+  "features": [
+    {
+      "name": "frame",
+      "scale": 86400
+    },
+    {
+      "name": "minerals",
+      "scale": 2000
+    },
+    {
+      "name": "gas",
+      "scale": 2000
+    },
+    {
+      "name": "supply_used_doubled",
+      "scale": 400
+    },
+    {
+      "name": "supply_total_doubled",
+      "scale": 400
+    },
+    {
+      "name": "gathered_minerals",
+      "scale": 20000
+    },
+    {
+      "name": "gathered_gas",
+      "scale": 10000
+    },
+    {
+      "name": "map_width_pixels",
+      "scale": 4096
+    },
+    {
+      "name": "map_height_pixels",
+      "scale": 4096
+    },
+    {
+      "name": "latency_frames",
+      "scale": 24
+    },
+    {
+      "name": "enemy_protoss",
+      "scale": 1
+    },
+    {
+      "name": "enemy_terran",
+      "scale": 1
+    },
+    {
+      "name": "enemy_zerg",
+      "scale": 1
+    },
+    {
+      "name": "enemy_unknown",
+      "scale": 1
+    },
+    {
+      "name": "gas_workers",
+      "scale": 24
+    },
+    {
+      "name": "workers_under_attack",
+      "scale": 24
+    },
+    {
+      "name": "history_ready",
+      "scale": 1
+    },
+    {
+      "name": "history_elapsed_frames",
+      "scale": 240
+    },
+    {
+      "name": "mineral_income_per_second",
+      "scale": 100
+    },
+    {
+      "name": "gas_income_per_second",
+      "scale": 100
+    },
+    {
+      "name": "own_complete/probe",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/probe",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/probe",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/probe",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/probe",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/probe",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/nexus",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/nexus",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/nexus",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/nexus",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/nexus",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/nexus",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/pylon",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/pylon",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/pylon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/pylon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/pylon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/pylon",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/assimilator",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/assimilator",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/assimilator",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/assimilator",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/assimilator",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/assimilator",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/gateway",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/gateway",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/gateway",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/gateway",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/gateway",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/gateway",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/forge",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/forge",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/forge",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/forge",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/forge",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/forge",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/photon_cannon",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/photon_cannon",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/photon_cannon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/photon_cannon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/photon_cannon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/photon_cannon",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/cybernetics_core",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/cybernetics_core",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/cybernetics_core",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/cybernetics_core",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/cybernetics_core",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/cybernetics_core",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/shield_battery",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/shield_battery",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/shield_battery",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/shield_battery",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/shield_battery",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/shield_battery",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/robotics_facility",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/robotics_facility",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/robotics_facility",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/robotics_facility",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/robotics_facility",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/robotics_facility",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/observatory",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/observatory",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/observatory",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/observatory",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/observatory",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/observatory",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/robotics_support_bay",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/robotics_support_bay",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/robotics_support_bay",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/robotics_support_bay",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/robotics_support_bay",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/robotics_support_bay",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/stargate",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/stargate",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/stargate",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/stargate",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/stargate",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/stargate",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/citadel_of_adun",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/citadel_of_adun",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/citadel_of_adun",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/citadel_of_adun",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/citadel_of_adun",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/citadel_of_adun",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/templar_archives",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/templar_archives",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/templar_archives",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/templar_archives",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/templar_archives",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/templar_archives",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/fleet_beacon",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/fleet_beacon",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/fleet_beacon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/fleet_beacon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/fleet_beacon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/fleet_beacon",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/arbiter_tribunal",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/arbiter_tribunal",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/arbiter_tribunal",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/arbiter_tribunal",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/arbiter_tribunal",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/arbiter_tribunal",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/zealot",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/zealot",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/zealot",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/zealot",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/zealot",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/zealot",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/dragoon",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/dragoon",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/dragoon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/dragoon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/dragoon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/dragoon",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/high_templar",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/high_templar",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/high_templar",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/high_templar",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/high_templar",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/high_templar",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/dark_templar",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/dark_templar",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/dark_templar",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/dark_templar",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/dark_templar",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/dark_templar",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/archon",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/archon",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/archon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/archon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/archon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/archon",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/dark_archon",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/dark_archon",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/dark_archon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/dark_archon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/dark_archon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/dark_archon",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/reaver",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/reaver",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/reaver",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/reaver",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/reaver",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/reaver",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/observer",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/observer",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/observer",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/observer",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/observer",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/observer",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/shuttle",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/shuttle",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/shuttle",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/shuttle",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/shuttle",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/shuttle",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/scout",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/scout",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/scout",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/scout",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/scout",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/scout",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/corsair",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/corsair",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/corsair",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/corsair",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/corsair",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/corsair",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/carrier",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/carrier",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/carrier",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/carrier",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/carrier",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/carrier",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/arbiter",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/arbiter",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/arbiter",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/arbiter",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/arbiter",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/arbiter",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/scv",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/scv",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/scv",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/scv",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/scv",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/scv",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/command_center",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/command_center",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/command_center",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/command_center",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/command_center",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/command_center",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/barracks",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/barracks",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/barracks",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/barracks",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/barracks",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/barracks",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/factory",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/factory",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/factory",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/factory",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/factory",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/factory",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/starport",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/starport",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/starport",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/starport",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/starport",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/starport",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/bunker",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/bunker",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/bunker",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/bunker",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/bunker",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/bunker",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/missile_turret",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/missile_turret",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/missile_turret",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/missile_turret",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/missile_turret",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/missile_turret",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/marine",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/marine",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/marine",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/marine",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/marine",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/marine",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/medic",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/medic",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/medic",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/medic",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/medic",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/medic",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/firebat",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/firebat",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/firebat",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/firebat",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/firebat",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/firebat",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/vulture",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/vulture",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/vulture",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/vulture",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/vulture",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/vulture",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/siege_tank",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/siege_tank",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/siege_tank",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/siege_tank",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/siege_tank",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/siege_tank",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/goliath",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/goliath",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/goliath",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/goliath",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/goliath",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/goliath",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/wraith",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/wraith",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/wraith",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/wraith",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/wraith",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/wraith",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/science_vessel",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/science_vessel",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/science_vessel",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/science_vessel",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/science_vessel",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/science_vessel",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/dropship",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/dropship",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/dropship",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/dropship",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/dropship",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/dropship",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/battlecruiser",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/battlecruiser",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/battlecruiser",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/battlecruiser",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/battlecruiser",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/battlecruiser",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/drone",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/drone",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/drone",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/drone",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/drone",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/drone",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/hatchery",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/hatchery",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/hatchery",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/hatchery",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/hatchery",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/hatchery",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/lair",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/lair",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/lair",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/lair",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/lair",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/lair",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/hive",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/hive",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/hive",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/hive",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/hive",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/hive",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/spawning_pool",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/spawning_pool",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/spawning_pool",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/spawning_pool",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/spawning_pool",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/spawning_pool",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/hydralisk_den",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/hydralisk_den",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/hydralisk_den",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/hydralisk_den",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/hydralisk_den",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/hydralisk_den",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/spire",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/spire",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/spire",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/spire",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/spire",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/spire",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/greater_spire",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/greater_spire",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/greater_spire",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/greater_spire",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/greater_spire",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/greater_spire",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/sunken_colony",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/sunken_colony",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/sunken_colony",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/sunken_colony",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/sunken_colony",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/sunken_colony",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/spore_colony",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/spore_colony",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/spore_colony",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/spore_colony",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/spore_colony",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/spore_colony",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/zergling",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/zergling",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/zergling",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/zergling",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/zergling",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/zergling",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/hydralisk",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/hydralisk",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/hydralisk",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/hydralisk",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/hydralisk",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/hydralisk",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/lurker",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/lurker",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/lurker",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/lurker",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/lurker",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/lurker",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/mutalisk",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/mutalisk",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/mutalisk",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/mutalisk",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/mutalisk",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/mutalisk",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/scourge",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/scourge",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/scourge",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/scourge",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/scourge",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/scourge",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/ultralisk",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/ultralisk",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/ultralisk",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/ultralisk",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/ultralisk",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/ultralisk",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/defiler",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/defiler",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/defiler",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/defiler",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/defiler",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/defiler",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/overlord",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/overlord",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/overlord",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/overlord",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/overlord",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/overlord",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/ghost",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/ghost",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/ghost",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/ghost",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/ghost",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/ghost",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/valkyrie",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/valkyrie",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/valkyrie",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/valkyrie",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/valkyrie",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/valkyrie",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/spider_mine",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/spider_mine",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/spider_mine",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/spider_mine",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/spider_mine",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/spider_mine",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/academy",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/academy",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/academy",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/academy",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/academy",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/academy",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/engineering_bay",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/engineering_bay",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/engineering_bay",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/engineering_bay",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/engineering_bay",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/engineering_bay",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/armory",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/armory",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/armory",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/armory",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/armory",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/armory",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/machine_shop",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/machine_shop",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/machine_shop",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/machine_shop",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/machine_shop",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/machine_shop",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/control_tower",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/control_tower",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/control_tower",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/control_tower",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/control_tower",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/control_tower",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/science_facility",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/science_facility",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/science_facility",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/science_facility",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/science_facility",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/science_facility",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/covert_ops",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/covert_ops",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/covert_ops",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/covert_ops",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/covert_ops",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/covert_ops",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/physics_lab",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/physics_lab",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/physics_lab",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/physics_lab",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/physics_lab",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/physics_lab",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/comsat_station",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/comsat_station",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/comsat_station",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/comsat_station",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/comsat_station",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/comsat_station",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/queen",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/queen",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/queen",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/queen",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/queen",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/queen",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/guardian",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/guardian",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/guardian",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/guardian",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/guardian",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/guardian",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/devourer",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/devourer",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/devourer",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/devourer",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/devourer",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/devourer",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/broodling",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/broodling",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/broodling",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/broodling",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/broodling",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/broodling",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/infested_terran",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/infested_terran",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/infested_terran",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/infested_terran",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/infested_terran",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/infested_terran",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/creep_colony",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/creep_colony",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/creep_colony",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/creep_colony",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/creep_colony",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/creep_colony",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/evolution_chamber",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/evolution_chamber",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/evolution_chamber",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/evolution_chamber",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/evolution_chamber",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/evolution_chamber",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/queen's_nest",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/queen's_nest",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/queen's_nest",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/queen's_nest",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/queen's_nest",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/queen's_nest",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/ultralisk_cavern",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/ultralisk_cavern",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/ultralisk_cavern",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/ultralisk_cavern",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/ultralisk_cavern",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/ultralisk_cavern",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/defiler_mound",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/defiler_mound",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/defiler_mound",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/defiler_mound",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/defiler_mound",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/defiler_mound",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/nydus_canal",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/nydus_canal",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/nydus_canal",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/nydus_canal",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/nydus_canal",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/nydus_canal",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/lurker_egg",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/lurker_egg",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/lurker_egg",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/lurker_egg",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/lurker_egg",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/lurker_egg",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/cocoon",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/cocoon",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/cocoon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/cocoon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/cocoon",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/cocoon",
+      "scale": 5760
+    },
+    {
+      "name": "own_complete/nuclear_silo",
+      "scale": 50
+    },
+    {
+      "name": "own_incomplete/nuclear_silo",
+      "scale": 50
+    },
+    {
+      "name": "own_queue/nuclear_silo",
+      "scale": 50
+    },
+    {
+      "name": "enemy_visible/nuclear_silo",
+      "scale": 50
+    },
+    {
+      "name": "enemy_remembered/nuclear_silo",
+      "scale": 50
+    },
+    {
+      "name": "enemy_memory_age/nuclear_silo",
+      "scale": 5760
+    },
+    {
+      "name": "own_tech_level/singularity_charge",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/singularity_charge",
+      "scale": 1
+    },
+    {
+      "name": "own_tech_level/leg_enhancements",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/leg_enhancements",
+      "scale": 1
+    },
+    {
+      "name": "own_tech_level/psionic_storm",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/psionic_storm",
+      "scale": 1
+    },
+    {
+      "name": "own_tech_level/stasis_field",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/stasis_field",
+      "scale": 1
+    },
+    {
+      "name": "own_tech_level/recall",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/recall",
+      "scale": 1
+    },
+    {
+      "name": "own_tech_level/khaydarin_amulet",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/khaydarin_amulet",
+      "scale": 1
+    },
+    {
+      "name": "own_tech_level/gravitic_drive",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/gravitic_drive",
+      "scale": 1
+    },
+    {
+      "name": "own_tech_level/gravitic_boosters",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/gravitic_boosters",
+      "scale": 1
+    },
+    {
+      "name": "own_tech_level/sensor_array",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/sensor_array",
+      "scale": 1
+    },
+    {
+      "name": "own_tech_level/reaver_capacity",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/reaver_capacity",
+      "scale": 1
+    },
+    {
+      "name": "own_tech_level/scarab_damage",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/scarab_damage",
+      "scale": 1
+    },
+    {
+      "name": "own_tech_level/carrier_capacity",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/carrier_capacity",
+      "scale": 1
+    },
+    {
+      "name": "own_tech_level/protoss_ground_weapons",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/protoss_ground_weapons",
+      "scale": 1
+    },
+    {
+      "name": "own_tech_level/protoss_ground_armor",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/protoss_ground_armor",
+      "scale": 1
+    },
+    {
+      "name": "own_tech_level/protoss_plasma_shields",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/protoss_plasma_shields",
+      "scale": 1
+    },
+    {
+      "name": "own_tech_level/protoss_air_weapons",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/protoss_air_weapons",
+      "scale": 1
+    },
+    {
+      "name": "own_tech_level/protoss_air_armor",
+      "scale": 3
+    },
+    {
+      "name": "own_tech_in_progress/protoss_air_armor",
+      "scale": 1
+    }
+  ],
+  "actions": [
+    "wait",
+    "train_probe",
+    "expand_nexus",
+    "build_pylon",
+    "build_assimilator",
+    "build_gateway",
+    "build_forge",
+    "build_photon_cannon",
+    "build_cybernetics_core",
+    "build_shield_battery",
+    "build_robotics_facility",
+    "build_observatory",
+    "build_robotics_support_bay",
+    "build_stargate",
+    "build_citadel_of_adun",
+    "build_templar_archives",
+    "build_fleet_beacon",
+    "build_arbiter_tribunal",
+    "train_zealot",
+    "train_dragoon",
+    "train_high_templar",
+    "train_dark_templar",
+    "train_reaver",
+    "train_observer",
+    "train_shuttle",
+    "train_scout",
+    "train_corsair",
+    "train_carrier",
+    "train_arbiter",
+    "upgrade_singularity_charge",
+    "upgrade_leg_enhancements",
+    "research_psionic_storm",
+    "research_stasis_field",
+    "research_recall",
+    "upgrade_khaydarin_amulet",
+    "upgrade_gravitic_drive",
+    "upgrade_gravitic_boosters",
+    "upgrade_sensor_array",
+    "upgrade_reaver_capacity",
+    "upgrade_scarab_damage",
+    "upgrade_carrier_capacity",
+    "upgrade_protoss_ground_weapons",
+    "upgrade_protoss_ground_armor",
+    "upgrade_protoss_plasma_shields",
+    "upgrade_protoss_air_weapons",
+    "upgrade_protoss_air_armor"
+  ]
+}

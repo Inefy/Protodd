@@ -1,0 +1,21 @@
+{
+  "dataset": "artifacts/replay-learning/protoss-tensors-20260922",
+  "output": "artifacts/replay-learning/protoss-a0-gpu-20260922",
+  "device": "cuda",
+  "precision": "bf16",
+  "data_cache": "cuda",
+  "hidden": [1024, 1024],
+  "epochs": 20,
+  "batch_size": 4096,
+  "validation_batch_size": 8192,
+  "learning_rate": 0.0003,
+  "weight_decay": 0.0001,
+  "warmup_steps": 500,
+  "patience": 4,
+  "prefetch": 2,
+  "checkpoint_steps": 250,
+  "status_seconds": 15,
+  "cpu_threads": 4,
+  "seed": 42,
+  "parity_tool": "build/runtime-parity-audit/Release/model_tool.exe"
+}

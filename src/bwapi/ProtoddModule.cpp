@@ -198,6 +198,7 @@ void ProtoddModule::onStart() {
 
     const auto historyFile = OpponentHistory::filename(opponentName_);
     policy_.start();
+    model_.start(log_);
     // Controlled training imports only externally validated results. onEnd
     // alone cannot distinguish a strategic win from an opponent crash.
     const auto learningMode = readFile("bwapi-data/read/Protodd-learning-mode.txt");
@@ -333,6 +334,10 @@ void ProtoddModule::runFrame() {
     }
 
     const auto cadence = frameBudget_.expensiveCadenceMultiplier(state_.frame);
+    if (model_.enabled()) {
+        measure("model-observe", [this] { model_.observe(state_); });
+        measure("model-shadow", [this] { model_.infer(state_.frame, frameBudget_, log_); });
+    }
     // Work is staggered to keep frame time predictable under tournament load.
     if (state_.frame % (8 * cadence) == 0) measure("influence", [this] { influence_.update(state_); });
     if (state_.frame % (12 * cadence) == 0) measure("inference", [this] { opponent_.update(state_); });

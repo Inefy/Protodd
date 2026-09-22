@@ -62,9 +62,14 @@ try {
             '-Wno-unused-command-line-argument', '-Wno-language-extension-token'
         )
         foreach ($source in Get-ChildItem -LiteralPath "src/bwapi" -Filter "*.cpp") {
-            $object = Join-Path "build/verify" ($source.BaseName + ".obj")
-            & $zigPath c++ @adapterFlags -c $source.FullName -o $object
-            if ($LASTEXITCODE -ne 0) { throw "Adapter compilation failed: $($source.Name)" }
+            $raceVariants = if ($source.Name -eq 'RaceBotEntry.cpp') { @(1, 2) } else { @(0) }
+            foreach ($raceVariant in $raceVariants) {
+                $raceFlags = @()
+                if ($raceVariant -gt 0) { $raceFlags = @("-DPROTODD_BOT_RACE=$raceVariant") }
+                $object = Join-Path "build/verify" ($source.BaseName + "-$raceVariant.obj")
+                & $zigPath c++ @adapterFlags @raceFlags -c $source.FullName -o $object
+                if ($LASTEXITCODE -ne 0) { throw "Adapter compilation failed: $($source.Name) race=$raceVariant" }
+            }
         }
     }
 

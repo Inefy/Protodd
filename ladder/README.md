@@ -112,7 +112,10 @@ The output includes:
 - `games.csv` — one row per Tournament Manager game;
 - `telemetry-games.csv` — one row per Protodd log game when logs were passed.
 
-Win rates always include Wilson 95% intervals. Fewer than 30 games is marked
+Strategic win rates include only completed normal games without either bot
+crashing or timing out, and always include Wilson 95% intervals. The separate
+operational score retains completed tournament points awarded through failures.
+Incomplete games remain excluded from both. Fewer than 30 games is marked
 `insufficient`, 30–99 is `directional`, and 100+ is `strong`. A segment is only
 called winning or losing when its interval excludes 50%. Crashes, frame
 timeouts, incomplete matches, map splits, opponent splits, trend, supply-block
@@ -130,7 +133,11 @@ Use the same opponents, versions, maps, number of games, and time limits:
   --output ladder/reports/baseline-vs-candidate.json
 ```
 
-The comparison reports the overall percentage-point change and a Newcombe
-score-based 95% interval, plus opponent-level deltas. Treat `inconclusive` as a
-request for more games, not evidence of no effect. Any Protodd crash or severe
-frame timeout is a release blocker regardless of win rate.
+The comparison requires current reports with separated strategic outcomes;
+regenerate historical reports before comparing them. It reports the overall
+percentage-point change and a Newcombe score-based 95% interval, plus
+opponent-level deltas. Treat `inconclusive` as a request for more games, not
+evidence of no effect. Candidate crashes, timeouts, caught errors, incomplete
+or missing games, and missing or mismatched run manifests block the comparison's
+promotion verdict regardless of strategic win rate. This is a preliminary
+comparison, not the full matchup, pairing, and runtime promotion gate.

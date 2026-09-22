@@ -2,6 +2,7 @@
 
 #include "BwapiBridge.hpp"
 #include "PolicyRuntime.hpp"
+#include "ModelRuntime.hpp"
 
 #include "protodd/Combat.hpp"
 #include "protodd/Diagnostics.hpp"
@@ -67,6 +68,7 @@ private:
     DebugOverlay debug_;
     OpponentHistory history_;
     PolicyRuntime policy_;
+    ModelRuntime model_;
     bool validatedLearning_{false};
     OpeningStyle openingStyle_{OpeningStyle::standard};
     std::string opponentName_;

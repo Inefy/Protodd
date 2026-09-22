@@ -635,7 +635,11 @@ def group_stats(records: Sequence[dict[str, Any]], key: str) -> dict[str, dict[s
 
 def summarize(records: Sequence[dict[str, Any]], our_bot: str, manifest: dict[str, Any] | None = None) -> dict[str, Any]:
     excluded = [record for record in records if not record.get("complete") or record.get("won") is None or record.get("frames", 0) <= 0 or record.get("end_type") == "GAME_STATE_NOT_UPDATED_60S_BOTH_BOTS"]
-    scored = [record for record in records if record not in excluded]
+    operational = [record for record in records if record not in excluded]
+    failure_fields = ("our_crash", "opponent_crash", "our_timeout", "opponent_timeout", "game_timeout")
+    scored = [record for record in operational if record.get("end_type") == "NORMAL" and
+              not any(record.get(field) for field in failure_fields)]
+    operational_wins = sum(record["won"] is True for record in operational)
     wins = sum(record["won"] is True for record in scored)
     scheduled = int((manifest or {}).get("scheduled_games", len(records)))
     received_ids = {int(record.get("game_id", -1)) for record in records}
@@ -645,19 +649,22 @@ def summarize(records: Sequence[dict[str, Any]], our_bot: str, manifest: dict[st
         str(bot["name"]): str(bot.get("race", "unknown"))
         for bot in (manifest or {}).get("bots", [])
     }
-    for record in scored:
+    for record in records:
         record["opponent_race"] = races.get(record["opponent"], "unknown")
+        record["strategic_result"] = record in scored
     def rate(games: Sequence[dict[str, Any]]) -> float | None:
         return sum(record["won"] is True for record in games) / len(games) if games else None
     return {
-        "schema": 1,
+        "schema": 2,
         "generated_utc": utc_now(),
         "our_bot": our_bot,
         "manifest": manifest,
         "summary": {
+            "outcome_basis": "normal_gameplay",
             "reported_games": len(records),
             "scored_games": len(scored),
             "excluded_incomplete_games": len(excluded),
+            "excluded_non_strategic_games": len(operational) - len(scored),
             "missing_scheduled_games": max(0, scheduled - len(received_ids)),
             "wins": wins,
             "losses": len(scored) - wins,
@@ -667,10 +674,19 @@ def summarize(records: Sequence[dict[str, Any]], our_bot: str, manifest: dict[st
             "average_game_minutes": statistics.fmean(record["frames"] for record in scored) / 1440.0 if scored else 0.0,
             "our_crashes": sum(bool(record.get("our_crash")) for record in records),
             "our_timeouts": sum(bool(record.get("our_timeout")) for record in records),
+            "opponent_crashes": sum(bool(record.get("opponent_crash")) for record in records),
+            "opponent_timeouts": sum(bool(record.get("opponent_timeout")) for record in records),
             "game_timeouts": sum(bool(record.get("game_timeout")) for record in records),
             "first_half_win_rate": rate(first_half),
             "second_half_win_rate": rate(second_half),
             "latest_20_win_rate": rate(scored[-20:]),
+        },
+        "operational_summary": {
+            "outcome_basis": "completed_tournament_scores_including_failures",
+            "scored_games": len(operational),
+            "wins": operational_wins,
+            "losses": len(operational) - operational_wins,
+            "win_rate": rate(operational),
         },
         "by_opponent": group_stats(scored, "opponent"),
         "by_race": group_stats(scored, "opponent_race"),
@@ -697,6 +713,7 @@ def markdown_table(groups: dict[str, dict[str, Any]]) -> str:
 
 def report_markdown(report: dict[str, Any]) -> str:
     summary = report["summary"]
+    operational = report.get("operational_summary", summary)
     low, high = summary["wilson_95"]
     label = (report.get("manifest") or {}).get("label", "unlabelled")
     telemetry = report.get("protodd_telemetry")
@@ -718,9 +735,11 @@ Generated {report['generated_utc']}.
 
 ## Verdict
 
-**{summary['indication']}** - {summary['wins']}-{summary['losses']} over {summary['scored_games']} scored games, {percent(summary['win_rate'])} win rate (Wilson 95% CI {percent(low)} to {percent(high)}).
+**{summary['indication']}** - {summary['wins']}-{summary['losses']} over {summary['scored_games']} normal games, {percent(summary['win_rate'])} strategic win rate (Wilson 95% CI {percent(low)} to {percent(high)}).
 
+- Operational score including failures: {operational['wins']}-{operational['losses']} over {operational['scored_games']} completed scored games. Failure outcomes do not establish strategic strength.
 - Reliability: {summary['our_crashes']} Protodd crashes, {summary['our_timeouts']} per-frame timeouts, {summary['game_timeouts']} game-length timeouts, {summary['excluded_incomplete_games']} incomplete/excluded.
+- Opponent failures: {summary.get('opponent_crashes', 0)} crashes and {summary.get('opponent_timeouts', 0)} per-frame timeouts, excluded from strategic results.
 - Coverage: {summary['reported_games']} result records, {summary['missing_scheduled_games']} scheduled games missing.
 - Trend: first half {percent(summary['first_half_win_rate'])}, second half {percent(summary['second_half_win_rate'])}, latest 20 {percent(summary['latest_20_win_rate'])}.
 - Average game length: {summary['average_game_minutes']:.1f} in-game minutes.
@@ -742,6 +761,7 @@ Generated {report['generated_utc']}.
 
 def report_html(report: dict[str, Any]) -> str:
     summary = report["summary"]
+    operational = report.get("operational_summary", summary)
     low, high = summary["wilson_95"]
     def rows(groups: dict[str, dict[str, Any]]) -> str:
         output = []
@@ -768,11 +788,11 @@ def report_html(report: dict[str, Any]) -> str:
 <title>Protodd ladder report</title><style>
 :root{{--bg:#0b1020;--panel:#151c32;--text:#edf2ff;--muted:#9daaca;--accent:#6ee7b7;--bad:#fb7185}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,sans-serif}}main{{max-width:1120px;margin:auto;padding:32px}}h1{{font-size:32px;margin-bottom:6px}}.sub{{color:var(--muted)}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:24px 0}}.card,section{{background:var(--panel);border:1px solid #283352;border-radius:12px;padding:18px}}.big{{font-size:28px;font-weight:750;margin-top:8px}}section{{margin:16px 0;overflow:auto}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;text-align:left;border-bottom:1px solid #283352;white-space:nowrap}}th{{color:var(--muted)}}.track{{width:130px}}.bar{{display:block;height:8px;max-width:130px;background:var(--accent);border-radius:10px}}@media(max-width:650px){{main{{padding:16px}}}}
 </style></head><body><main><h1>Protodd ladder report</h1><div class="sub">{html.escape(report['generated_utc'])} · {html.escape(summary['indication'])}</div>
-<div class="cards"><div class="card">Win rate<div class="big">{percent(summary['win_rate'])}</div><div class="sub">95% CI {percent(low)} to {percent(high)}</div></div><div class="card">Record<div class="big">{summary['wins']}-{summary['losses']}</div><div class="sub">{summary['scored_games']} scored games</div></div><div class="card">Reliability<div class="big">{summary['our_crashes']} crashes</div><div class="sub">{summary['our_timeouts']} timeouts / {summary['excluded_incomplete_games']} incomplete</div></div><div class="card">Coverage<div class="big">{summary['reported_games']}</div><div class="sub">{summary['missing_scheduled_games']} scheduled games missing</div></div><div class="card">Latest 20<div class="big">{percent(summary['latest_20_win_rate'])}</div><div class="sub">First {percent(summary['first_half_win_rate'])} / second {percent(summary['second_half_win_rate'])}</div></div></div>{diagnostic_section}{sections}</main></body></html>"""
+<div class="cards"><div class="card">Strategic win rate<div class="big">{percent(summary['win_rate'])}</div><div class="sub">95% CI {percent(low)} to {percent(high)}</div></div><div class="card">Normal-game record<div class="big">{summary['wins']}-{summary['losses']}</div><div class="sub">{summary['scored_games']} normal games</div></div><div class="card">Operational score<div class="big">{operational['wins']}-{operational['losses']}</div><div class="sub">Includes failure outcomes</div></div><div class="card">Reliability<div class="big">{summary['our_crashes']} crashes</div><div class="sub">{summary['our_timeouts']} timeouts / {summary['excluded_incomplete_games']} incomplete</div></div><div class="card">Coverage<div class="big">{summary['reported_games']}</div><div class="sub">{summary['missing_scheduled_games']} scheduled games missing</div></div><div class="card">Latest 20<div class="big">{percent(summary['latest_20_win_rate'])}</div><div class="sub">First {percent(summary['first_half_win_rate'])} / second {percent(summary['second_half_win_rate'])}</div></div></div>{diagnostic_section}{sections}</main></body></html>"""
 
 
 def write_games_csv(path: Path, games: Sequence[dict[str, Any]]) -> None:
-    fields = ["game_id", "round", "opponent", "opponent_race", "map", "won", "winner", "frames", "end_type", "our_crash", "opponent_crash", "our_timeout", "opponent_timeout", "game_timeout", "complete"]
+    fields = ["game_id", "round", "opponent", "opponent_race", "map", "won", "winner", "frames", "end_type", "our_crash", "opponent_crash", "our_timeout", "opponent_timeout", "game_timeout", "complete", "strategic_result"]
     with path.open("w", newline="", encoding="utf-8") as target:
         writer = csv.DictWriter(target, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
@@ -857,8 +877,24 @@ def command_compare(args: argparse.Namespace) -> None:
             "use --allow-mismatch only for exploratory analysis"
         )
     a, b = baseline["summary"], candidate["summary"]
+    for report in (baseline, candidate):
+        if report["summary"].get("outcome_basis") != "normal_gameplay":
+            raise LadderError("Rebuild both reports before comparing: legacy reports mix strategic and failure outcomes")
     delta, low, high = difference_interval(a["wins"], a["scored_games"], b["wins"], b["scored_games"])
-    verdict = "likely improvement" if low > 0 else "likely regression" if high < 0 else "inconclusive"
+    strength_verdict = "likely improvement" if low > 0 else "likely regression" if high < 0 else "inconclusive"
+    blockers = []
+    for field in ("our_crashes", "our_timeouts", "excluded_incomplete_games", "missing_scheduled_games"):
+        if b.get(field, 0):
+            blockers.append(f"candidate {field}: {b[field]}")
+    runtime = candidate.get("protodd_telemetry", {}).get("runtime", {})
+    for field in ("over_55ms", "over_1s", "over_10s", "caught_errors"):
+        if runtime.get(field, 0):
+            blockers.append(f"candidate {field}: {runtime[field]}")
+    if mismatches:
+        blockers.append("exploratory comparison with mismatched run conditions")
+    if not baseline_manifest or not candidate_manifest:
+        blockers.append("missing frozen run manifests")
+    verdict = "blocked by reliability or comparison failures" if blockers else strength_verdict
     comparison: dict[str, Any] = {
         "generated_utc": utc_now(),
         "baseline": {"label": (baseline.get("manifest") or {}).get("label", "baseline"), **a},
@@ -866,6 +902,8 @@ def command_compare(args: argparse.Namespace) -> None:
         "win_rate_delta": delta,
         "delta_95": [low, high],
         "verdict": verdict,
+        "strength_verdict": strength_verdict,
+        "promotion_blockers": blockers,
         "segments": {},
     }
     common_opponents = set(baseline.get("by_opponent", {})) & set(candidate.get("by_opponent", {}))
@@ -881,6 +919,8 @@ def command_compare(args: argparse.Namespace) -> None:
     )
     for opponent, item in comparison["segments"].items():
         print(f"  {opponent}: {item['delta'] * 100:+.1f} points")
+    for blocker in blockers:
+        print(f"  Blocked: {blocker}")
 
 
 def build_parser() -> argparse.ArgumentParser:
