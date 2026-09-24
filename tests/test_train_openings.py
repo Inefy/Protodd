@@ -1,5 +1,7 @@
 import importlib.util
+import json
 from pathlib import Path
+import tempfile
 import unittest
 
 spec = importlib.util.spec_from_file_location('trainer', Path(__file__).resolve().parents[1] / 'tools/train_openings.py')
@@ -8,6 +10,33 @@ spec.loader.exec_module(trainer)
 
 
 class TrainingValidation(unittest.TestCase):
+    def test_evaluation_purpose_rejected_before_reading_results(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run = Path(temp)
+            for purpose in ('development', 'final-test', None):
+                (run / 'manifest.json').write_text(json.dumps(dict(format='protodd-arena-v1', purpose=purpose)))
+                with self.assertRaisesRegex(ValueError, 'campaign purpose'):
+                    trainer.read_episode(run, 0)
+            (run / 'manifest.json').write_text(json.dumps(dict(format='protodd-arena-v1', purpose='training')))
+            trainer.require_training_campaign(run)
+
+    def test_opening_trace_must_explicitly_be_a_training_episode(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run = Path(temp)
+            trace_dir = run / 'server/replays/bot-write/game-0/Protodd/archive'
+            trace_dir.mkdir(parents=True)
+            (run / 'manifest.json').write_text(json.dumps(dict(format='protodd-arena-v1', purpose='training')))
+            (run / 'server/results.jsonl').write_text('\n'.join(map(json.dumps, self.pair())) + '\n')
+            (run / 'server/server_settings.json').write_text(json.dumps(dict(tournamentModuleSettings=dict(timeoutLimits=[]))))
+            trace = trace_dir / 'Protodd.log'
+            episode = 'START,Map,Enemy,standard\nEND,loss,12000\n'
+            for mode in ('', 'LEARNING,mode=frozen\n'):
+                trace.write_text(mode + episode)
+                with self.assertRaisesRegex(ValueError, 'opening-learning'):
+                    trainer.read_episode(run, 0)
+            trace.write_text('LEARNING,mode=validated-train\n' + episode)
+            self.assertFalse(trainer.read_episode(run, 0)[1])
+
     def test_normal_flag_does_not_hide_runtime_forfeit(self):
         rows = self.pair()
         limits = [dict(timeInMS=55, frameCount=320)]

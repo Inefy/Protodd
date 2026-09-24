@@ -121,6 +121,7 @@ void ProtoddModule::onStart() {
     // works and reports that its interactive controls are unavailable.
     BWAPI::Broodwar->enableFlag(BWAPI::Flag::UserInput);
     bridge_.onStart();
+    wholeGame_.start();
     state_ = bridge_.observe();
     navigation_ = bridge_.navigationGrid();
     opponent_.reset(state_.enemy.race);
@@ -225,6 +226,7 @@ void ProtoddModule::onStart() {
 }
 
 void ProtoddModule::onEnd(const bool winner) {
+    wholeGame_.end();
     policy_.end(winner);
     state_.frame = BWAPI::Broodwar->getFrameCount();
     sampleTelemetry();
@@ -327,6 +329,20 @@ void ProtoddModule::runFrame() {
             std::chrono::steady_clock::now() - start).count());
     };
     measure("observe", [this] { state_ = bridge_.observe(); });
+    std::vector<LegalWholeGameCommand> learnedCommands;
+    if (wholeGame_.enabled()) measure("whole-game-observe", [this, &learnedCommands] {
+        learnedCommands = wholeGame_.observe();
+    });
+#ifdef PROTODD_WHOLE_GAME_CONTROL
+    if (state_.self.race == Race::protoss && wholeGame_.controlling()) {
+        if (!learnedCommands.empty()) measure("whole-game-control", [this, &learnedCommands] {
+            for (const auto& candidate : learnedCommands)
+                static_cast<void>(bridge_.executeWholeGame(candidate.command));
+        });
+        measure("damage-log", [this] { logDamage(); });
+        return;
+    }
+#endif
     measure("damage-log", [this] { logDamage(); });
     if (state_.self.race != Race::protoss) {
         BWAPI::Broodwar->drawTextScreen(8, 8, "Protodd requires Protoss");

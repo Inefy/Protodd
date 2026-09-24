@@ -6,6 +6,12 @@ option(PROTODD_BUILD_TESTS "Build deterministic core tests" ON)
 option(PROTODD_BUILD_BWAPI_MODULE "Build the 32-bit BWAPI tournament DLL" OFF)
 set(BWAPI_ROOT "" CACHE PATH "Path to an unpacked BWAPI 4.4.0 release")
 set(BWAPI_LIBRARY "" CACHE FILEPATH "Path to a 32-bit BWAPILIB.lib")
+set(PROTODD_WHOLE_GAME_WEIGHTS "" CACHE FILEPATH "Whole-game model weights to embed in Protodd.dll")
+option(PROTODD_WHOLE_GAME_CONTROL "Allow the embedded whole-game policy to issue BWAPI commands" OFF)
+option(PROTODD_WHOLE_GAME_EVALUATION_BUILD
+    "Build a six-slot controller for local evaluation before it has a promotion receipt" OFF)
+set(PROTODD_WHOLE_GAME_PROMOTION_RECEIPT "" CACHE FILEPATH
+    "Promotion receipt binding a six-slot tournament policy to its exact weights")
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(ProtoddWarnings)
@@ -44,6 +50,9 @@ target_compile_features(protodd_core PUBLIC cxx_std_20)
 protodd_enable_warnings(protodd_core)
 
 if(PROTODD_BUILD_BWAPI_MODULE)
+    if(PROTODD_WHOLE_GAME_EVALUATION_BUILD AND NOT PROTODD_WHOLE_GAME_CONTROL)
+        message(FATAL_ERROR "Evaluation build requires whole-game control")
+    endif()
     if(NOT WIN32)
         message(FATAL_ERROR "The injected BWAPI module must be built for 32-bit Windows")
     endif()
@@ -82,20 +91,98 @@ if(PROTODD_BUILD_BWAPI_MODULE)
         src/bwapi/Entry.cpp
         src/bwapi/PolicyRuntime.cpp
         src/bwapi/ModelRuntime.cpp
+        src/bwapi/WholeGameRuntime.cpp
+        src/bwapi/WholeGameAction.cpp
+        src/cpu/WholeGameCpu.cpp
+        src/cpu/WholeGameEncoder.cpp
+        src/cpu/WholeGameIntent.cpp
     )
+    if(PROTODD_WHOLE_GAME_WEIGHTS)
+        if(NOT EXISTS "${PROTODD_WHOLE_GAME_WEIGHTS}")
+            message(FATAL_ERROR "Whole-game weight file does not exist: ${PROTODD_WHOLE_GAME_WEIGHTS}")
+        endif()
+        enable_language(RC)
+        file(TO_CMAKE_PATH "${PROTODD_WHOLE_GAME_WEIGHTS}" PROTODD_WHOLE_GAME_WEIGHTS_RC)
+        set(PROTODD_WHOLE_GAME_RESOURCE "${CMAKE_CURRENT_BINARY_DIR}/whole-game-weights.rc")
+        file(WRITE "${PROTODD_WHOLE_GAME_RESOURCE}"
+            "101 RCDATA \"${PROTODD_WHOLE_GAME_WEIGHTS_RC}\"\n")
+        target_sources(protodd_bwapi PRIVATE "${PROTODD_WHOLE_GAME_RESOURCE}")
+        set_property(SOURCE "${PROTODD_WHOLE_GAME_RESOURCE}" APPEND PROPERTY
+            OBJECT_DEPENDS "${PROTODD_WHOLE_GAME_WEIGHTS}")
+        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_EMBED_WHOLE_GAME_WEIGHTS=1)
+    endif()
+    if(PROTODD_WHOLE_GAME_CONTROL)
+        if(NOT PROTODD_WHOLE_GAME_WEIGHTS)
+            message(FATAL_ERROR "Whole-game control requires embedded weights")
+        endif()
+        file(READ "${PROTODD_WHOLE_GAME_WEIGHTS}" PROTODD_WEIGHT_VERSION_HEX
+            OFFSET 8 LIMIT 4 HEX)
+        if(PROTODD_WHOLE_GAME_EVALUATION_BUILD AND
+           NOT PROTODD_WEIGHT_VERSION_HEX STREQUAL "02000000")
+            message(FATAL_ERROR "Evaluation build requires six-slot weights")
+        endif()
+        if(PROTODD_WEIGHT_VERSION_HEX STREQUAL "02000000")
+            if(NOT PROTODD_WHOLE_GAME_EVALUATION_BUILD AND
+               (NOT PROTODD_WHOLE_GAME_PROMOTION_RECEIPT OR
+                NOT EXISTS "${PROTODD_WHOLE_GAME_PROMOTION_RECEIPT}"))
+                message(FATAL_ERROR
+                    "Six-slot whole-game control requires a promotion receipt for these weights")
+            endif()
+            if(NOT PROTODD_WHOLE_GAME_EVALUATION_BUILD)
+                file(READ "${PROTODD_WHOLE_GAME_PROMOTION_RECEIPT}" PROTODD_PROMOTION_JSON)
+                string(JSON PROTODD_PROMOTION_SCHEMA GET "${PROTODD_PROMOTION_JSON}" schema)
+                string(JSON PROTODD_PROMOTION_READY GET "${PROTODD_PROMOTION_JSON}" tournament_ready)
+                string(JSON PROTODD_PROMOTION_SHA GET "${PROTODD_PROMOTION_JSON}" weights_sha256)
+                file(SHA256 "${PROTODD_WHOLE_GAME_WEIGHTS}" PROTODD_EMBEDDED_SHA)
+                if(NOT PROTODD_PROMOTION_SCHEMA STREQUAL "protodd-whole-game-promotion-v1" OR
+                   NOT PROTODD_PROMOTION_READY OR
+                   NOT PROTODD_PROMOTION_SHA STREQUAL PROTODD_EMBEDDED_SHA)
+                    message(FATAL_ERROR
+                        "Six-slot promotion receipt is not ready or does not match embedded weights")
+                endif()
+                find_package(Python3 COMPONENTS Interpreter REQUIRED)
+                execute_process(
+                    COMMAND "${Python3_EXECUTABLE}" -m training.whole_game_multislot_promotion
+                            verify "${PROTODD_WHOLE_GAME_PROMOTION_RECEIPT}"
+                            "${PROTODD_WHOLE_GAME_WEIGHTS}"
+                    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                    RESULT_VARIABLE PROTODD_PROMOTION_RESULT
+                    OUTPUT_VARIABLE PROTODD_PROMOTION_OUTPUT
+                    ERROR_VARIABLE PROTODD_PROMOTION_ERROR)
+                if(NOT PROTODD_PROMOTION_RESULT EQUAL 0)
+                    message(FATAL_ERROR "Six-slot promotion evidence failed verification:\n${PROTODD_PROMOTION_ERROR}")
+                endif()
+            endif()
+        endif()
+        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_WHOLE_GAME_CONTROL=1)
+    endif()
     target_include_directories(protodd_bwapi PRIVATE
         "${BWAPI_INCLUDE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/bwapi"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu"
     )
     target_link_libraries(protodd_bwapi PRIVATE Protodd::Core "${BWAPI_LIBRARY}")
     target_compile_features(protodd_bwapi PRIVATE cxx_std_20)
     target_compile_definitions(protodd_bwapi PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+        target_compile_options(protodd_bwapi PRIVATE /arch:SSE2)
+    endif()
     protodd_enable_warnings(protodd_bwapi)
     set_target_properties(protodd_bwapi PROPERTIES
         OUTPUT_NAME "Protodd"
         PREFIX ""
         SUFFIX ".dll"
     )
+    if(PROTODD_WHOLE_GAME_EVALUATION_BUILD)
+        set_target_properties(protodd_bwapi PROPERTIES OUTPUT_NAME "ProtoddEvaluation")
+        find_package(Python3 COMPONENTS Interpreter REQUIRED)
+        add_custom_command(TARGET protodd_bwapi POST_BUILD
+            COMMAND "${Python3_EXECUTABLE}" -m training.whole_game_multislot_promotion
+                    record-evaluation "$<TARGET_FILE:protodd_bwapi>"
+                    "$<TARGET_FILE_DIR:protodd_bwapi>/ProtoddEvaluation.build.json"
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            COMMENT "Record the evaluated DLL and frozen source fingerprint")
+    endif()
     foreach(race IN ITEMS Terran Zerg)
         if(race STREQUAL "Terran")
             set(race_id 1)
@@ -140,7 +227,7 @@ if(PROTODD_BUILD_TESTS)
     endif()
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
-        foreach(PROTODD_NEW_TEST IN ITEMS data_release dataset_analysis ladder arena)
+        foreach(PROTODD_NEW_TEST IN ITEMS data_release dataset_analysis ladder arena whole_game_pilot whole_game_labels whole_game_parity whole_game_model whole_game_sequences)
             add_test(NAME "protodd_${PROTODD_NEW_TEST}_tests"
                 COMMAND "${Python3_EXECUTABLE}" -m unittest discover
                     -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p "test_${PROTODD_NEW_TEST}.py")

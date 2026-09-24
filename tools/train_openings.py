@@ -13,6 +13,15 @@ from pathlib import Path
 STYLES = {'standard', 'aggressive', 'economic', 'deceptive'}
 
 
+def require_training_campaign(run):
+    """Declared evaluation purpose wins even if a trace accidentally says train."""
+    path = Path(run) / 'manifest.json'
+    if path.exists():
+        manifest = json.loads(path.read_text())
+        if ('purpose' in manifest or manifest.get('format') == 'protodd-arena-v1') and manifest.get('purpose') != 'training':
+            raise ValueError('evaluation or unknown campaign purpose cannot train')
+
+
 def validate_pair(rows, timeout_limits=(), bot='Protodd'):
     if len(rows) != 2 or len({r['reportingBot'] for r in rows}) != 2:
         raise ValueError('requires exactly two distinct reports')
@@ -40,6 +49,7 @@ def validate_pair(rows, timeout_limits=(), bot='Protodd'):
 
 
 def read_episode(run, game_id):
+    require_training_campaign(run)
     rows = [json.loads(line) for line in (run / 'server/results.jsonl').read_text().splitlines()]
     settings = json.loads((run / 'server/server_settings.json').read_text())
     own = validate_pair([r for r in rows if r['gameID'] == game_id],
@@ -49,6 +59,9 @@ def read_episode(run, game_id):
         raise ValueError('requires one unambiguous archived trace')
     data = logs[0].read_bytes()
     lines = data.decode('utf-8', errors='replace').splitlines()
+    modes = [line for line in lines if line.startswith('LEARNING,')]
+    if modes != ['LEARNING,mode=validated-train']:
+        raise ValueError('frozen or unknown opening-learning episode')
     starts = [line.split(',') for line in lines if line.startswith('START,')]
     ends = [line.split(',') for line in lines if line.startswith('END,')]
     if len(starts) != 1 or len(ends) != 1:

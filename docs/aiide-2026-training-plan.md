@@ -1,9 +1,61 @@
 # AIIDE 2026: training for the strongest deployable Protoss bot
 
+## Active revision — 24 September 2026
+
+Follow the [strength-first plan](strength-first-plan.md). The user asked for a
+reassessment and adjustments: prioritize demonstrated playing strength, coherent
+learned decision scopes and actual group execution. The six-slot replay packet
+model is an offline baseline, not the mandatory next tournament controller.
+The frozen reference campaign has started; loss diagnosis and the action/sequence
+contract precede another large fit. Full-game learning and all promotion gates
+remain goals. The earlier priorities and dated implementation status below are
+historical and are superseded where they conflict with this revision.
+
+## Original plan and implementation history
+
 Plan prepared 22 September 2026 after auditing the current data, training, runtime,
 and evaluation code. This is the implementation priority for the replay-learning
 work. It refines [the original roadmap](replay-learning-plan.md) for AIIDE 2026.
 Changes below are proposed unless explicitly marked completed.
+
+Current priority supersedes the earlier A0/A2-first delivery order below:
+make the GPU-trained whole-game Protoss policy the tournament candidate. The
+existing bot remains an executable comparison and command fallback while the
+learned controller is brought through legality, latency and paired strength
+gates. Spend the remaining development time on action quality, whole-game
+coverage and a CPU-deployable student instead of extending the shallow macro
+policy. If the comprehensive controller misses a gate, record the evidence and
+select the strongest validated build before the submission deadline.
+
+### Direction update — whole-game GPU policy as primary controller
+
+The requested tournament candidate is now the replay-trained whole-game policy,
+with the existing deterministic controllers providing legality, placement,
+pathing and bounded fallbacks. Train the comprehensive teacher on GPU; compile
+a numerically checked CPU evaluator or distilled student into the submitted
+Windows/BWAPI bot. The published AIIDE machines have no competition GPU, so
+GPU inference cannot be a tournament dependency. The learned policy must own
+explicit unit/action scopes; the scripted bot cannot silently overwrite its
+orders. Promotion still requires paired strength campaigns and frame-time tests.
+
+The v3.2 full-prefix release is extracting 12,563 frozen Protoss train and
+validation games. `training.whole_game_fit` supports BF16 minibatches,
+high-MMR/player-diverse sampling, separate verified held-out releases, and
+source-hashed reports. The 24-game-per-matchup fit and the 64-game-per-matchup
+width-512 fit are completed development experiments, not tournament model
+selection: the latter predicted only 3/72 held-out action kinds correctly in
+its bounded report. A longer action-weighted continuation is running. The
+deterministic export and Win32 C++ evaluator have passed
+replay-observation numerical parity. We can embed exact model bytes in the DLL;
+the resource probe verifies both bytes and inference. A paired local shadow
+campaign passed after fixing a terminal zero-unit case, with worst complete
+callbacks below 31 ms on this PC. Learned command ownership and strength
+validation remain the main blockers to making the GPU-trained policy the
+tournament controller. A typed intent decoder and BWAPI legal-command adapter
+now run in shadow mode. The first paired intent campaign exposed incompatible
+action/target combinations in the smoke student and one 56.98 ms callback. The
+adapter does not issue learned commands. A staggered-inference build is being
+measured separately under the same live CPU load.
 
 ### Implementation update — 22 September 2026
 
@@ -41,7 +93,9 @@ Next implementation work is T06 learned-intent execution, followed by T07
 recurrence and controlled A0/A1/A2 comparisons.
 These changes have not yet demonstrated increased playing strength. Original-game
 fidelity checks, full label coverage analysis and exact tournament-hardware timing
-also remain required. The first GPU experiment is complete; the game campaign remains stopped.
+also remain required. The first GPU experiment is complete. The later whole-game
+goal authorized fresh game campaigns; current evidence and expanded priorities
+are maintained in [whole-game training](robust-training-goal.md).
 
 ## 1. Decision and success criterion
 

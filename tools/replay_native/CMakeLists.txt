@@ -22,6 +22,24 @@ add_executable(replay_extract_selftest selftest.cpp
 target_compile_features(replay_extract_selftest PRIVATE cxx_std_20)
 target_include_directories(replay_extract_selftest SYSTEM PRIVATE "${OPENBW_SOURCE_DIR}")
 target_include_directories(replay_extract_selftest PRIVATE "${PROTODD_ROOT}/include")
+foreach(V3_TARGET IN ITEMS replay_extract_v3 replay_extract_v3_selftest)
+    if(V3_TARGET STREQUAL "replay_extract_v3")
+        set(V3_SOURCE extract_whole_game.cpp)
+    else()
+        set(V3_SOURCE whole_game_selftest.cpp)
+    endif()
+    add_executable(${V3_TARGET} ${V3_SOURCE}
+        "${PROTODD_ROOT}/src/core/ObservationEncoder.cpp" "${PROTODD_ROOT}/src/core/GameState.cpp"
+        "${PROTODD_ROOT}/src/core/UnitCatalog.cpp" "${PROTODD_ROOT}/src/core/Technology.cpp")
+    target_compile_features(${V3_TARGET} PRIVATE cxx_std_20)
+    target_include_directories(${V3_TARGET} SYSTEM PRIVATE "${OPENBW_SOURCE_DIR}")
+    target_include_directories(${V3_TARGET} PRIVATE "${PROTODD_ROOT}/include")
+    if(MSVC)
+        target_compile_options(${V3_TARGET} PRIVATE /bigobj /w /permissive)
+        target_compile_definitions(${V3_TARGET} PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX
+            _HAS_DEPRECATED_RESULT_OF=1 _HAS_DEPRECATED_IS_LITERAL_TYPE=1 _HAS_DEPRECATED_ALLOCATOR_MEMBERS=1)
+    endif()
+endforeach()
 if(MSVC)
     target_compile_options(replay_extract_selftest PRIVATE /bigobj /w /permissive)
     target_compile_definitions(replay_extract_selftest PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX

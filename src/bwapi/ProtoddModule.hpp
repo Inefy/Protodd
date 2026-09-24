@@ -3,6 +3,7 @@
 #include "BwapiBridge.hpp"
 #include "PolicyRuntime.hpp"
 #include "ModelRuntime.hpp"
+#include "WholeGameRuntime.hpp"
 
 #include "protodd/Combat.hpp"
 #include "protodd/Diagnostics.hpp"
@@ -69,6 +70,7 @@ private:
     OpponentHistory history_;
     PolicyRuntime policy_;
     ModelRuntime model_;
+    WholeGameRuntime wholeGame_;
     bool validatedLearning_{false};
     OpeningStyle openingStyle_{OpeningStyle::standard};
     std::string opponentName_;

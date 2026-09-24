@@ -15,8 +15,14 @@ if (Get-NetTCPConnection -LocalPort $settings.serverPort -State Listen -ErrorAct
 $javaLauncher = (Get-Command java -ErrorAction Stop).Source
 # Oracle javapath is a launcher that creates another java.exe. Start the actual
 # JVM so processes.json contains live worker handles, not short-lived wrappers.
-$javaProperty = & $javaLauncher -XshowSettings:properties -version 2>&1 |
-    ForEach-Object { [string]$_ } | Where-Object { $_ -match '^\s*java.home\s*=' } | Select-Object -First 1
+# java writes its property listing to stderr, which Windows PowerShell turns
+# into error records under Stop even when java exits successfully.
+$previousErrorAction = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    $javaProperty = & $javaLauncher -XshowSettings:properties -version 2>&1 |
+        ForEach-Object { [string]$_ } | Where-Object { $_ -match '^\s*java.home\s*=' } | Select-Object -First 1
+} finally { $ErrorActionPreference = $previousErrorAction }
 if (-not $javaProperty) { throw 'Cannot resolve the installed Java runtime' }
 $javaRuntimeRoot = ($javaProperty -replace '^\s*java.home\s*=\s*','').Trim()
 $arenaJava = Join-Path $javaRuntimeRoot 'bin/java.exe'

@@ -1,5 +1,8 @@
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -8,6 +11,50 @@ from training.arena import prepare, inspect, verify
 
 
 class ArenaTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt' and shutil.which('pwsh'), 'Windows process ownership fixture')
+    def test_cleanup_does_not_kill_peer_or_unknown_process(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runtime = root / 'runtime'
+            runtime.mkdir()
+            (runtime / 'StarCraft.exe').write_bytes(b'fixture')
+            (runtime / 'arena-owned-processes.json').write_text(json.dumps(dict(runtime=str(runtime), processes=[
+                dict(pid=4, parent=40, created='2026-09-22T12:00:00Z'),
+                dict(pid=5, parent=50, created='2026-09-21T12:00:00Z')])))
+            # Mock OS enumeration/termination only; execute the actual helper.
+            harness = root / 'ownership.ps1'
+            harness.write_text('''param($Helper, $Runtime)
+$global:arenaStopped = @()
+function Get-CimInstance {
+    [PSCustomObject]@{ProcessId=1; ExecutablePath=(Join-Path $Runtime 'StarCraft.exe')}
+    [PSCustomObject]@{ProcessId=2; ExecutablePath=(Join-Path (Split-Path $Runtime) 'peer/StarCraft.exe')}
+    [PSCustomObject]@{ProcessId=3; ExecutablePath=$null}
+    [PSCustomObject]@{ProcessId=4; ParentProcessId=40; CreationDate=[DateTime]::Parse('2026-09-22T12:00:00Z'); ExecutablePath=$null}
+    [PSCustomObject]@{ProcessId=5; ParentProcessId=50; CreationDate=[DateTime]::Parse('2026-09-22T12:00:00Z'); ExecutablePath=$null}
+}
+function Stop-Process { param($Id, [switch]$Force, $ErrorAction) $global:arenaStopped += $Id }
+& $Helper -Runtime $Runtime
+if (($global:arenaStopped -join ',') -ne '1,4') { throw 'peer ownership or PID-reuse protection violated' }
+''')
+            helper = Path(__file__).resolve().parents[1] / 'scripts/stop-owned-starcraft.ps1'
+            result = subprocess.run(['pwsh', '-NoProfile', '-File', str(harness), str(helper), str(runtime)],
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_client_bundle_is_pinned_with_ownership_helper(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = self.fixture(Path(temp))
+            bundle = Path(temp) / 'bundle'
+            bundle.mkdir()
+            shutil.copy2(args['template'] / 'client1/client.jar', bundle / 'client.jar')
+            (bundle / 'stop-owned-starcraft.ps1').write_text('fixture')
+            (bundle / 'start-owned-starcraft.ps1').write_text('fixture')
+            prepare(**args, client_bundle=bundle)
+            self.assertTrue(verify(args['output'])['verified'])
+            (args['output'] / 'client1/stop-owned-starcraft.ps1').write_text('changed')
+            with self.assertRaises(ValueError):
+                verify(args['output'])
+
     def fixture(self, root):
         template = root / "template"
         server = template / "server"
@@ -51,6 +98,17 @@ class ArenaTests(unittest.TestCase):
             (run / "server/bots/Enemy/AI/Enemy.dll").write_bytes(b"changed")
             with self.assertRaises(ValueError):
                 verify(run)
+
+    def test_manager_html_results_are_mutable_outputs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = self.fixture(Path(temp))
+            dashboard = args["template"] / "server/html/results"
+            dashboard.mkdir(parents=True)
+            (dashboard / "detailed_results.txt").write_text("old")
+            manifest = prepare(**args)
+            self.assertNotIn("server/html/results/detailed_results.txt", manifest["components"])
+            (args["output"] / "server/html/results/detailed_results.txt").write_text("new")
+            self.assertTrue(verify(args["output"])["verified"])
 
     def test_reject_placeholder_and_odd_pairing_before_creating_output(self):
         with tempfile.TemporaryDirectory() as temp:

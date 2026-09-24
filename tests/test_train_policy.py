@@ -1,11 +1,20 @@
 import sys
+import json
 from pathlib import Path
+import tempfile
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'tools'))
-from train_policy import transitions
+from train_policy import transitions, read_episode
 
 
 class PolicyDatasetTests(unittest.TestCase):
+    def test_evaluation_campaign_rejected_before_trace_access(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run = Path(temp)
+            (run / 'manifest.json').write_text(json.dumps(dict(format='protodd-arena-v1', purpose='development')))
+            with self.assertRaisesRegex(ValueError, 'campaign purpose'):
+                read_episode(run, 0)
+
     def test_episode_return_credits_early_actions_once_without_stall_bonus(self):
         trace = self.trace().replace('END,1000,1', 'DECISION,960,1,0,15\nEND,2000,0')
         rows = transitions(trace, dict(won=False, finalFrame=2000), 'Terran', 'episode-return')

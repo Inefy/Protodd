@@ -10,7 +10,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from train_openings import validate_pair
+from train_openings import require_training_campaign, validate_pair
 
 
 def transitions(text, own, expected_race, credit='q'):
@@ -68,6 +68,7 @@ def transitions(text, own, expected_race, credit='q'):
 
 
 def read_episode(run, gid, credit='q'):
+    require_training_campaign(run)
     manifest = json.loads((run/'manifest.json').read_text())
     bot, race = manifest['bot'], manifest['race']
     settings = json.loads((run/'server/server_settings.json').read_text())

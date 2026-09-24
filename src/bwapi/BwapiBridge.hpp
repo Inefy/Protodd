@@ -80,6 +80,8 @@ public:
     }
 
     [[nodiscard]] bool execute(const Command& command);
+    [[nodiscard]] bool executeWholeGame(const BWAPI::UnitCommand& command,
+                                        Frame leaseFrames = 24);
     [[nodiscard]] bool commandActive(const Command& command) const;
     [[nodiscard]] ExpansionFeedback expansionFeedback() const;
     [[nodiscard]] bool cancelExpansion();
@@ -151,6 +153,7 @@ private:
     std::vector<FailedBuildSite> failedBuildSites_;
     std::unordered_map<UnitKind, PlacementSearchState> placementSearches_;
     std::unordered_map<UnitId, Frame> unitCommandLocks_;
+    std::unordered_map<UnitId, Frame> learnedCommandLeases_;
     std::vector<ResourceSite> resourceSites_;
     bool defensesInitialized_{};
     std::vector<SpellZone> recentAreaSpells_;

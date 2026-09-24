@@ -14,17 +14,24 @@ import zipfile
 from .schema import sha256
 
 
+# The manager rewrites its HTML result dashboard during each campaign. These
+# files are outputs even when present in the copied template.
+MUTABLE_OUTPUT_PREFIX = "server/html/results/"
+
+
 def write_json(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
 def prepare(template, output, dll, opponents, maps, purpose="development", race="Protoss", rounds=2, port=1347,
-            server_jar=None):
+            server_jar=None, client_bundle=None, whole_game_observe=False):
     template, output, dll = map(lambda p: Path(p).resolve(), (template, output, dll))
     if purpose not in ("training", "development", "final-test"):
         raise ValueError("unknown campaign purpose")
     if race not in ("Protoss", "Terran", "Zerg") or type(rounds) is not int or rounds < 2 or rounds % 2:
         raise ValueError("race and an even number of rounds >=2 are required")
+    if whole_game_observe and race != "Protoss":
+        raise ValueError("whole-game live pilot currently supports Protoss only")
     if output.exists() or not dll.is_file() or not 1024 <= port <= 65535:
         raise ValueError("existing output, missing DLL or invalid port")
     settings = json.loads((template / "server/server_settings.json").read_text())
@@ -55,6 +62,11 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
     server_jar = Path(server_jar).resolve() if server_jar else template / "server/server.jar"
     if not zipfile.is_zipfile(server_jar):
         raise ValueError("invalid server JAR")
+    if client_bundle is not None:
+        client_bundle = Path(client_bundle).resolve()
+        if (not zipfile.is_zipfile(client_bundle / "client.jar") or
+                not all((client_bundle / name).is_file() for name in ('stop-owned-starcraft.ps1', 'start-owned-starcraft.ps1'))):
+            raise ValueError("invalid local client bundle")
     with zipfile.ZipFile(template / "server/required" / settings["mapsFile"]) as archive:
         if not set(maps) <= set(archive.namelist()):
             raise ValueError("map archive does not contain selected maps")
@@ -84,6 +96,8 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
     (target / "read/Protodd-learning-mode.txt").write_text("validated-train\n" if purpose == "training" else "frozen\n")
     (target / "read/Policy-mode.txt").write_text("train\n" if purpose == "training" else "frozen\n")
     (target / "read/LearnedMacro-mode.txt").write_text("off\n")
+    if whole_game_observe:
+        (target / "read/WholeGame-observe.txt").write_text("observe\n")
     settings["bots"] = [dict(BotName=bot, Race=race, BotType="dll", BWAPIVersion="BWAPI_440")] + [available[n] for n in opponents]
     settings.update(clearResults="no", gamesListFile="games.jsonl", resultsFile="results.jsonl",
                     maps=maps, serverPort=port, enableBotFileIO=False, lobbyGameSpeed="Fastest")
@@ -101,10 +115,14 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
     for number, (client, cfg) in enumerate(clients, 1):
         destination = output / f"client{number}"
         destination.mkdir()
-        shutil.copy2(client / "client.jar", destination / "client.jar")
+        shutil.copy2((client_bundle or client) / "client.jar", destination / "client.jar")
+        if client_bundle:
+            for helper in ('start-owned-starcraft.ps1', 'stop-owned-starcraft.ps1'):
+                shutil.copy2(client_bundle / helper, destination / helper)
         cfg["ServerAddress"] = f"127.0.0.1:{port}"
         write_json(destination / "client_settings.json", cfg)
-    hashes = {p.relative_to(output).as_posix(): sha256(p) for p in output.rglob("*") if p.is_file()}
+    hashes = {p.relative_to(output).as_posix(): sha256(p) for p in output.rglob("*")
+              if p.is_file() and not p.relative_to(output).as_posix().startswith(MUTABLE_OUTPUT_PREFIX)}
     manifest = dict(format="protodd-arena-v1", complete=True, label=output.name, bot=bot, race=race,
                     purpose=purpose, games=len(schedule), template=str(template), components=hashes,
                     reward_requires="two consistent normal healthy reports plus reviewed opponent activity",
@@ -120,6 +138,10 @@ def verify(run):
     if manifest.get("format") != "protodd-arena-v1" or manifest.get("complete") is not True:
         raise ValueError("unfinished or incompatible campaign")
     for name, digest in manifest["components"].items():
+        # Older campaign manifests included dashboard files before they were
+        # identified as manager-owned outputs. Keep their input audit usable.
+        if name.startswith(MUTABLE_OUTPUT_PREFIX):
+            continue
         path = (run / name).resolve()
         if not path.is_relative_to(run) or sha256(path) != digest:
             raise ValueError(f"campaign artifact changed: {name}")
@@ -175,6 +197,8 @@ def main():
     prepare_parser.add_argument("--rounds", type=int, default=2)
     prepare_parser.add_argument("--port", type=int, default=1347)
     prepare_parser.add_argument("--server-jar", type=Path, help="Explicitly rebuilt manager, pinned in the campaign")
+    prepare_parser.add_argument("--client-bundle", type=Path, help="Rebuilt local client JAR and owned-process cleanup helper")
+    prepare_parser.add_argument("--whole-game-observe", action="store_true", help="Record legal live observations from the opt-in BWAPI pilot")
     inspect_parser = commands.add_parser("inspect")
     inspect_parser.add_argument("run", type=Path)
     verify_parser = commands.add_parser("verify")

@@ -38,6 +38,7 @@ void BwapiBridge::onStart() {
     failedBuildSites_.clear();
     placementSearches_.clear();
     unitCommandLocks_.clear();
+    learnedCommandLeases_.clear();
     defensesInitialized_ = false;
     recentAreaSpells_.clear();
     lastMacroStatus_ = "idle";
@@ -118,6 +119,9 @@ GameState BwapiBridge::observe() {
         return site.expires <= frame;
     });
     std::erase_if(unitCommandLocks_, [frame](const auto& entry) {
+        return entry.second <= frame;
+    });
+    std::erase_if(learnedCommandLeases_, [frame](const auto& entry) {
         return entry.second <= frame;
     });
     for (auto& [kind, pending] : pendingBuilds_) {
@@ -293,16 +297,24 @@ void BwapiBridge::forget(const BWAPI::Unit unit) {
 
 std::vector<UnitId> BwapiBridge::reservedBuilders() const {
     std::vector<UnitId> result;
-    result.reserve(pendingBuilds_.size());
+    result.reserve(pendingBuilds_.size() + learnedCommandLeases_.size());
     for (const auto& [kind, pending] : pendingBuilds_) {
         static_cast<void>(kind);
         if (pending.builder >= 0) result.push_back(pending.builder);
     }
+    for (const auto& [id, expiry] : learnedCommandLeases_) {
+        static_cast<void>(expiry);
+        result.push_back(id);
+    }
     std::ranges::sort(result);
+    result.erase(std::unique(result.begin(), result.end()), result.end());
     return result;
 }
 
 bool BwapiBridge::issue(const BWAPI::UnitCommand& command, const std::string_view source) {
+    if (!command.getUnit() ||
+        (source != "whole-game" && learnedCommandLeases_.contains(command.getUnit()->getID())))
+        return false;
     const auto accepted = command.getUnit()->issueCommand(command);
     // Capture immediately: later BWAPI queries can replace the last error.
     lastIssueError_ = Broodwar->getLastError();
@@ -313,6 +325,16 @@ bool BwapiBridge::issue(const BWAPI::UnitCommand& command, const std::string_vie
             std::string(source), accepted ? "accepted" : lastIssueError_.toString(),
             command.extra, true, accepted});
     } } catch (...) { ++diagnosticErrors_; }
+    return accepted;
+}
+
+bool BwapiBridge::executeWholeGame(const BWAPI::UnitCommand& command,
+                                   const Frame leaseFrames) {
+    if (leaseFrames < 1 || !command.getUnit()) return false;
+    const auto accepted = issue(command, "whole-game");
+    if (accepted)
+        learnedCommandLeases_[command.getUnit()->getID()] =
+            Broodwar->getFrameCount() + leaseFrames;
     return accepted;
 }
 
@@ -1487,7 +1509,7 @@ BWAPI::Unit BwapiBridge::findBuilder(
             continue;
         }
         if (std::ranges::find(unavailableBuilders, unit->getID()) !=
-            unavailableBuilders.end()) {
+            unavailableBuilders.end() || learnedCommandLeases_.contains(unit->getID())) {
             continue;
         }
         // Pending Protoss construction is a real lease even while the Probe

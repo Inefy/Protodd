@@ -7,14 +7,13 @@ opponent adaptation, deterministic behavior, and replay-driven testing.
 This repository starts from a clean-room architecture. It does not copy a
 tournament bot or depend on code whose license restricts competition entry.
 
-The current development priority is [learning from human replays](docs/replay-learning-plan.md):
-validate the dataset and player observations, train Protoss macro and opponent
-prediction models on the local PC, then extend proven improvements to Terran
-and Zerg. The [first model implementation](training/README.md) now includes shared
-features, validated-data training, CPU export, and opt-in shadow inference. The
-v2 replay extractor and full-corpus validation-to-CUDA pipeline are implemented;
-see the [current run and evidence](docs/replay-extraction-status.md). Competitive
-improvement and authoritative StarCraft playback fidelity remain unverified.
+The current development priority is the [strength-first plan](docs/strength-first-plan.md):
+measure actual games, repair the most consequential execution/learning gaps,
+and introduce learned decision scopes that improve a frozen reference. Human
+replays initialize whole-game learning; matched games determine playing strength.
+The v32d extraction and full six-slot fit are complete, but the model fails its
+command-quality gates. See the [experiment evidence](docs/whole-game-model.md).
+No experimental whole-game model is promoted to tournament control.
 
 ## What is implemented
 
