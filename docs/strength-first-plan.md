@@ -1,5 +1,39 @@
 # Strength-first development plan — 24 September 2026
 
+## Manual priority update — 26 September UTC
+
+A subsequent deep correctness audit fixed twelve issues spanning upgrade
+prerequisites and producer selection, navigation, melee targeting, Storm
+friendly fire, threat maps, unavailable workers/scouts and command identity.
+See [the audit and validation record](deep-performance-audit-20260926.md).
+These remain development changes awaiting controlled engine/live evaluation;
+the concurrent available-tech composition comparison uses its earlier frozen
+DLLs and cannot validate this patch set.
+
+The fresh three-arm Pylon-grace comparison completed twelve healthy games:
+all arms lost 0/4, and frame-8400 army was essentially unchanged. Delayed
+Pylon construction improved, but two candidate games missed a Core. Preserve
+the isolated candidate; it is not an established strength improvement.
+
+The recent manual work addressed a native-reproducible production accounting
+failure: army shares assigned to unstarted tech suppress every affordable
+available unit once opening quotas are met. The bounded correction uses the
+mix supported by committed tech, after existing worker/tech reservations.
+Native and Win32 regression checks passed. The completed twelve-game live
+screen failed its frozen army-growth gate: candidate 5.75 at frame 8400 versus
+5.25/5.0 in the same-DLL reference arms, and all arms lost 0/4. Other gates
+passed, but this does not qualify a larger campaign or a strength claim. See
+[available-composition-20260926.md](available-composition-20260926.md).
+The correction remains unvalidated development source; its frozen experiment
+is preserved. Do not combine it with the archived placement rule or promote it
+based on this screen. Hourly requests remain paused.
+
+A subsequent manual test review passed all 37 development suites and four
+Win32 checks. It also reproduced and corrected the missing Robotics Support
+Bay prerequisite for Reavers, which could reserve funds for impossible units.
+The frozen composition comparison is unchanged. Validate the Reaver correction
+separately after that run; see [test-review-20260926.md](test-review-20260926.md).
+
 This is the active direction after the user's request to reassess the path to
 the strongest possible bot and make adjustments. It supersedes the priority of
 making the existing six-slot replay packet model the sole next tournament
@@ -76,7 +110,69 @@ bot. These motivate the staged direction; no external bot code is imported.
 
 ## Active work queue
 
-### Execution update — current task
+### PvT Core bridge and paired games — active
+
+The [PvT Core bridge experiment](pvt-core-bridge-20260925.md) addresses a
+repeated idle-Gateway window during Core construction. Its two-pair Steamhammer
+screen passed functional army, worker, Dragoon-timing and runtime checks, but
+both versions lost 0/2. Fresh four-pair development games on Benzene and
+Destination are running under the owned sequential supervisor in
+`build/bridge-zealot-generalization-20260925`. No tournament mode changed.
+
+The [worker spending training pilots](worker-outcome-training-20260925.md)
+stopped before treatment because UABTerran crashed on apparent Protodd wins.
+Those games supply no qualified intervention win labels; do not restart the
+unlaunched conditions or fit a worker policy from them.
+
+### Latest population-goal cycle — completed, confirmation failed
+
+The [population-goal experiment](production-goal-experiment-20260924.md) tested
+36 omitted train games, nine development games and a separate nine-game train
+holdout. The joint population/priority network failed development. A learned
+worker-only linear policy passed the separate holdout, then failed unchanged
+24-game validation: two games missed the per-game recall floor, and late PvP
+worker-growth recall was 65.1%. No new model was exported or given control.
+
+This two-variant cycle is closed. The next dependency is outcome-labelled
+training scenarios for worker spending/recovery with qualified persistent
+ownership, matched training interventions and actual army/economy trade-offs.
+Do not repeat similar population-head fits or relax the failed gates. All jobs
+from this cycle have exited; no arena campaign is queued. The earlier live
+integration below remains evidence for its original three-unit scope only.
+
+### Latest live integration
+
+The production model now passes causal live-history checks, native persistent
+unit-production feedback, complete callback timing, and a two-game bounded
+Probe/Zealot/Dragoon control screen. The screen preserved Probe count but had
+4.0 versus 4.5 reference army starts; stronger gameplay is not established.
+The seed-matched full-game pilot completed: candidate 0/2 wins, reference 1/2.
+Runtime and execution checks passed, but the win-improvement gate failed.
+The supervisor and games have stopped; no 72-game campaign was launched.
+Next, test sustained worker/composition goals and spending priorities on bounded
+training material, with readiness checks throughout the controlled window.
+See [production-live-integration-20260924.md](production-live-integration-20260924.md).
+Building-control cancellation and the 72-game strength gate remain unqualified.
+No tournament mode was changed. The earlier continuation below is historical.
+
+### Earlier offline execution update
+
+**Continuation:** the new concurrent production-demand policy passed its
+capacity check, bounded 300-game training / nine-game development comparison,
+and frozen confirmation on 24 reserved validation games. Confirmation macro F1
+is 56.88%; all predeclared checks passed. A standalone Win32 export matches every
+decoded quantity on 7,139 rows and runs at 0.0708ms p95 for model inference alone.
+Twenty-one focused tests pass, including the offline commitment reference.
+See [production-demand-experiment-20260924.md](production-demand-experiment-20260924.md)
+for provenance, criteria, limitations and the current remaining work. The old
+single-action classifiers below remain rejected; this uses all accepted action
+logs, concurrent quantities and strictly past own-command history.
+
+The current blocker is native/live input and persistent execution integration,
+then full callback timing and gameplay evidence. Assimilator recall is only
+7.35% in confirmation, so an offline pass cannot authorize unrestricted macro
+control. No model has live or tournament control. The confirmation games were
+used by the historical macro model and are not globally untouched.
 
 Detailed evidence and current run identities are in
 [local-training-results-20260924.md](local-training-results-20260924.md).
@@ -208,6 +304,26 @@ record its hypothesis, baseline and acceptance criterion before editing behavior
 Develop on training/scenario material; use a new matched candidate campaign for
 evaluation. The 12 games establish a reference, not statistical proof of a small
 strength difference. Verify actual map/start/seed comparability.
+The 25 September PvZ same-DLL repeat control found pre-treatment state
+divergence in all four seed-matched pairs and large late-game duration
+variance. Treat seed matching as a variance reduction tool, not an exact
+counterfactual; calibrate a metric against same-DLL repeats and use more
+independent seeds before accepting a small gameplay effect. See
+[pvz-repeat-control-20260925.md](pvz-repeat-control-20260925.md).
+The source-pinned 25 September build-lease diagnostic then found many accepted
+Pylon orders canceled while their Probes were still travelling. A bounded
+18-second travel extension failed its frozen functional screen and was retired;
+the observation-only diagnostics remain. Investigate builder selection and
+near-site obstruction from the archived ACTION/ENTITY/BUILDLEASE traces before
+another placement change. See
+[pvz-build-lease-diagnostic-20260925.md](pvz-build-lease-diagnostic-20260925.md).
+The subsequent native selector diagnostic found 11 accepted Pylon orders that
+ended in a hard release despite a site-eligible Probe at least 256 pixels
+closer. A bounded site-builder handoff candidate reduced hard releases in two
+seed-matched games but failed its frozen Pylon-construction floor; the game
+with fewer Pylons had no handoff exposure. The rule was retired. Continue
+with a controlled near-footprint retry diagnosis, then use repeated independent
+seeds for any later gameplay effect.
 
 ### 2. Repair the learning and action contract — in progress
 
@@ -244,7 +360,7 @@ Before another full-corpus run:
    for a globally untouched replay evaluation before making that stronger claim.
    Keep final-test replay payloads and final-test game outcomes sealed.
 
-### 3. Prove a scope improves play, then expand — queued
+### 3. Prove a scope improves play, then expand — native preflight passed; integration pending
 
 Once the scoped candidate passes its predeclared offline functional gates:
 export and verify Python/Win32 parity, measure complete BWAPI callbacks with

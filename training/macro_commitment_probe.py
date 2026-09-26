@@ -99,7 +99,15 @@ def evaluate(model, data, names):
 def write(path, value):
     temp=path.with_suffix('.tmp.json')
     temp.write_text(json.dumps(value,indent=2)+'\n',encoding='utf-8')
-    os.replace(temp,path)
+    # A Windows status reader or scanner may briefly deny replacement. Preserve
+    # atomic publication and retry the same bytes, never truncate the live file.
+    for attempt in range(20):
+        try:
+            os.replace(temp,path)
+            break
+        except PermissionError:
+            if attempt==19: raise
+            time.sleep(.05)
 
 
 def load_cohort(dataset, ids, horizon, max_frame=None):

@@ -11,6 +11,41 @@ from training.arena import prepare, inspect, verify
 
 
 class ArenaTests(unittest.TestCase):
+    def test_worker_intervention_is_training_only_and_frozen(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args=self.fixture(Path(temp))
+            with self.assertRaisesRegex(ValueError,'worker interventions require'):
+                prepare(**args,worker_training_intervention='plus-one')
+            self.assertFalse(args['output'].exists())
+            prepare(**args,purpose='training',worker_training_intervention='plus-one')
+            read=args['output']/'server/bots/Protodd/read'
+            self.assertEqual((read/'WorkerTraining-mode.txt').read_text(),'plus-one\n')
+            self.assertEqual((read/'Protodd-learning-mode.txt').read_text(),'frozen\n')
+            self.assertEqual((read/'Policy-mode.txt').read_text(),'frozen\n')
+            self.assertTrue(verify(args['output'])['verified'])
+            (read/'WorkerTraining-mode.txt').write_text('plus-two\n')
+            with self.assertRaises(ValueError):verify(args['output'])
+
+    def test_failed_feedback_cannot_prepare_control(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args=self.fixture(Path(temp));model=Path(temp)/'model.bin';model.write_bytes(b'frozen')
+            receipt=Path(temp)/'receipt.json';receipt.write_text(json.dumps({'shadow_gate_pass':True,'feedback_gate_pass':False}))
+            with self.assertRaisesRegex(ValueError,'passing shadow'):
+                prepare(**args,production_shadow=model,frame_limit=7200,production_control_receipt=receipt)
+            self.assertFalse(args['output'].exists())
+
+    def test_production_shadow_is_pinned_and_does_not_enable_control(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args=self.fixture(Path(temp))
+            model=Path(temp)/'demand.bin';model.write_bytes(b'frozen weights')
+            prepare(**args,production_shadow=model)
+            read=args['output']/'server/bots/Protodd/read'
+            self.assertEqual((read/'ProductionDemand-mode.txt').read_text(),'shadow\n')
+            self.assertEqual((read/'LearnedMacro-mode.txt').read_text(),'off\n')
+            self.assertTrue(verify(args['output'])['verified'])
+            (read/'ProductionDemand.bin').write_bytes(b'changed')
+            with self.assertRaises(ValueError):verify(args['output'])
+
     @unittest.skipUnless(os.name == 'nt' and shutil.which('pwsh'), 'Windows process ownership fixture')
     def test_cleanup_does_not_kill_peer_or_unknown_process(self):
         with tempfile.TemporaryDirectory() as temp:

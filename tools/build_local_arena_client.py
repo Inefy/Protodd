@@ -7,10 +7,12 @@ import subprocess
 import zipfile
 
 
-def build(template, output, javac):
+def build(template, output, javac, seed_base=None):
     template, output = Path(template).resolve(), Path(output).resolve()
     if output.exists():
         raise ValueError("output already exists")
+    if seed_base is not None and (type(seed_base) is not int or not 0<=seed_base<2000000000):
+        raise ValueError('seed base must be a bounded nonnegative integer')
     jar = template / "client-a/client.jar"
     sources = template / "_source/src/client"
     client = (sources / "Client.java").read_text()
@@ -41,6 +43,10 @@ def build(template, output, javac):
                 .inheritIO().start();
             if (process.waitFor() != 0) throw new IOException("Owned StarCraft launch failed");
         } catch (Exception e) { throw new RuntimeException(e); }''')
+    if seed_base is not None:
+        marker='BWINI += "[starcraft]" + newLine;'
+        if commands.count(marker)!=1:raise ValueError('unexpected BWAPI ini section')
+        commands=commands.replace(marker,marker+'\n        BWINI += "seed_override = " + ('+str(seed_base)+' + id) + newLine;')
     if 'taskkill /T /F /IM StarCraft.exe' in commands:
         raise ValueError("unscoped cleanup remains")
     # The local template already disables cleanup of unrelated session processes.
@@ -70,6 +76,7 @@ def build(template, output, javac):
     inputs = [jar, sources / "Client.java", sources / "ClientCommands.java", helper, launcher, Path(__file__)]
     digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
     (output / "build.json").write_text(json.dumps(dict(
+        seed_base=seed_base,seed_rule='seed_base + game_id' if seed_base is not None else None,
         inputs={str(p.resolve()): digest(p) for p in inputs},
         outputs={str(p.relative_to(output)): digest(p) for p in output.rglob("*") if p.is_file()},
         changes=["missing crash log directory tolerated", "cleanup restricted to owned runtime process",
@@ -81,4 +88,5 @@ if __name__ == "__main__":
     parser.add_argument("--template", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--javac", default="javac")
+    parser.add_argument('--seed-base',type=int,help='Pin BWAPI host random seed to base + game ID for paired campaigns')
     build(**vars(parser.parse_args()))

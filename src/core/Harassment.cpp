@@ -15,7 +15,9 @@ bool recent(const GameState& state, const UnitSnapshot& enemy) {
 bool safeRaidRoute(const GameState& state, const UnitSnapshot& raider,
                    const Position target, const bool flyingRoute) {
     for (const auto& enemy : state.enemy.units) {
-        if (!enemy.completed || enemy.disabled || isWorker(enemy.kind) || !enemy.position.valid() ||
+        if (!enemy.completed || enemy.disabled || enemy.loaded || enemy.hallucination ||
+            (unitStats(enemy.kind).requiresPsi && !enemy.powered) ||
+            isWorker(enemy.kind) || !enemy.position.valid() ||
             (!isBuilding(enemy.kind) && !recent(state, enemy))) continue;
         const auto detector = raider.cloaked && (enemy.role == UnitRole::detector || enemy.kind == UnitKind::photonCannon ||
             enemy.kind == UnitKind::missileTurret || enemy.kind == UnitKind::sporeColony || enemy.kind == UnitKind::overlord);

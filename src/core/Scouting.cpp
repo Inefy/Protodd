@@ -74,6 +74,7 @@ UnitId selectOpeningWorkerScout(
 
     const auto eligible = [&unavailableWorkers](const UnitSnapshot& unit) {
         return unit.kind == UnitKind::probe && unit.completed &&
+               !unit.loaded && !unit.disabled && !unit.hallucination &&
                !unit.carryingResources && !unit.underAttack &&
                std::ranges::find(unavailableWorkers, unit.id) ==
                    unavailableWorkers.end();

@@ -4,6 +4,7 @@ project(Protodd VERSION 0.1.0 LANGUAGES CXX)
 
 option(PROTODD_BUILD_TESTS "Build deterministic core tests" ON)
 option(PROTODD_BUILD_BWAPI_MODULE "Build the 32-bit BWAPI tournament DLL" OFF)
+option(PROTODD_PRODUCTION_LOCAL_EVALUATION "Enable opt-in early train-unit control in isolated local evaluations" OFF)
 set(BWAPI_ROOT "" CACHE PATH "Path to an unpacked BWAPI 4.4.0 release")
 set(BWAPI_LIBRARY "" CACHE FILEPATH "Path to a 32-bit BWAPILIB.lib")
 set(PROTODD_WHOLE_GAME_WEIGHTS "" CACHE FILEPATH "Whole-game model weights to embed in Protodd.dll")
@@ -33,6 +34,7 @@ add_library(protodd_core OBJECT
     src/core/PolicyLearning.cpp
     src/core/ObservationEncoder.cpp
     src/core/LearnedPolicy.cpp
+    src/core/ProductionDemandModel.cpp
     src/core/Runtime.cpp
     src/core/Squads.cpp
     src/core/Transport.cpp
@@ -91,6 +93,8 @@ if(PROTODD_BUILD_BWAPI_MODULE)
         src/bwapi/Entry.cpp
         src/bwapi/PolicyRuntime.cpp
         src/bwapi/ModelRuntime.cpp
+        src/bwapi/ProductionRuntime.cpp
+        src/bwapi/ProductionFeedback.cpp
         src/bwapi/WholeGameRuntime.cpp
         src/bwapi/WholeGameAction.cpp
         src/cpu/WholeGameCpu.cpp
@@ -110,6 +114,9 @@ if(PROTODD_BUILD_BWAPI_MODULE)
         set_property(SOURCE "${PROTODD_WHOLE_GAME_RESOURCE}" APPEND PROPERTY
             OBJECT_DEPENDS "${PROTODD_WHOLE_GAME_WEIGHTS}")
         target_compile_definitions(protodd_bwapi PRIVATE PROTODD_EMBED_WHOLE_GAME_WEIGHTS=1)
+    endif()
+    if(PROTODD_PRODUCTION_LOCAL_EVALUATION)
+        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_PRODUCTION_LOCAL_EVALUATION=1)
     endif()
     if(PROTODD_WHOLE_GAME_CONTROL)
         if(NOT PROTODD_WHOLE_GAME_WEIGHTS)

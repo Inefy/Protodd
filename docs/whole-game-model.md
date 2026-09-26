@@ -2,6 +2,35 @@
 
 ## Active direction — 24 September 2026
 
+The [worker spending training pilots](worker-outcome-training-20260925.md)
+stopped at baseline health because UABTerran crashed on apparent Protodd wins;
+they yielded no qualified treatment outcome labels. The active
+[PvT Core bridge experiment](pvt-core-bridge-20260925.md) tests a targeted
+production change in matched Steamhammer games. It has no learned command
+authority or tournament control.
+
+Latest bounded cycle: [population goals](production-goal-experiment-20260924.md).
+The joint goal/priority model failed development. A worker-only learned linear
+policy passed a disjoint nine-game train check but failed frozen 24-game
+validation, including 65.1% late worker-growth recall in PvP. All jobs finished;
+no new model was exported or given control. Next, establish outcome-labelled
+training scenarios for worker spending and recovery before another fit.
+
+Earlier integration evidence follows.
+
+Latest continuation: [concurrent production-demand experiment](production-demand-experiment-20260924.md)
+passed bounded development, frozen 24-game confirmation and standalone Win32
+model parity. Confirmation macro F1 is 56.88%; decoded counts match Python on
+all 7,139 rows. Live causal history, persistent training feedback, complete
+callback timing and bounded Probe/Zealot/Dragoon control now pass. The subsequent
+seed-matched full-game pilot failed advancement: candidate 0/2 wins versus
+reference 1/2. Its supervisor and arena processes have stopped, with no 72-game
+campaign or tournament promotion. See the
+[live integration report](production-live-integration-20260924.md) for evidence
+and the next bounded training direction. The earlier whole-game command model
+and exclusive macro classifiers remain rejected. The reserved validation games
+were previously seen by the historical macro model, so are not globally fresh.
+
 Current execution evidence:
 [local-training-results-20260924.md](local-training-results-20260924.md).
 The new group-command capacity test passed at 66/80 training signatures and 37/37
@@ -9,7 +38,7 @@ near-position hits, but remained poor on other games. The source-pinned bounded
 development fit completed 4,800 updates and failed: 4/781 signatures versus
 reference 10/781, and 4/449 near-position hits versus 5/449. Both exclusive
 economy next-intent probes also failed. All these local runs have finished;
-no candidate passed to confirmation or live control. The full training plan
+none of those earlier candidates passed to confirmation or live control. The full training plan
 remains incomplete at the learning/execution stage. The repaired baseline finished 12 normal games,
 all losses, and its loss review selects economy/army readiness before contact.
 All 1,380 release validation games were previously evaluated by the macro model;

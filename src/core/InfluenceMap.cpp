@@ -27,7 +27,7 @@ void InfluenceMap::update(const GameState& state) {
     std::ranges::fill(cells_, InfluenceCell{});
 
     for (const auto& unit : state.enemy.units) {
-        if (unit.hallucination || !unit.position.valid() || !unit.completed ||
+        if (unit.hallucination || unit.loaded || !unit.position.valid() || !unit.completed ||
             unit.disabled || (unitStats(unit.kind).requiresPsi && !unit.powered)) {
             continue;
         }
@@ -139,7 +139,11 @@ void InfluenceMap::addThreat(const UnitSnapshot& unit, const Frame currentFrame)
                                       : std::exp(-static_cast<double>(age) / (24.0 * 12.0));
     if (memoryConfidence < 0.02) return;
 
-    const auto addWeapon = [this, &unit, memoryConfidence](
+    // As in CombatEvaluator, BWAPI's zero HP for an undetected enemy means
+    // unavailable health. Preserve the observed snapshot and targetability.
+    const auto vitality = !unit.ours && !unit.detected && unit.durability() == 0
+        ? 1.0 : unit.healthFraction();
+    const auto addWeapon = [this, &unit, memoryConfidence, vitality](
                                const WeaponSnapshot& weapon,
                                const bool air) {
         if (weapon.damage <= 0 || (!weapon.targetsAir && !weapon.targetsGround)) {
@@ -164,7 +168,7 @@ void InfluenceMap::addThreat(const UnitSnapshot& unit, const Frame currentFrame)
                 auto& cell = cells_[offset(x, y)];
                 auto& field = air ? cell.airThreat : cell.groundThreat;
                 field += static_cast<float>(
-                    dps * falloff * unit.healthFraction() * memoryConfidence);
+                    dps * falloff * vitality * memoryConfidence);
             }
         }
     };

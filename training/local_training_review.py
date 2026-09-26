@@ -71,6 +71,22 @@ def review(repo):
         jobs[name]=completed_run(root/output,repo/'build'/source/'source')
     inventory=json.loads((root/'whole-game-evaluation-inventory-20260924.json').read_text())
     runtime=json.loads((root/'whole-game-group-runtime-preflight-cached-terrain-20260924.json').read_text())
+    production_path=repo/'build/strength-first-20260924/production-training-status.json'
+    production=None
+    if production_path.exists():
+        latest=json.loads(production_path.read_text())
+        production=dict(path=str(production_path.resolve()),sha256=sha256(production_path),
+            confirmation_pass=latest['confirmation']['passed'],native_model_parity_pass=latest['native']['passed'],
+            remaining=latest['remaining'],promotion_eligible=False,
+            note='Current scoped continuation; failed historical fits below remain rejected.')
+        integration_path=repo/'build/strength-first-20260924/production-integration-status.json'
+        if integration_path.exists():
+            integration=json.loads(integration_path.read_text())
+            production['live_integration']=dict(path=str(integration_path.resolve()),sha256=sha256(integration_path),
+                feedback_pass=integration['native_train_unit_feedback_pass'],
+                bounded_control_pass=integration['bounded_control_screen_pass'],
+                paired_pilot=integration['paired_pilot'],queue=integration['paired_queue'])
+            production['remaining']=integration['remaining']
     blockers={}
     for name,job in jobs.items():
         if job['status']!='complete':
@@ -80,8 +96,19 @@ def review(repo):
             checks=development.get('checks',development)
             blockers[name]=dict(status='failed_development',
                 failed_checks=[k for k,v in checks.items() if v is False])
+    goal_path=repo/'build/strength-first-20260924/production-goal-status.json'
+    population_goals=None
+    if goal_path.exists():
+        goal=json.loads(goal_path.read_text())
+        population_goals=dict(path=str(goal_path.resolve()),sha256=sha256(goal_path),
+            stage=goal['stage'],sources_verified=goal['sources_verified'],
+            worker_holdout_pass=goal['worker_holdout']['passed'],
+            worker_confirmation=goal['worker_confirmation']['gate'],remaining=goal['remaining'],
+            live_control_allowed=False,promotion_eligible=False)
     return dict(schema='protodd-local-training-plan-review-v1',updated_unix=time.time(),
         baseline=baseline,jobs=jobs,plan_complete=False,promotion_eligible=False,
+        current_production_scope=production,
+        current_population_goal_scope=population_goals,
         bounded_research_runs_complete=all(job['status']=='complete' for job in jobs.values()),
         offline_blockers=blockers,
         live_control_allowed=False,selected_scope='persistent economy/production priorities',
@@ -90,11 +117,13 @@ def review(repo):
             globally_fresh=inventory['globally_fresh']),
         runtime_preflight=dict(python_numeric_parity=runtime['frozen_model_numeric_parity'],
             measurements=runtime['measurements'],synthetic=True,full_callback=False),
-        remaining_gates=dict(disjoint_command_confirmation='not run; development must pass first',
-            learned_scope_execution='not implemented or validated; scoped learning probes failed',
-            export_win32_parity='not run for this architecture',
-            complete_callback_timing='not run; Python model preflight is insufficient',
-            paired_candidate_games='not run; baseline games do not validate a candidate',
+        remaining_gates=dict(disjoint_command_confirmation='historical group-command architecture: not run; development must pass first',
+            learned_scope_execution=('native training feedback and bounded local control passed; building ownership unqualified' if production and production.get('live_integration') else
+                'offline commitment scenarios passed; native/live adapter still pending' if production else
+                'not implemented or validated; scoped learning probes failed'),
+            export_win32_parity=('passed for production scope; historical group-command architecture unqualified' if production and production['native_model_parity_pass'] else 'not run for this architecture'),
+            complete_callback_timing=('passed in production local arenas' if production and production.get('live_integration') else 'not run; Python model preflight is insufficient'),
+            paired_candidate_games=(production['live_integration']['paired_pilot'] if production and production.get('live_integration') else 'not run; baseline games do not validate a candidate'),
             strength_72_games='not run; upstream competence/execution gates required'),
         final_test_payloads_opened=False,
         note='Research completion is distinct from plan completion. Failed development blocks dependent stages; these files authorize no control.')

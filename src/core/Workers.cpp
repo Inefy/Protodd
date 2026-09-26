@@ -140,7 +140,8 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     const std::span<const UnitId> reservedBuilders) const {
     std::vector<const UnitSnapshot*> workers;
     for (const auto& unit : state.self.units) {
-        if (isWorker(unit.kind) && unit.completed) {
+        if (isWorker(unit.kind) && unit.completed && !unit.loaded &&
+            !unit.disabled && !unit.hallucination) {
             workers.push_back(&unit);
         }
     }

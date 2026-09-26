@@ -453,10 +453,14 @@ const UnitSnapshot* CombatEvaluator::selectTarget(
     const auto meleeAttacker = attacker.groundWeapon.targetsGround &&
                                attacker.groundWeapon.maxRange < 96;
     const auto hasCloseMeleeTarget = meleeAttacker && std::ranges::any_of(
-        candidates, [&attacker](const UnitSnapshot& target) {
+        candidates, [&attacker, allocations](const UnitSnapshot& target) {
+            const auto reserved = std::ranges::find(allocations, target.id, &TargetAllocation::target);
+            const auto committed = reserved == allocations.end() ? 0 : reserved->committedDamage;
             return target.visible && target.detected && !target.flying &&
-                   !target.hallucination && attacker.canAttack(target) &&
-                   distanceSquared(attacker.position, target.position) <= 224 * 224;
+                   !target.loaded && !target.invincible && !target.hallucination &&
+                   attacker.canAttack(target) &&
+                   target.durability() > target.incomingDamage + committed &&
+                   weaponDistance(attacker, target) <= 224.0;
         });
     const auto hasShot = std::ranges::any_of(candidates,
         [&attacker, allocations](const UnitSnapshot& target) {
@@ -541,7 +545,16 @@ double CombatEvaluator::unitPower(
     }
     if ((unit.kind == UnitKind::reaver || unit.kind == UnitKind::carrier) &&
         unit.ammo <= 0) {
-        return unitStats(unit.kind).combatValue * 0.12;
+        // Potential future ammunition still has to be able to hit this squad.
+        // Otherwise an empty Reaver becomes an anti-air threat while a loaded
+        // one correctly contributes zero power against an all-flying force.
+        const auto compatible = opposition.empty() || std::ranges::any_of(
+            opposition, [&unit](const UnitSnapshot& target) {
+                const auto& weapon = target.flying ? unit.airWeapon : unit.groundWeapon;
+                return !target.invincible && !target.loaded && weapon.damage > 0 &&
+                    (target.flying ? weapon.targetsAir : weapon.targetsGround);
+            });
+        return compatible ? unitStats(unit.kind).combatValue * 0.12 : 0.0;
     }
     const auto usefulTarget = [&unit](const UnitSnapshot& target) {
         if (target.invincible || target.loaded || !unit.canAttack(target)) return false;
@@ -624,6 +637,25 @@ std::vector<Command> TacticalController::control(
     std::vector<TargetAllocation> allocations;
     allocations.reserve(enemy.size());
     std::vector<Position> plannedStorms;
+    // Live squads contain only their own members. The support and obstacle
+    // snapshots also contain allies (including workers) that Storm can hurt.
+    // Build one union only when this squad has a caster ready to use it.
+    std::vector<const UnitSnapshot*> stormAllies;
+    if (psionicStormAvailable && std::ranges::any_of(friendly, [](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::highTemplar && unit.energy >= 75 && combatReady(unit);
+        })) {
+        for (const auto allies : {friendly, support, obstacles}) {
+            for (const auto& ally : allies) {
+                if (ally.loaded || ally.invincible || ally.hallucination ||
+                    isBuilding(ally.kind) || !ally.position.valid()) continue;
+                stormAllies.push_back(&ally);
+            }
+        }
+        std::ranges::stable_sort(stormAllies, {}, [](const UnitSnapshot* ally) { return ally->id; });
+        const auto duplicates = std::ranges::unique(stormAllies, {},
+            [](const UnitSnapshot* ally) { return ally->id; });
+        stormAllies.erase(duplicates.begin(), duplicates.end());
+    }
     const auto nearbyArmy = support.empty() ? friendly : support;
 
     // A single 96px hold disk cannot accommodate a late-game ground army.
@@ -867,6 +899,7 @@ std::vector<Command> TacticalController::control(
             auto bestScore = 1.8;
             for (const auto& candidate : enemy) {
                 if (!candidate.visible || !candidate.detected || candidate.invincible ||
+                    candidate.loaded || candidate.hallucination ||
                     candidate.underStorm || isBuilding(candidate.kind) ||
                     !candidate.position.valid() ||
                     distance(unit.position, candidate.position) > castRange ||
@@ -879,6 +912,7 @@ std::vector<Command> TacticalController::control(
                 auto friendlyValue = 0.0;
                 for (const auto& nearby : enemy) {
                     if (!nearby.visible || nearby.invincible || nearby.underStorm ||
+                        nearby.loaded || nearby.hallucination || !nearby.position.valid() ||
                         isBuilding(nearby.kind) ||
                         distanceSquared(nearby.position, candidate.position) >
                             stormRadius * stormRadius) {
@@ -887,14 +921,13 @@ std::vector<Command> TacticalController::control(
                     enemyValue += unitStats(nearby.kind).combatValue *
                                   std::clamp(nearby.healthFraction(), 0.2, 1.0);
                 }
-                for (const auto& nearby : friendly) {
-                    if (nearby.invincible || isBuilding(nearby.kind) ||
-                        distanceSquared(nearby.position, candidate.position) >
+                for (const auto* nearby : stormAllies) {
+                    if (distanceSquared(nearby->position, candidate.position) >
                             stormRadius * stormRadius) {
                         continue;
                     }
-                    friendlyValue += unitStats(nearby.kind).combatValue *
-                                     std::clamp(nearby.healthFraction(), 0.2, 1.0);
+                    friendlyValue += unitStats(nearby->kind).combatValue *
+                                     std::clamp(nearby->healthFraction(), 0.2, 1.0);
                 }
                 const auto score = enemyValue - friendlyValue * 1.75;
                 if (score > bestScore) {

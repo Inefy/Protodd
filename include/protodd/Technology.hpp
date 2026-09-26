@@ -21,6 +21,8 @@ struct TechnologyStats {
 };
 
 [[nodiscard]] const TechnologyStats& technologyStats(TechnologyKind kind) noexcept;
+// Additional engine prerequisite beyond the research/upgrade producer.
+[[nodiscard]] UnitKind technologyPrerequisite(TechnologyKind kind, int level) noexcept;
 [[nodiscard]] int technologyLevel(
     const PlayerSnapshot& player,
     TechnologyKind kind) noexcept;

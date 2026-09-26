@@ -1,14 +1,38 @@
 # Local training execution — 24 September 2026
 
+**Latest continuation:** the [population-goal cycle](production-goal-experiment-20260924.md)
+completed capacity/development training, a separate nine-game train check and
+fixed 24-game validation. The joint model failed development; the narrower
+worker model failed validation's per-game recall floor. No new live control or
+arena campaign followed. Verified status:
+`build/strength-first-20260924/production-goal-status.json`.
+
+**Live integration continuation:** native history and production feedback now
+pass real-game checks; a bounded local Probe/Zealot/Dragoon control trial passed
+its fixed screen. The full-game comparison with matched seeds completed with
+candidate 0/2 wins versus reference 1/2, failing advancement. The local paired
+supervisor has stopped; no 72-game campaign was launched. Current evidence is in
+[production-live-integration-20260924.md](production-live-integration-20260924.md)
+and `build/strength-first-20260924/production-integration-status.json`.
+Historical offline failures below remain rejected; tournament control is off.
+
 This records execution of the active [strength-first plan](strength-first-plan.md).
-All jobs use local compute. No experimental model has live or tournament control.
+All jobs use local compute. Experimental control is limited to isolated local
+development campaigns; no experimental model has tournament control.
 The consolidated machine-readable checklist is
 `build/strength-first-20260924/training-plan-status.json`, regenerated with
 `python -m training.local_training_review` after inspecting jobs. It verifies
 completed jobs' frozen sources and checkpoint steps/sample counts, and records
 dependent gates separately from completed research experiments.
 
-**Final status at 07:52 UTC:** all four bounded group/macro runs have completed;
+**Earlier offline update:** concurrent production-demand training passes
+development and 24-game fixed-weight confirmation. Win32 model-only numerical
+parity also passes; live input/execution integration and playing-strength gates
+remain. See [production-demand-experiment-20260924.md](production-demand-experiment-20260924.md)
+and `build/strength-first-20260924/production-training-status.json` for current
+evidence. The failed experiments below remain preserved historical results.
+
+**Prior cycle status at 07:52 UTC:** all four bounded group/macro runs have completed;
 the larger group model and both economy classifiers failed development. The
 group fit exited normally after its final audit. No associated training or arena
 process remains, and no continuation fit is queued. The research cycle is
@@ -58,6 +82,19 @@ the decisive enemy attack, so combat losses cannot explain the initial economy
 stall. The traces show early construction commitments and saving/placement
 states. They establish a repeated symptom; they do not prove which alternative
 spending policy wins.
+
+A later frame-by-frame review of all four archived PvZ logs identified the
+immediate cause of the Probe pause: `planPvZ` intentionally caps the worker
+target at eight until two completed Zealots or a completed Cannon exist. At
+frame 2400, each game had an idle Nexus, eight Probes, and 248–264 minerals;
+the plan requested only eight Probes. Higher-priority structure commitments
+also affected spending, but changing reservations alone would not have created
+an unmet Probe goal. A later source-pinned paired development test raised the
+early cap to ten after the first Pylon. It produced two extra Probes at frame
+3,000 in all four pairs, but both versions lost 0/4 and the candidate had no
+larger mobile army at frame 6,000. See
+[pvz-worker-cap-20260925.md](pvz-worker-cap-20260925.md). This does not
+establish a strength gain.
 
 PvT also fields only one completed army unit at frame 4800 in all four games,
 with the Core incomplete and roughly 320 gas banked. PvP game 3 has one army

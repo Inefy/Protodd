@@ -3,6 +3,7 @@
 #include "BwapiBridge.hpp"
 #include "PolicyRuntime.hpp"
 #include "ModelRuntime.hpp"
+#include "ProductionRuntime.hpp"
 #include "WholeGameRuntime.hpp"
 
 #include "protodd/Combat.hpp"
@@ -20,6 +21,7 @@
 #include "protodd/Strategy.hpp"
 #include "protodd/Transport.hpp"
 #include "protodd/Workers.hpp"
+#include "protodd/WorkerTrainingIntervention.hpp"
 
 #include <BWAPI.h>
 
@@ -70,6 +72,11 @@ private:
     OpponentHistory history_;
     PolicyRuntime policy_;
     ModelRuntime model_;
+    ProductionRuntime production_;
+    WorkerTrainingProfile workerTrainingProfile_{WorkerTrainingProfile::baseline};
+    bool workerTrainingEnabled_{};
+    std::vector<std::int64_t> callbackTimes_;
+    bool callbackAudit_{};
     WholeGameRuntime wholeGame_;
     bool validatedLearning_{false};
     OpeningStyle openingStyle_{OpeningStyle::standard};
@@ -147,6 +154,8 @@ private:
     std::uint64_t loggingErrors_{};
 
     void logAction(const ActionDiagnostic& action) noexcept;
+    void logBuildLease(const BuildLeaseDiagnostic& lease) noexcept;
+    void logBuildSelection(const BuildSelectionDiagnostic& selection) noexcept;
     void logLifecycle(BWAPI::Unit unit, std::string_view event);
     void logDamage();
     void incident(std::string_view kind, UnitId unit, bool active, Frame threshold,

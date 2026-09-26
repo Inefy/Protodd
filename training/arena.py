@@ -24,7 +24,8 @@ def write_json(path, value):
 
 
 def prepare(template, output, dll, opponents, maps, purpose="development", race="Protoss", rounds=2, port=1347,
-            server_jar=None, client_bundle=None, whole_game_observe=False):
+            server_jar=None, client_bundle=None, whole_game_observe=False, production_shadow=None, frame_limit=None,
+            production_control_receipt=None, production_screen_receipt=None, worker_training_intervention=None):
     template, output, dll = map(lambda p: Path(p).resolve(), (template, output, dll))
     if purpose not in ("training", "development", "final-test"):
         raise ValueError("unknown campaign purpose")
@@ -34,6 +35,36 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
         raise ValueError("whole-game live pilot currently supports Protoss only")
     if output.exists() or not dll.is_file() or not 1024 <= port <= 65535:
         raise ValueError("existing output, missing DLL or invalid port")
+    if production_shadow and (race != 'Protoss' or not Path(production_shadow).is_file()):
+        raise ValueError('production shadow needs Protoss and a model file')
+    if worker_training_intervention is not None and (purpose != 'training' or race != 'Protoss' or
+            worker_training_intervention not in ('baseline', 'plus-one', 'plus-two') or production_control_receipt):
+        raise ValueError('worker interventions require isolated Protoss training without model command control')
+    if frame_limit is not None and (type(frame_limit) is not int or frame_limit<240 or purpose=='final-test'):
+        raise ValueError('bounded development/training frame limit required')
+    if production_control_receipt:
+        if purpose!='development' or not production_shadow or ((frame_limit is None or frame_limit>7200) and not production_screen_receipt):
+            raise ValueError('production control is limited to bounded local development scenarios')
+        receipt=json.loads(Path(production_control_receipt).read_text())
+        if receipt.get('shadow_gate_pass') is not True or receipt.get('feedback_gate_pass') is not True:
+            raise ValueError('production control requires passing shadow and real feedback gates')
+        prior=Path(receipt['campaign']);verify(prior)
+        if sha256(prior/'manifest.json')!=receipt['manifest_sha256'] or sha256(production_shadow)!=sha256(prior/'server/bots/Protodd/read/ProductionDemand.bin'):
+            raise ValueError('production receipt/model binding differs')
+        for game in receipt['games']:
+            for name,digest in game['hashes'].items():
+                if sha256(Path(game['directory'])/name)!=digest:raise ValueError('production evidence changed')
+        if production_screen_receipt:
+            screen=json.loads(Path(production_screen_receipt).read_text())
+            if screen.get('passed') is not True or screen.get('schema')!='protodd-production-control-screen-v1':
+                raise ValueError('full-game comparison requires passing controlled screen')
+            for group in ('candidate','reference'):
+                for row in screen[group]:
+                    if sha256(row['log'])!=row['sha256']:raise ValueError('controlled screen evidence changed')
+            candidate_campaign=Path(screen['live_audit']['campaign'])
+            verify(candidate_campaign)
+            if sha256(candidate_campaign/'server/bots/Protodd/read/ProductionDemand.bin')!=sha256(production_shadow):
+                raise ValueError('screen model differs')
     settings = json.loads((template / "server/server_settings.json").read_text())
     available = {b["BotName"]: b for b in settings["bots"]}
     opponents = list(dict.fromkeys(opponents))
@@ -93,9 +124,18 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
     for name in ("AI", "read", "write"):
         (target / name).mkdir(parents=True)
     shutil.copy2(dll, target / "AI" / (bot + ".dll"))
-    (target / "read/Protodd-learning-mode.txt").write_text("validated-train\n" if purpose == "training" else "frozen\n")
-    (target / "read/Policy-mode.txt").write_text("train\n" if purpose == "training" else "frozen\n")
+    (target / "read/Protodd-learning-mode.txt").write_text("validated-train\n" if purpose == "training" and worker_training_intervention is None else "frozen\n")
+    (target / "read/Policy-mode.txt").write_text("train\n" if purpose == "training" and worker_training_intervention is None else "frozen\n")
+    if worker_training_intervention is not None:
+        (target / "read/WorkerTraining-mode.txt").write_text(worker_training_intervention+'\n')
     (target / "read/LearnedMacro-mode.txt").write_text("off\n")
+    (target / "read/ProductionDemand-mode.txt").write_text('local-train-units\n' if production_control_receipt else 'shadow\n' if production_shadow else 'off\n')
+    if production_shadow:
+        shutil.copy2(production_shadow,target/'read/ProductionDemand.bin')
+    if production_control_receipt:
+        shutil.copy2(production_control_receipt,target/'read/ProductionDemand-evaluation-receipt.json')
+    if production_screen_receipt:
+        shutil.copy2(production_screen_receipt,target/'read/ProductionDemand-screen-receipt.json')
     if whole_game_observe:
         (target / "read/WholeGame-observe.txt").write_text("observe\n")
     settings["bots"] = [dict(BotName=bot, Race=race, BotType="dll", BWAPIVersion="BWAPI_440")] + [available[n] for n in opponents]
@@ -103,6 +143,7 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
                     maps=maps, serverPort=port, enableBotFileIO=False, lobbyGameSpeed="Fastest")
     settings["tournamentModuleSettings"]["frameSkip"] = 256
     settings["tournamentModuleSettings"]["localSpeed"] = 0
+    if frame_limit is not None:settings['tournamentModuleSettings']['gameFrameLimit']=frame_limit
     write_json(server / "server_settings.json", settings)
     schedule = []
     for repetition in range(rounds):
@@ -199,6 +240,11 @@ def main():
     prepare_parser.add_argument("--server-jar", type=Path, help="Explicitly rebuilt manager, pinned in the campaign")
     prepare_parser.add_argument("--client-bundle", type=Path, help="Rebuilt local client JAR and owned-process cleanup helper")
     prepare_parser.add_argument("--whole-game-observe", action="store_true", help="Record legal live observations from the opt-in BWAPI pilot")
+    prepare_parser.add_argument('--production-shadow', type=Path, help='Frozen production-demand weights; shadow only')
+    prepare_parser.add_argument('--frame-limit',type=int,help='Bounded development/training scenario; not strength evidence')
+    prepare_parser.add_argument('--production-control-receipt',type=Path,help='Passing shadow/feedback receipt for bounded local train-unit scenarios')
+    prepare_parser.add_argument('--production-screen-receipt',type=Path,help='Passing bounded control screen for a full-game local comparison')
+    prepare_parser.add_argument('--worker-training-intervention',choices=('baseline','plus-one','plus-two'),help='Fixed local worker spending intervention, training episodes only')
     inspect_parser = commands.add_parser("inspect")
     inspect_parser.add_argument("run", type=Path)
     verify_parser = commands.add_parser("verify")

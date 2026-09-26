@@ -140,6 +140,10 @@ void ProtoddModule::onStart() {
     caughtErrors_ = loggingErrors_ = 0;
     lastErrorFrame_ = -1000;
     bridge_.actionDiagnostic = [this](const ActionDiagnostic& action) { logAction(action); };
+    bridge_.buildLeaseDiagnostic = [this](const BuildLeaseDiagnostic& lease) { logBuildLease(lease); };
+    bridge_.buildSelectionDiagnostic = [this](const BuildSelectionDiagnostic& selection) {
+        logBuildSelection(selection);
+    };
     supplyBlockedFrames_.reset();
     idleGatewayFrames_.reset();
     idleWorkerFrames_.reset();
@@ -200,6 +204,38 @@ void ProtoddModule::onStart() {
     const auto historyFile = OpponentHistory::filename(opponentName_);
     policy_.start();
     model_.start(log_);
+    production_.start(log_);
+    workerTrainingProfile_ = WorkerTrainingProfile::baseline;
+    workerTrainingEnabled_ = false;
+    const auto workerMode = readFile("bwapi-data/read/WorkerTraining-mode.txt");
+    if (!workerMode.empty()) {
+#ifdef PROTODD_PRODUCTION_LOCAL_EVALUATION
+        if (workerMode.starts_with("baseline")) workerTrainingEnabled_ = true;
+        else if (workerMode.starts_with("plus-one")) {
+            workerTrainingProfile_ = WorkerTrainingProfile::plusOne;
+            workerTrainingEnabled_ = true;
+        } else if (workerMode.starts_with("plus-two")) {
+            workerTrainingProfile_ = WorkerTrainingProfile::plusTwo;
+            workerTrainingEnabled_ = true;
+        }
+        log_ << "WORKER_TRAINING_MODE," << (workerTrainingEnabled_ ?
+            workerTrainingProfile_ == WorkerTrainingProfile::baseline ? "baseline" :
+            workerTrainingProfile_ == WorkerTrainingProfile::plusOne ? "plus-one" : "plus-two" :
+            "invalid") << ",enabled=" << workerTrainingEnabled_ << '\n';
+#else
+        log_ << "WORKER_TRAINING_MODE,unavailable,enabled=0\n";
+#endif
+    }
+    callbackTimes_.clear();
+    callbackAudit_=production_.enabled();
+    if (callbackAudit_) callbackTimes_.reserve(100000);
+    bridge_.productionDiagnostic = [this](const BWAPI::UnitCommand& command, bool before, bool accepted) {
+        try { return production_.command(command, before, accepted, log_); }
+        catch (...) { production_.disable(log_); return !before; }
+    };
+    bridge_.productionPermission = [this](const BWAPI::UnitCommand& command, std::string_view source) {
+        return production_.allows(command,source);
+    };
     // Controlled training imports only externally validated results. onEnd
     // alone cannot distinguish a strategic win from an opponent crash.
     const auto learningMode = readFile("bwapi-data/read/Protodd-learning-mode.txt");
@@ -226,6 +262,12 @@ void ProtoddModule::onStart() {
 }
 
 void ProtoddModule::onEnd(const bool winner) {
+    production_.end(log_);
+    if (!callbackTimes_.empty()) {
+        std::ofstream timing("bwapi-data/write/production-callback-us.bin", std::ios::binary | std::ios::trunc);
+        timing.write(reinterpret_cast<const char*>(callbackTimes_.data()),
+            static_cast<std::streamsize>(callbackTimes_.size()*sizeof(std::int64_t)));
+    }
     wholeGame_.end();
     policy_.end(winner);
     state_.frame = BWAPI::Broodwar->getFrameCount();
@@ -302,6 +344,11 @@ void ProtoddModule::onFrame() {
     const auto frame = BWAPI::Broodwar->getFrameCount();
     frameBudget_.record(frame, elapsed);
     recordPerformance(frame, elapsed);
+    // Includes observation, model, execution, diagnostics, budget accounting and
+    // performance logging. Only this instrumentation's own final append is outside.
+    if (callbackAudit_ && callbackTimes_.size() < 100000)
+        callbackTimes_.push_back(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started).count());
 }
 
 void ProtoddModule::onSendText(std::string text) {
@@ -350,6 +397,15 @@ void ProtoddModule::runFrame() {
     }
 
     const auto cadence = frameBudget_.expensiveCadenceMultiplier(state_.frame);
+    if (production_.enabled()) {
+        try {
+            measure("production-observe", [this] { production_.observe(state_, log_); });
+            measure("production-shadow", [this] { production_.infer(state_.frame, frameBudget_, log_); });
+            measure("production-control", [this] {
+                production_.act(state_.frame,[this](const BWAPI::UnitCommand& command){return bridge_.executeProduction(command);},log_);
+            });
+        } catch (...) { production_.disable(log_); }
+    }
     if (model_.enabled()) {
         measure("model-observe", [this] { model_.observe(state_); });
         measure("model-shadow", [this] { model_.infer(state_.frame, frameBudget_, log_); });
@@ -457,6 +513,15 @@ void ProtoddModule::updateStrategy() {
     plan_ = strategicDirector_.stabilize(std::move(candidate), state_, opponent_.assessment());
     expansion_.update(plan_, state_, bridge_.expansionFeedback());
     if (expansion_.releaseBuilder() && !bridge_.cancelExpansion()) plan_.deferExpansion = false;
+    if (workerTrainingEnabled_) {
+        const auto decision = applyWorkerTrainingIntervention(plan_, state_, workerTrainingProfile_);
+        if (decision.applied) {
+            log_ << "WORKER_TRAINING," << state_.frame << ",committed=" << decision.committed
+                 << ",before=" << decision.beforeGoal << ",goal=" << decision.afterGoal
+                 << ",beforePriority=" << decision.beforePriority
+                 << ",priority=" << decision.afterPriority << '\n';
+        }
+    }
     debug_.operation = expansion_.reason();
     trace("strategy", "STRATEGY," + csvSafe(plan_.name) + ',' +
         std::string(postureName(proposed)) + ',' + std::string(postureName(plan_.posture)) + ',' +
@@ -1012,6 +1077,42 @@ void ProtoddModule::logAction(const ActionDiagnostic& action) noexcept {
             std::to_string(action.target) + '/' + std::to_string(action.extra) + '/' +
             std::to_string(action.position.x / 64) + '/' + std::to_string(action.position.y / 64);
         trace("action/" + std::to_string(action.actor), row.str(), 120, comparison, frame);
+    } catch (...) { ++loggingErrors_; }
+}
+
+void ProtoddModule::logBuildLease(const BuildLeaseDiagnostic& lease) noexcept {
+    try {
+        if (!log_) return;
+        log_ << "BUILDLEASE," << lease.frame << ",kind="
+             << BwapiBridge::toBwapi(lease.kind).toString()
+             << ",builder=" << lease.builder << ",issued=" << lease.issued
+             << ",targetX=" << lease.target.x << ",targetY=" << lease.target.y
+             << ",builderX=" << lease.builderPosition.x
+             << ",builderY=" << lease.builderPosition.y
+             << ",lastProgress=" << lease.lastProgress
+             << ",reason=" << csvSafe(lease.reason)
+             << ",order=" << csvSafe(lease.order)
+             << ",commandedBuild=" << lease.commandedBuild
+             << ",buildTypeMatches=" << lease.buildTypeMatches
+             << ",builderCanBuildHere=" << lease.builderCanBuildHere
+             << ",mapCanBuildHere=" << lease.mapCanBuildHere
+             << ",hasPath=" << lease.hasPath << '\n';
+    } catch (...) { ++loggingErrors_; }
+}
+
+void ProtoddModule::logBuildSelection(const BuildSelectionDiagnostic& selection) noexcept {
+    try {
+        if (!log_) return;
+        log_ << "BUILDSELECT," << selection.frame
+             << ",kind=" << BwapiBridge::toBwapi(selection.kind).toString()
+             << ",selected=" << selection.selected
+             << ",siteCandidate=" << selection.siteCandidate
+             << ",targetX=" << selection.target.x << ",targetY=" << selection.target.y
+             << ",anchorX=" << selection.anchor.x << ",anchorY=" << selection.anchor.y
+             << ",selectedDistance=" << selection.selectedDistance
+             << ",candidateDistance=" << selection.siteCandidateDistance
+             << ",candidateCanBuildHere=" << selection.candidateCanBuildHere
+             << ",candidateHasPath=" << selection.candidateHasPath << '\n';
     } catch (...) { ++loggingErrors_; }
 }
 

@@ -108,6 +108,10 @@ bool NavigationGrid::lineWalkable(const Position from, const Position to) const 
         if (!cellWalkable(x, y)) return false;
         if (x == endX && y == endY) return true;
         const auto twice = error * 2;
+        // Match A*'s clearance rule. A diagonal jump across two cell centers
+        // must not bypass a blocked orthogonal neighbor at their shared corner.
+        if (twice >= dy && twice <= dx &&
+            (!cellWalkable(x + stepX, y) || !cellWalkable(x, y + stepY))) return false;
         if (twice >= dy) {
             error += dy;
             x += stepX;

@@ -1,4 +1,5 @@
 #include "protodd/UnitCatalog.hpp"
+#include "protodd/Technology.hpp"
 #include "../src/bwapi/ProductionCount.hpp"
 #include "../src/bwapi/TerranDetection.hpp"
 #include "../src/bwapi/SupplyPlanning.hpp"
@@ -6,9 +7,13 @@
 #include <BWAPI/UnitType.h>
 #include <BWAPI/UnitCommand.h>
 #include <BWAPI/WeaponType.h>
+#include <BWAPI/UpgradeType.h>
+#include <BWAPI/TechType.h>
 
 #include <array>
+#include <algorithm>
 #include <iostream>
+#include <set>
 #include <utility>
 
 int main() {
@@ -95,6 +100,81 @@ int main() {
                       << type.mineralPrice() << '/' << type.gasPrice() << '/' << type.supplyRequired()
                       << '/' << type.buildTime() << ")\n";
             ++failures;
+        }
+        // Production must use the engine's actual producer and technology
+        // requirements. Buildings also need a builder and power, which the
+        // planner handles through placement. Archon merges are a separate path.
+        if (!type.isBuilding()) {
+            std::set<int> expected, actual;
+            for (const auto& [required, count] : type.requiredUnits()) {
+                expected.insert(required.getID());
+                if (count != 1) {
+                    std::cerr << "Unexpected prerequisite multiplicity: " << stats.name << '\n';
+                    ++failures;
+                }
+            }
+            for (const auto required : protodd::unitPrerequisites(kind)) {
+                const auto found = std::ranges::find_if(pairs, [required](const auto& entry) {
+                    return entry.first == required;
+                });
+                if (found == pairs.end()) {
+                    std::cerr << "Unmapped prerequisite: " << stats.name << '\n';
+                    ++failures;
+                } else actual.insert(found->second.getID());
+            }
+            if (actual != expected) {
+                std::cerr << "Training prerequisites differ from BWAPI: " << stats.name << '\n';
+                ++failures;
+            }
+        }
+    }
+    using protodd::TechnologyKind;
+    using namespace BWAPI::UpgradeTypes;
+    const std::array upgrades{
+        std::pair{TechnologyKind::singularityCharge, Singularity_Charge},
+        std::pair{TechnologyKind::legEnhancements, Leg_Enhancements},
+        std::pair{TechnologyKind::khaydarinAmulet, Khaydarin_Amulet},
+        std::pair{TechnologyKind::graviticDrive, Gravitic_Drive},
+        std::pair{TechnologyKind::graviticBoosters, Gravitic_Boosters},
+        std::pair{TechnologyKind::sensorArray, Sensor_Array},
+        std::pair{TechnologyKind::reaverCapacity, Reaver_Capacity},
+        std::pair{TechnologyKind::scarabDamage, Scarab_Damage},
+        std::pair{TechnologyKind::carrierCapacity, Carrier_Capacity},
+        std::pair{TechnologyKind::protossGroundWeapons, Protoss_Ground_Weapons},
+        std::pair{TechnologyKind::protossGroundArmor, Protoss_Ground_Armor},
+        std::pair{TechnologyKind::protossPlasmaShields, Protoss_Plasma_Shields},
+        std::pair{TechnologyKind::protossAirWeapons, Protoss_Air_Weapons},
+        std::pair{TechnologyKind::protossAirArmor, Protoss_Air_Armor},
+    };
+    const auto engineType = [&pairs](UnitKind kind) {
+        const auto entry = std::ranges::find(pairs, kind, &decltype(pairs)::value_type::first);
+        return entry == pairs.end() ? BWAPI::UnitTypes::None : entry->second;
+    };
+    for (const auto& [kind, upgrade] : upgrades) {
+        const auto& stats = protodd::technologyStats(kind);
+        if (stats.research || stats.maximumLevel != upgrade.maxRepeats() ||
+            engineType(stats.producer) != upgrade.whatUpgrades()) {
+            std::cerr << "Upgrade producer/levels mismatch: " << stats.name << '\n'; ++failures;
+        }
+        for (int level = 1; level <= upgrade.maxRepeats(); ++level) {
+            if (stats.mineralCost(level) != upgrade.mineralPrice(level) ||
+                stats.gasCost(level) != upgrade.gasPrice(level) ||
+                engineType(protodd::technologyPrerequisite(kind, level)) != upgrade.whatsRequired(level)) {
+                std::cerr << "Upgrade cost/prerequisite mismatch: " << stats.name << " level " << level << '\n';
+                ++failures;
+            }
+        }
+    }
+    const std::array research{
+        std::pair{TechnologyKind::psionicStorm, BWAPI::TechTypes::Psionic_Storm},
+        std::pair{TechnologyKind::stasisField, BWAPI::TechTypes::Stasis_Field},
+        std::pair{TechnologyKind::recall, BWAPI::TechTypes::Recall},
+    };
+    for (const auto& [kind, tech] : research) {
+        const auto& stats = protodd::technologyStats(kind);
+        if (!stats.research || stats.maximumLevel != 1 || engineType(stats.producer) != tech.whatResearches() ||
+            stats.mineralCost(1) != tech.mineralPrice() || stats.gasCost(1) != tech.gasPrice()) {
+            std::cerr << "Research catalog mismatch: " << stats.name << '\n'; ++failures;
         }
     }
     std::cout << "BWAPI weapon contracts: Zealot hits=" << Protoss_Zealot.maxGroundHits()

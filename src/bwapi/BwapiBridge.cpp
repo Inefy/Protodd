@@ -1,4 +1,5 @@
 #include "BwapiBridge.hpp"
+#include "TechnologyProducer.hpp"
 
 #include "protodd/Combat.hpp"
 #include "protodd/PlacementSearch.hpp"
@@ -162,11 +163,31 @@ GameState BwapiBridge::observe() {
         const auto commandedBuild = lastCommand.getType() == BWAPI::UnitCommandTypes::Build &&
             lastCommand.getUnitType() == expectedType &&
             fromBwapi(lastCommand.getTargetPosition()) == pending.target;
+        const auto reportLeaseEnd = [this, kind, frame, &pending, builder, expectedType,
+                                     commandedBuild](std::string_view reason) {
+            if (!buildLeaseDiagnostic) return;
+            try {
+                const BWAPI::TilePosition tile{pending.target.x / 32, pending.target.y / 32};
+                const BWAPI::Position center{
+                    pending.target.x + expectedType.tileWidth() * 16,
+                    pending.target.y + expectedType.tileHeight() * 16};
+                buildLeaseDiagnostic({
+                    kind, pending.builder, pending.target, fromBwapi(builder->getPosition()),
+                    pending.issued, frame, pending.lastProgress, std::string(reason),
+                    builder->getOrder().toString(), commandedBuild,
+                    builder->getBuildType() == expectedType,
+                    Broodwar->canBuildHere(tile, expectedType, builder, true),
+                    Broodwar->canBuildHere(tile, expectedType, nullptr, true),
+                    builder->hasPath(center),
+                });
+            } catch (...) { ++diagnosticErrors_; }
+        };
         if (kind != UnitKind::nexus && age > std::max(2 * 24, Broodwar->getLatencyFrames() + 12) &&
             frame - pending.lastProgress > 2 * 24) {
             // Keep travelling builders leased. A stalled order must be
             // cancelled before its resources and worker can be reassigned,
             // otherwise it may complete after a replacement is already sent.
+            reportLeaseEnd("stalled-position");
             if (builder->getBuildType() == expectedType || commandedBuild) issue(UnitCommand::stop(builder), "builder-release");
             rememberFailure();
             return true;
@@ -177,6 +198,7 @@ GameState BwapiBridge::observe() {
             // an obstructed footprint indefinitely, which previously held a
             // Pylon reservation for 45 seconds at a time while the army sat at
             // the hard supply cap. Re-place urgent supply after eight seconds.
+            reportLeaseEnd("hard-lease-limit");
             if (builder->getBuildType() == expectedType || commandedBuild) issue(UnitCommand::stop(builder), "builder-release");
             rememberFailure();
             return true;
@@ -193,10 +215,12 @@ GameState BwapiBridge::observe() {
         // genuinely travelling builder reserved long enough for expansions.
         if (age <= std::max(12, Broodwar->getLatencyFrames() + 6)) return false;
         if (!stillAssigned) {
+            reportLeaseEnd("order-lost");
             rememberFailure();
             return true;
         }
         if (age >= 45 * 24) {
+            reportLeaseEnd("fallback-lease-limit");
             if (builder->getBuildType() == expectedType || commandedBuild || pending.prepositioned)
                 issue(UnitCommand::stop(builder), "builder-release");
             rememberFailure();
@@ -312,12 +336,17 @@ std::vector<UnitId> BwapiBridge::reservedBuilders() const {
 }
 
 bool BwapiBridge::issue(const BWAPI::UnitCommand& command, const std::string_view source) {
+    if (productionPermission && !productionPermission(command, source)) {
+        lastIssueError_ = BWAPI::Errors::Unit_Busy; return false;
+    }
     if (!command.getUnit() ||
         (source != "whole-game" && learnedCommandLeases_.contains(command.getUnit()->getID())))
         return false;
+    if (productionDiagnostic && !productionDiagnostic(command, true, false)) return false;
     const auto accepted = command.getUnit()->issueCommand(command);
     // Capture immediately: later BWAPI queries can replace the last error.
     lastIssueError_ = Broodwar->getLastError();
+    if (productionDiagnostic) productionDiagnostic(command, false, accepted);
     try { if (actionDiagnostic) {
         const auto target = command.getTarget();
         actionDiagnostic({command.getUnit()->getID(), target ? target->getID() : -1,
@@ -2451,6 +2480,24 @@ bool BwapiBridge::build(
         lastMacroStatus_ = "build-location-rejected";
         return false;
     }
+    if (buildSelectionDiagnostic && Broodwar->getFrameCount() <= 12'000 &&
+        (action.target == UnitKind::pylon || action.target == UnitKind::cyberneticsCore)) {
+        try {
+            const BWAPI::Position center{
+                location.x * 32 + type.tileWidth() * 16,
+                location.y * 32 + type.tileHeight() * 16};
+            const auto siteCandidate = findBuilder(type, center, influence, unavailableBuilders);
+            buildSelectionDiagnostic({
+                action.target, Broodwar->getFrameCount(), builder->getID(),
+                siteCandidate != nullptr ? siteCandidate->getID() : -1,
+                fromBwapi(BWAPI::Position(location)), fromBwapi(near),
+                builder->getDistance(center),
+                siteCandidate != nullptr ? siteCandidate->getDistance(center) : -1,
+                siteCandidate != nullptr && Broodwar->canBuildHere(location, type, siteCandidate, true),
+                siteCandidate != nullptr && siteCandidate->hasPath(center),
+            });
+        } catch (...) { ++diagnosticErrors_; }
+    }
     if (issue(UnitCommand::build(builder, location, type), action.reason)) {
         pendingBuilds_[action.target] = {
             builder->getID(), Broodwar->getFrameCount(),
@@ -2526,17 +2573,10 @@ bool BwapiBridge::executeTechnology(const MacroAction& action) {
     const auto tech = toBwapiTech(action.technology);
     if (tech != TechTypes::None) {
         if (self->hasResearched(tech) || self->isResearching(tech)) return false;
-        Unit producer = nullptr;
-        for (const auto candidate : self->getUnits()) {
-            if (candidate == nullptr || !candidate->exists() || !candidate->isCompleted() ||
-                candidate->getType() != tech.whatResearches() || candidate->isResearching()) {
-                continue;
-            }
-            if (producer == nullptr || candidate->getID() < producer->getID()) {
-                producer = candidate;
-            }
-        }
-        return producer != nullptr && producer->canResearch(tech) && issue(UnitCommand::research(producer, tech), action.reason);
+        const auto producer = technologyProducer(self->getUnits(), [tech](const Unit candidate) {
+            return candidate->getType() == tech.whatResearches() && candidate->canResearch(tech);
+        });
+        return producer != nullptr && issue(UnitCommand::research(producer, tech), action.reason);
     }
 
     const auto upgrade = toBwapiUpgrade(action.technology);
@@ -2544,17 +2584,10 @@ bool BwapiBridge::executeTechnology(const MacroAction& action) {
         self->getUpgradeLevel(upgrade) >= upgrade.maxRepeats()) {
         return false;
     }
-    Unit producer = nullptr;
-    for (const auto candidate : self->getUnits()) {
-        if (candidate == nullptr || !candidate->exists() || !candidate->isCompleted() ||
-            candidate->getType() != upgrade.whatUpgrades() || candidate->isUpgrading()) {
-            continue;
-        }
-        if (producer == nullptr || candidate->getID() < producer->getID()) {
-            producer = candidate;
-        }
-    }
-    return producer != nullptr && producer->canUpgrade(upgrade) && issue(UnitCommand::upgrade(producer, upgrade), action.reason);
+    const auto producer = technologyProducer(self->getUnits(), [upgrade](const Unit candidate) {
+        return candidate->getType() == upgrade.whatUpgrades() && candidate->canUpgrade(upgrade);
+    });
+    return producer != nullptr && issue(UnitCommand::upgrade(producer, upgrade), action.reason);
 }
 
 BWAPI::Position BwapiBridge::toBwapiPosition(const Position position) noexcept {

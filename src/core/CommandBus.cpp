@@ -119,6 +119,7 @@ bool CommandBus::redundant(const Command& command) const {
                                               previous.command.targetPosition) <= 8 * 8;
     return command.type == previous.command.type &&
            command.targetUnit == previous.command.targetUnit &&
+           command.technology == previous.command.technology &&
            command.targetKind == previous.command.targetKind && samePosition;
 }
 

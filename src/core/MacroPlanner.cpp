@@ -403,10 +403,18 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             ? goal.target : technologyStats(goal.technology).producer;
         auto wait = prerequisiteWait(state, futureTarget);
         if (goal.technology != TechnologyKind::none) {
-            for (const auto& producer : state.self.units) {
-                if (producer.kind == futureTarget && !producer.completed)
-                    wait = std::max(wait, unitStats(futureTarget).buildTime *
-                        (100 - std::clamp(producer.buildProgress, 0, 100)) / 100);
+            const auto requirement = technologyPrerequisite(goal.technology,
+                technologyLevel(state.self, goal.technology) + 1);
+            for (const auto building : {futureTarget, requirement}) {
+                if (building == UnitKind::unknown || countCompleted(state, building) > 0) continue;
+                wait = std::max(wait, prerequisiteWait(state, building));
+                auto earliest = std::numeric_limits<int>::max();
+                for (const auto& unit : state.self.units) {
+                    if (unit.kind == building)
+                        earliest = std::min(earliest, unitStats(building).buildTime *
+                            (100 - std::clamp(unit.buildProgress, 0, 100)) / 100);
+                }
+                if (earliest != std::numeric_limits<int>::max()) wait = std::max(wait, earliest);
             }
         }
         // Leave the final ten seconds for saving and command latency. This
@@ -432,9 +440,13 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             const auto nextLevel = currentLevel + 1;
             const auto minerals = stats.mineralCost(nextLevel);
             const auto gas = stats.gasCost(nextLevel);
-            if (countCompleted(state, stats.producer) == 0) {
-                const auto nested = nextMissingPrerequisite(state, stats.producer);
-                const auto prerequisite = nested != UnitKind::unknown ? nested : stats.producer;
+            const auto levelRequirement = technologyPrerequisite(goal.technology, nextLevel);
+            const auto missing = countCompleted(state, stats.producer) == 0 ? stats.producer :
+                (levelRequirement != UnitKind::unknown && countCompleted(state, levelRequirement) == 0
+                    ? levelRequirement : UnitKind::unknown);
+            if (missing != UnitKind::unknown) {
+                const auto nested = nextMissingPrerequisite(state, missing);
+                const auto prerequisite = nested != UnitKind::unknown ? nested : missing;
                 // Optional research must not invent an opening prerequisite.
                 // For example, a low-priority Dragoon range goal used to
                 // reserve a Cybernetics Core before the PvP planner had
@@ -603,8 +615,24 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         double deficit{};
     };
     std::unordered_map<UnitKind, int> openProducerSlots;
+    auto availableCompositionWeight = 0.0;
     for (const auto& target : plan.composition) {
         const auto producer = producerFor(target.kind);
+        // Shares for technology we have not started cannot be filled. Keeping
+        // them in the denominator can cap every available unit and idle the
+        // entire army economy. Preserve paid-for prerequisites, including
+        // unfinished ones, so a tech transition still has its intended share.
+        // Neither affordability nor a temporarily busy/unpowered producer
+        // changes that share: a gas shortage must not flood us with Zealots.
+        const auto& stats = unitStats(target.kind);
+        const auto techCommitted = std::ranges::all_of(
+            unitPrerequisites(target.kind), [&state](const UnitKind prerequisite) {
+                return countExisting(state, prerequisite) > 0;
+            });
+        if (producer != UnitKind::unknown && !stats.building &&
+            stats.minerals + stats.gas > 0 && target.weight > 0.0 && techCommitted) {
+            availableCompositionWeight += target.weight;
+        }
         if (producer == UnitKind::unknown || openProducerSlots.contains(producer)) continue;
         openProducerSlots[producer] = std::max(
             0, usableProducers(state, producer) - queuedForProducer(state, producer) -
@@ -616,7 +644,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         armyCount += countExisting(state, target.kind) + planned[target.kind];
     }
     constexpr auto maximumCompositionActions = 8;
-    for (auto cycle = 0; cycle < maximumCompositionActions; ++cycle) {
+    for (auto cycle = 0; cycle < maximumCompositionActions &&
+                         availableCompositionWeight > 0.0; ++cycle) {
         std::vector<CompositionCandidate> candidates;
         for (const auto& target : plan.composition) {
             const auto& stats = unitStats(target.kind);
@@ -634,7 +663,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                 continue;
             }
             const auto current = countExisting(state, target.kind) + planned[target.kind];
-            const auto desired = target.weight * static_cast<double>(armyCount + 1);
+            const auto desired = target.weight / availableCompositionWeight *
+                                 static_cast<double>(armyCount + 1);
             // Affordability is not permission to keep growing an already
             // overrepresented unit type while the desired unit waits for gas.
             if (static_cast<double>(current) >= desired) continue;
@@ -648,7 +678,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         if (!ledger.reserve(stats.minerals, stats.gas)) break;
         actions.push_back({MacroActionKind::train, best->kind, 58,
                            stats.minerals, stats.gas, true,
-                           "fill idle production with strategic composition"});
+                           "fill idle production with available tech composition"});
         ++planned[best->kind];
         ++armyCount;
         plannedSupply += stats.supply;

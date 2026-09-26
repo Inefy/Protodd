@@ -62,11 +62,45 @@ struct ActionDiagnostic {
     bool accepted{};
 };
 
+struct BuildLeaseDiagnostic {
+    UnitKind kind{UnitKind::unknown};
+    UnitId builder{-1};
+    Position target{-1, -1};
+    Position builderPosition{-1, -1};
+    Frame issued{};
+    Frame frame{};
+    Frame lastProgress{};
+    std::string reason;
+    std::string order;
+    bool commandedBuild{};
+    bool buildTypeMatches{};
+    bool builderCanBuildHere{};
+    bool mapCanBuildHere{};
+    bool hasPath{};
+};
+
+struct BuildSelectionDiagnostic {
+    UnitKind kind{UnitKind::unknown};
+    Frame frame{};
+    UnitId selected{-1};
+    UnitId siteCandidate{-1};
+    Position target{-1, -1};
+    Position anchor{-1, -1};
+    int selectedDistance{};
+    int siteCandidateDistance{};
+    bool candidateCanBuildHere{};
+    bool candidateHasPath{};
+};
+
 class BwapiBridge {
 public:
     BwapiBridge() = default;
 
     std::function<void(const ActionDiagnostic&)> actionDiagnostic;
+    std::function<void(const BuildLeaseDiagnostic&)> buildLeaseDiagnostic;
+    std::function<void(const BuildSelectionDiagnostic&)> buildSelectionDiagnostic;
+    std::function<bool(const BWAPI::UnitCommand&, bool, bool)> productionDiagnostic;
+    std::function<bool(const BWAPI::UnitCommand&, std::string_view)> productionPermission;
     [[nodiscard]] std::uint64_t diagnosticErrors() const noexcept { return diagnosticErrors_; }
 
     void onStart();
@@ -80,6 +114,7 @@ public:
     }
 
     [[nodiscard]] bool execute(const Command& command);
+    [[nodiscard]] bool executeProduction(const BWAPI::UnitCommand& command) { return issue(command, "production-demand"); }
     [[nodiscard]] bool executeWholeGame(const BWAPI::UnitCommand& command,
                                         Frame leaseFrames = 24);
     [[nodiscard]] bool commandActive(const Command& command) const;

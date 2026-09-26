@@ -62,6 +62,18 @@ const TechnologyStats& technologyStats(const TechnologyKind kind) noexcept {
     return index < table.size() ? table[index] : unknown;
 }
 
+UnitKind technologyPrerequisite(const TechnologyKind kind, const int level) noexcept {
+    if (level < 2 || level > technologyStats(kind).maximumLevel) return UnitKind::unknown;
+    switch (kind) {
+        case TechnologyKind::protossGroundWeapons:
+        case TechnologyKind::protossGroundArmor: return UnitKind::templarArchives;
+        case TechnologyKind::protossAirWeapons:
+        case TechnologyKind::protossAirArmor: return UnitKind::fleetBeacon;
+        case TechnologyKind::protossPlasmaShields: return UnitKind::cyberneticsCore;
+        default: return UnitKind::unknown;
+    }
+}
+
 int technologyLevel(
     const PlayerSnapshot& player,
     const TechnologyKind kind) noexcept {
