@@ -30,14 +30,13 @@ three concrete bottlenecks:
 
 Current order of work (updated after the 27 September PvZ screens):
 
-1. Finish the same-input, four-game-per-arm PvP fog-detection screen on
-   Benzene and Destination. Check Observer completion **before** the first
-   Dark Templar, Probe survival, combat strength, and adjudicated wins. Keep
-   the option off unless those results justify promotion. The first reference
-   attempt produced one valid loss, then its manager and client processes
-   exited before game 1 without a recorded exception. The candidate has not
-   started. Reprepare both arms for a complete comparison; do not treat the
-   partial result as a win-rate screen.
+1. Stabilize the PvP opening against early Zealot and Dragoon pressure.
+   The fresh four-game default reference lost 0/4 without a logged Dark
+   Templar. Measure the first mobile army, first Reaver, powered Cannon
+   coverage, and Probe survival before spending on optional detector count.
+   A fog-only Observer rule missed its target timing in an earlier four-game
+   candidate; keep it off and avoid another copy of that screen until a
+   genuine early cloak exposure is available.
 2. Address the fresh PvT baseline's repeated natural-base collapse against
    Steamhammer mech. Inspect the defender's engagement estimate, mine and
    siege coverage, Reaver firing, and whether a protected third base can be
@@ -53,6 +52,27 @@ Current order of work (updated after the 27 September PvZ screens):
 
 The target is a stronger full-game bot. No current result establishes a
 major win-rate gain or tournament readiness.
+
+### PvP default reference on both maps — 27 September
+
+`build/pvp-fog-screen-640-20260927/reference` completed four healthy
+BananaBrain games with both map and host sides, all normal losses at frames
+13,673, 13,022, 22,105 and 8,589. All had observed opponent activity and no
+runtime errors. No enemy Dark Templar was logged. In game 0, a large Dragoon
+force arrived while Protodd's first Reaver completed at frame 10,164; the
+second completed at 11,354, during the first major attack.
+In game 1, enemy Zealots reached the main before the first Reaver completed
+at 10,610; all Probes were gone by frame 10,800. In game 3, a two-Gateway
+Zealot flood reached the main before a Cybernetics Core or Cannon completed;
+the first Cannon under construction was destroyed, and all Probes were gone
+by frame 7,200. Game 2 ran longer but also lost.
+The opt-in fog candidate from the earlier 320-slow-frame package also lost
+0/4 and did not trigger before its observed Dark Templar. A new 640-frame
+candidate package is prepared but unplayed: this reference has no cloak
+exposure to test its intended benefit. No matched strength claim is made for
+that candidate, and the option stays off. The next bounded experiment should
+protect the first mobile screen and first Reaver timing, with a healthy
+four-game reference and safeguards for workers, early losses and detection.
 
 ### Current-default PvT baseline against Steamhammer — 27 September
 
