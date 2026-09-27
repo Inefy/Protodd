@@ -26,10 +26,12 @@ def write_json(path, value):
 def prepare(template, output, dll, opponents, maps, purpose="development", race="Protoss", rounds=2, port=1347,
             server_jar=None, client_bundle=None, whole_game_observe=False, production_shadow=None, frame_limit=None,
             production_control_receipt=None, production_screen_receipt=None, worker_training_intervention=None,
-            tactical_target_weights=None, slow_frame_allowance=None):
+            tactical_target_weights=None, slow_frame_allowance=None, policy_mode="frozen"):
     template, output, dll = map(lambda p: Path(p).resolve(), (template, output, dll))
     if purpose not in ("training", "development", "final-test"):
         raise ValueError("unknown campaign purpose")
+    if policy_mode not in ("frozen", "off") or (policy_mode != "frozen" and purpose != "development"):
+        raise ValueError("policy-off comparison requires a development campaign")
     if race not in ("Protoss", "Terran", "Zerg") or type(rounds) is not int or rounds < 2 or rounds % 2:
         raise ValueError("race and an even number of rounds >=2 are required")
     if whole_game_observe and race != "Protoss":
@@ -137,7 +139,9 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
         (target / name).mkdir(parents=True)
     shutil.copy2(dll, target / "AI" / (bot + ".dll"))
     (target / "read/Protodd-learning-mode.txt").write_text("validated-train\n" if purpose == "training" and worker_training_intervention is None else "frozen\n")
-    (target / "read/Policy-mode.txt").write_text("train\n" if purpose == "training" and worker_training_intervention is None else "frozen\n")
+    (target / "read/Policy-mode.txt").write_text(
+        "train\n" if purpose == "training" and worker_training_intervention is None
+        else policy_mode + "\n")
     if worker_training_intervention is not None:
         (target / "read/WorkerTraining-mode.txt").write_text(worker_training_intervention+'\n')
     (target / "read/LearnedMacro-mode.txt").write_text("off\n")
@@ -264,7 +268,9 @@ def main():
     prepare_parser.add_argument('--worker-training-intervention',choices=('baseline','plus-one','plus-two'),help='Fixed local worker spending intervention, training episodes only')
     prepare_parser.add_argument('--tactical-target-weights',type=Path,help='Frozen local target scorer weights; DLL still requires opt-in evaluation build')
     prepare_parser.add_argument('--slow-frame-allowance', type=int,
-                                help='Development-only allowance for 55 ms slow frames, pinned in both arms')
+        help='Development-only allowance for 55 ms slow frames, pinned in both arms')
+    prepare_parser.add_argument('--policy-mode', choices=('frozen', 'off'), default='frozen',
+        help='Development comparison may disable the embedded policy while keeping the same DLL')
     inspect_parser = commands.add_parser("inspect")
     inspect_parser.add_argument("run", type=Path)
     verify_parser = commands.add_parser("verify")

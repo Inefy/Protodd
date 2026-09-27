@@ -11,12 +11,14 @@ public:
     PolicyAction decision();
     void end(bool won);
     bool enabled() const noexcept { return enabled_; }
+    bool weightsLoaded() const noexcept { return weightsLoaded_; }
 private:
     PolicyLearner learner_;
     std::ofstream trace_;
     std::string context_;
     bool enabled_ = false;
     bool training_ = false;
+    bool weightsLoaded_ = false;
     int nextFrame_ = 0;
     PolicyAction action_ = PolicyAction::balanced;
 };

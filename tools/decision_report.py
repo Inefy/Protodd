@@ -258,9 +258,13 @@ class DecisionTrace:
             elif kind == "STRATEGY":
                 row = {"frame": frame, "plan": fields[2], "proposed": fields[3], "posture": fields[4],
                        "enemy": fields[5], "mission": fields[6], "deferred": bool(int(fields[7]))}
+                row.update(extras(fields[8:]))
                 if any(self.strategy.get(k) != v for k, v in row.items() if k != "frame"):
+                    route = (f'{row["strategyPosture"]} → {row["proposed"]} → {row["posture"]}'
+                             if row.get("policyEnabled") else
+                             f'{row.get("strategyPosture", row["proposed"])} → {row["posture"]}')
                     self.append(self.events, {"frame": frame, "kind": kind,
-                        "text": f'{row["plan"]} | {row["proposed"]} → {row["posture"]} | {row["mission"]}'})
+                        "text": f'{row["plan"]} | {route} | {row["mission"]}'})
                 self.strategy = row
                 self.append(self.strategies, row)
             elif kind == "ORDER":
@@ -597,11 +601,14 @@ class DecisionReportTests(unittest.TestCase):
     def test_scrubbing_has_historical_strategy_and_beliefs(self):
         trace = DecisionTrace()
         trace.feed("STRATEGY,24,Opening,Hold,Hold,Unknown,Wait,0")
-        trace.feed("STRATEGY,240,Push,Pressure,Pressure,FastTech,Expand,0")
+        trace.feed("STRATEGY,240,Push,Hold,Hold,FastTech,Expand,0,strategyPosture=Pressure,policyEnabled=1,policyAction=3,policyWeights=0")
         trace.feed("BELIEF,24,Unknown,0.9")
         trace.feed("BELIEF,240,Unknown,0.1")
         payload = trace.payload()
         self.assertEqual(payload["strategies"][0]["plan"], "Opening")
+        self.assertEqual(payload["strategies"][1]["strategyPosture"], "Pressure")
+        self.assertEqual(payload["strategies"][1]["policyAction"], 3)
+        self.assertEqual(payload["strategies"][1]["policyWeights"], 0)
         self.assertEqual(payload["beliefHistory"][0]["values"]["Unknown"], 0.9)
 
     def test_embedded_log_cannot_inject_script(self):

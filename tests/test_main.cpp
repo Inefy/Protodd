@@ -1548,6 +1548,36 @@ void testMacroReservations() {
     protodd::ResourceLedger pendingSupplyLedger{100, 0};
     expect(planner.reconcile(supplyInvariant, {}, pendingSupplyLedger).empty(),
            "supply invariant does not duplicate an in-progress pylon");
+
+    protodd::GameState cappedExpansion;
+    cappedExpansion.frame = 30480;
+    cappedExpansion.self.id = 1;
+    cappedExpansion.self.race = protodd::Race::protoss;
+    cappedExpansion.self.minerals = 334;
+    cappedExpansion.self.supplyUsed = 260;
+    cappedExpansion.self.supplyTotal = 262;
+    cappedExpansion.self.units = {
+        unit(50, protodd::UnitKind::nexus, true),
+        unit(51, protodd::UnitKind::nexus, true),
+        unit(52, protodd::UnitKind::nexus, true),
+        unit(53, protodd::UnitKind::pylon, true),
+        unit(54, protodd::UnitKind::gateway, true),
+    };
+    protodd::StrategicPlan fourthBase;
+    fourthBase.goals = {
+        {protodd::GoalKind::expand, protodd::UnitKind::nexus, 4, 120, true,
+         "match economic phase"},
+    };
+    protodd::ResourceLedger cappedLedger{334, 0};
+    const auto cappedActions = protodd::MacroPlanner{}.reconcile(
+        cappedExpansion, fourthBase, cappedLedger);
+    expect(std::ranges::any_of(cappedActions, [](const protodd::MacroAction& action) {
+               return action.target == protodd::UnitKind::pylon && action.reserved;
+           }) &&
+               std::ranges::none_of(cappedActions, [](const protodd::MacroAction& action) {
+                   return action.target == protodd::UnitKind::nexus && action.reserved;
+               }),
+           "an imminent supply block funds its Pylon before reserving a fourth Nexus");
 }
 
 void testPvZMineralFallback() {
@@ -2429,6 +2459,47 @@ void testWorkersAndScouts() {
            "flying scout ignores ground-only danger and shadows the army");
 }
 
+void testThreatenedNaturalRally() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 24000;
+    state.self.id = 1;
+    BaseSnapshot main;
+    main.id = 1;
+    main.center = {2066, 3671};
+    main.ownerId = 1;
+    main.startLocation = true;
+    BaseSnapshot natural;
+    natural.id = 2;
+    natural.center = {1008, 3184};
+    natural.ownerId = 1;
+    state.bases = {main, natural};
+    StrategicPlan plan;
+    plan.posture = Posture::hold;
+    plan.rallyPoint = main.center;
+    for (auto id = 0; id < 3; ++id) {
+        auto attacker = unit(200 + id, UnitKind::siegeTank, false,
+                             {1100 + id * 32, 3000});
+        attacker.visible = true;
+        attacker.lastSeen = state.frame;
+        state.enemy.units.push_back(attacker);
+    }
+    const auto safe = moveToward(natural.center, main.center, 128.0);
+    expect(SquadPlanner::threatenedNaturalRally(state, plan) == safe,
+           "a distant uncommitted rally reinforces the attacked natural from its safe side");
+    state.enemy.units.back().visible = false;
+    state.enemy.units.back().lastSeen = state.frame - 7 * 24;
+    expect(SquadPlanner::threatenedNaturalRally(state, plan) == safe,
+           "recent fog contact does not instantly pull reinforcements away");
+    state.enemy.units.back().lastSeen = state.frame - 9 * 24;
+    expect(!SquadPlanner::threatenedNaturalRally(state, plan),
+           "two attackers and stale memory do not divert the whole main army");
+    state.enemy.units.back().visible = true;
+    plan.posture = Posture::pressure;
+    expect(!SquadPlanner::threatenedNaturalRally(state, plan),
+           "a committed pressure army is not redirected by the hold-rally rule");
+}
+
 void testLocalSquadsAndDetection() {
     protodd::GameState state;
     state.mapWidthPixels = 2048;
@@ -2479,6 +2550,7 @@ void testLocalSquadsAndDetection() {
                                    state.bases.front().mineralLine) &&
                defense->requiredRatio < 0.6,
            "base defense screens on the safe side of the economy instead of retreating through workers");
+    const auto originalDefense = *defense;
 
     state.bases.front().defense = {{700, 260}, {820, 260}, {700, 220}, {700, 300}, 160, true};
     auto cannon = unit(95, protodd::UnitKind::photonCannon, true, {430, 260});
@@ -2493,8 +2565,7 @@ void testLocalSquadsAndDetection() {
     });
     expect(coveredDefense != squads.end() && coveredDefense->defense.center == cannon.position,
            "Cannon weapon cover outranks an exposed high-ground terrain anchor");
-
-    auto breachedDefense = *defense;
+    auto breachedDefense = originalDefense;
     auto visibleLing = unit(91, protodd::UnitKind::zergling, false,
                             breachedDefense.retreat);
     visibleLing.role = protodd::UnitRole::groundArmy;
@@ -2946,6 +3017,13 @@ void testEconomicTargeting() {
     squad.enemies = {proxy};
     expect(SquadPlanner::tacticalTargets(squad, std::vector{proxy}).size() == 1,
            "a hostile already in the combat set is not duplicated for focus-fire allocation");
+    auto scanner = unit(8, UnitKind::unknown, false, {550, 500});
+    scanner.visible = true;
+    scanner.detected = true;
+    squad.enemies = {hidden, scanner};
+    targets = SquadPlanner::tacticalTargets(squad, std::vector{worker, scanner});
+    expect(targets.size() == 1 && targets.front().id == worker.id,
+           "hidden combat memory and visible unknown spell effects cannot receive attack-unit orders");
 }
 
 void testReserveCounterattack() {
@@ -6561,6 +6639,7 @@ int main() {
     testCommandArbitration();
     testFrameBudget();
     testWorkersAndScouts();
+    testThreatenedNaturalRally();
     testLocalSquadsAndDetection();
     testTransportMissions();
 

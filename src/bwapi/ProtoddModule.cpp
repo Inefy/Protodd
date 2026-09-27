@@ -536,11 +536,19 @@ void ProtoddModule::updateStrategy() {
         action == PolicyAction::pressure ? OpeningStyle::aggressive :
         action == PolicyAction::economy ? OpeningStyle::economic : OpeningStyle::standard;
     auto candidate = strategy_.plan(state_, opponent_.assessment(), style);
+    const auto strategyPosture = candidate.posture;
     if (policy_.enabled() && action == PolicyAction::defend &&
         candidate.posture != Posture::defend && candidate.posture != Posture::recover)
         candidate.posture = Posture::hold;
     const auto proposed = candidate.posture;
     plan_ = strategicDirector_.stabilize(std::move(candidate), state_, opponent_.assessment());
+    auto naturalRallyOverride = false;
+#ifdef PROTODD_THREATENED_NATURAL_RALLY
+    if (const auto rally = SquadPlanner::threatenedNaturalRally(state_, plan_)) {
+        plan_.rallyPoint = *rally;
+        naturalRallyOverride = true;
+    }
+#endif
     expansion_.update(plan_, state_, bridge_.expansionFeedback());
     if (expansion_.releaseBuilder() && !bridge_.cancelExpansion()) plan_.deferExpansion = false;
     if (workerTrainingEnabled_) {
@@ -556,7 +564,12 @@ void ProtoddModule::updateStrategy() {
     trace("strategy", "STRATEGY," + csvSafe(plan_.name) + ',' +
         std::string(postureName(proposed)) + ',' + std::string(postureName(plan_.posture)) + ',' +
         std::string(enemyPlanName(opponent_.assessment().mostLikely)) + ',' + debug_.operation + ',' +
-        std::to_string(plan_.deferExpansion));
+        std::to_string(plan_.deferExpansion) + ",strategyPosture=" +
+        std::string(postureName(strategyPosture)) + ",policyEnabled=" +
+        std::to_string(policy_.enabled()) + ",policyAction=" +
+        std::to_string(static_cast<int>(action)) + ",policyWeights=" +
+        std::to_string(policy_.weightsLoaded()) + ",naturalRallyOverride=" +
+        std::to_string(naturalRallyOverride));
 }
 
 void ProtoddModule::updateMacro() {

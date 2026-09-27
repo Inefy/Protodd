@@ -307,7 +307,12 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         const auto openingDeadline = pylons == 0 && state.self.supplyUsed >= 12;
         if (state.self.supplyTotal + pendingPylons * 16 < 400 &&
             ((openingDeadline && pendingPylons == 0) || remaining <= safetyMargin)) {
-            goals.push_back({GoalKind::build, UnitKind::pylon, pylons + 1, 110, true,
+            // At four supply or less, an unstarted Pylon is already on the
+            // critical path. A planned Nexus may have priority 120, but
+            // reserving its 400 minerals first can leave every Gateway idle
+            // while both goals wait. Fund the supply deadline first.
+            const auto priority = remaining <= 4 ? 130 : 110;
+            goals.push_back({GoalKind::build, UnitKind::pylon, pylons + 1, priority, true,
                              "operational supply invariant"});
         }
     }

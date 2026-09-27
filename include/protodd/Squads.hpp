@@ -7,6 +7,7 @@
 #include "protodd/Strategy.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -44,6 +45,8 @@ enum class MainArmyTravelMode : std::uint8_t {
 class SquadPlanner {
 public:
     void reset() { harassment_.reset(); }
+    [[nodiscard]] static std::optional<Position> threatenedNaturalRally(
+        const GameState& state, const StrategicPlan& plan);
     [[nodiscard]] std::vector<Squad> form(
         const GameState& state,
         std::span<const UnitSnapshot> friendly,

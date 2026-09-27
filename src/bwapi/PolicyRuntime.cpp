@@ -21,6 +21,7 @@ void PolicyRuntime::start() {
     learner_ = PolicyLearner{};
     const auto snapshot = read("bwapi-data/read/Policy.q");
     const auto loaded = snapshot.empty() || learner_.parse(snapshot);
+    weightsLoaded_ = !snapshot.empty() && loaded;
     if (!loaded) enabled_ = false; // fail closed, don't silently train a corrupt table
     learner_.freeze(!training_);
     const auto selfRace = BWAPI::Broodwar->self()->getRace().getName();
@@ -33,7 +34,8 @@ void PolicyRuntime::start() {
     trace_.open("bwapi-data/write/PolicyTrace.log", std::ios::trunc);
     trace_ << "BEGIN,1," << selfRace << ',' << enemyRace << ',' << context_ << ','
            << BWAPI::Broodwar->getRandomSeed() << ','
-           << (enabled_ ? (training_ ? "train" : "frozen") : "off") << '\n';
+           << (enabled_ ? (training_ ? "train" :
+                          weightsLoaded_ ? "frozen" : "frozen-empty") : "off") << '\n';
     trace_.flush();
 }
 PolicyAction PolicyRuntime::decision() {

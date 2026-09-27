@@ -420,6 +420,40 @@ std::vector<Squad> SquadPlanner::form(
     return result;
 }
 
+std::optional<Position> SquadPlanner::threatenedNaturalRally(
+    const GameState& state, const StrategicPlan& plan) {
+    if ((plan.posture != Posture::hold && plan.posture != Posture::defend) ||
+        !plan.rallyPoint.valid()) return std::nullopt;
+    const auto home = std::ranges::find_if(state.bases, [&state](const BaseSnapshot& base) {
+        return base.ownerId == state.self.id && base.startLocation && base.center.valid();
+    });
+    if (home == state.bases.end()) return std::nullopt;
+
+    const BaseSnapshot* threatened = nullptr;
+    auto mostAttackers = 0;
+    for (const auto& base : state.bases) {
+        if (base.ownerId != state.self.id || base.startLocation || !base.center.valid() ||
+            distanceSquared(base.center, plan.rallyPoint) <= 640 * 640) continue;
+        const auto attackers = std::ranges::count_if(state.enemy.units, [&state, &base](
+            const UnitSnapshot& enemy) {
+            return enemy.completed && !enemy.loaded && !enemy.hallucination &&
+                !enemy.invincible && enemy.position.valid() && isCombatUnit(enemy.kind) &&
+                (enemy.visible || (enemy.lastSeen > 0 &&
+                                   state.frame - enemy.lastSeen <= 8 * 24)) &&
+                distanceSquared(enemy.position, base.center) <= 900 * 900;
+        });
+        if (attackers >= 3 && attackers > mostAttackers) {
+            threatened = &base;
+            mostAttackers = static_cast<int>(attackers);
+        }
+    }
+    if (threatened == nullptr) return std::nullopt;
+    // Assemble behind the attacked Nexus, toward our main. The base-defense
+    // squad still owns the immediate interception, so this moves only the
+    // otherwise uncommitted main force toward reinforcement range.
+    return moveToward(threatened->center, home->center, 128.0);
+}
+
 bool SquadPlanner::mobileDetectionReady(const GameState& state, const Squad& squad) noexcept {
     if (!squad.needsDetection) return true;
     const auto ahead = squad.objective.valid() ? moveToward(squad.center, squad.objective, 128.0) : squad.center;
@@ -653,10 +687,22 @@ bool SquadPlanner::canCounterattack(
 
 std::vector<UnitSnapshot> SquadPlanner::tacticalTargets(
     const Squad& squad, const std::span<const UnitSnapshot> hostiles) {
-    auto targets = squad.enemies;
+    const auto targetable = [](const UnitSnapshot& candidate) {
+        // The engagement estimate may remember a unit after vision is lost.
+        // Only an identified, currently visible BWAPI unit can receive an
+        // Attack_Unit order. Unknown spell effects such as Scanner Sweep can
+        // appear as visible enemy units but reject attack commands.
+        return candidate.kind != UnitKind::unknown && candidate.visible &&
+            candidate.detected && candidate.position.valid() &&
+            !candidate.loaded && !candidate.invincible && !candidate.hallucination &&
+            candidate.durability() > 0;
+    };
+    std::vector<UnitSnapshot> targets;
+    for (const auto& candidate : squad.enemies) {
+        if (targetable(candidate)) targets.push_back(candidate);
+    }
     for (const auto& candidate : hostiles) {
-        if (!candidate.visible || !candidate.detected || !candidate.position.valid() ||
-            candidate.loaded || candidate.invincible || candidate.hallucination ||
+        if (!targetable(candidate) ||
             std::ranges::find(targets, candidate.id, &UnitSnapshot::id) != targets.end()) {
             continue;
         }

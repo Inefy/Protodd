@@ -11,6 +11,20 @@ from training.arena import prepare, inspect, verify
 
 
 class ArenaTests(unittest.TestCase):
+    def test_policy_off_is_development_only_and_pinned(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = self.fixture(Path(temp))
+            with self.assertRaisesRegex(ValueError, 'policy-off comparison requires'):
+                prepare(**args, purpose='final-test', policy_mode='off')
+            self.assertFalse(args['output'].exists())
+            prepare(**args, policy_mode='off')
+            path = args['output'] / 'server/bots/Protodd/read/Policy-mode.txt'
+            self.assertEqual(path.read_text(), 'off\n')
+            self.assertTrue(verify(args['output'])['verified'])
+            path.write_text('frozen\n')
+            with self.assertRaises(ValueError):
+                verify(args['output'])
+
     def test_development_slow_frame_allowance_is_frozen(self):
         with tempfile.TemporaryDirectory() as temp:
             args = self.fixture(Path(temp))

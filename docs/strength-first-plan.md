@@ -6,8 +6,9 @@ The latest default source includes the clearer in-game status overlay, combat
 and scouting correctness fixes, and several bounded strategy changes. The
 experimental PvZ and PvP tactics are build options that remain **off** in the
 default bot. The overlay improves diagnosis; it is not evidence of stronger
-play. At this checkpoint all 42 development test
-suites pass and the default Win32 BWAPI DLL builds successfully.
+play. The current default Win32 BWAPI DLL builds successfully. The 39
+configured CTest suites that use the default Python environment pass, and
+the PyTorch model suite passes with `build/model-venv/Scripts/python.exe`.
 
 A fresh, structurally healthy four-game development baseline against
 BananaBrain (PvP) and McRaveZ (PvZ) on Benzene lost 0/4. This is a narrow
@@ -28,7 +29,7 @@ three concrete bottlenecks:
    after the army had already collapsed; one late Reaver died before firing.
    More late Reaver priority is not the next useful variant.
 
-Current order of work (updated after the 27 September PvZ screens):
+Current order of work (updated after the 27 September control screens):
 
 1. Stabilize the PvP opening against early Zealot and Dragoon pressure.
    The fresh four-game default reference lost 0/4 without a logged Dark
@@ -39,10 +40,13 @@ Current order of work (updated after the 27 September PvZ screens):
    genuine early cloak exposure is available.
 2. Address the PvT natural-base collapse and stalled counterpressure against
    Steamhammer mech. The larger mobile screen lost all four controlled games;
-   a closer third base built in one paired game but also did not win. Test the
-   frozen policy's repeated late `defend` decisions as a separate controlled
-   factor, then inspect mine coverage, engagement estimates and Reaver firing.
-   Compare frozen packages on both maps and starting sides.
+   a closer third base built in one paired game but also did not win. Simply
+   disabling the empty-table frozen policy also lost 0/4. Two Cannon-leash
+   variants also lost 0/4 and were removed. Keep the legal-target correction.
+   A threatened-natural rally option did activate in four matched games but
+   also lost 0/4, so it remains off. Next inspect mine coverage, actual
+   Reaver and Observer execution, and worker-line interception; test an
+   explicit last stand only when income cannot be rebuilt.
 3. Attack the earliest repeatable loss mechanism: opening mobile defense,
    protected tech/expansion transitions, army cohesion and detector coverage.
    Choose one bounded change at a time and compare frozen binaries in healthy
@@ -53,6 +57,190 @@ Current order of work (updated after the 27 September PvZ screens):
 
 The target is a stronger full-game bot. No current result establishes a
 major win-rate gain or tournament readiness.
+
+### Broader improvement loop — 27 September
+
+The recent one-rule screens found useful defects but did not produce wins.
+Broaden the work from build-order selection to **control of the entire game**:
+
+1. **Decision authority.** Audit every layer that can change posture or issue
+   orders: the frozen policy, strategic director, base-defense allocator,
+   engagement estimate, tactical controller and command dispatcher. Log the
+   proposed action, final action and reason for an override. Distinguish a
+   frozen policy with learned weights from the empty-table heuristic, and
+   preserve useful emergency defense while correcting harmful overrides.
+2. **Action quality.** Review actual issued orders and resulting movement or
+   damage, not only planned unit counts. Quantify time spent assembled at
+   home with a viable army, failed attack travel, repeated retreat orders,
+   detector-blocked advances, underused Reavers/Templar and workers lost while
+   an army survives. Fix the largest repeatable control failure first.
+3. **Learning scope.** Use the approved replay training split to improve
+   target, movement, engagement, production and expansion decisions with
+   legal observations and explicit command ownership. Keep validation/test
+   and unassigned source replays out of fitting until a reviewed new split is
+   frozen. The first target ranker used only 818 fit examples in its broader
+   bounded fit and remains unpromoted. Increase game diversity and add weapon
+   compatibility, target threat, focus and overkill context to its legal
+   candidate set before another fit. Offline prediction scores only qualify
+   candidates for live tests.
+4. **Game outcomes.** Screen mechanisms on paired maps/sides and stable
+   opponent openings, then test promising full-game candidates against more
+   opponents, openings and maps. Track wins together with opening survival,
+   economy, army use and late conversion. A four-game screen is diagnostic,
+   not an overall win-rate claim.
+
+The immediate control comparison uses the same Protodd DLL and fixed
+Steamhammer `Vultures` opponent with only the coarse `Policy-mode` changed.
+Distinguish the missing-weight fallback from a properly trained policy before
+making any control change permanent. Trace remaining losses from strategic
+posture through squad allocation to
+the BWAPI command that actually reached each unit.
+
+The full four-game policy-off arm used the same DLL and differed intentionally
+only in `Policy-mode` (plus the arena port). It matched all maps, sides and
+observed seeds with the frozen-mode third-site arm. Both campaigns were healthy
+and lost 0/4. Policy-off ends were frames 29,886, 32,180, 23,841 and 38,101;
+frozen-mode ends were 47,370, 32,614, 25,639 and 25,484. The first policy-off
+game does not support simply removing `Hold`: at frames 12,000–19,200 the
+pressure plan still assembled at rally, covered a Nexus or allocated most of
+its fighters to base defense. At frame 14,400 its natural defense used a
+Cannon at 352×2816 as the center of a 256-pixel pursuit leash,
+although the natural was at 416×2288 and that Cannon was not in weapon range
+of the attacker's observed forward position. Squad formation previously
+counted a static defender when its attack *type* matched a local enemy; it
+did not check actual weapon range. The later range-filter and terrain-anchor
+candidate was tested below and removed from the default after losing 0/4;
+it needs a better movement design rather than direct promotion. This screen
+establishes no win-rate gain from turning the policy off. The frozen policy had no `Policy.q`
+snapshot, so its non-emergency table values were untrained zeros; the runtime
+now labels this situation `frozen-empty` in `PolicyTrace.log` instead of
+implying that learned weights were loaded.
+
+The command-outcome report found a second execution error in that game. At
+frames 19,206–19,332, two combat units repeatedly issued `Attack_Unit` toward
+enemy unit 507, a visible Scanner Sweep effect, and BWAPI rejected the orders
+as `Incompatible_UnitType`. The squad target list accepted visible units of
+unknown type and copied fog-remembered enemies directly into the attack list.
+The revised target selector retains that memory for engagement estimates but
+requires a currently visible, detected, identified, attackable unit for a
+unit-target command. A native regression covers both the unknown spell effect
+and hidden memory. This fixes illegal orders; its effect on full-game wins is
+still unmeasured.
+
+The first same-policy control candidate at
+`build/pvt-control-static-screen-20260927/candidate-v2` completed four
+healthy paired games, with only the DLL different from the reference. Both
+arms lost 0/4. Candidate loss frames were 22,787, 24,213, 26,910 and 29,607;
+reference loss frames were 47,370, 32,614, 25,639 and 25,484. On Benzene
+game 0 at frame 14,400, its natural defense had no in-range Cannon support,
+but the fallback selected a terrain anchor at 880×1744 while most defenders
+were near 511×2370 and enemy Tanks occupied the forward side. It was also
+well behind the reference in Probes and army before this contact, so the
+leash alone does not explain the earlier loss. A second bounded rule kept a
+distant choke as the defense point only if at least half of the available
+mobile defenders were already within 320 pixels of it. This follow-up,
+`candidate-v3`, also completed four healthy paired games. It lost 0/4 at
+frames 25,360, 23,965, 29,607 and 26,662 versus the same reference's 0/4.
+The intended base-centered movement appeared in the Benzene fight, but the
+worker economy still collapsed. Both leash variants were removed from the
+default source; their frozen binaries and traces remain for diagnosis.
+
+The control report also counted 188 idle-production-with-bank episodes in the
+longer frozen-policy game (98,448 sampled unit-frames) and 135 rejected combat
+orders labeled `Incompatible_UnitType` across focus fire, screen intercept and
+retreat volley. The invalid-target candidate had 100% combat-order acceptance
+in game 0, with no such rejection; this verifies that sampled execution path,
+not a win improvement. It still had 55 idle-production-with-bank episodes and
+1,438 cumulative idle Gateway unit-seconds before losing at frame 22,787. At
+frame 30,480 in the longer reference, three Nexuses
+and 66 Probes were active, but a blocking fourth-Nexus reservation was ahead
+of routine Gateway production while Terran was scaling its Factories. Next
+review whether expansion reservations and tactical contact leave a suitable
+mobile army idle; measure producer utilization and army presence alongside
+wins before changing that priority.
+
+One of those waits is now explained by goal ordering. At frame 30,480 the
+reference had 260/262 supply and 334 minerals. Both the fourth Nexus and a
+new Pylon logged `saving-resources`; the expansion priority was 120 and the
+operational supply Pylon priority was 110. The Nexus reservation therefore
+preceded the Pylon while two of seven Gateways were idle. A bounded macro
+correction raises the Pylon deadline to 130 only when four or fewer supply
+remain and no Pylon is pending. A native regression reproduces the
+three-Nexus, near-cap bank and confirms that the Pylon reserves first. This
+is a command-priority fix, not yet a measured game gain; package it only
+after the current frozen choke screen finishes.
+
+The new route trace in candidate-v2 game 0 recorded 234 strategic decisions.
+In 99 of them the policy changed the strategy's posture, predominantly
+Pressure to Hold under its forced Defend action (97 decisions). This establishes
+the frequency of the override, not that it caused the loss: turning the
+policy fully off had already lost all four matched games. The next policy
+candidate should keep emergency base defense and vary only when a covered
+army may leave Hold; compare it on multiple opponent openings before
+promotion.
+
+A second control opportunity is squad placement rather than posture. In the
+current-default Destination loss at frame 24,000, 12 units defended the
+natural against 18 recorded enemies while 15 main-army units assembled at a
+rally roughly 1,000 pixels away. At frame 25,200 only five were in the
+natural defense while 32 assembled at that distant rally; the natural still
+had 44 Probes. At 26,400 the defense gained 12 units against 16 enemies, but
+the main force of 23 remained at the distant rally. By 27,600 the worker
+count had fallen to 22; at 28,800 it was zero while 28 combat units survived.
+The tested army-control candidate routed the uncommitted main force to a
+threatened natural's safe screen before the worker line was breached, with a
+distance and threat threshold so a minor raid did not divert every attack.
+The opt-in `PROTODD_THREATENED_NATURAL_RALLY` implementation requires a
+Hold/Defend final posture, three recent attackers within 900 pixels of an
+owned outer base, and a current rally more than 640 pixels away. It assembles
+128 pixels behind that base toward the main. The native tests cover recent
+fog contact, stale contact and an actively pressuring army. The default
+build keeps this option off after the failed live screen below.
+The four-game reference and option-enabled candidate are frozen as
+`reference-fixed` and `candidate-fixed` under
+`build/pvt-natural-rally-screen-20260927/`. Their verified non-DLL inputs
+match; the reference DLL SHA-256 is `832e00cffd46ebacd0dc55c7112da68483f8cb90fcebad852de6a17a67519637`
+and the option-enabled DLL is `880fb752aae0b45857f1be8e96b809f069f49e0274698188cd2cdb7406f3654e`.
+Both include the legal-target filter and urgent Pylon priority so only the
+rally rule differs. An initial packaging attempt lacked the arena's owned
+StarCraft helper scripts and produced no games; the fixed packages use the
+validated local client bundle.
+The corrected reference completed four healthy, normal losses at frames
+42,503, 37,233, 23,469 and 41,542. The option-enabled candidate also lost
+all four, at frames 24,802, 36,737, 22,973 and 40,767. Both campaigns had
+opponent activity, normal adjudication and no logged bot errors. The paired
+input and runtime checks passed. Candidate traces recorded the option
+activating 53, 170, 19 and 147 times, respectively; all four games were
+functional exposures, and none showed a win gain. Keep it off.
+The first reference game has repeated exposed natural contact: 61 sampled
+base-defense rows with at least three enemies, including frames 13,680–15,840
+while the plan's rally was at the main.
+The first candidate game did exercise it: the trace first recorded an
+override at frame 14,112 after the empty policy had turned Pressure into
+Hold. At frame 14,280 the main group travelled toward 397×2415 behind the
+natural, versus the reference's main rally at 416×3024. This confirms the
+route mechanism, but the completed campaign above shows no strength gain.
+Candidate game 0 ended in a normal loss at frame 24,802, versus the reference
+loss at 42,503. At frame 21,600 it had 18 Probes and one Nexus versus the
+reference's 44 Probes and two Nexuses. The candidate's first contact had far
+more observed enemies, so the one-game difference cannot be assigned solely
+to its route; it does show that this rule has not rescued that opening.
+The command report for candidate game 0 found no `Incompatible_UnitType`
+orders, but 80 idle-production-with-bank episodes and 2,073 cumulative idle
+Gateway unit-seconds. The fight accepted at frame 15,840 used 21 defending
+units against 17 recorded enemies and lost nine members worth 1,325 minerals
+plus gas in the next ten seconds. Its simulation did predict heavy friendly
+losses (about 8.7 of 21 remaining) even while predicting no enemy survivors.
+The next combat-control audit should check whether the surviving Reavers,
+Observers and Gateway units delivered their planned damage before changing
+the fight threshold; a simple higher threshold could abandon the Nexus.
+In candidate game 3, the rule activated 147 times yet the bot reached zero
+Probes with 39 combat units and two Nexuses at frame 33,600. The mineral bank
+later fell to 18, below the price of one Probe, so its economy could not
+restart. The main goal for the next control cycle is to protect the worker
+line during the first major fight and to make an explicit last-stand choice
+when a large surviving army has no way to rebuild income. Separate those
+interventions and test each against a new healthy reference before promotion.
 
 The repository now carries the complete 59,391-file cwal.gg source replay
 snapshot as six Git LFS archives under `replays/cwal-source/`, alongside the
