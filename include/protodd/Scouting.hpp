@@ -32,6 +32,7 @@ struct ScoutOrder {
 class ProbeHarasser {
 public:
     void reset() noexcept;
+    void withdraw() noexcept { withdrawing_ = true; }
     void finish() noexcept { finished_ = true; }
     [[nodiscard]] bool finished() const noexcept { return finished_; }
     [[nodiscard]] std::optional<Command> control(
@@ -67,6 +68,9 @@ public:
     [[nodiscard]] UnitId openingScout() const noexcept {
         return openingMission_ ? workerScout_ : -1;
     }
+    [[nodiscard]] UnitId returningScout() const noexcept {
+        return returningMission_ ? workerScout_ : -1;
+    }
     [[nodiscard]] std::optional<Command> controlWorkerScout(
         const GameState& state, const InfluenceMap& influence, const NavigationGrid* terrain = nullptr);
 
@@ -76,7 +80,9 @@ private:
     Frame nextWorkerMission_{};
     UnitId workerScout_{-1};
     bool openingMission_{};
+    bool returningMission_{};
     ProbeHarasser harasser_;
+    ProbeHarasser returnHarasser_;
 };
 
 }  // namespace protodd

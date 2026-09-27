@@ -192,7 +192,12 @@ GameState BwapiBridge::observe() {
             rememberFailure();
             return true;
         }
-        const auto hardLeaseLimit = kind == UnitKind::pylon ? 8 * 24 : 18 * 24;
+        // The eight-second Pylon timeout is useful for emergency supply near
+        // home. A deliberately placed Pylon at a new natural can need more
+        // than that just for travel. Its moving builder already has the
+        // stalled-position escape above; do not cancel it mid-route.
+        const auto hardLeaseLimit = kind == UnitKind::pylon &&
+            !pending.plannedRemotePower ? 8 * 24 : 18 * 24;
         if (kind != UnitKind::nexus && age >= hardLeaseLimit) {
             // Movement alone is not construction progress. A Probe can orbit
             // an obstructed footprint indefinitely, which previously held a
@@ -943,49 +948,142 @@ void BwapiBridge::drawDebug(
     const ThreatAssessment& threat,
     const DebugOverlay& debug) const {
     if (debug.level == 0) return;
-    const auto macroLimit = debug.level == 1 ? 1U : 3U;
-    const auto expansion = pendingBuilds_.find(UnitKind::nexus);
-    const auto rows = 8 + static_cast<int>(std::min<std::size_t>(macroLimit, debug.macro.size())) +
-        (!debug.scout.empty() ? 1 : 0) +
-        (expansion != pendingBuilds_.end() ? 1 : 0) +
-        (debug.level > 1 ? 2 * static_cast<int>(std::min<std::size_t>(3, debug.squads.size())) :
-                          (debug.squads.empty() ? 0 : 1));
-    Broodwar->drawBoxScreen(4, 4, 636, 12 + rows * 12, Colors::Black, true);
-    auto y = 8;
-    const auto row = [&y](const char* format, auto... args) {
-        Broodwar->drawTextScreen(10, y, format, args...);
-        y += 12;
-    };
     const auto count = [&state](const UnitKind kind) {
         return static_cast<int>(std::ranges::count_if(state.self.units, [kind](const UnitSnapshot& unit) {
             return unit.kind == kind && unit.completed;
         }));
     };
+    const auto army = static_cast<int>(std::ranges::count_if(
+        state.self.units, [](const UnitSnapshot& unit) {
+            return unit.completed && isCombatUnit(unit.kind) &&
+                   !isWorker(unit.kind) && !isBuilding(unit.kind);
+        }));
+    const auto matchup = state.enemy.race == Race::zerg ? "PvZ" :
+                         state.enemy.race == Race::terran ? "PvT" :
+                         state.enemy.race == Race::protoss ? "PvP" : "Pv?";
+    const auto nextAction = debug.macro.empty() ? nullptr : &debug.macro.front();
+    const auto actionName = nextAction == nullptr ? "" :
+        nextAction->technology != TechnologyKind::none
+            ? technologyStats(nextAction->technology).name.data()
+            : unitStats(nextAction->target).name.data();
+    const auto actionState = nextAction == nullptr ? "IDLE" :
+        !nextAction->executable ? "WAIT" : nextAction->reserved ? "READY" : "SAVE";
+    const auto largestSquad = debug.squads.empty() ? debug.squads.end() :
+        std::ranges::max_element(debug.squads, {}, &DebugSquad::units);
+    const auto userInput = Broodwar->isFlagEnabled(BWAPI::Flag::UserInput);
+
+    // Keep the everyday view shallow and group the information by decision.
+    // Coordinates, reasons, leases and map geometry belong in /debug 2.
+    if (debug.level == 1) {
+        // Tournament Manager draws its own match text in the upper left after
+        // BWAPI's draw callbacks. Keep this panel clear of that text and the
+        // game's resource counters along the top edge.
+        constexpr int x = 340;
+        Broodwar->drawBoxScreen(332, 28, 638, 211, Colors::Black, true);
+        Broodwar->drawBoxScreen(332, 28, 638, 211, Colors::Cyan, false);
+        Broodwar->drawTextScreen(x, 32, "%cPROTODD%c  %s  %02d:%02d",
+            Text::Teal, Text::White, matchup, state.frame / (24 * 60), (state.frame / 24) % 60);
+        Broodwar->drawTextScreen(x, 45, "%c%s%c  %.32s", Text::Yellow,
+            postureName(plan.posture).data(), Text::White, plan.name.c_str());
+        Broodwar->drawLineScreen(337, 59, 633, 59, Colors::Grey);
+
+        Broodwar->drawTextScreen(x, 63, "%cECONOMY", Text::Teal);
+        Broodwar->drawTextScreen(x, 76, "%cProbes %d/%d   Bases %d/%d", Text::White,
+            count(UnitKind::probe), plan.desiredWorkers,
+            count(UnitKind::nexus), plan.desiredBases);
+        Broodwar->drawTextScreen(x, 89, "%c%dM  %dG   Supply %d/%d", Text::White,
+            state.self.minerals, state.self.gas,
+            state.self.supplyUsed / 2, state.self.supplyTotal / 2);
+        Broodwar->drawTextScreen(x, 104, "%cARMY", Text::Teal);
+        Broodwar->drawTextScreen(x, 117, "%c%d total   D %d  Z %d  R %d", Text::White,
+            army, count(UnitKind::dragoon), count(UnitKind::zealot), count(UnitKind::reaver));
+        if (largestSquad != debug.squads.end()) {
+            const auto decision = largestSquad->decision == FightDecision::engage ? "FIGHT" :
+                                  largestSquad->decision == FightDecision::kite ? "KITE" : "BACK";
+            if (largestSquad->enemies > 0)
+                Broodwar->drawTextScreen(x, 130, "%cFront %.11s  %d:%d  %s", Text::White,
+                    largestSquad->role.c_str(), largestSquad->units,
+                    largestSquad->enemies, decision);
+            else Broodwar->drawTextScreen(x, 130, "%cFront %.14s  %d  clear", Text::White,
+                largestSquad->role.c_str(), largestSquad->units);
+        } else Broodwar->drawTextScreen(x, 130, "%cNo squad assigned", Text::White);
+
+        Broodwar->drawLineScreen(337, 145, 633, 145, Colors::Grey);
+        Broodwar->drawTextScreen(x, 149, "%cEnemy%c %.16s  %.0f%% unsure", Text::Teal, Text::White,
+            enemyPlanName(threat.mostLikely).data(), threat.uncertainty * 100.0);
+        if (nextAction != nullptr) {
+            Broodwar->drawTextScreen(x, 162, "%cNext %s%c %.24s",
+                nextAction->executable && nextAction->reserved ? Text::Green : Text::Yellow,
+                actionState, Text::White, actionName);
+            Broodwar->drawTextScreen(x, 175, "%cCost %dM / %dG", Text::White,
+                nextAction->minerals, nextAction->gas);
+        } else Broodwar->drawTextScreen(x, 162, "%cNo pending spend", Text::White);
+
+        const auto supplyBlocked = state.self.supplyTotal > 0 &&
+            state.self.supplyTotal < 400 && state.self.supplyUsed >= state.self.supplyTotal;
+        if (supplyBlocked)
+            Broodwar->drawTextScreen(x, 188, "%cSUPPLY BLOCKED", Text::Red);
+        else if (debug.unpoweredBuildings > 0)
+            Broodwar->drawTextScreen(x, 188, "%c%d unpowered buildings", Text::Red,
+                debug.unpoweredBuildings);
+        else if (debug.idleGateways > 0)
+            Broodwar->drawTextScreen(x, 188, "%cGateways idle %d/%d", Text::Yellow,
+                debug.idleGateways, debug.usableGateways);
+        else if (debug.idleWorkers > 0)
+            Broodwar->drawTextScreen(x, 188, "%c%d idle Probes", Text::Yellow,
+                debug.idleWorkers);
+        else if (!debug.operation.empty())
+            Broodwar->drawTextScreen(x, 188, "%cTask%c %.34s", Text::Teal,
+                Text::White, debug.operation.c_str());
+        else Broodwar->drawTextScreen(x, 188, "%cNo production alerts", Text::Green);
+
+        Broodwar->drawTextScreen(x, 198, "%c%s", Text::White,
+            userInput ? "/debug 2 details   /debug 0 hide" : "Controls disabled by host");
+        return;
+    }
+
+    const auto expansion = pendingBuilds_.find(UnitKind::nexus);
+    constexpr std::size_t macroLimit = 3;
+    const auto rows = 11 + static_cast<int>(std::min<std::size_t>(macroLimit, debug.macro.size())) +
+        (!debug.scout.empty() ? 1 : 0) +
+        (expansion != pendingBuilds_.end() ? 1 : 0) +
+        2 * static_cast<int>(std::min<std::size_t>(3, debug.squads.size()));
+    Broodwar->drawBoxScreen(4, 4, 556, 12 + rows * 12, Colors::Black, true);
+    Broodwar->drawBoxScreen(4, 4, 556, 12 + rows * 12, Colors::Cyan, false);
+    auto y = 8;
+    const auto row = [&y](const char* format, auto... args) {
+        Broodwar->drawTextScreen(10, y, format, args...);
+        y += 12;
+    };
     const auto weight = [&plan](const UnitKind kind) {
         const auto found = std::ranges::find(plan.composition, kind, &CompositionTarget::kind);
         return found == plan.composition.end() ? 0 : static_cast<int>(found->weight * 100.0 + 0.5);
     };
-    row("Protodd | %.85s", plan.name.c_str());
-    row("%s | Enemy: %s | uncertainty %.0f%%", postureName(plan.posture).data(),
+    row("PROTODD  %s  /debug 1 compact", matchup);
+    row("PLAN    %.65s", plan.name.c_str());
+    row("STATE   %s | enemy %s | uncertainty %.0f%%", postureName(plan.posture).data(),
         enemyPlanName(threat.mostLikely).data(), threat.uncertainty * 100.0);
-    row("Army D/Z/R %d/%d/%d | mix %d/%d/%d%% | Probes %d/%d", count(UnitKind::dragoon),
+    row("ARMY    %d total | D/Z/R %d/%d/%d | mix %d/%d/%d%%", army, count(UnitKind::dragoon),
         count(UnitKind::zealot), count(UnitKind::reaver), weight(UnitKind::dragoon),
-        weight(UnitKind::zealot), weight(UnitKind::reaver), count(UnitKind::probe), plan.desiredWorkers);
-    row("Rally %d,%d | Bases %d/%d | Expansion %s | Gas workers target %d",
-        plan.rallyPoint.x, plan.rallyPoint.y, count(UnitKind::nexus), plan.desiredBases,
-        plan.expansionTarget.valid() ? "TARGET SELECTED" : plan.sustainEconomy ? "GROWTH ENABLED" : "WAIT",
-        plan.desiredGasWorkers);
-    row("Macro: %.90s", lastMacroStatus_.c_str());
-    row("Mission: %.88s", debug.operation.c_str());
-    row("Health: %.88s", debug.health.c_str());
-    if (!debug.scout.empty()) row("Scout: %.88s", debug.scout.c_str());
+        weight(UnitKind::zealot), weight(UnitKind::reaver));
+    row("ECO     Probes %d/%d | Bases %d/%d | gas workers goal %d",
+        count(UnitKind::probe), plan.desiredWorkers, count(UnitKind::nexus),
+        plan.desiredBases, plan.desiredGasWorkers);
+    row("BANK    %d minerals | %d gas | supply %d/%d", state.self.minerals,
+        state.self.gas, state.self.supplyUsed / 2, state.self.supplyTotal / 2);
+    row("MAP     Rally %d,%d | expansion %s", plan.rallyPoint.x, plan.rallyPoint.y,
+        plan.expansionTarget.valid() ? "target selected" : plan.sustainEconomy ? "growth enabled" : "waiting");
+    row("MACRO   %.61s", lastMacroStatus_.c_str());
+    row("MISSION %.59s", debug.operation.c_str());
+    row("HEALTH  %.60s", debug.health.c_str());
+    if (!debug.scout.empty()) row("SCOUT   %.61s", debug.scout.c_str());
     if (expansion != pendingBuilds_.end()) {
         const auto& pending = expansion->second;
         const auto builder = Broodwar->getUnit(pending.builder);
         const auto remaining = builder != nullptr && builder->exists()
             ? static_cast<int>(distance(fromBwapi(builder->getPosition()),
                                        {pending.target.x + 64, pending.target.y + 48})) : -1;
-        row("Nexus Probe %d | %d px to site | waiting %ds | no movement %ds", pending.builder,
+        row("NEXUS   Probe %d | %d px to site | waiting %ds | no movement %ds", pending.builder,
             remaining, (state.frame - pending.issued) / 24,
             pending.lastProgress >= 0 ? (state.frame - pending.lastProgress) / 24 : 0);
     }
@@ -993,27 +1091,19 @@ void BwapiBridge::drawDebug(
         const auto& action = debug.macro[i];
         const auto label = action.technology != TechnologyKind::none
             ? technologyStats(action.technology).name.data() : unitStats(action.target).name.data();
-        row("%s %s (%dM %dG): %.52s", !action.executable ? "PREREQ" : action.reserved ? "FUNDED" : "SAVING",
+        row("NEXT    %s %.21s (%dM %dG): %.26s", !action.executable ? "PREREQ" : action.reserved ? "FUNDED" : "SAVING",
             label, action.minerals, action.gas, action.reason.c_str());
     }
-    if (debug.level > 1) {
-        for (std::size_t i = 0; i < std::min<std::size_t>(3, debug.squads.size()); ++i) {
-            const auto& squad = debug.squads[i];
-            if (squad.enemies > 0)
-                row("%s %d vs %d | ratio %.2f / need %.2f", squad.role.c_str(),
-                    squad.units, squad.enemies, squad.ratio, squad.required);
-            else row("%s %d | no local enemy", squad.role.c_str(), squad.units);
-            row("  %.72s -> %d,%d", squad.reason.c_str(), squad.objective.x, squad.objective.y);
-        }
-    } else if (!debug.squads.empty()) {
-        const auto& squad = debug.squads.front();
+    for (std::size_t i = 0; i < std::min<std::size_t>(3, debug.squads.size()); ++i) {
+        const auto& squad = debug.squads[i];
         if (squad.enemies > 0)
-            row("%s: %.55s | %.2f / %.2f", squad.role.c_str(), squad.reason.c_str(), squad.ratio, squad.required);
-        else row("%s: %.55s | no local enemy", squad.role.c_str(), squad.reason.c_str());
+            row("SQUAD   %.16s %d vs %d | ratio %.2f / need %.2f", squad.role.c_str(),
+                squad.units, squad.enemies, squad.ratio, squad.required);
+        else row("SQUAD   %.16s %d | no local enemy", squad.role.c_str(), squad.units);
+        row("        %.51s -> %d,%d", squad.reason.c_str(), squad.objective.x, squad.objective.y);
     }
-    if (Broodwar->isFlagEnabled(BWAPI::Flag::UserInput))
-        row("/debug: cycle detail/off/compact | /debug 0, 1, 2: select display");
-    else row("Passive overlay | interactive controls disabled by host");
+    row(userInput ? "/debug 1 compact  |  /debug 0 hide" :
+                    "Passive display; game host blocks controls");
 
     const auto marker = [](const Position point, const Color color, const char* label) {
         if (!point.valid()) return;
@@ -1852,6 +1942,16 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         for (const auto unit : Broodwar->self()->getUnits()) {
             if (unit == nullptr || !unit->exists() ||
                 unit->getType() != UnitTypes::Protoss_Nexus) continue;
+            // An unpowered natural is not a legal Cannon destination. If it
+            // wins the "fewest defenses" comparison, returning immediately
+            // below also prevents a second Cannon at the powered main. That
+            // left the mineral line exposed through an entire Zergling flood.
+            const auto localPylon = Broodwar->getClosestUnit(
+                unit->getPosition(),
+                Filter::GetType == UnitTypes::Protoss_Pylon && Filter::IsCompleted &&
+                    Filter::IsOwned);
+            if (localPylon == nullptr || localPylon->getDistance(unit) > 384)
+                continue;
             const auto nearby = static_cast<int>(Broodwar->getUnitsInRadius(
                 unit->getPosition(), 416,
                 Filter::IsOwned && Filter::GetType == type).size());
@@ -1869,12 +1969,6 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         }
         if (forwardNexus != nullptr) {
             defendedNexus = forwardNexus;
-            const auto localPylon = Broodwar->getClosestUnit(
-                forwardNexus->getPosition(),
-                Filter::GetType == UnitTypes::Protoss_Pylon && Filter::IsCompleted &&
-                    Filter::IsOwned);
-            if (localPylon == nullptr || localPylon->getDistance(forwardNexus) > 384)
-                return TilePositions::None;
             // The Pylon is already offset from the Nexus. Anchoring the layout
             // to it and applying another layout offset placed Cannons beyond
             // useful mineral-line coverage. Search around the defended Nexus
@@ -1912,6 +2006,9 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
             } else {
                 anchorPosition = forwardNexus->getPosition();
             }
+        } else {
+            lastMacroStatus_ = "placement-defense-no-powered-base";
+            return TilePositions::None;
         }
     }
 
@@ -2503,6 +2600,9 @@ bool BwapiBridge::build(
             builder->getID(), Broodwar->getFrameCount(),
             fromBwapi(BWAPI::Position(location)), false,
         };
+        pendingBuilds_[action.target].plannedRemotePower =
+            action.target == UnitKind::pylon &&
+            action.reason == "power the new PvZ natural before pressure";
         return true;
     }
     // Only placement failures invalidate terrain. A transient worker/resource

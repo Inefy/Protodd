@@ -5,6 +5,10 @@ project(Protodd VERSION 0.1.0 LANGUAGES CXX)
 option(PROTODD_BUILD_TESTS "Build deterministic core tests" ON)
 option(PROTODD_BUILD_BWAPI_MODULE "Build the 32-bit BWAPI tournament DLL" OFF)
 option(PROTODD_PRODUCTION_LOCAL_EVALUATION "Enable opt-in early train-unit control in isolated local evaluations" OFF)
+option(PROTODD_TACTICAL_LOCAL_EVALUATION "Enable opt-in replay-trained target selection in isolated local evaluations" OFF)
+option(PROTODD_PVZ_GATEWAY_OPENING "Evaluate a gateway-first PvZ opening in isolated local games" OFF)
+option(PROTODD_PVZ_EARLY_SPLASH "Evaluate an early evidence-triggered PvZ Reaver transition in isolated local games" OFF)
+option(PROTODD_PVP_FOG_DETECTION "Evaluate an early Observer against a poorly scouted PvP two-Gateway opening" OFF)
 set(BWAPI_ROOT "" CACHE PATH "Path to an unpacked BWAPI 4.4.0 release")
 set(BWAPI_LIBRARY "" CACHE FILEPATH "Path to a 32-bit BWAPILIB.lib")
 set(PROTODD_WHOLE_GAME_WEIGHTS "" CACHE FILEPATH "Whole-game model weights to embed in Protodd.dll")
@@ -27,6 +31,7 @@ add_library(protodd_core OBJECT
     src/core/Strategy.cpp
     src/core/MacroPlanner.cpp
     src/core/Combat.cpp
+    src/core/TacticalTargetModel.cpp
     src/core/CommandBus.cpp
     src/core/Workers.cpp
     src/core/Scouting.cpp
@@ -52,6 +57,9 @@ target_compile_features(protodd_core PUBLIC cxx_std_20)
 protodd_enable_warnings(protodd_core)
 
 if(PROTODD_BUILD_BWAPI_MODULE)
+    if(PROTODD_PVZ_GATEWAY_OPENING AND PROTODD_PVZ_EARLY_SPLASH)
+        message(FATAL_ERROR "Evaluate one PvZ opening intervention at a time")
+    endif()
     if(PROTODD_WHOLE_GAME_EVALUATION_BUILD AND NOT PROTODD_WHOLE_GAME_CONTROL)
         message(FATAL_ERROR "Evaluation build requires whole-game control")
     endif()
@@ -117,6 +125,18 @@ if(PROTODD_BUILD_BWAPI_MODULE)
     endif()
     if(PROTODD_PRODUCTION_LOCAL_EVALUATION)
         target_compile_definitions(protodd_bwapi PRIVATE PROTODD_PRODUCTION_LOCAL_EVALUATION=1)
+    endif()
+    if(PROTODD_TACTICAL_LOCAL_EVALUATION)
+        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_TACTICAL_LOCAL_EVALUATION=1)
+    endif()
+    if(PROTODD_PVZ_GATEWAY_OPENING)
+        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_PVZ_GATEWAY_OPENING=1)
+    endif()
+    if(PROTODD_PVZ_EARLY_SPLASH)
+        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_PVZ_EARLY_SPLASH=1)
+    endif()
+    if(PROTODD_PVP_FOG_DETECTION)
+        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_PVP_FOG_DETECTION=1)
     endif()
     if(PROTODD_WHOLE_GAME_CONTROL)
         if(NOT PROTODD_WHOLE_GAME_WEIGHTS)
@@ -225,6 +245,18 @@ if(PROTODD_BUILD_TESTS)
             COMMAND "${PROTODD_NODE_EXECUTABLE}" --test "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_replay_comparison.mjs")
     endif()
     if(PROTODD_BUILD_BWAPI_MODULE)
+        add_library(protodd_audit_scenario MODULE tests/bwapi_audit_scenario.cpp src/bwapi/BwapiBridge.cpp)
+        target_include_directories(protodd_audit_scenario PRIVATE "${BWAPI_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src/bwapi")
+        target_link_libraries(protodd_audit_scenario PRIVATE Protodd::Core "${BWAPI_LIBRARY}")
+        target_compile_features(protodd_audit_scenario PRIVATE cxx_std_20)
+        target_compile_definitions(protodd_audit_scenario PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        set_target_properties(protodd_audit_scenario PROPERTIES PREFIX "" OUTPUT_NAME "AuditScenario" SUFFIX ".dll")
+        add_library(protodd_audit_load MODULE tests/bwapi_audit_load.cpp)
+        target_include_directories(protodd_audit_load PRIVATE "${BWAPI_INCLUDE_DIR}")
+        target_link_libraries(protodd_audit_load PRIVATE "${BWAPI_LIBRARY}")
+        target_compile_features(protodd_audit_load PRIVATE cxx_std_20)
+        target_compile_definitions(protodd_audit_load PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        set_target_properties(protodd_audit_load PROPERTIES PREFIX "" OUTPUT_NAME "AuditLoad" SUFFIX ".dll")
         add_executable(protodd_bwapi_catalog_tests tests/bwapi_catalog.cpp)
         target_include_directories(protodd_bwapi_catalog_tests PRIVATE "${BWAPI_INCLUDE_DIR}")
         target_link_libraries(protodd_bwapi_catalog_tests PRIVATE Protodd::Core "${BWAPI_LIBRARY}")
@@ -243,6 +275,11 @@ if(PROTODD_BUILD_TESTS)
         endforeach()
         add_test(NAME protodd_replay_pipeline_tests
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_replay_pipeline.py")
+        add_test(NAME protodd_tactical_target_fit_tests
+            COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+                -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p test_tactical_target_fit.py)
+        set_tests_properties(protodd_tactical_target_fit_tests PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME protodd_parallel_validation_tests
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_parallel_validation.py")
         add_test(NAME protodd_replay_catalog_tests

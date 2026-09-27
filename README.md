@@ -125,6 +125,12 @@ The [logging-driven strength pass](docs/logging-strength.md) records constructio
 supply, resource reservation, gas recovery, and scout fixes with frozen-binary tests.
 The [army control validation](docs/army-control-validation.md) records order
 persistence, retreat, staging, perimeter control and the latest actual match results.
+The [combat accuracy update](docs/combat-accuracy-20260926.md) records exact
+weapon-event timing, suicide payloads, immediate worker defense, safer movement,
+55 regression checks and complete-callback engine timing.
+The [trained tactics pilot](docs/trained-tactics-20260926.md) adds an opt-in
+replay-trained target selector for isolated local evaluation; ladder control
+is unchanged while match-strength evidence is pending.
 
 ## Local opponent ladder
 

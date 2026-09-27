@@ -59,12 +59,21 @@ struct StrategicPlan {
 
 class StrategyEngine {
 public:
+    explicit StrategyEngine(bool pvzGatewayOpening = false,
+                            bool pvzEarlySplash = false,
+                            bool pvpFogDetection = false) noexcept
+        : pvzGatewayOpening_(pvzGatewayOpening), pvzEarlySplash_(pvzEarlySplash),
+          pvpFogDetection_(pvpFogDetection) {}
+
     [[nodiscard]] StrategicPlan plan(
         const GameState& state,
         const ThreatAssessment& threat,
         OpeningStyle style = OpeningStyle::standard) const;
 
 private:
+    bool pvzGatewayOpening_{};
+    bool pvzEarlySplash_{};
+    bool pvpFogDetection_{};
     [[nodiscard]] StrategicPlan planPvT(
         const GameState& state,
         const ThreatAssessment& threat) const;

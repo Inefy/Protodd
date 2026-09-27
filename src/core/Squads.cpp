@@ -385,6 +385,34 @@ std::vector<Squad> SquadPlanner::form(
         result.push_back(std::move(squad));
     }
 
+    // The adapter's army span excludes workers. Add only workers that can
+    // immediately surround a member or are visibly pursuing one, after squad
+    // allocation, so a remote mineral line cannot absorb defensive reserves.
+    for (auto& squad : result) {
+        for (const auto& worker : state.enemy.units) {
+            if (!isWorker(worker.kind) || !worker.visible || !worker.detected ||
+                !worker.completed || worker.disabled || worker.loaded || worker.hallucination ||
+                worker.invincible || !worker.position.valid() || worker.durability() <= 0 ||
+                std::ranges::find(squad.enemies, worker.id, &UnitSnapshot::id) != squad.enemies.end()) continue;
+            const auto defending = std::ranges::any_of(squad.units, [&worker, navigation](const UnitSnapshot& member) {
+                if (!member.completed || member.disabled || member.loaded || member.hallucination ||
+                    member.invincible || !member.position.valid() || !worker.canAttack(member)) return false;
+                const auto& weapon = member.flying ? worker.airWeapon : worker.groundWeapon;
+                const auto range = weaponDistance(worker, member);
+                if (range < weapon.minRange ||
+                    (range > weapon.maxRange + 32 &&
+                     (worker.orderTargetId != member.id || range > 160))) return false;
+                // A known cliff separates two close positions. If either
+                // coarse origin is unavailable, retain the visible danger.
+                return navigation == nullptr || navigation->empty() ||
+                    !navigation->walkable(worker.position) || !navigation->walkable(member.position) ||
+                    navigation->lineWalkable(worker.position, member.position);
+            });
+            if (defending) squad.enemies.push_back(worker);
+        }
+        std::ranges::sort(squad.enemies, {}, &UnitSnapshot::id);
+    }
+
     // Strategic cloak risk should accelerate Observer production, not tether
     // every ground squad to one. A squad requests an escort only after its own
     // local contact list contains a cloaked, burrowed, or undetected threat.
@@ -483,6 +511,20 @@ const Squad* SquadPlanner::selectVanguard(
         }
     }
     return best;
+}
+
+MainArmyTravelMode SquadPlanner::mainArmyTravelMode(
+    const Squad& squad,
+    const Squad* vanguard,
+    const bool aggressive,
+    const int minimumAttackSize) noexcept {
+    // One squad must meet the commitment size. Summing disconnected groups
+    // would send each fragment into contact as if the full force were there.
+    if (!aggressive || vanguard == nullptr ||
+        vanguard->units.size() < static_cast<std::size_t>(std::max(1, minimumAttackSize)))
+        return MainArmyTravelMode::assemble;
+    return vanguard == &squad ? MainArmyTravelMode::attack
+                              : MainArmyTravelMode::joinVanguard;
 }
 
 std::vector<Command> SquadPlanner::supportEscorts(

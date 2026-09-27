@@ -35,6 +35,12 @@ struct Squad {
     std::string missionReason;
 };
 
+enum class MainArmyTravelMode : std::uint8_t {
+    assemble,
+    joinVanguard,
+    attack,
+};
+
 class SquadPlanner {
 public:
     void reset() { harassment_.reset(); }
@@ -53,6 +59,9 @@ public:
     [[nodiscard]] static const Squad* selectVanguard(
         std::span<const Squad> squads,
         Position objective) noexcept;
+    [[nodiscard]] static MainArmyTravelMode mainArmyTravelMode(
+        const Squad& squad, const Squad* vanguard, bool aggressive,
+        int minimumAttackSize) noexcept;
     [[nodiscard]] static std::vector<Command> supportEscorts(
         const Squad& squad, Position objective);
 
@@ -69,8 +78,9 @@ public:
         const Squad& squad, Position assembly, Position expansion,
         DefenseArea currentDefense = {}) noexcept;
 
-    // Workers and unfinished/ordinary structures are legal tactical targets,
-    // but must not inflate the army used for engagement simulation.
+    // Mining workers and unfinished/ordinary structures are legal tactical
+    // targets without inflating the local army. form() separately admits
+    // visible workers that are already surrounding or pursuing a member.
     [[nodiscard]] static std::vector<UnitSnapshot> tacticalTargets(
         const Squad& squad, std::span<const UnitSnapshot> hostiles);
     // Evaluation context only: ownership and issued orders stay with each squad.

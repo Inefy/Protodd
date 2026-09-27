@@ -20,6 +20,7 @@
 #include "protodd/Squads.hpp"
 #include "protodd/Strategy.hpp"
 #include "protodd/Transport.hpp"
+#include "protodd/TacticalTargetModel.hpp"
 #include "protodd/Workers.hpp"
 #include "protodd/WorkerTrainingIntervention.hpp"
 
@@ -51,7 +52,15 @@ private:
     OpponentModel opponent_;
     InfluenceMap influence_;
     NavigationGrid navigation_;
+#ifdef PROTODD_PVZ_EARLY_SPLASH
+    StrategyEngine strategy_{false, true};
+#elif defined(PROTODD_PVZ_GATEWAY_OPENING)
+    StrategyEngine strategy_{true};
+#elif defined(PROTODD_PVP_FOG_DETECTION)
+    StrategyEngine strategy_{false, false, true};
+#else
     StrategyEngine strategy_;
+#endif
     StrategicDirector strategicDirector_;
     ExpansionCoordinator expansion_;
     MacroPlanner macro_;
@@ -60,6 +69,8 @@ private:
     CombatEvaluator combat_;
     EngagementTracker engagements_;
     TacticalController tactics_;
+    TacticalTargetModel tacticalTarget_;
+    bool tacticalTargetControl_{};
     SquadPlanner squads_;
     TransportController transports_;
     FrameBudget frameBudget_;

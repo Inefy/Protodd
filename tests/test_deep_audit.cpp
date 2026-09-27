@@ -207,8 +207,11 @@ void legalTechnologyProducer() {
         int id; bool alive; bool completed; bool powered; bool researching; bool upgrading;
         bool exists() const { return alive; }
         bool isCompleted() const { return completed; }
+        bool isPowered() const { return powered; }
         int getID() const { return id; }
-        bool legal() const { return powered && !researching && !upgrading; }
+        // BWAPI canUpgrade can report true for an unpowered Forge. Power is
+        // a separate execution guard, verified in the UMS engine fixture.
+        bool legal() const { return !researching && !upgrading; }
     };
     Producer first{1, true, true, false, false, false};
     Producer second{2, true, true, true, false, false};

@@ -1,4 +1,5 @@
 #include "protodd/Combat.hpp"
+#include "protodd/TacticalTargetModel.hpp"
 
 #include "protodd/UnitCatalog.hpp"
 #include "protodd/Navigation.hpp"
@@ -11,11 +12,19 @@
 namespace protodd {
 namespace {
 
+constexpr auto simulationHorizonFrames = 24 * 14;
+
+bool suicideAttacker(const UnitKind kind) noexcept {
+    return kind == UnitKind::scourge || kind == UnitKind::spiderMine ||
+           kind == UnitKind::infestedTerran;
+}
+
 struct SimUnit {
     const UnitSnapshot* unit{};
     double durability{};
     int readyFrame{};
     int ammunition{};
+    bool expended{};
 };
 
 struct SimulationOutcome {
@@ -54,7 +63,7 @@ std::vector<SimUnit> simulationUnits(const std::span<const UnitSnapshot> source)
     selected.reserve(source.size());
     for (const auto& unit : source) {
         if (combatReady(unit) &&
-            (isCombatUnit(unit.kind) || isStaticDefense(unit.kind))) {
+            (isCombatUnit(unit.kind) || isStaticDefense(unit.kind) || isWorker(unit.kind))) {
             selected.push_back(&unit);
         }
     }
@@ -81,7 +90,8 @@ const UnitSnapshot* nearestLivingTarget(
     const std::span<const SimUnit> defenders,
     const std::span<const double> pending,
     std::size_t& targetIndex,
-    const int frame) {
+    const int frame,
+    int& nextContactFrame) {
     const UnitSnapshot* best = nullptr;
     auto bestScore = std::numeric_limits<double>::infinity();
     for (std::size_t i = 0; i < defenders.size(); ++i) {
@@ -106,7 +116,10 @@ const UnitSnapshot* nearestLivingTarget(
         const auto closingSpeed = std::max(0.1, attacker.unit->topSpeed +
                                                    defender.unit->topSpeed * 0.20);
         const auto contactFrame = static_cast<int>(std::ceil(gap / closingSpeed));
-        if (frame < contactFrame) continue;
+        if (frame < contactFrame) {
+            nextContactFrame = std::min(nextContactFrame, contactFrame);
+            continue;
+        }
         const auto damage = attackDamage(*attacker.unit, *defender.unit,
                                           defender.durability - pending[i]);
         if (damage <= 0.0) continue;
@@ -132,11 +145,21 @@ void scheduleVolleys(
     const int frame) {
     for (auto& attacker : attackers) {
         if (attacker.durability <= 0.0 || frame < attacker.readyFrame) continue;
-        if (attacker.unit->kind == UnitKind::reaver && attacker.ammunition <= 0) continue;
+        if (attacker.unit->kind == UnitKind::reaver && attacker.ammunition <= 0) {
+            attacker.readyFrame = std::numeric_limits<int>::max();
+            continue;
+        }
         auto targetIndex = std::size_t{0};
+        auto nextContactFrame = std::numeric_limits<int>::max();
         const auto* target = nearestLivingTarget(attacker, defenders, pending,
-                                                 targetIndex, frame);
-        if (target == nullptr) continue;
+                                                 targetIndex, frame, nextContactFrame);
+        if (target == nullptr) {
+            // Retry at the earliest possible contact. A unit with no legal
+            // opponent cannot acquire one later as this simulation only
+            // removes units; avoid rescanning it at every other unit's event.
+            attacker.readyFrame = nextContactFrame;
+            continue;
+        }
         const auto& weapon = target->flying ? attacker.unit->airWeapon
                                             : attacker.unit->groundWeapon;
         pending[targetIndex] += attackDamage(*attacker.unit, *target,
@@ -160,6 +183,9 @@ void scheduleVolleys(
             }
         }
         attacker.readyFrame = frame + std::max(1, weapon.cooldown);
+        // Apply consumption after both armies schedule this frame's damage.
+        // A suicide impact must not erase an opposing simultaneous volley.
+        attacker.expended = suicideAttacker(attacker.unit->kind);
         // Scarabs are consumed; Interceptors return and must not be consumed.
         // Future Scarab production is not guaranteed by the observed bank.
         if (attacker.unit->kind == UnitKind::reaver) --attacker.ammunition;
@@ -175,24 +201,33 @@ SimulationOutcome simulateEngagement(
     for (const auto& unit : friendly) result.friendlyInitial += simulationValue(unit);
     for (const auto& unit : enemy) result.enemyInitial += simulationValue(unit);
 
-    constexpr auto stepFrames = 6;
-    constexpr auto horizonFrames = 24 * 14;
-    for (auto frame = 0; frame <= horizonFrames; frame += stepFrames) {
-        std::vector<double> damageToFriendly(friendly.size(), 0.0);
-        std::vector<double> damageToEnemy(enemy.size(), 0.0);
+    std::vector<double> damageToFriendly(friendly.size(), 0.0);
+    std::vector<double> damageToEnemy(enemy.size(), 0.0);
+    // Advance directly to the next cooldown/contact event. Fixed six-frame
+    // ticks turned eight-frame weapons into twelve-frame weapons and kept
+    // rounding every subsequent volley. Damage on one frame remains atomic.
+    for (auto frame = 0; frame <= simulationHorizonFrames;) {
+        std::ranges::fill(damageToFriendly, 0.0);
+        std::ranges::fill(damageToEnemy, 0.0);
         scheduleVolleys(friendly, enemy, damageToEnemy, frame);
         scheduleVolleys(enemy, friendly, damageToFriendly, frame);
+        auto nextFrame = std::numeric_limits<int>::max();
         for (std::size_t i = 0; i < friendly.size(); ++i) {
-            friendly[i].durability -= damageToFriendly[i];
+            auto& unit = friendly[i];
+            unit.durability = unit.expended ? 0.0 : unit.durability - damageToFriendly[i];
+            if (unit.durability > 0.0) nextFrame = std::min(nextFrame, unit.readyFrame);
         }
         for (std::size_t i = 0; i < enemy.size(); ++i) {
-            enemy[i].durability -= damageToEnemy[i];
+            auto& unit = enemy[i];
+            unit.durability = unit.expended ? 0.0 : unit.durability - damageToEnemy[i];
+            if (unit.durability > 0.0) nextFrame = std::min(nextFrame, unit.readyFrame);
         }
         const auto friendlyAlive = std::ranges::any_of(
             friendly, [](const SimUnit& unit) { return unit.durability > 0.0; });
         const auto enemyAlive = std::ranges::any_of(
             enemy, [](const SimUnit& unit) { return unit.durability > 0.0; });
         if (!friendlyAlive || !enemyAlive) break;
+        frame = nextFrame;
     }
     for (const auto& unit : friendly) {
         if (unit.durability > 0.0) result.friendlyRemaining += simulationValue(unit);
@@ -447,9 +482,12 @@ void EngagementTracker::reset() {
 const UnitSnapshot* CombatEvaluator::selectTarget(
     const UnitSnapshot& attacker,
     const std::span<const UnitSnapshot> candidates,
-    const std::span<const TargetAllocation> allocations) const {
+    const std::span<const TargetAllocation> allocations,
+    const TacticalTargetModel* targetModel) const {
     const UnitSnapshot* best = nullptr;
     auto bestScore = -std::numeric_limits<double>::infinity();
+    const UnitSnapshot* heuristicBest = nullptr;
+    auto heuristicBestScore = -std::numeric_limits<double>::infinity();
     const auto meleeAttacker = attacker.groundWeapon.targetsGround &&
                                attacker.groundWeapon.maxRange < 96;
     const auto hasCloseMeleeTarget = meleeAttacker && std::ranges::any_of(
@@ -524,15 +562,30 @@ const UnitSnapshot* CombatEvaluator::selectTarget(
         const auto distanceDivisor = meleeAttacker ? 112.0 : 320.0;
         const auto approachFrames = std::max(0.0, range - weapon.maxRange) /
                                     std::max(0.5, attacker.topSpeed);
-        const auto score = priority + killEfficiency * 4.0 + inRange + targetStability -
-                           range / distanceDivisor -
-                           approachFrames / std::max(12, weapon.cooldown) * 4.0;
+        const auto heuristicScore = priority + killEfficiency * 4.0 + inRange + targetStability -
+                                    range / distanceDivisor -
+                                    approachFrames / std::max(12, weapon.cooldown) * 4.0;
+        if (targetModel != nullptr && targetModel->valid() &&
+            (heuristicScore > heuristicBestScore ||
+             (std::abs(heuristicScore - heuristicBestScore) < 0.001 &&
+              (heuristicBest == nullptr || target.id < heuristicBest->id)))) {
+            heuristicBest = &target;
+            heuristicBestScore = heuristicScore;
+        }
+        const auto learned = targetModel != nullptr && targetModel->valid();
+        const auto score = learned
+            ? static_cast<double>(targetModel->score(attacker, target, candidates)) : heuristicScore;
         if (score > bestScore || (std::abs(score - bestScore) < 0.001 &&
                                   (best == nullptr || target.id < best->id))) {
             best = &target;
             bestScore = score;
         }
     }
+    if (best == nullptr && targetModel != nullptr && targetModel->valid())
+        return selectTarget(attacker, candidates, allocations, nullptr);
+    if (best != nullptr && heuristicBest != nullptr && targetModel != nullptr &&
+        targetModel->valid())
+        targetModel->observeComparison(attacker, *best, *heuristicBest);
     return best;
 }
 
@@ -540,7 +593,7 @@ double CombatEvaluator::unitPower(
     const UnitSnapshot& unit,
     const std::span<const UnitSnapshot> opposition) {
     if (!combatReady(unit) ||
-        (!isCombatUnit(unit.kind) && !isStaticDefense(unit.kind))) {
+        (!isCombatUnit(unit.kind) && !isStaticDefense(unit.kind) && !isWorker(unit.kind))) {
         return 0.0;
     }
     if ((unit.kind == UnitKind::reaver || unit.kind == UnitKind::carrier) &&
@@ -577,8 +630,11 @@ double CombatEvaluator::unitPower(
     }
 
     const auto& weapon = airUseful ? unit.airWeapon : unit.groundWeapon;
-    const auto dps = static_cast<double>(weapon.damage * std::max(1, weapon.hits)) /
-                     std::max(1, weapon.cooldown);
+    // BWAPI's one-frame suicide cooldown does not mean another impact every
+    // frame. Spread its single payload over this estimate's fight horizon.
+    const auto period = suicideAttacker(unit.kind) ? simulationHorizonFrames :
+                                                    std::max(1, weapon.cooldown);
+    const auto dps = static_cast<double>(weapon.damage * std::max(1, weapon.hits)) / period;
     const auto rangeFactor = 1.0 + std::clamp(weapon.maxRange / 256.0, 0.0, 1.0) * 0.35;
     const auto mobility = 1.0 + std::clamp(unit.topSpeed / 8.0, 0.0, 1.0) * 0.2;
     const auto vitality = std::clamp(unit.healthFraction(), 0.08, 1.0);
@@ -630,7 +686,8 @@ std::vector<Command> TacticalController::control(
     const DefenseArea defense, const TacticalIntent intent,
     const std::span<const UnitSnapshot> support,
     const NavigationGrid* navigation,
-    const std::span<const UnitSnapshot> obstacles) const {
+    const std::span<const UnitSnapshot> obstacles,
+    const TacticalTargetModel* targetModel) const {
     std::vector<Command> commands;
     commands.reserve(friendly.size());
     CombatEvaluator evaluator;
@@ -714,6 +771,29 @@ std::vector<Command> TacticalController::control(
         const auto protectedStep = [&defense](const Position proposed) {
             return defense.front.valid() && !defense.contains(proposed) ? defense.center : proposed;
         };
+        const auto reachableStep = [&unit, navigation](const Position candidate) {
+            if (!candidate.valid()) return false;
+            if (navigation == nullptr || navigation->empty()) return true;
+            if (candidate.x >= navigation->width() * navigation->cellSize() ||
+                candidate.y >= navigation->height() * navigation->cellSize()) return false;
+            if (unit.flying) return true;
+            auto origin = unit.position;
+            // A legally observed unit can stand on the passable edge of a
+            // rejected coarse cell. Admit that origin only, then check every
+            // following cell for retreats, kiting and splash spacing alike.
+            if (!navigation->walkable(origin)) {
+                const auto cellSize = navigation->cellSize();
+                for (auto stepDistance = 8; stepDistance <= cellSize * 2; stepDistance += 8) {
+                    const auto next = moveToward(unit.position, candidate, stepDistance);
+                    if (next.x / cellSize != unit.position.x / cellSize ||
+                        next.y / cellSize != unit.position.y / cellSize) {
+                        origin = next;
+                        break;
+                    }
+                }
+            }
+            return navigation->lineWalkable(origin, candidate);
+        };
         const auto reposition = [&](const Position toward, const bool retreating = false) {
             // Small combat moves need a walkable segment, not just a safe
             // destination across a cliff. Account for allies already moving
@@ -733,30 +813,8 @@ std::vector<Command> TacticalController::control(
                 {-45, -45}, {-45, 45}, {45, -45}, {45, 45}}};
             for (const auto step : steps) {
                 const Position candidate{unit.position.x + step.x, unit.position.y + step.y};
-                if (!candidate.valid()) continue;
-                if (!unit.flying && navigation != nullptr && !navigation->empty()) {
-                    auto origin = unit.position;
-                    // The 32px grid is conservative. A legally observed unit
-                    // can stand on the passable edge of a rejected origin
-                    // cell. Admit that cell only, then check every following
-                    // cell; otherwise every escape direction is rejected.
-                    if (!navigation->walkable(origin)) {
-                        const auto cellSize = navigation->cellSize();
-                        for (auto stepDistance = 8; stepDistance <= cellSize * 2; stepDistance += 8) {
-                            const auto next = moveToward(unit.position, candidate, stepDistance);
-                            if (next.x / cellSize != unit.position.x / cellSize ||
-                                next.y / cellSize != unit.position.y / cellSize) {
-                                origin = next;
-                                break;
-                            }
-                        }
-                    }
-                    if (!navigation->lineWalkable(origin, candidate)) continue;
-                }
+                if (!reachableStep(candidate)) continue;
                 if (!retreating && defense.active() && defense.contains(unit.position) && !defense.contains(candidate)) continue;
-                if (navigation != nullptr && !navigation->empty() &&
-                    (candidate.x >= navigation->width() * navigation->cellSize() ||
-                     candidate.y >= navigation->height() * navigation->cellSize())) continue;
                 const auto field = influence.at(candidate);
                 const auto threat = unit.flying ? field.airThreat : field.groundThreat;
                 auto crowding = 0.0;
@@ -889,7 +947,7 @@ std::vector<Command> TacticalController::control(
             }
             targets = raidTargets;
         }
-        const auto target = evaluator.selectTarget(unit, targets, allocations);
+        const auto target = evaluator.selectTarget(unit, targets, allocations, targetModel);
 
         if (psionicStormAvailable && unit.kind == UnitKind::highTemplar &&
             unit.energy >= 75) {
@@ -1018,7 +1076,7 @@ std::vector<Command> TacticalController::control(
                         ((weapon.maxRange >= 96 && range <= weapon.maxRange) || screenIntercept))
                         firingTargets.push_back(candidate);
                 }
-                if (const auto* shot = evaluator.selectTarget(unit, firingTargets, allocations)) {
+                if (const auto* shot = evaluator.selectTarget(unit, firingTargets, allocations, targetModel)) {
                     commands.push_back({unit.id, CommandType::attackUnit, shot->id, {-1, -1},
                                         UnitKind::unknown, 86, 0,
                                         estimate.holdScreen ? "screen-intercept" : "retreat-volley"});
@@ -1100,21 +1158,22 @@ std::vector<Command> TacticalController::control(
             const auto ranged = weapon.maxRange >= 96;
             // The selected worker or building may be harmless while another
             // nearby unit is closing on us. Kite the actual pursuer on reload.
-            const UnitSnapshot* pursuer = target;
+            const UnitSnapshot* pursuer = nullptr;
             auto closestPressure = std::numeric_limits<double>::infinity();
             for (const auto& candidate : enemy) {
                 const auto& response = unit.flying ? candidate.airWeapon : candidate.groundWeapon;
                 const auto separation = weaponDistance(unit, candidate);
-                if (!candidate.visible || !candidate.completed || candidate.disabled ||
-                    candidate.invincible || response.damage <= 0 ||
+                if (!candidate.visible || !combatReady(candidate) || !candidate.position.valid() ||
+                    candidate.invincible || !candidate.canAttack(unit) ||
                     separation > response.maxRange + 64 || separation < response.minRange) continue;
                 const auto pressureDistance = separation - response.maxRange;
                 if (pressureDistance < closestPressure) { closestPressure = pressureDistance; pursuer = &candidate; }
             }
-            const auto targetWeapon = unit.flying ? pursuer->airWeapon : pursuer->groundWeapon;
+            const auto targetWeapon = pursuer == nullptr ? WeaponSnapshot{} :
+                unit.flying ? pursuer->airWeapon : pursuer->groundWeapon;
             const auto rangeAdvantage = weapon.maxRange >= targetWeapon.maxRange + 48;
             const auto kite = estimate.decision == FightDecision::kite || rangeAdvantage;
-            const auto targetCanPressure = targetWeapon.damage > 0 &&
+            const auto targetCanPressure = pursuer != nullptr && targetWeapon.damage > 0 &&
                                            weaponDistance(unit, *pursuer) <= targetWeapon.maxRange + 64;
             // Spend reload time opening firing lanes against observed splash.
             // Keep ready volleys, retreats and attack frames on their existing
@@ -1126,8 +1185,9 @@ std::vector<Command> TacticalController::control(
                     const auto splash = threat.kind == UnitKind::reaver ||
                         threat.kind == UnitKind::archon || threat.kind == UnitKind::lurker ||
                         (threat.kind == UnitKind::siegeTank && threat.groundWeapon.maxRange >= 320);
-                    return splash && threat.visible && threat.completed && !threat.disabled &&
-                        threat.position.valid() && threat.groundWeapon.damage > 0 &&
+                    return splash && threat.visible && combatReady(threat) && !threat.invincible &&
+                        threat.position.valid() && threat.canAttack(unit) &&
+                        weaponDistance(unit, threat) >= threat.groundWeapon.minRange &&
                         weaponDistance(unit, threat) <= threat.groundWeapon.maxRange + 96;
                 })) {
                 const auto crowding = [&friendly, &commands, &unit](const Position position) {
@@ -1151,8 +1211,9 @@ std::vector<Command> TacticalController::control(
                     {-45, 45}, {45, -45}, {-45, -45}, {45, 45}}};
                 for (const auto offset : offsets) {
                     const Position candidate{unit.position.x + offset.x, unit.position.y + offset.y};
-                    if (!candidate.valid() || (defense.active() && !defense.contains(candidate))) continue;
-                    // The adapter additionally checks actual ground connectivity.
+                    if (!reachableStep(candidate) || (defense.active() && !defense.contains(candidate))) continue;
+                    // Connectivity alone can accept a long detour around a
+                    // cliff; reload spacing requires a clear local segment.
                     if (influence.at(candidate).groundThreat > local.groundThreat + 0.05F ||
                         distance(candidate, target->position) + 16 < distance(unit.position, target->position))
                         continue;

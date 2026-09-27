@@ -205,6 +205,17 @@ void ProtoddModule::onStart() {
     policy_.start();
     model_.start(log_);
     production_.start(log_);
+    tacticalTargetControl_ = false;
+#ifdef PROTODD_TACTICAL_LOCAL_EVALUATION
+    const auto targetModelLoaded = tacticalTarget_.load(
+        "bwapi-data/read/TacticalTarget-weights.bin");
+    const auto targetMode = readFile("bwapi-data/read/TacticalTarget-mode.txt");
+    tacticalTargetControl_ = targetModelLoaded && targetMode.starts_with("local-target");
+    if (log_) log_ << "TACTICAL_TARGET,loaded=" << targetModelLoaded
+                   << ",control=" << tacticalTargetControl_ << '\n';
+#else
+    if (log_) log_ << "TACTICAL_TARGET,unavailable,control=0\n";
+#endif
     workerTrainingProfile_ = WorkerTrainingProfile::baseline;
     workerTrainingEnabled_ = false;
     const auto workerMode = readFile("bwapi-data/read/WorkerTraining-mode.txt");
@@ -227,7 +238,10 @@ void ProtoddModule::onStart() {
 #endif
     }
     callbackTimes_.clear();
-    callbackAudit_=production_.enabled();
+    std::ifstream callbackModeFile("bwapi-data/read/CallbackAudit-mode.txt");
+    std::string callbackMode;
+    callbackModeFile >> callbackMode;
+    callbackAudit_=production_.enabled() || callbackMode == "on";
     if (callbackAudit_) callbackTimes_.reserve(100000);
     bridge_.productionDiagnostic = [this](const BWAPI::UnitCommand& command, bool before, bool accepted) {
         try { return production_.command(command, before, accepted, log_); }
@@ -282,6 +296,15 @@ void ProtoddModule::onEnd(const bool winner) {
     }
     if (log_) {
         flushPerformanceRecord();
+        log_ << "TACTICAL_TARGET_SUMMARY,control=" << tacticalTargetControl_
+             << ",candidateScores=" << tacticalTarget_.scoreCount()
+             << ",comparisons=" << tacticalTarget_.comparisonCount()
+             << ",disagreements=" << tacticalTarget_.disagreementCount()
+             << ",workerOverCombat=" << tacticalTarget_.workerOverCombatCount()
+             << ",buildingOverCombat=" << tacticalTarget_.buildingOverCombatCount()
+             << ",combatOverWorker=" << tacticalTarget_.combatOverWorkerCount()
+             << ",combatOverBuilding=" << tacticalTarget_.combatOverBuildingCount()
+             << ",threatAbandoned=" << tacticalTarget_.threatAbandonedCount() << '\n';
         const auto& runtime = frameBudget_.stats();
         log_ << "PERF_SUMMARY," << runtime.samples << ',' << runtime.movingAverageMs << ','
              << runtime.peakMs << ',' << runtime.over42ms << ',' << runtime.over55ms << ','
@@ -608,7 +631,7 @@ void ProtoddModule::updateScouting() {
         // on frame 1, leaving the economy supply-blocked with a large bank.
         const auto probe = scouts_.selectWorkerScout(
             state_, opponent_.assessment(), previousLeases, reservedBuilders);
-        if (probe >= 0) available.push_back(probe);
+        if (probe >= 0 && probe != scouts_.returningScout()) available.push_back(probe);
     }
     const auto orders = scouts_.assign(state_, available, influence_,
                                        opponent_.assessment());
@@ -618,6 +641,9 @@ void ProtoddModule::updateScouting() {
     const auto openingScout = scouts_.openingScout();
     if (openingScout >= 0 && std::ranges::find(leasedScouts_, openingScout) == leasedScouts_.end())
         leasedScouts_.push_back(openingScout);
+    const auto returningScout = scouts_.returningScout();
+    if (returningScout >= 0 && std::ranges::find(leasedScouts_, returningScout) == leasedScouts_.end())
+        leasedScouts_.push_back(returningScout);
     std::vector<ScoutOrder> ordinary;
     for (const auto& order : orders) if (order.scout != openingScout) ordinary.push_back(order);
     bridge_.executeScouts(ordinary);
@@ -693,27 +719,30 @@ void ProtoddModule::updateCombat(
             travelReason = "attack-target";
             if (coverExpansion)
                 objective = expansionAssemblyPoint(state_, plan_.expansionTarget, retreatPoint());
-            const auto undersizedVanguard =
-                vanguard == &squad &&
-                squad.units.size() <
-                    static_cast<std::size_t>(std::max(1, plan_.minimumAttackSize));
-            if (!aggressive || undersizedVanguard) {
+            const auto travelMode = SquadPlanner::mainArmyTravelMode(
+                squad, vanguard, aggressive, plan_.minimumAttackSize);
+            if (travelMode == MainArmyTravelMode::assemble) {
                 travelReason = "assemble-at-rally";
                 // A small squad may move toward its rally point, but it must
                 // not accept an equal-size fight on the way there. The old
                 // 0.88 ratio made a five-Zealot vanguard engage four-to-six
                 // enemy Zealots before the next reinforcement arrived.
+                const auto undersizedForce = vanguard == nullptr ||
+                    vanguard->units.size() <
+                        static_cast<std::size_t>(std::max(1, plan_.minimumAttackSize));
                 requiredRatio = squad.enemies.empty()
                                     ? 0.88
-                                    : (undersizedVanguard ? 1.18 : 1.05);
+                                    : (undersizedForce ? 1.18 : 1.05);
                 objective = coverExpansion
                     ? expansionAssemblyPoint(state_, plan_.expansionTarget, retreatPoint()) : plan_.rallyPoint;
                 defense = SquadPlanner::defensiveArea(state_, plan_.rallyPoint);
-            } else if (vanguard != nullptr && vanguard != &squad &&
-                       squad.enemies.empty()) {
+            } else if (travelMode == MainArmyTravelMode::joinVanguard) {
                 // Detached reinforcements join the strongest mobile component
-                // instead of launching a second, usually losing attack wave.
-                requiredRatio = 0.88;
+                // even when they encounter an enemy on the way. That local
+                // fight still uses its combat estimate, but the strategic
+                // travel objective cannot become a solo assault.
+                requiredRatio = squad.enemies.empty()
+                    ? 0.88 : std::max(requiredRatio, 1.18);
                 objective = SquadPlanner::reinforcementDestination(squad, *vanguard, plan_.attackTarget);
                 travelReason = objective == plan_.attackTarget ? "continue-assault" : "join-vanguard";
             }
@@ -841,7 +870,8 @@ void ProtoddModule::updateCombat(
                  technologyLevel(state_.self, TechnologyKind::psionicStorm) > 0,
                  defense, squad.withdrawing ? TacticalIntent::withdraw :
                      squad.role == SquadRole::harassment ? TacticalIntent::raid : TacticalIntent::battle,
-                 supportedArmy, &navigation_, state_.self.units)) {
+                 supportedArmy, &navigation_, state_.self.units,
+                 tacticalTargetControl_ ? &tacticalTarget_ : nullptr)) {
             submit(order);
         }
         if (aggressive)
@@ -1236,6 +1266,10 @@ void ProtoddModule::logDiagnostics() {
     supplyBlockedFrames_.sample(state_.frame, blocked ? 1 : 0);
     idleGatewayFrames_.sample(state_.frame, idleGateways);
     idleWorkerFrames_.sample(state_.frame, idleWorkers);
+    debug_.idleGateways = idleGateways;
+    debug_.usableGateways = usableGateways;
+    debug_.idleWorkers = idleWorkers;
+    debug_.unpoweredBuildings = unpowered;
     debug_.health = "Idle Gateways " + std::to_string(idleGateways) + "/" +
         std::to_string(usableGateways) + " | idle Probes " + std::to_string(idleWorkers) +
         " | supply tight " + std::to_string(supplyBlockedFrames_.total() / 24) + "s";

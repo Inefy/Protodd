@@ -222,7 +222,9 @@ void ScoutManager::reset() noexcept {
     nextWorkerMission_ = 0;
     workerScout_ = -1;
     openingMission_ = false;
+    returningMission_ = false;
     harasser_.reset();
+    returnHarasser_.reset();
 }
 
 UnitId ScoutManager::selectWorkerScout(
@@ -238,6 +240,15 @@ UnitId ScoutManager::selectWorkerScout(
         openingMission_ = false;
         workerScout_ = -1;
         harasser_.finish();
+        nextWorkerMission_ = state.frame + 45 * 24;
+    }
+    if (returningMission_) {
+        const auto worker = state.findUnit(workerScout_);
+        if (worker && worker->ours && worker->kind == UnitKind::probe &&
+            worker->completed && std::ranges::find(unavailableWorkers, workerScout_) ==
+                unavailableWorkers.end()) return workerScout_;
+        returningMission_ = false;
+        workerScout_ = -1;
         nextWorkerMission_ = state.frame + 45 * 24;
     }
     const auto opening = selectOpeningWorkerScout(state, previousScouts, unavailableWorkers);
@@ -263,6 +274,20 @@ UnitId ScoutManager::selectWorkerScout(
         const auto worker = state.findUnit(workerScout_);
         if (safe && worker && eligible(*worker) &&
             state.frame - workerMissionStarted_ < 45 * 24) return workerScout_;
+        // A timed-out scout can still be far across the map. Keep its lease
+        // while it travels home; handing it to mining here sends it through
+        // enemy territory with no scout escape control.
+        const auto home = friendlyMain(state);
+        if (worker && worker->ours && worker->kind == UnitKind::probe &&
+            worker->completed && home.valid() &&
+            distanceSquared(worker->position, home) > 160 * 160 &&
+            std::ranges::find(unavailableWorkers, workerScout_) ==
+                unavailableWorkers.end()) {
+            returningMission_ = true;
+            returnHarasser_.reset();
+            returnHarasser_.withdraw();
+            return workerScout_;
+        }
         workerScout_ = -1;
         nextWorkerMission_ = state.frame + 45 * 24;
         return -1;
@@ -282,6 +307,17 @@ UnitId ScoutManager::selectWorkerScout(
 
 std::optional<Command> ScoutManager::controlWorkerScout(
     const GameState& state, const InfluenceMap& influence, const NavigationGrid* terrain) {
+    if (returningMission_) {
+        auto command = returnHarasser_.control(
+            state, workerScout_, friendlyMain(state), influence, terrain);
+        if (command) command->source = "probe-followup-return";
+        if (returnHarasser_.finished()) {
+            returningMission_ = false;
+            workerScout_ = -1;
+            nextWorkerMission_ = state.frame + 45 * 24;
+        }
+        return command;
+    }
     if (!openingMission_) return std::nullopt;
     const auto previous = previousOrders_.find(workerScout_);
     const auto goal = previous != previousOrders_.end() ? previous->second.target : friendlyMain(state);

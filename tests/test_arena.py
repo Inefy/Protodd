@@ -46,6 +46,25 @@ class ArenaTests(unittest.TestCase):
             (read/'ProductionDemand.bin').write_bytes(b'changed')
             with self.assertRaises(ValueError):verify(args['output'])
 
+    def test_tactical_target_weights_are_frozen_local_inputs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = self.fixture(Path(temp))
+            weights = Path(temp) / 'target.bin'
+            weights.write_bytes(b'frozen target weights')
+            with self.assertRaisesRegex(ValueError, 'tactical target control needs'):
+                prepare(**args, purpose='training', tactical_target_weights=weights)
+            self.assertFalse(args['output'].exists())
+            prepare(**args, tactical_target_weights=weights)
+            read = args['output'] / 'server/bots/Protodd/read'
+            self.assertEqual((read / 'TacticalTarget-weights.bin').read_bytes(),
+                             weights.read_bytes())
+            self.assertEqual((read / 'TacticalTarget-mode.txt').read_text(),
+                             'local-target\n')
+            self.assertTrue(verify(args['output'])['verified'])
+            (read / 'TacticalTarget-mode.txt').write_text('off\n')
+            with self.assertRaises(ValueError):
+                verify(args['output'])
+
     @unittest.skipUnless(os.name == 'nt' and shutil.which('pwsh'), 'Windows process ownership fixture')
     def test_cleanup_does_not_kill_peer_or_unknown_process(self):
         with tempfile.TemporaryDirectory() as temp:

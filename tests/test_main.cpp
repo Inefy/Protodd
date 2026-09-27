@@ -927,10 +927,139 @@ void testOpeningMilestones() {
                    }),
            "pool-first-safe opening banks a Gateway before resuming Probe growth");
 
+    auto unpoweredNatural = poolFirst;
+    unpoweredNatural.frame = 5 * 60 * 24;
+    unpoweredNatural.self.supplyUsed = 38;
+    unpoweredNatural.self.supplyTotal = 58;
+    unpoweredNatural.self.units.push_back(
+        unit(88, protodd::UnitKind::pylon, true, {192, 128}));
+    auto naturalNexus = unit(89, protodd::UnitKind::nexus, true, {768, 768});
+    naturalNexus.buildProgress = 25;
+    unpoweredNatural.self.units.push_back(naturalNexus);
+    const auto earlyNaturalPower = strategy.plan(unpoweredNatural, {});
+    expect(std::ranges::any_of(earlyNaturalPower.goals,
+               [](const protodd::ProductionGoal& candidate) {
+                   return candidate.target == protodd::UnitKind::pylon &&
+                          candidate.desiredCount >= 2 && candidate.blocking &&
+                          candidate.reason == "power the new PvZ natural before pressure";
+               }),
+           "PvZ powers an in-progress natural before the next supply deadline");
+    unpoweredNatural.self.units.push_back(
+        unit(90, protodd::UnitKind::pylon, false, {768, 672}));
+    const auto poweredNatural = strategy.plan(unpoweredNatural, {});
+    expect(std::ranges::none_of(poweredNatural.goals,
+               [](const protodd::ProductionGoal& candidate) {
+                   return candidate.reason == "power the new PvZ natural before pressure";
+               }),
+           "a committed Pylon at the natural ends the extra power request");
+
+    const protodd::StrategyEngine gatewayOpening{true};
+    const auto gatewayFirstPlan = gatewayOpening.plan(poolFirst, {});
+    expect(gatewayFirstPlan.desiredWorkers == 8 &&
+               std::ranges::none_of(gatewayFirstPlan.goals,
+                   [](const protodd::ProductionGoal& candidate) {
+                       return candidate.blocking &&
+                           (candidate.target == protodd::UnitKind::forge ||
+                            candidate.target == protodd::UnitKind::photonCannon);
+                   }),
+           "gateway-first opening commits the first Gateway before static defense");
+    protodd::ThreatAssessment uncertainOpeningThreat;
+    uncertainOpeningThreat.uncertainty = 0.974189;
+    uncertainOpeningThreat.immediateGround = 0.347826;
+    const auto uncertainOpening = gatewayOpening.plan(poolFirst, uncertainOpeningThreat);
+    expect(uncertainOpening.name == "PvZ gateway-first mobile opening" &&
+               std::ranges::none_of(uncertainOpening.goals,
+                   [](const protodd::ProductionGoal& candidate) {
+                       return candidate.blocking &&
+                           candidate.target == protodd::UnitKind::forge;
+                   }),
+           "prior-only ground risk does not trigger the fortified opening");
+    auto gatewayCommitted = poolFirst;
+    gatewayCommitted.self.units.push_back(
+        unit(88, protodd::UnitKind::gateway, false, {192, 160}));
+    const auto workerGrowth = gatewayOpening.plan(gatewayCommitted, {});
+    expect(workerGrowth.desiredWorkers == 11,
+           "gateway-first opening resumes mining after the first Gateway is committed");
+    auto mobileCheckpoint = gatewayCommitted;
+    mobileCheckpoint.frame = 5 * 60 * 24;
+    mobileCheckpoint.self.supplyUsed = 42;
+    mobileCheckpoint.self.supplyTotal = 66;
+    mobileCheckpoint.bases.push_back(
+        {1, {128, 128}, {128, 128}, 8000, 5000, 1});
+    mobileCheckpoint.bases.push_back(
+        {2, {768, 768}, {768, 768}, 8000, 5000, 2});
+    for (int id = 120; id < 125; ++id) {
+        auto probe = unit(id, protodd::UnitKind::probe, true, {128, 128});
+        probe.role = protodd::UnitRole::worker;
+        mobileCheckpoint.self.units.push_back(probe);
+    }
+    for (int id = 100; id < 104; ++id)
+        mobileCheckpoint.self.units.push_back(
+            unit(id, protodd::UnitKind::zealot, true, {192, 160}));
+    const auto screenBeforeNatural = gatewayOpening.plan(mobileCheckpoint, {});
+    expect(screenBeforeNatural.desiredBases == 1 &&
+               std::ranges::any_of(screenBeforeNatural.goals,
+                   [](const protodd::ProductionGoal& candidate) {
+                       return candidate.target == protodd::UnitKind::zealot &&
+                              candidate.desiredCount >= 6 && candidate.blocking &&
+                              candidate.priority >= 102;
+                   }),
+           "gateway-first opening keeps mobile production ahead of Nexus banking");
+    mobileCheckpoint.self.units.push_back(
+        unit(104, protodd::UnitKind::zealot, true, {192, 160}));
+    mobileCheckpoint.self.units.push_back(
+        unit(105, protodd::UnitKind::zealot, true, {192, 160}));
+    const auto coreBeforeNatural = gatewayOpening.plan(mobileCheckpoint, {});
+    expect(coreBeforeNatural.desiredBases == 1 &&
+               std::ranges::any_of(coreBeforeNatural.goals,
+                   [](const protodd::ProductionGoal& candidate) {
+                       return candidate.target == protodd::UnitKind::cyberneticsCore &&
+                              candidate.blocking && candidate.priority >= 101;
+                   }),
+           "gateway-first opening funds ranged access before the natural");
+    mobileCheckpoint.self.units.push_back(
+        unit(106, protodd::UnitKind::cyberneticsCore, false, {224, 160}));
+    const auto expansionPressure = gatewayOpening.plan(mobileCheckpoint, {});
+    expect(expansionPressure.posture == protodd::Posture::pressure &&
+               expansionPressure.minimumAttackSize == 6 &&
+               expansionPressure.desiredBases == 1 &&
+               expansionPressure.attackTarget == mobileCheckpoint.bases[1].center,
+           "six-Zealot window pressures the known Zerg expansion before Nexus banking");
+    for (int id = 125; id < 133; ++id) {
+        auto probe = unit(id, protodd::UnitKind::probe, true, {128, 128});
+        probe.role = protodd::UnitRole::worker;
+        mobileCheckpoint.self.units.push_back(probe);
+    }
+    const auto saturatedPressure = gatewayOpening.plan(mobileCheckpoint, {});
+    expect(saturatedPressure.desiredBases == 1 &&
+               std::ranges::none_of(saturatedPressure.goals,
+                   [](const protodd::ProductionGoal& candidate) {
+                       return candidate.goal == protodd::GoalKind::expand &&
+                              candidate.target == protodd::UnitKind::nexus &&
+                              candidate.desiredCount > 1;
+                   }),
+           "saturated-economy recovery cannot recall the committed early pressure squad");
+    mobileCheckpoint.enemy.units.push_back(
+        unit(107, protodd::UnitKind::sunkenColony, false, {768, 768}));
+    expect(gatewayOpening.plan(mobileCheckpoint, {}).posture !=
+               protodd::Posture::pressure,
+           "observed Sunken Colony cancels the six-Zealot timing");
+    mobileCheckpoint.enemy.units.clear();
+    mobileCheckpoint.frame = 7 * 60 * 24;
+    expect(gatewayOpening.plan(mobileCheckpoint, {}).desiredBases >= 2,
+           "gateway-first opening releases the natural after its pressure window");
+
     protodd::ThreatAssessment earlyZergThreat;
     earlyZergThreat.immediateGround = 0.35;
     earlyZergThreat.combatEnemiesNearMain = 6;
     const auto pressuredPoolFirstPlan = strategy.plan(poolFirst, earlyZergThreat);
+    const auto pressuredMobileOpening = gatewayOpening.plan(poolFirst, earlyZergThreat);
+    expect(std::ranges::any_of(pressuredMobileOpening.goals,
+               [](const protodd::ProductionGoal& candidate) {
+                   return candidate.target == protodd::UnitKind::photonCannon &&
+                          candidate.blocking;
+               }),
+           "gateway-first opening funds static defense when early ground contact is observed");
     expect(std::ranges::any_of(
                pressuredPoolFirstPlan.goals, [](const protodd::ProductionGoal& goal) {
                    return goal.target == protodd::UnitKind::photonCannon &&
@@ -2169,6 +2298,31 @@ void testWorkersAndScouts() {
     const auto orders = scouting.assign(scoutState, scouts, influence, {});
     expect(orders.size() == 1 && orders.front().target == protodd::Position{1700, 1700},
            "scout prioritizes stale unexplored start location");
+
+    protodd::GameState techScoutState;
+    techScoutState.frame = 6000;
+    techScoutState.self.id = 1;
+    techScoutState.enemy.id = 2;
+    techScoutState.self.units.push_back(
+        unit(80, protodd::UnitKind::probe, true, {100, 100}));
+    auto enemyHatchery = unit(81, protodd::UnitKind::hatchery, false, {1300, 100});
+    enemyHatchery.role = protodd::UnitRole::resourceDepot;
+    techScoutState.enemy.units.push_back(enemyHatchery);
+    techScoutState.bases.push_back(
+        {1, {1300, 100}, {1300, 100}, 8000, 0, 2, 3600, true, false, 8, 0});
+    techScoutState.bases.push_back(
+        {2, {900, 100}, {900, 100}, 8000, 0, 2, 3900, false, false, 8, 0});
+    techScoutState.bases.push_back(
+        {3, {1150, 100}, {1150, 100}, 0, 0, -1, 0, false, false, 8, 0});
+    expect(protodd::enemyNatural(techScoutState)->id == 2,
+           "a nearby empty terrain marker is not an enemy natural");
+    protodd::ScoutManager techScouting;
+    const protodd::UnitId techScoutIds[]{80};
+    techScoutState.bases.front().lastScouted = 5900;
+    const auto techOrders = techScouting.assign(techScoutState, techScoutIds, influence, {});
+    expect(techOrders.size() == 1 &&
+               techOrders.front().target == protodd::Position{900, 100},
+           "a freshly checked enemy main releases the scout to the natural");
 
     protodd::GameState riskState;
     riskState.mapWidthPixels = 2048;
@@ -3429,9 +3583,24 @@ void testReportImprovements() {
     state.frame += 46 * 24;
     expect(scouts.selectWorkerScout(state, {}, {}, reserved) >= 0,
            "follow-up scouting resumes after its cooldown when the economy is safe");
+    const auto returningId = scouts.selectWorkerScout(state, {}, {}, reserved);
+    auto returningProbe = std::ranges::find(state.self.units, returningId, &UnitSnapshot::id);
+    returningProbe->position = {1500, 1200};
     state.frame += 46 * 24;
+    expect(scouts.selectWorkerScout(state, {}, {}, reserved) == returningId &&
+               scouts.returningScout() == returningId,
+           "a timed-out worker scout stays leased until it gets home");
+    InfluenceMap returnInfluence;
+    returnInfluence.update(state);
+    const auto returnOrder = scouts.controlWorkerScout(state, returnInfluence);
+    expect(returnOrder && returnOrder->actor == returningId &&
+               returnOrder->source == "probe-followup-return",
+           "a returning follow-up scout receives an explicit safe-home order");
+    returningProbe->position = {550, 550};
+    expect(!scouts.controlWorkerScout(state, returnInfluence) && scouts.returningScout() == -1,
+           "the scout lease ends when the Probe reaches home");
     expect(scouts.selectWorkerScout(state, {}, {}, reserved) == -1,
-           "worker scouting has a bounded mission duration");
+           "follow-up scouting cools down after a completed return");
 
     OpponentModel model;
     model.update(state);
@@ -5440,6 +5609,24 @@ void testForwardReinforcementOwnership() {
     front.units.assign(13, unit(200, UnitKind::highTemplar, true, front.center));
     expect(SquadPlanner::reinforcementDestination(front, rear, enemyBase) == rear.center,
         "support casters alone cannot qualify as an independent assault force");
+
+    Squad splitVanguard;
+    splitVanguard.units.assign(4, unit(300, UnitKind::zealot, true, {700, 500}));
+    Squad detached;
+    detached.units.assign(2, unit(310, UnitKind::zealot, true, {1300, 500}));
+    expect(SquadPlanner::mainArmyTravelMode(splitVanguard, &splitVanguard, true, 6) ==
+               MainArmyTravelMode::assemble &&
+           SquadPlanner::mainArmyTravelMode(detached, &splitVanguard, true, 6) ==
+               MainArmyTravelMode::assemble,
+           "four-plus-two disconnected fighters assemble instead of attacking as separate squads");
+    splitVanguard.units.assign(6, unit(320, UnitKind::zealot, true, {700, 500}));
+    expect(SquadPlanner::mainArmyTravelMode(splitVanguard, &splitVanguard, true, 6) ==
+               MainArmyTravelMode::attack &&
+           SquadPlanner::mainArmyTravelMode(detached, &splitVanguard, true, 6) ==
+               MainArmyTravelMode::joinVanguard &&
+           SquadPlanner::mainArmyTravelMode(splitVanguard, &splitVanguard, false, 6) ==
+               MainArmyTravelMode::assemble,
+           "a formed vanguard attacks while smaller fragments join it; hold posture assembles");
 }
 
 void testPayloadReloadTravel() {
@@ -5662,9 +5849,165 @@ void testVenatorDetectionDeadline() {
         "observed ranged production retains the existing ranged opening");
 }
 
+void testPvPFogDetectionOption() {
+    using namespace protodd;
+    // A two-Gateway army has been seen, but the enemy main and tech have not
+    // been revisited. This reproduces the legal evidence before the DT loss.
+    GameState state;
+    state.frame = 8400;
+    state.self.race = state.enemy.race = Race::protoss;
+    state.self.supplyUsed = 52;
+    state.self.supplyTotal = 80;
+    state.self.units = {unit(1, UnitKind::nexus, true),
+        unit(2, UnitKind::pylon, true), unit(3, UnitKind::gateway, true),
+        unit(4, UnitKind::gateway, true), unit(5, UnitKind::cyberneticsCore, true),
+        unit(6, UnitKind::assimilator, true), unit(7, UnitKind::forge, true),
+        unit(8, UnitKind::photonCannon, true),
+        unit(9, UnitKind::roboticsFacility, true)};
+    for (int id = 20; id < 34; ++id)
+        state.self.units.push_back(unit(id, UnitKind::probe, true));
+    for (int id = 40; id < 47; ++id)
+        state.self.units.push_back(unit(id, UnitKind::zealot, true));
+    state.self.units.push_back(unit(47, UnitKind::dragoon, true));
+    state.self.units.push_back(unit(48, UnitKind::dragoon, true));
+    state.enemy.units = {unit(100, UnitKind::gateway, false, {3000, 3000}),
+        unit(101, UnitKind::gateway, false, {3150, 3000})};
+    for (int id = 110; id < 117; ++id)
+        state.enemy.units.push_back(unit(id, UnitKind::zealot, false, {2700, 2700}));
+    state.enemy.units.push_back(unit(117, UnitKind::dragoon, false, {2700, 2700}));
+    state.enemy.units.push_back(unit(118, UnitKind::dragoon, false, {2700, 2700}));
+    for (auto& enemy : state.enemy.units) {
+        enemy.visible = false;
+        enemy.lastSeen = 3598;
+    }
+    ThreatAssessment threat;
+    threat.mostLikely = EnemyPlan::fastRush;
+    threat.uncertainty = 0.88;
+    const auto firstDetector = [](const StrategicPlan& plan) {
+        return plan.requireMobileDetection && std::ranges::any_of(plan.goals,
+            [](const ProductionGoal& demand) {
+                return demand.target == UnitKind::observer &&
+                    demand.desiredCount == 1 && demand.blocking &&
+                    demand.priority >= 124;
+            });
+    };
+    expect(!firstDetector(StrategyEngine{}.plan(state, threat)),
+        "default PvP rule keeps the opt-in fog detector disabled");
+    StrategyEngine candidate{false, false, true};
+    const auto plan = candidate.plan(state, threat);
+    expect(firstDetector(plan),
+        "two-Gateway fog risk reserves one Observer before a visible DT");
+    MacroPlanner macro;
+    ResourceLedger bank{150, 100};
+    const auto actions = macro.reconcile(state, plan, bank);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::observatory && action.reserved &&
+            action.executable && action.priority >= 124;
+    }), "fog detector chain actually funds the Observatory ahead of splash");
+
+    auto control = state;
+    control.enemy.units.erase(control.enemy.units.begin() + 1);
+    expect(!firstDetector(candidate.plan(control, threat)),
+        "one scouted Gateway does not trigger the fog detector option");
+    auto freshInformation = threat;
+    freshInformation.uncertainty = 0.5;
+    expect(!firstDetector(candidate.plan(state, freshInformation)),
+        "fresh mirror information does not trigger the fog detector option");
+    control = state;
+    control.self.units.erase(std::remove_if(control.self.units.begin(), control.self.units.end(),
+        [](const UnitSnapshot& own) { return own.kind == UnitKind::photonCannon; }),
+        control.self.units.end());
+    expect(!firstDetector(candidate.plan(control, threat)),
+        "an unanchored opening keeps its resources for the initial defense");
+}
+
+void testPvZEarlySplashOption() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 6 * 60 * 24;
+    state.self.id = 1;
+    state.self.race = Race::protoss;
+    state.enemy.id = 2;
+    state.enemy.race = Race::zerg;
+    state.self.supplyUsed = 38;
+    state.self.supplyTotal = 80;
+    auto nexus = unit(1, UnitKind::nexus, true, {128, 128});
+    nexus.role = UnitRole::resourceDepot;
+    state.self.units.push_back(nexus);
+    for (int id = 10; id < 24; ++id) {
+        auto probe = unit(id, UnitKind::probe, true, {160, 160});
+        probe.role = UnitRole::worker;
+        state.self.units.push_back(probe);
+    }
+    state.self.units.push_back(unit(30, UnitKind::pylon, true, {160, 200}));
+    state.self.units.push_back(unit(31, UnitKind::forge, true, {200, 200}));
+    state.self.units.push_back(unit(32, UnitKind::photonCannon, true, {240, 200}));
+    state.self.units.push_back(unit(33, UnitKind::gateway, true, {280, 200}));
+    state.self.units.push_back(unit(34, UnitKind::gateway, true, {320, 200}));
+    for (int id = 40; id < 44; ++id)
+        state.self.units.push_back(unit(id, UnitKind::zealot, true, {350, 250}));
+    const StrategyEngine baseline;
+    const StrategyEngine earlySplash{false, true};
+    const auto safePlan = earlySplash.plan(state, {});
+    expect(std::ranges::any_of(safePlan.goals, [](const ProductionGoal& candidate) {
+               return candidate.target == UnitKind::cyberneticsCore &&
+                   candidate.priority >= 96 && candidate.blocking;
+           }) &&
+           std::ranges::none_of(safePlan.goals, [](const ProductionGoal& candidate) {
+               return candidate.target == UnitKind::roboticsSupportBay;
+           }), "early splash first prepares Core without blindly buying Robotics");
+    const auto baselinePlan = baseline.plan(state, {});
+    expect(std::ranges::none_of(baselinePlan.goals, [](const ProductionGoal& candidate) {
+               return candidate.target == UnitKind::cyberneticsCore &&
+                   candidate.priority >= 96;
+           }), "the isolated early-splash option leaves default Core timing intact");
+
+    for (int id = 70; id < 72; ++id) {
+        auto hydra = unit(id, UnitKind::hydralisk, false, {1200, 1200});
+        hydra.lastSeen = state.frame;
+        hydra.visible = true;
+        state.enemy.units.push_back(hydra);
+    }
+    const auto hydraPlan = earlySplash.plan(state, {});
+    expect(std::ranges::any_of(hydraPlan.goals, [](const ProductionGoal& candidate) {
+               return candidate.target == UnitKind::roboticsFacility &&
+                   candidate.priority >= 101 && candidate.blocking;
+           }) &&
+           std::ranges::any_of(hydraPlan.goals, [](const ProductionGoal& candidate) {
+               return candidate.target == UnitKind::roboticsSupportBay &&
+                   candidate.priority >= 100 && candidate.blocking;
+           }) &&
+           std::ranges::any_of(hydraPlan.goals, [](const ProductionGoal& candidate) {
+               return candidate.target == UnitKind::reaver &&
+                   candidate.priority >= 100 && candidate.blocking;
+           }), "two Hydras move the whole first-Reaver chain ahead of routine production");
+    ResourceLedger bank{600, 300};
+    const auto actions = MacroPlanner{}.reconcile(state, hydraPlan, bank);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+               return action.target == UnitKind::cyberneticsCore && action.reserved;
+           }), "the early splash demand actually funds its first missing prerequisite");
+
+    auto spire = unit(80, UnitKind::spire, false, {1250, 1200});
+    spire.lastSeen = state.frame;
+    state.enemy.units.push_back(spire);
+    const auto mixedTechPlan = earlySplash.plan(state, {});
+    expect(std::ranges::none_of(mixedTechPlan.goals, [](const ProductionGoal& candidate) {
+               return candidate.target == UnitKind::roboticsSupportBay;
+           }), "a scouted Spire keeps the first tech response available for air defense");
+    state.enemy.units.pop_back();
+    ThreatAssessment breach;
+    breach.combatEnemiesNearMain = 2;
+    const auto emergency = earlySplash.plan(state, breach);
+    expect(std::ranges::none_of(emergency.goals, [](const ProductionGoal& candidate) {
+               return candidate.target == UnitKind::roboticsSupportBay;
+           }), "a main-base breach does not divert the emergency budget to splash tech");
+}
+
 int main() {
+    testPvZEarlySplashOption();
     testVenatorCloakedContainment();
     testVenatorDetectionDeadline();
+    testPvPFogDetectionOption();
     testForwardReinforcementOwnership();
     testDefensivePerimeterBreakout();
     testPayloadReloadTravel();

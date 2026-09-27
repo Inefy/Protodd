@@ -1,5 +1,54 @@
 # Strength-first development plan — 24 September 2026
 
+## Current checkpoint — 27 September 2026
+
+The latest default source includes the clearer in-game status overlay, combat
+and scouting correctness fixes, and several bounded strategy changes. The
+experimental PvZ early-splash and PvP fog-detection rules are build options
+that remain **off** in the default bot. The overlay improves diagnosis; it is
+not evidence of stronger play. At this checkpoint all 41 development test
+suites pass and the default Win32 BWAPI DLL builds successfully.
+
+A fresh, structurally healthy four-game development baseline against
+BananaBrain (PvP) and McRaveZ (PvZ) on Benzene lost 0/4. This is a narrow
+opponent/map sample, not an overall ladder win-rate estimate. It reinforces
+three concrete bottlenecks:
+
+1. **Detection can lose the economy while the army survives.** In one PvP
+   game, the first visible Dark Templar arrived at frame 9,707, the
+   Observatory completed at 10,370, and all Probes were gone by 10,800 while
+   13 combat units remained. The existing quiet-tech-gap check missed a
+   scouted two-Gateway army, and a six-Dragoon rule deferred detection.
+2. **The opening screen and base transition still break under pressure.**
+   Another PvP game had 13 combat units around its natural completion, then
+   lost its two Reavers and most of the army to the first major attack. An
+   expansion or tech timing is useful only when the army can hold the base.
+3. **Reactive PvZ splash arrives too late.** In the frozen early-splash
+   comparison both arms lost 0/4. The eligible Hydra signal often arrived
+   after the army had already collapsed; one late Reaver died before firing.
+   More late Reaver priority is not the next useful variant.
+
+Current order of work:
+
+1. Finish the same-input, four-game-per-arm PvP fog-detection screen on
+   Benzene and Destination. Check Observer completion **before** the first
+   Dark Templar, Probe survival, combat strength, and adjudicated wins. Keep
+   the option off unless those results justify promotion. The frozen
+   reference is running; the candidate is prepared but has not started.
+2. Run the prepared current-default PvT baseline against UABTerran so the
+   next intervention is chosen from all three matchups rather than another
+   PvZ guess.
+3. Attack the earliest repeatable loss mechanism: opening mobile defense,
+   protected tech/expansion transitions, army cohesion and detector coverage.
+   Choose one bounded change at a time and compare frozen binaries in healthy
+   matched games on both starting sides.
+4. Promote a trained tactic only after its action contract, legal runtime
+   execution and matched live outcome are verified. The existing offline
+   target/command metrics and failed screens do not establish a win gain.
+
+The target is a stronger full-game bot. No current result establishes a
+major win-rate gain or tournament readiness.
+
 ## Manual priority update — 26 September UTC
 
 A subsequent deep correctness audit fixed twelve issues spanning upgrade
@@ -388,6 +437,260 @@ Own Terran/Zerg transfer follows robust Protoss coverage. No paid/cloud compute
 without the existing cost-proposal authorization process.
 
 ## Experiment discipline and recurring work
+
+### PvZ gateway-first opening pilot, 26 September 2026
+
+A source-frozen four-game matched pilot against McRaveZ on Benzene and
+Destination tested moving the first Gateway ahead of the Forge/Cannon and
+allowing up to 11 opening Probes. All four pairs had healthy games and identical
+seed/map/host inputs. The first Zealot arrived 884–1,016 frames earlier, but
+the completed mobile army at frame 6,000 changed by only +1, 0, -1, and 0.
+Both variants lost all four games. One candidate game never completed a
+Cybernetics Core before defeat. The pilot failed its frozen functional gate;
+`PROTODD_PVZ_GATEWAY_OPENING` stays OFF and no larger campaign is justified.
+The archived machine report is
+`build/pvz-gateway-opening-20260926/pilot-v2-report.json`.
+
+The next useful hypothesis is a continuous opening spending schedule: keep
+Gateway production active through the Forge/Cannon response, then make the
+Cybernetics Core transition on time. Check issued unit/build orders and paid
+resource commitments, not only the first defender timing. Preserve the
+pressure fallback while testing this; one early unit cannot establish a
+stronger opening by itself.
+
+The bounded follow-up added a six-completed-Zealot and committed-Core
+checkpoint before the natural, still behind the OFF-by-default opening flag.
+All four candidate games were healthy and had matching seed/map/host records.
+The Core completed 1,476–3,214 frames earlier, and mobile army at frame 6,000
+rose by 1, 2, 2, and 2 units. Neither variant won a game. The arena endpoint
+changed from port 1385 to 1386, so the frozen review's exact common-input
+hash check failed; the diagnostic rows are archived separately in
+`build/pvz-gateway-opening-20260926/pilot-v3-diagnostic.json`. This is useful
+mechanism evidence, not a passing promotion result. No larger run is warranted
+from it. The next loss review should examine why a stronger early screen still
+collapses to the later Zerg army, including hydralisk splash and air coverage.
+
+The follow-up six-Zealot pressure window did not establish a gain. Its first
+attempt aborted after a launcher crash, and the retry exposed an expansion
+override that recalled the army immediately after a forward order. After
+repairing that override, the four-game pilot had three decisive losses and
+one 30,000-frame cap with both bots reporting no win. The frozen health and
+pairing gate failed, so that experiment stays OFF. See
+`build/pvz-gateway-opening-20260926/pilot-v5-report.json`.
+
+A separate default-on squad cohesion repair was tested against the prior
+four-game reference with identical non-DLL inputs. In the one reference game
+with understrength MainArmy attack orders during enemy contact, the count fell
+from four to zero. No early losses were added; completed mobile army at frame
+8,400 changed by 0, -1, +1, and 0. Both versions lost all four games. Its
+functional gate passed, but its strength gate did not, so this is a verified
+movement repair rather than a measured win-rate gain. See
+`build/squad-cohesion-20260926/pilot-report.json`.
+
+The next frozen pilot tested Hydra response spending. The reference repeatedly
+reserved an Observatory and Observer against Hydralisks with no Lurker in sight,
+while it produced no Reaver in four losses. A separate candidate reserved the
+Robotics/Support Bay/Reaver chain against ground mass and reserved detection
+only after observing a Lurker. Core tests passed. All four matched candidate
+games were healthy but followed different Zerg openings, never reached a Hydra
+response, and lost. The predeclared exposure gate failed, so the change was
+restored to the frozen source state and remains an archived hypothesis rather
+than a win-rate improvement. See `build/hydra-splash-20260926/pilot-report.json`.
+
+Those four games exposed a more immediate placement bottleneck. The bot could
+reserve minerals for its second Cannon, then choose an unpowered expansion as
+the least defended Nexus and return without examining the powered main. One
+loss had repeated `build-no-location-placement-search` reports from frame
+8,833, but its second Cannon only began at frame 10,822 after the expansion
+was lost. The next isolated candidate skips unpowered Nexuses when selecting
+where to build defensive Cannons or Batteries. All four matched games were
+healthy and the second Cannon started 3,070–4,737 frames earlier, but total
+no-location failures fell only from 83 to 45 because one candidate game made
+39 late attempts under attack. Both versions lost 0/4; the predeclared
+functional gate failed. The source remains a development candidate while the
+failure is repaired, with its exact evidence in
+`build/powered-defense-20260926/pilot-report.json`.
+
+The next isolated candidate requests a Pylon at the natural as soon as its
+Nexus is committed and no ground attack is approaching. In the placement
+candidate, the natural Nexus began around frames 6,400–6,700, yet its first
+nearby Pylon appeared only around 9,100–9,700 in three games and never in the
+fourth. The separate four-game comparison advanced natural power by at least
+1,000 frames in two games, but its frozen gate required three; it delayed the
+second Cannon too much in two games and still lost 0/4. See
+`build/natural-power-20260926/pilot-report.json`.
+
+The failure has a concrete executor cause. In one match the natural Pylon was
+requested at frame 6,985 and an accepted build order was issued at 7,123. At
+frame 7,315 the Probe was still moving, the site was legal and reachable, yet
+the generic eight-second Pylon hard lease canceled the command. This happened
+repeatedly; construction finally began at frame 9,160. The next isolated
+pilot gives only that planned remote natural Pylon an 18-second travel lease,
+while keeping the stalled-builder escape. Its frozen comparison and review
+are under `build/natural-power-lease-20260926`. The four-game review passed
+its functional gate: natural Pylon starts advanced at least 1,000 frames in
+three games, moving-builder hard lease expiries fell from 32 to 3, second
+Cannon timing stayed within the declared limit, and frame-8,400 mobile army
+was unchanged in every pair. Both versions still lost all four games. This is
+an executor repair, not evidence of improved win rate; the remaining priority
+is to produce a timely counter to Hydra and Mutalisk mass without losing the
+early defensive screen. See `build/natural-power-lease-20260926/pilot-report.json`.
+
+A second Hydra response pilot used the natural-power-lease version as its
+reference. Seeing Hydralisks or their Den committed a Robotics/Support Bay/
+Reaver chain after a small defensive screen, while skipping optional Stargate
+spending unless Zerg air tech was seen. All four matched games were healthy
+and three candidate games saw Hydras. Support Bay began at least 720 frames
+earlier in two exposed games, but only one Reaver arrived within 4,800 frames
+of the first Hydra. Both versions lost all four games, so the frozen functional
+gate failed. In one loss, 12 Hydras arrived while Protodd still lacked a
+completed Cybernetics Core; reactive splash tech was too late. The change was
+restored to the lease baseline. See `build/hydra-commit-20260926/pilot-report.json`.
+
+The next isolated pilot moved that Core checkpoint earlier, once a committed
+PvZ natural had two completed Cannons and four completed Zealots and no ground
+attack was approaching. All four matched games were healthy, but Core began at
+least 1,000 frames earlier in only one game. The second Cannon was delayed
+1,437 frames in another, beyond the declared 720-frame limit. Both versions
+lost all four games. The checkpoint was restored to the lease baseline; see
+`build/core-checkpoint-20260926/pilot-report.json`. The next investigation
+should measure when Gateways are idle, how many Zealots are completed before
+the first large Hydra wave, and whether the two-base economy funds more mobile
+units without delaying defensive power.
+
+The reference logs show that at frame 8,400, two Gateways were idle in two
+games with five completed Zealots and 152–166 minerals banked. The minute-based
+Zealot target was already satisfied. The next isolated candidate raises that
+target to at least eight only after the second Cannon has started. Its frozen
+four-game comparison and defensive timing gate are under
+`build/fortified-zealot-20260926`. All four matched games were healthy. The
+candidate had one more completed army unit at frame 8,400 in three games,
+second-Cannon delays of 60, 3, 368, and -391 frames, and no additional early
+losses. Its declared functional gate passed, but both versions lost all four
+games. Core construction was delayed by over 2,000 frames in several candidate
+games, so this remains a production finding rather than a strength-validated
+opening. See `build/fortified-zealot-20260926/pilot-report.json`.
+
+The follow-up candidate reserves the first Core at priority 100 after the
+second Cannon starts and five Zealots are complete, ahead of further Zealot
+cycles. Its source, reference inputs, and pass criteria are frozen under
+`build/balanced-fortress-20260927`. All four matched games were healthy and
+completed army at frame 8,400 rose by one in three games; Cannon two stayed
+within the limit. But the Core never started in one game under sustained
+emergency pressure, the frozen functional gate failed, and both versions lost
+all four games. The combined opening was restored to the lease baseline. See
+`build/balanced-fortress-20260927/pilot-report.json`.
+
+The next priority is the emergency hold itself. In the exposed failure,
+Protodd had five completed Zealots, one completed Cannon, an unfinished second
+Cannon and no Core at frame 8,400 while the emergency plan consumed production
+capacity. Ground pressure kept the planned quiet-window tech checkpoint from
+firing. A useful follow-up must measure worker allocation, Pylon survivability,
+Gateway cycles, and whether defensive buildings finish and remain powered
+through the first large Hydra wave. Improvements must win healthy paired games
+before they can be called strength gains.
+
+A new isolated pilot asks for a third Cannon after the first two are committed
+at a two-base PvZ defense. The existing placement code chooses the least
+defended powered Nexus, breaking ties toward the enemy, so the added structure
+should reinforce the forward natural. Its frozen four-game inputs and pass
+criteria, including a Core-delay limit, are under `build/third-cannon-20260927`.
+All four matched games were healthy. Cannon three began before frame 9,500 in
+three games, but Cannon two was delayed 2,807 frames in the fourth, and both
+versions lost all four games. The frozen functional gate failed; the added
+goal was restored to the lease baseline. See the frozen pilot report. Further
+static defense work should address natural placement and construction timing
+directly, not only the total Cannon count.
+
+These four-game screens are diagnostic, not causal win-rate estimates. The
+arena fixes map, seed, host and all non-DLL inputs, but early actions can still
+diverge before a conditional candidate rule fires. In the third-Cannon game 0,
+the initial Nexus had a different unit ID and early Pylon/Zealot timings had
+already diverged before Protodd possessed two Cannons. Future claims need a
+larger, disjoint multi-opponent campaign with confidence intervals and replay
+review, especially when a candidate changes an opening timing by only one or
+two production cycles.
+
+The trained Protodd target ranker received its first live four-game PvZ screen
+against a newly run heuristic reference with identical non-DLL inputs,
+including the frozen v2 weights and mode file. The candidate loaded the model
+and scored legal targets in all four games; its functional integration gate
+passed. Both arms lost all four games, so the trained scorer stays opt-in and
+unpromoted. See `build/trained-target-screen-20260927/pilot-report.json` and
+`docs/trained-tactics-20260926.md`. The next trained-tactics step is to compare
+model and heuristic choices on the exact same live legal candidate sets,
+identify harmful disagreements, and fit or gate a narrower decision before
+another win-rate trial. Broad tactical control is not justified by this screen.
+
+The same-set target diagnostic under `build/target-disagreement-20260927`
+recorded 652 disagreements in 3,581 live decisions (18.2%) across two healthy
+losses. There were no broad worker/building-versus-combat switches or immediate
+threat abandonments by its defined counters. The model remains opt-in; the next
+trained step is a replay-level review of within-category choices before
+another fit or outcome screen.
+
+The scouting review found a separate timing gap: after the opening Probe left
+the enemy main, a follow-up Probe repeatedly visited the enemy natural. In one
+reference loss the enemy main was last seen near frame 3,598, the natural was
+rechecked around frame 6,720, and the Hydralisk Den was not discovered until
+around frame 8,880. A bounded stale-main priority change is under a frozen
+four-game development comparison in `build/scout-main-tech-20260927`.
+That comparison was healthy but failed its functional gate: zero of four
+candidate games revisited the main before frame 8,000, one extra Probe died
+before frame 8,400, and both arms lost all four games. The stale-main score
+bonus was reverted. Travel traces also revealed that Destination's nearest
+enemy "natural" marker had no resources. The working source now excludes such
+markers and keeps a timed-out follow-up Probe leased until it returns home;
+those two fixes are under a separate frozen comparison in
+`build/scout-safe-return-20260927`.
+The four-game safe-return comparison was healthy and issued follow-up return
+commands in all four games. It failed its development gate: one extra Probe
+died before frame 8,400 and both arms lost 0/4. The reviewer was tightened
+after game 0 to distinguish late opening withdrawal from follow-up return, so
+the return-order count is exploratory. That extra death was an opening
+scout at frame 4,610, before follow-up return control activated; identical
+seeds did not keep the opening trajectory fixed. The return lease remains a
+tested control fix, not an established win-rate gain. The natural filter in
+that DLL still selected a zero-mineral marker on Destination, so the source
+has since been tightened to require remaining minerals and its regression
+test covers a stale nonzero patch count. This correction has no live result
+yet.
+
+The next bounded PvZ intervention addressed the whole anti-Hydra path. The opt-in
+`PROTODD_PVZ_EARLY_SPLASH` build raises Core after the opening mobile/static
+screen, then demands Robotics Facility, Support Bay and one Reaver as soon as
+two Hydras or a Den are known, unless Spire/Mutalisk evidence or a main breach
+calls for a different response. Native strategy and spending tests pass.
+The default DLL has this option off. The same-input eight-game screen in
+`build/pvz-early-splash-20260927` was healthy, but both arms lost all four
+games. Only one candidate game saw the eligible Hydra signal early enough;
+its army collapsed before Robotics could start. A Reaver completed in another
+game at frame 13,694, then died 45 frames later with no Scarabs fired as the
+base was overrun. The functional and decisive-win gates both failed. Do not
+promote this option or repeat another reactive splash timing variant without
+a materially earlier defensive mechanism and broader opponent evidence.
+
+### PvP fog detection screen (in progress, 2026-09-27)
+
+A fresh four-game PvP/PvZ baseline with the current default DLL was structurally
+healthy and lost 0/4. In its second BananaBrain game, a first Dark Templar
+appeared at frame 9,707; the Observatory did not finish until frame 10,370.
+Protodd still had 13 combat units but no Probes by frame 10,800. The known
+enemy two-Gateway army did not satisfy the older quiet-tech-gap rule, and the
+six-Dragoon checkpoint suppressed the lower-priority Observatory goal.
+
+The opt-in `PROTODD_PVP_FOG_DETECTION` experiment reserves one Observer after
+Robotics is complete when a two-Gateway enemy main has stale tech information,
+our home has a completed Cannon and a six-unit mobile screen, and no hard main
+breach is occurring. Its native plan/spending test passes. The default option
+remains off. Frozen DLL SHA-256: reference
+`52C5D39DD5D7E125BE4C6F778FB045BD1620BCB7339929DCE700784991500012`,
+candidate `98590F6DF4B1C0851EC17E4BB4E537087F97E7A94D53EFB2619747D9F43AD009`.
+The same-input BananaBrain screen has four games per arm across Benzene and
+Destination, alternating sides, under `build/pvp-fog-screen-20260927`.
+The functional gate is Observatory/Observer ahead of the first DT in eligible
+games without a new opening collapse. Promotion requires a real win gain with
+healthy paired reports; earlier detection alone is insufficient.
 
 - No new full-corpus fit until a bounded experiment addresses a demonstrated
   bottleneck and meets its declared development gates. Do not restart the completed

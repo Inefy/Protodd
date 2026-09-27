@@ -12,6 +12,7 @@
 namespace protodd {
 
 class NavigationGrid;
+class TacticalTargetModel;
 
 // Edge-to-edge weapon distance and per-volley damage, shared by targeting and
 // simulation. Remaining durability permits shields to deplete during a fight.
@@ -59,7 +60,8 @@ public:
     [[nodiscard]] const UnitSnapshot* selectTarget(
         const UnitSnapshot& attacker,
         std::span<const UnitSnapshot> candidates,
-        std::span<const TargetAllocation> allocations = {}) const;
+        std::span<const TargetAllocation> allocations = {},
+        const TacticalTargetModel* targetModel = nullptr) const;
 
 private:
     [[nodiscard]] static double unitPower(
@@ -144,7 +146,8 @@ public:
         TacticalIntent intent = TacticalIntent::battle,
         std::span<const UnitSnapshot> support = {},
         const NavigationGrid* navigation = nullptr,
-        std::span<const UnitSnapshot> obstacles = {}) const;
+        std::span<const UnitSnapshot> obstacles = {},
+        const TacticalTargetModel* targetModel = nullptr) const;
 };
 
 }  // namespace protodd

@@ -90,6 +90,7 @@ const BaseSnapshot* enemyNatural(const GameState& state) noexcept {
     auto nearest = std::numeric_limits<int>::max();
     for (const auto& base : state.bases) {
         if (base.id == main->id || base.startLocation || base.island ||
+            (base.mineralPatches <= 0 || base.mineralsRemaining <= 0) ||
             !base.center.valid() || base.ownerId == state.self.id) continue;
         const auto distance = distanceSquared(main->center, base.center);
         if (distance < nearest) { nearest = distance; natural = &base; }

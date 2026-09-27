@@ -42,6 +42,10 @@ struct DebugOverlay {
     std::string operation;
     std::string health;
     std::string scout;
+    int idleGateways{};
+    int usableGateways{};
+    int idleWorkers{};
+    int unpoweredBuildings{};
 };
 
 struct MacroExecution {
@@ -157,6 +161,7 @@ private:
         bool prepositioned{};
         Position lastPosition{-1, -1};
         Frame lastProgress{-1};
+        bool plannedRemotePower{};
     };
 
     struct FailedBuildSite {

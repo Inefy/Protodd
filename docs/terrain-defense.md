@@ -59,12 +59,19 @@ The overlay starts in compact mode. Enter commands in the game's chat input:
 | `/debug 1` | Compact |
 | `/debug 2` | Detailed |
 
-The panel shows the chosen plan and posture, inferred enemy plan and its
-uncertainty, completed Dragoon/Zealot/Reaver counts beside desired shares,
-worker/base targets, rally coordinates, expansion selection, macro status,
-and the actual queued action's cost and reason. `FUNDED` means resources are
-reserved, not that a building has started. A pending expansion also shows its
-Probe, remaining distance, lease age, and time since observed movement.
+Compact mode keeps a narrow panel in the upper-right corner, clear of the
+Tournament Manager's match text in the upper left and the game's resource row.
+It groups the plan and posture, economy, army, opponent assessment, next spend,
+and the most urgent production alert or current operation. Red marks a supply
+block or unpowered buildings; yellow marks idle production or workers. Supply
+is displayed in the game's usual units rather than BWAPI's doubled units.
+Compact mode leaves map geometry and labels hidden so the field remains visible.
+
+Detailed mode adds composition shares, rally and expansion coordinates, macro
+reasons, scouting, the pending Nexus builder and squad reasoning. `FUNDED`
+means resources are reserved, not that a building has started. A pending
+expansion also shows its Probe, remaining distance, lease age, and time since
+observed movement.
 
 Squad rows show why the bot is holding terrain, retreating, firing and
 repositioning, waiting for detection, intercepting a breach, or advancing.
@@ -72,8 +79,8 @@ Detailed mode adds local unit counts and the combat estimate beside the
 required threshold. These ratios are heuristic estimates, not win
 probabilities. No-enemy situations are labeled explicitly.
 
-Cyan map markers show the rally and defensive anchor/area. Yellow marks the
-entrance frontage and pursuit limit. Red marks the strategic attack target;
+In detailed mode, cyan map markers show the rally and defensive anchor/area.
+Yellow marks the entrance frontage and pursuit limit. Red marks the strategic attack target;
 green marks the selected expansion site. Squad lines use green for engage,
 yellow for kite, and red for retreat. Selecting an owned unit shows the reason
 for its last successfully issued order. The panel sizes itself to its contents.
@@ -141,6 +148,12 @@ DLL's default compact display and a typed `/debug` transition to detailed
 mode, including additional macro rows and squad details. This intentionally
 bounded UI run is excluded from competitive results; its timeout cleanup
 must not be counted as a loss.
+
+On September 27, the compact panel was inspected again in a headed McRaveZ
+arena. The Tournament Manager's own text visibly overlapped the previous
+top-left layout. Moving the compact panel to the upper right made every row
+legible in the same game view. This was a bounded display check, not a match
+strength result; the detailed view remains the full diagnostic view.
 
 The next strategic work needs to turn held territory into a completed second
 base: coordinate construction with a cleared route and escort, avoid reserving

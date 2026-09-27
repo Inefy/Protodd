@@ -227,6 +227,18 @@ bool hardBreachAtMain(const GameState& state) noexcept {
         });
 }
 
+bool pvzEarlyPressureEligible(
+    const GameState& state,
+    const ThreatAssessment& threat) {
+    return state.frame >= 5 * 60 * 24 && state.frame < 7 * 60 * 24 &&
+           count(state, UnitKind::nexus) == 1 &&
+           count(state, UnitKind::zealot, true) >= 6 &&
+           count(state, UnitKind::cyberneticsCore) > 0 &&
+           threat.combatEnemiesNearMain == 0 && !activeApproach(state, threat) &&
+           !hardBreachAtMain(state) &&
+           recentEnemyCount(state, UnitKind::sunkenColony) == 0;
+}
+
 bool defensiveExpansionWindow(const GameState& state, const ThreatAssessment& threat) {
     // Holding an army at home and growing the economy are separate decisions.
     // Keep the rush/contain/detection vetoes, but don't require an attack order
@@ -318,6 +330,25 @@ StrategicPlan StrategyEngine::plan(
 
     addPostPressureTransition(result, state, threat);
     addMapControlEconomy(result, state, threat);
+
+    // The generic saturated-economy pass can reintroduce a Nexus after the
+    // PvZ timing is chosen. That immediately changes the squad mission to
+    // cover-expansion and recalls the force. Reconcile the short timing here,
+    // after all generic economy styles have made their requests.
+    if (pvzGatewayOpening_ && state.enemy.race == Race::zerg &&
+        pvzEarlyPressureEligible(state, threat) &&
+        result.posture == Posture::pressure && result.attackTarget.valid()) {
+        result.desiredBases = 1;
+        result.expansionTarget = {-1, -1};
+        result.sustainEconomy = false;
+        for (auto& objective : result.goals) {
+            if (objective.goal != GoalKind::expand ||
+                objective.target != UnitKind::nexus) continue;
+            objective.desiredCount = 1;
+            objective.blocking = false;
+            objective.reason = "finish the six-Zealot pressure before the natural";
+        }
+    }
 
     const auto safeToClose = threat.combatEnemiesNearMain == 0 &&
                              threat.immediateGround <= 0.45 &&
@@ -543,6 +574,25 @@ StrategicPlan StrategyEngine::plan(
         !activeApproach(state, threat) && threat.immediateGround <= 0.45 &&
         threat.workerRush <= 0.30 && threat.proxy + threat.staticContain <= 0.34 &&
         threat.mostLikely != EnemyPlan::fastRush;
+    // A scouted two-Gateway army can still conceal Dark Templar when its tech
+    // has not been revisited. Once Robotics and a home Cannon are present,
+    // finish one mobile detector before spending the next gas on splash.
+    // Keep this experiment behind a build option until matched games show
+    // that its earlier Observatory repays the delayed Reaver.
+    const auto twoGatewayFogCloakRisk = pvpFogDetection_ &&
+        state.enemy.race == Race::protoss &&
+        state.frame >= 5 * 60 * 24 && minute(state) < 11 &&
+        count(state, UnitKind::roboticsFacility, true) > 0 &&
+        count(state, UnitKind::photonCannon, true) > 0 &&
+        count(state, UnitKind::observer) == 0 &&
+        std::ranges::count(state.self.queuedUnits, UnitKind::observer) == 0 &&
+        std::ranges::count(state.enemy.units, UnitKind::gateway,
+                           &UnitSnapshot::kind) >= 2 &&
+        threat.uncertainty >= 0.75 &&
+        count(state, UnitKind::zealot, true) +
+            count(state, UnitKind::dragoon, true) +
+            count(state, UnitKind::reaver, true) >= 6 &&
+        !hardBreachAtMain(state);
     result.requireMobileDetection = threat.cloak > 0.28 ||
         recentEnemyCount(state, UnitKind::spiderMine) > 0 ||
         recentEnemyCount(state, UnitKind::lurker) > 0 ||
@@ -552,15 +602,17 @@ StrategicPlan StrategyEngine::plan(
            !activeApproach(state, threat) && threat.immediateGround <= 0.45) ||
           recentEnemyCount(state, UnitKind::factory) >= 2 ||
           recentEnemyCount(state, UnitKind::starport) > 0));
-    const auto insuranceDetectorOnly = mirrorTechGap && !result.requireMobileDetection;
-    result.requireMobileDetection = result.requireMobileDetection || mirrorTechGap;
+    const auto insuranceDetectorOnly =
+        (mirrorTechGap || twoGatewayFogCloakRisk) && !result.requireMobileDetection;
+    result.requireMobileDetection = result.requireMobileDetection ||
+        mirrorTechGap || twoGatewayFogCloakRisk;
     if (result.requireMobileDetection) {
         result.desiredGasWorkers = std::max(3, result.desiredGasWorkers);
         goal(result, GoalKind::build, UnitKind::assimilator, 1, 123,
              "fund required mobile detection", true);
         goal(result, GoalKind::train, UnitKind::observer,
              insuranceDetectorOnly ? 1 : (count(state, UnitKind::nexus) >= 2 ? 3 : 2), 124,
-             insuranceDetectorOnly ? "first Observer against a mirror tech information gap"
+             insuranceDetectorOnly ? "first Observer against an unscouted mirror tech path"
                                    : "replace and maintain mission detectors", true);
     }
 
@@ -938,7 +990,12 @@ StrategicPlan StrategyEngine::planPvZ(
     const GameState& state,
     const ThreatAssessment& threat) const {
     StrategicPlan result;
-    result.name = "PvZ fortified gateway into corsair-templar";
+    const auto earlyGroundPressure = openingPressureExpected(state, threat) ||
+        threat.combatEnemiesNearMain > 0 || activeApproach(state, threat) ||
+        (minute(state) < 6 && recentEnemyCount(state, UnitKind::zergling) > 0);
+    const auto gatewayFirst = pvzGatewayOpening_ && !earlyGroundPressure;
+    result.name = gatewayFirst ? "PvZ gateway-first mobile opening" :
+        "PvZ fortified gateway into corsair-templar";
     result.desiredWorkers = std::min(70, 20 + minute(state) * 4);
     result.desiredBases = minute(state) < 3 ? 1 : (minute(state) < 11 ? 2 : 3);
     result.desiredGasWorkers = !supplyAtLeast(state, 14) ? 0 :
@@ -951,13 +1008,39 @@ StrategicPlan StrategyEngine::planPvZ(
                           {UnitKind::highTemplar, 0.25}, {UnitKind::corsair, 0.18},
                           {UnitKind::archon, 0.10}};
 
+    // The natural Nexus can be committed several minutes before routine
+    // supply calls for another Pylon. Power it while the builder is still
+    // travelling so a defensive Cannon has a legal footprint when the next
+    // Zerg wave arrives, rather than finishing the Pylon after the base falls.
+    if (minute(state) < 10 && threat.combatEnemiesNearMain == 0 &&
+        !activeApproach(state, threat) && threat.immediateGround < 0.45) {
+        const auto home = ourMain(state);
+        const auto unpoweredExpansion = std::ranges::any_of(
+            state.self.units, [&](const UnitSnapshot& nexus) {
+                if (nexus.kind != UnitKind::nexus || !nexus.position.valid() ||
+                    !home.valid() || distanceSquared(nexus.position, home) <= 320 * 320)
+                    return false;
+                return std::ranges::none_of(state.self.units,
+                    [&](const UnitSnapshot& pylon) {
+                        return pylon.kind == UnitKind::pylon && pylon.position.valid() &&
+                               distanceSquared(pylon.position, nexus.position) <= 384 * 384;
+                    });
+            });
+        if (unpoweredExpansion)
+            goal(result, GoalKind::build, UnitKind::pylon,
+                 count(state, UnitKind::pylon) + 1, 104,
+                 "power the new PvZ natural before pressure", true);
+    }
+
     // A pool-first Zerg can make contact before a conventional Gateway army
     // has enough surface area. Pause briefly at eight workers and establish a
     // static anchor; resume Probe growth as soon as either that anchor or two
     // Zealots are complete. This remains safe even when the first scout dies.
     if (minute(state) < 4 && count(state, UnitKind::zealot, true) < 2 &&
         count(state, UnitKind::photonCannon, true) == 0) {
-        result.desiredWorkers = std::min(result.desiredWorkers, 8);
+        const auto openingWorkerLimit = gatewayFirst &&
+            count(state, UnitKind::gateway) > 0 ? 11 : 8;
+        result.desiredWorkers = std::min(result.desiredWorkers, openingWorkerLimit);
     }
 
     if (supplyAtLeast(state, 10) && count(state, UnitKind::gateway) >= 2 &&
@@ -982,14 +1065,17 @@ StrategicPlan StrategyEngine::planPvZ(
              std::min(6, safetyCannons), 89, "ling and mutalisk coverage");
     }
     if (supplyAtLeast(state, 7)) {
-        goal(result, GoalKind::build, UnitKind::forge, 1, 100,
-             "fortified PvZ opening anchor", true);
-        goal(result, GoalKind::build, UnitKind::photonCannon, 1, 99,
-             "baseline anti-ling safety before economic commitment", true);
+        if (!gatewayFirst) {
+            goal(result, GoalKind::build, UnitKind::forge, 1, 100,
+                 "fortified PvZ opening anchor", true);
+            goal(result, GoalKind::build, UnitKind::photonCannon, 1, 99,
+                 "baseline anti-ling safety before economic commitment", true);
+        }
         const auto openingGateways = supplyAtLeast(state, 8) ? 2 : 1;
         goal(result, GoalKind::build, UnitKind::gateway,
              minute(state) < 8 ? openingGateways : 4,
-             openingGateways == 1 ? 98 : 97,
+             gatewayFirst && openingGateways == 1 ? 100 :
+                 (openingGateways == 1 ? 98 : 97),
              "seven-supply gateway into two-gate Zerg safety",
              count(state, UnitKind::gateway) < openingGateways);
         goal(result, GoalKind::train, UnitKind::zealot,
@@ -997,9 +1083,77 @@ StrategicPlan StrategyEngine::planPvZ(
              "opening defenders before Forge economy",
              count(state, UnitKind::zealot) < 3);
     }
-    if (supplyAtLeast(state, 15)) {
-        goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 82,
-             "air and dragoon access");
+    // The gateway-first pilot fielded four Zealots early, then reserved the
+    // whole mineral bank for a Nexus while both Gateways sat idle. Complete a
+    // mobile screen and the ranged-tech checkpoint before that reservation.
+    if (pvzGatewayOpening_ && count(state, UnitKind::nexus) < 2 && minute(state) < 10) {
+        const auto mobileScreen = count(state, UnitKind::zealot, true) >= 6;
+        const auto rangedAccess = count(state, UnitKind::cyberneticsCore) > 0;
+        if (!mobileScreen || !rangedAccess) result.desiredBases = 1;
+        if (!mobileScreen) {
+            goal(result, GoalKind::train, UnitKind::zealot, 6, 102,
+                 "keep both opening Gateways producing before the natural", true);
+        } else if (!rangedAccess) {
+            goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1, 101,
+                 "unlock ranged units before the natural", true);
+        }
+    }
+    // The mobile/Core pilot reached six Zealots before Zerg massed its first
+    // large wave, then spent the timing at home covering a Nexus. Use that
+    // short window to threaten the nearest known Zerg base. Local combat
+    // estimation retains authority to back away from a prepared defense.
+    if (pvzGatewayOpening_ && pvzEarlyPressureEligible(state, threat)) {
+        const auto home = ourMain(state);
+        auto target = enemyMain(state);
+        for (const auto& base : state.bases) {
+            if (base.ownerId != state.enemy.id || !base.center.valid() ||
+                !home.valid()) continue;
+            if (!target.valid() ||
+                distanceSquared(home, base.center) < distanceSquared(home, target))
+                target = base.center;
+        }
+        if (target.valid()) {
+            result.name += " [six-Zealot expansion pressure]";
+            result.posture = Posture::pressure;
+            result.minimumAttackSize = 6;
+            result.attackThreshold = 1.20;
+            result.attackTarget = target;
+            result.rallyPoint = home.valid() ? moveToward(home, target, 640.0) : target;
+            result.desiredBases = 1;
+        }
+    }
+    const auto earlySplashCore = pvzEarlySplash_ && minute(state) >= 5 &&
+        count(state, UnitKind::gateway, true) >= 2 &&
+        count(state, UnitKind::zealot, true) >= 3 &&
+        count(state, UnitKind::photonCannon, true) >= 1 &&
+        threat.combatEnemiesNearMain == 0 && !activeApproach(state, threat) &&
+        threat.immediateGround <= 0.45;
+    if (supplyAtLeast(state, 15) || earlySplashCore) {
+        goal(result, GoalKind::build, UnitKind::cyberneticsCore, 1,
+             earlySplashCore ? 96 : 82,
+             earlySplashCore ? "prepare a ranged or splash response behind the opening screen" :
+                               "air and dragoon access", earlySplashCore);
+    }
+    const auto hydraEvidence = recentEnemyCount(state, UnitKind::hydralisk) +
+                                   recentEnemyCount(state, UnitKind::lurker) >= 2 ||
+        std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& enemy) {
+            return enemy.kind == UnitKind::hydraliskDen;
+        });
+    const auto airEvidence = recentEnemyCount(state, UnitKind::mutalisk) >= 2 ||
+        std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& enemy) {
+            return enemy.kind == UnitKind::spire || enemy.kind == UnitKind::greaterSpire;
+        });
+    if (pvzEarlySplash_ && hydraEvidence && !airEvidence &&
+        count(state, UnitKind::zealot, true) >= 3 &&
+        count(state, UnitKind::photonCannon, true) >= 1 &&
+        threat.combatEnemiesNearMain == 0 && !hardBreachAtMain(state)) {
+        result.name += " [early Reaver screen]";
+        goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 101,
+             "start splash production on first Hydra evidence", true);
+        goal(result, GoalKind::build, UnitKind::roboticsSupportBay, 1, 100,
+             "finish the first Reaver prerequisite", true);
+        goal(result, GoalKind::train, UnitKind::reaver, 1, 100,
+             "field splash before the Hydra mass reaches the bases", true);
     }
     if (supplyAtLeast(state, 22)) {
         goal(result, GoalKind::build, UnitKind::stargate, 1, 76,

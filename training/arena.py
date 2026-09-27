@@ -25,7 +25,8 @@ def write_json(path, value):
 
 def prepare(template, output, dll, opponents, maps, purpose="development", race="Protoss", rounds=2, port=1347,
             server_jar=None, client_bundle=None, whole_game_observe=False, production_shadow=None, frame_limit=None,
-            production_control_receipt=None, production_screen_receipt=None, worker_training_intervention=None):
+            production_control_receipt=None, production_screen_receipt=None, worker_training_intervention=None,
+            tactical_target_weights=None):
     template, output, dll = map(lambda p: Path(p).resolve(), (template, output, dll))
     if purpose not in ("training", "development", "final-test"):
         raise ValueError("unknown campaign purpose")
@@ -37,6 +38,9 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
         raise ValueError("existing output, missing DLL or invalid port")
     if production_shadow and (race != 'Protoss' or not Path(production_shadow).is_file()):
         raise ValueError('production shadow needs Protoss and a model file')
+    if tactical_target_weights and (purpose != 'development' or race != 'Protoss' or
+                                    not Path(tactical_target_weights).is_file()):
+        raise ValueError('tactical target control needs Protoss development and frozen weights')
     if worker_training_intervention is not None and (purpose != 'training' or race != 'Protoss' or
             worker_training_intervention not in ('baseline', 'plus-one', 'plus-two') or production_control_receipt):
         raise ValueError('worker interventions require isolated Protoss training without model command control')
@@ -138,6 +142,9 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
         shutil.copy2(production_screen_receipt,target/'read/ProductionDemand-screen-receipt.json')
     if whole_game_observe:
         (target / "read/WholeGame-observe.txt").write_text("observe\n")
+    if tactical_target_weights:
+        shutil.copy2(tactical_target_weights, target / "read/TacticalTarget-weights.bin")
+        (target / "read/TacticalTarget-mode.txt").write_text("local-target\n")
     settings["bots"] = [dict(BotName=bot, Race=race, BotType="dll", BWAPIVersion="BWAPI_440")] + [available[n] for n in opponents]
     settings.update(clearResults="no", gamesListFile="games.jsonl", resultsFile="results.jsonl",
                     maps=maps, serverPort=port, enableBotFileIO=False, lobbyGameSpeed="Fastest")
@@ -245,6 +252,7 @@ def main():
     prepare_parser.add_argument('--production-control-receipt',type=Path,help='Passing shadow/feedback receipt for bounded local train-unit scenarios')
     prepare_parser.add_argument('--production-screen-receipt',type=Path,help='Passing bounded control screen for a full-game local comparison')
     prepare_parser.add_argument('--worker-training-intervention',choices=('baseline','plus-one','plus-two'),help='Fixed local worker spending intervention, training episodes only')
+    prepare_parser.add_argument('--tactical-target-weights',type=Path,help='Frozen local target scorer weights; DLL still requires opt-in evaluation build')
     inspect_parser = commands.add_parser("inspect")
     inspect_parser.add_argument("run", type=Path)
     verify_parser = commands.add_parser("verify")

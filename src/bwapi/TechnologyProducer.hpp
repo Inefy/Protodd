@@ -12,7 +12,7 @@ auto technologyProducer(const Units& units, CanExecute canExecute) {
     using Unit = std::remove_cvref_t<decltype(*units.begin())>;
     Unit selected = nullptr;
     for (const auto candidate : units) {
-        if (candidate == nullptr || !candidate->exists() || !candidate->isCompleted() ||
+        if (candidate == nullptr || !candidate->exists() || !candidate->isCompleted() || !candidate->isPowered() ||
             !canExecute(candidate)) continue;
         if (selected == nullptr || candidate->getID() < selected->getID()) selected = candidate;
     }

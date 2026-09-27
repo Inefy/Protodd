@@ -123,3 +123,10 @@ Whole-game learned control remains gated. No tournament package was changed,
 and hourly automation remains paused. A successful build and native tests do
 not replace engine parity, full callback timing, paired live evaluation and the
 72-game strength gate.
+
+Follow-up engine validation is documented in
+[audit-validation-20260926.md](audit-validation-20260926.md). It caught and
+corrected an incomplete part of B08: `canUpgrade()` can report true for an
+unpowered Forge, so the selector now checks power explicitly before choosing
+a producer. Controlled pre-fix/fixed DLL tests and a 200-supply complete-callback
+load test provide additional evidence beyond the native fake-producer test.
