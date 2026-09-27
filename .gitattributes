@@ -2,4 +2,4 @@
 *.bat text eol=crlf
 *.sln text eol=crlf
 *.vcxproj text eol=crlf
-
+replays/cwal-source/*.zip filter=lfs diff=lfs merge=lfs -text

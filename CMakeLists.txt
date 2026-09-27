@@ -280,6 +280,11 @@ if(PROTODD_BUILD_TESTS)
                 -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p test_tactical_target_fit.py)
         set_tests_properties(protodd_tactical_target_fit_tests PROPERTIES
             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME protodd_replay_bundle_tests
+            COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+                -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p test_replay_bundle.py)
+        set_tests_properties(protodd_replay_bundle_tests PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME protodd_parallel_validation_tests
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_parallel_validation.py")
         add_test(NAME protodd_replay_catalog_tests

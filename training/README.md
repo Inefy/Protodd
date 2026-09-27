@@ -105,6 +105,11 @@ allocation outputs, spatial targets, and richer history are future model version
 
 ## Prepared-data contract
 
+The repository's [source replay bundle](../replays/README.md) preserves the raw
+human replays in Git LFS. Its restore command selects only the frozen training
+split by default. The held-out and unassigned source files are not training
+inputs.
+
 ### Audit raw downloads first
 
 `training.replay_audit` performs the command/metadata stage on completed `.rep`

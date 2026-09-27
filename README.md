@@ -14,6 +14,8 @@ replays initialize whole-game learning; matched games determine playing strength
 The v32d extraction and full six-slot fit are complete, but the model fails its
 command-quality gates. See the [experiment evidence](docs/whole-game-model.md).
 No experimental whole-game model is promoted to tournament control.
+The raw human replay source corpus is in [replays/](replays/README.md) via Git
+LFS; its manifest keeps frozen training, validation, and test membership.
 
 ## What is implemented
 
