@@ -37,11 +37,12 @@ Current order of work (updated after the 27 September PvZ screens):
    A fog-only Observer rule missed its target timing in an earlier four-game
    candidate; keep it off and avoid another copy of that screen until a
    genuine early cloak exposure is available.
-2. Address the fresh PvT baseline's repeated natural-base collapse against
-   Steamhammer mech. Inspect the defender's engagement estimate, mine and
-   siege coverage, Reaver firing, and whether a protected third base can be
-   established before the first two mineral lines run low. Choose one bounded
-   correction and compare frozen binaries on both maps and starting sides.
+2. Address the PvT natural-base collapse and stalled counterpressure against
+   Steamhammer mech. The larger mobile screen lost all four controlled games;
+   a closer third base built in one paired game but also did not win. Test the
+   frozen policy's repeated late `defend` decisions as a separate controlled
+   factor, then inspect mine coverage, engagement estimates and Reaver firing.
+   Compare frozen packages on both maps and starting sides.
 3. Attack the earliest repeatable loss mechanism: opening mobile defense,
    protected tech/expansion transitions, army cohesion and detector coverage.
    Choose one bounded change at a time and compare frozen binaries in healthy
@@ -148,6 +149,59 @@ expansion and most of its army late. Game 1's main mineral field was depleted
 and the natural nearly depleted by frame 26,400, while the requested third
 Nexus had not completed. Review third-base protection alongside tactical
 defense, without assuming that an earlier expansion alone would survive.
+
+The first PvT follow-up tested a larger mobile screen against observed mines
+or Tanks and recalled a scouting Observer while home squads needed mine
+detection. The frozen broad candidate
+`build/pvt-natural-defense-screen-640-20260927/candidate-v2` was structurally
+healthy and differed from the prior Steamhammer reference only in Protodd's
+DLL. It won 1/4 versus 0/4, but Steamhammer chose different openings despite
+matched maps and game seeds: two candidate losses faced an early two-Barracks
+Marine rush absent from their paired references. The sole win cannot be
+attributed to the defense rule. A follow-up binary aligned mine recall with
+the squad's eight-second mine memory.
+
+To expose that follow-up to a consistent threat, an isolated Steamhammer
+template was configured to choose its `Vultures` opening, with evaluator
+selection disabled. Its four-game reference at
+`build/pvt-controlled-mech-screen-20260927/reference` and candidate at
+`build/pvt-controlled-mech-screen-20260927/candidate` matched every non-DLL
+input, map, side and observed game seed. Both campaigns were healthy, with
+opponent activity, normal adjudication and no bot errors. Both lost 0/4.
+Reference ends were frames 23,190, 40,209, 34,846 and 24,771; candidate ends
+were 28,863, 36,179, 28,243 and 36,055. The candidate sometimes delayed a
+loss but still lost the mineral lines while combat units remained. Its source
+changes were removed from the default bot; these experiments do not establish
+a strength gain.
+
+The next bounded issue was expansion placement. The generic site selector
+required gas for every Nexus, although its comment intended that rule only
+for the natural. In the mixed mech game Protodd chose a third at 320×240,
+ground route 3,079 from the main, while a mineral base at 416×1264 had route
+1,909. The distant third split the defense. A revised selector keeps the gas
+natural, then lets a substantially closer mineral base beat a far gas flank
+while retaining a modest gas preference. Native regression and Win32 build
+passed. The controlled four-game reference and revised-site candidate matched
+all non-DLL inputs, map, side and game seed; both campaigns ended normally with
+opponent activity and no bot errors. Both lost 0/4. Reference ends were frames
+23,190, 40,209, 34,846 and 24,771; candidate ends were 47,370, 32,614,
+25,639 and 25,484. In paired game 0 the third Nexus moved from the far gas
+base to the closer mineral pocket and the bot survived much longer. In games
+1–3 the candidate did not complete a third Nexus before defeat, so those games
+do not test the site's defensive value. Keep this bounded placement correction
+as a route-selection fix, without claiming a win-rate gain.
+
+The longer game exposed a separate late-game bottleneck. At frame 28,800 the
+candidate had three Nexuses and 66 Probes, and at frame 38,400 it still had
+four Nexuses and 54 Probes, but the opponent had grown from three to eight
+Command Centers and from seven to fourteen Factories. The bot's posture was
+`Hold` for much of that interval. `PolicyTrace.log` shows that 24 of 36
+decisions from frames 24,000–38,400 were forced `defend` (`mask=8`) because
+the embedded frozen policy saw at least two nearby enemies; the runtime then
+overrode the strategy's pressure posture with `Hold`. This is a concrete
+counterpressure hypothesis, not proof that attacking would win. Compare a
+frozen-policy-off arm against the same binary and opponent before changing
+the default policy guard.
 
 ## Manual priority update — 26 September UTC
 

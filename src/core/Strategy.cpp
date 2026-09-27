@@ -189,7 +189,8 @@ Position nearestExpansionSite(const GameState& state) {
     // previous planners could request a second base without ever naming one;
     // the bridge then used the combat rally point and was free to select a
     // forward or otherwise inappropriate resource cluster.
-    const auto gasBaseAvailable = std::ranges::any_of(
+    const auto firstExpansion = count(state, UnitKind::nexus) <= 1;
+    const auto gasBaseAvailable = firstExpansion && std::ranges::any_of(
         state.bases, [](const BaseSnapshot& base) {
             return base.ownerId == -1 && !base.island && base.center.valid() &&
                    base.mineralsRemaining >= 1000 && base.geysers > 0;
@@ -200,13 +201,17 @@ Position nearestExpansionSite(const GameState& state) {
         if (base.ownerId != -1 || base.island || !base.center.valid() ||
             base.mineralsRemaining < 1000) continue;
         // The first expansion must be the normal gas natural when one exists.
-        // Mineral-only pockets are useful later, but on maps such as
-        // Destination one can look closer across a cliff while actually being
-        // the fourth base along the ground route.
+        // After that, a closer mineral-only base can keep the economy behind
+        // the same defended route instead of opening a distant gas flank.
+        // Ground distance keeps a cliff-side pocket from looking artificially
+        // closer than the reachable natural on maps such as Destination.
         if (gasBaseAvailable && base.geysers == 0) continue;
-        const auto score = base.groundDistanceFromMain >= 0
+        const auto route = base.groundDistanceFromMain >= 0
                                ? static_cast<double>(base.groundDistanceFromMain)
                                : distance(home, base.center);
+        // Gas remains valuable after the natural, but it should not win over
+        // a mineral pocket more than a full screen closer by ground route.
+        const auto score = route - (!firstExpansion && base.geysers > 0 ? 384.0 : 0.0);
         if (score < bestScore ||
             (score == bestScore && (best == nullptr || base.id < best->id))) {
             bestScore = score;

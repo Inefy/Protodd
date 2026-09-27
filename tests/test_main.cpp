@@ -3517,6 +3517,26 @@ void testReportImprovements() {
     const auto gasNatural = strategy.plan(mineralPocket, {});
     expect(gasNatural.expansionTarget == Position{1400, 700},
            "the first Nexus does not replace an available gas natural with a mineral-only pocket");
+    auto thirdBase = mineralPocket;
+    thirdBase.frame = 11 * 60 * 24;
+    thirdBase.bases[3].ownerId = thirdBase.self.id;
+    thirdBase.bases.push_back({5, {3200, 1200}, {3200, 1250}, 9000, 5000,
+                               -1, thirdBase.frame, false, false, 8, 1});
+    thirdBase.bases.back().groundDistanceFromMain = 2500;
+    thirdBase.self.units.push_back(unit(300, UnitKind::nexus, true, {1400, 700}));
+    thirdBase.self.units.back().role = UnitRole::resourceDepot;
+    for (int i = 0; i < 16; ++i) {
+        auto probe = unit(310 + i, UnitKind::probe, true, {1400, 750});
+        probe.role = UnitRole::worker;
+        thirdBase.self.units.push_back(probe);
+    }
+    const auto protectedThird = strategy.plan(thirdBase, {});
+    expect(protectedThird.desiredBases >= 3 &&
+               protectedThird.expansionTarget == Position{900, 900},
+           "after the gas natural, the closer ground-route mineral base beats a distant gas flank");
+    thirdBase.bases.back().groundDistanceFromMain = 650;
+    expect(strategy.plan(thirdBase, {}).expansionTarget == Position{3200, 1200},
+           "a nearby gas third remains preferable when its route penalty is small");
     auto zergState = state;
     zergState.enemy.race = Race::zerg;
     zergState.frame = 5 * 60 * 24;
