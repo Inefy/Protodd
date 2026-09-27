@@ -838,6 +838,26 @@ ports. The screen will require an observed floor trigger and funded Zealot,
 first two Cannon starts and natural Cannon completion within 300 frames of
 reference where observed, no added early losses, and a valid paired win
 gain before more games. The rule is off by default.
+The screen finished with four valid losses at frames 13,115, 12,743,
+12,836 and 26,414. The strict review at
+`build/pvz-army-floor-screen-640-20260927/review.json` paired all four
+games against isolated powered Cannons and found 0/4 wins in both arms.
+The floor appeared in games 0, 1 and 3, but only game 3 had the minerals
+to fund its new action: 11 accepted extra Zealot training orders. It had
+20 army units and 44 Probes on two bases at frame 12,000, then 58 army
+units at frame 19,200. A Reaver and High Templar completed later, and four
+Storm casts were accepted. Zerg still destroyed every base by frame
+26,414. The reference for that map ended at 11,999, but its opponent
+opening diverged; the longer survival cannot be attributed to this rule.
+Game 2 never reached the army-floor checkpoint, and its second Cannon
+started at frame 7,867 versus 5,492 in the reference. That pre-intervention
+divergence fails the strict Cannon-start safeguard without showing that
+the floor caused the delay. Natural Cannon completion met the timing
+safeguard where both games observed one; no added early losses occurred.
+The functional and win gates failed, so this option stays off. The larger
+army in game 3 suggests the next loss review should inspect force position,
+engagement timing and composition against the late Zerg mass before another
+economy quota experiment.
 
 The isolated Cannon screen's game 2 also lost (frame 25,391). Its third and
 fourth Cannons completed near the natural at frames 12,121 and 13,326.
