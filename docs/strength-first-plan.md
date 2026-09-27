@@ -1046,19 +1046,30 @@ Its DLL SHA-256 is
 `CB2E2D9BE309276DF0234EACF869E8CF696CDE974CEA41EF7BAF2E8979B740E8`;
 all 415 non-DLL inputs match after port normalization. The original
 window's game 2 also lost (frame 22,911) without invoking the fallback; it
-had only six high-bank idle samples. Game 3 later lost at frame 12,030. The early
-variant has not been played.
+had only six high-bank idle samples. Game 3 later lost at frame 12,030.
 The detailed budget trace found zero original-window ready samples and zero
 fallback mentions in the first three games. Game 1 had four state samples
 meeting the revised early-window budget, supply and completed-defense gates.
 This is a plausible exposure opportunity, not evidence of an improved result.
 The original-window campaign finished with three valid losses and one
-frame-limit exclusion (game 0). Game 3 lost at frame 12,030. The strict
+frame-limit exclusion (game 0). The strict
 review in `build/pvz-mineral-fallback-screen-640-20260927/review.json`
 matched only games 1 and 2 because game 0 was excluded here and game 3 was
 excluded in the replay-opening reference. Neither matched game was won,
 the fallback never appeared in any of the four candidate logs, and both
 the functional and paired gates failed. Keep the original-window option off.
+The revised early-window `candidate-v2` subsequently completed four valid
+losses at frames 12,619, 11,689, 23,748 and 16,060. Its only exposed game
+(game 2) issued 24 accepted extra Zealot orders beginning at frame 12,247,
+yet had 15 army units at frame 18,000 versus 26 in the replay-opening
+reference, and one additional early loss. Games 0 and 1 collapsed before
+the new spending window; game 3 never issued the fallback. The strict
+review at `build/pvz-early-mineral-fallback-screen-640-20260927/review-v2.json`
+matched the three valid replay-opening reference games. The reference's
+excluded fourth game prevents a full paired gate; both arms won 0/3
+matched games. Its functional and win gates failed. Keep the early-window
+option off and close this mineral-fallback family after the two predeclared
+activation windows.
 
 - No new full-corpus fit until a bounded experiment addresses a demonstrated
   bottleneck and meets its declared development gates. Do not restart the completed
