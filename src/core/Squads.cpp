@@ -436,7 +436,8 @@ bool SquadPlanner::mobileDetectionReady(const GameState& state, const Squad& squ
 std::vector<Command> SquadPlanner::detectorEscorts(
     const GameState& state,
     const std::span<const Squad> squads,
-    const InfluenceMap& influence) const {
+    const InfluenceMap& influence,
+    const bool mobilizeReserveAgainstLurkers) const {
     std::vector<const UnitSnapshot*> observers;
     for (const auto& unit : state.self.units) {
         if (unit.kind == UnitKind::observer && unit.completed && !unit.loaded &&
@@ -444,15 +445,33 @@ std::vector<Command> SquadPlanner::detectorEscorts(
     }
     std::ranges::sort(observers, {}, [](const UnitSnapshot* unit) { return unit->id; });
 
+    const auto lurkerAtHome = mobilizeReserveAgainstLurkers &&
+        std::ranges::any_of(state.enemy.units, [&state](const UnitSnapshot& enemy) {
+            if (enemy.kind != UnitKind::lurker || !enemy.completed ||
+                !enemy.position.valid() ||
+                (!enemy.visible && state.frame - enemy.lastSeen > 3 * 24))
+                return false;
+            return std::ranges::any_of(state.bases, [&state, &enemy](const BaseSnapshot& base) {
+                return base.ownerId == state.self.id && base.center.valid() &&
+                       distanceSquared(enemy.position, base.center) <= 900 * 900;
+            });
+        });
+
     std::vector<const Squad*> priorities;
     for (const auto& squad : squads) {
         if (squad.role == SquadRole::baseDefense && squad.enemies.empty() &&
             !squad.needsDetection) continue;
         if (!squad.units.empty()) priorities.push_back(&squad);
     }
-    std::ranges::sort(priorities, [](const Squad* left, const Squad* right) {
+    std::ranges::sort(priorities, [lurkerAtHome](const Squad* left, const Squad* right) {
         if (left->needsDetection != right->needsDetection)
             return left->needsDetection > right->needsDetection;
+        // In a home Lurker fight, give the larger force its detection before
+        // a small remote guard. A static Cannon can still cover the guard's
+        // base, while an undetected main army cannot advance at all.
+        if (lurkerAtHome && left->needsDetection &&
+            left->units.size() != right->units.size())
+            return left->units.size() > right->units.size();
         if (left->role != right->role)
             return left->role == SquadRole::baseDefense;
         return left->units.size() > right->units.size();
@@ -462,7 +481,11 @@ std::vector<Command> SquadPlanner::detectorEscorts(
     // Once a second Observer exists, keep one available for strategic
     // scouting. Fragmented armies can otherwise lease every Observer as an
     // escort, leaving no unit to watch a siege push before it reaches a base.
-    const auto escortCapacity = observers.size() > 1 ? observers.size() - 1 : observers.size();
+    const auto detectionDemand = static_cast<std::size_t>(std::ranges::count_if(
+        priorities, [](const Squad* squad) { return squad->needsDetection; }));
+    const auto escortCapacity = lurkerAtHome
+        ? std::min(observers.size(), detectionDemand)
+        : (observers.size() > 1 ? observers.size() - 1 : observers.size());
     const auto count = std::min(escortCapacity, priorities.size());
     result.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {

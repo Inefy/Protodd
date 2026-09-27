@@ -20,6 +20,7 @@
 #include "protodd/Workers.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -3726,6 +3727,53 @@ void testReportImprovements() {
            "contact with an undetected threat sends the army home instead of turtling in place");
 }
 
+void testPvZDetectorSurgeOption() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 16416;
+    state.mapWidthPixels = 4096;
+    state.mapHeightPixels = 4096;
+    state.self.id = 1;
+    state.enemy.id = 2;
+    state.bases = {{1, {1000, 1000}, {1000, 1050}, 8000, 5000, 1}};
+    auto first = unit(700, UnitKind::observer, true, {2200, 1000});
+    auto second = unit(701, UnitKind::observer, true, {950, 1000});
+    first.flying = second.flying = true;
+    first.sightRange = second.sightRange = 288;
+    state.self.units = {first, second};
+    state.enemy.units = {unit(800, UnitKind::lurker, false, {1200, 1000})};
+    Squad guard;
+    guard.role = SquadRole::baseDefense;
+    guard.center = guard.retreat = {950, 1000};
+    guard.objective = {1200, 1000};
+    guard.needsDetection = true;
+    for (int id = 810; id < 815; ++id)
+        guard.units.push_back(unit(id, UnitKind::zealot, true, guard.center));
+    Squad army;
+    army.role = SquadRole::mainArmy;
+    army.center = army.retreat = {1600, 1000};
+    army.objective = {1200, 1000};
+    army.needsDetection = true;
+    for (int id = 820; id < 844; ++id)
+        army.units.push_back(unit(id, UnitKind::dragoon, true, army.center));
+    const std::array squads{guard, army};
+    InfluenceMap influence;
+    influence.update(state);
+    expect(!SquadPlanner::mobileDetectionReady(state, army),
+        "the distant second Observer has not yet covered the main army");
+    const auto regular = SquadPlanner{}.detectorEscorts(state, squads, influence);
+    const auto surge = SquadPlanner{}.detectorEscorts(state, squads, influence, true);
+    expect(regular.size() == 1 && regular.front().actor == 701,
+        "ordinary escort allocation retains the second Observer for scouting");
+    expect(surge.size() == 2 && surge.front().actor == 700 &&
+           surge.back().actor == 701,
+        "home Lurkers mobilize both Observers and prioritize the larger blocked army");
+    state.enemy.units[0].position = {3500, 3500};
+    influence.update(state);
+    expect(SquadPlanner{}.detectorEscorts(state, squads, influence, true).size() == 1,
+        "distant Lurkers leave the normal scouting reserve intact");
+}
+
 void testLadderSourceImprovements() {
     using namespace protodd;
     GameState state;
@@ -6393,6 +6441,7 @@ int main() {
     testPvZReplayOpeningOption();
     testPvZPoweredCannonScreenOption();
     testPvZArmyFloorOption();
+    testPvZDetectorSurgeOption();
     testPvZArchivesBeforeDropsOption();
     testProtectedLateEconomyOption();
     testVenatorCloakedContainment();

@@ -868,6 +868,30 @@ which engagements depleted the army, and whether reinforcement and supply
 timing could have protected the bases. The first attack at frame 11,976
 shows that the failure was not simply a missing attack order.
 
+The same loss exposed a detector allocation bottleneck. A Lurker was
+observed near the natural at frame 14,109. At frame 16,416 two Observers
+were complete, but the escort planner kept one for scouting while a
+24-unit main army and a second squad had detection-blocked advances.
+The newly completed Observer received a scout-travel order away from home.
+At frame 19,200 three Observers existed, yet a lone Reaver main-army squad
+was still detection-blocked while two escorts covered other squads. The
+Reaver did attack later, so this is a lost movement and allocation window,
+not proof that it never fought.
+
+An opt-in `PROTODD_PVZ_DETECTOR_SURGE` tactic releases the scouting reserve
+when a recently seen Lurker is within 900 pixels of an owned base and
+ground squads need detection. It gives larger detection-blocked squads
+priority over small guards, then returns to the normal scouting reserve
+when the threat moves away. The native allocation test and Win32 build
+pass. The DLL SHA-256 is
+`5D258D5499468603CE86CC2F2BD223F77B4CC3722C73E5D89EB76446D97291F5`.
+The frozen four-game package at
+`build/pvz-detector-surge-screen-640-20260927/candidate` matches all 415
+non-DLL inputs of the army-floor run after port normalization. Compare
+escort movement, detection-blocked main-army time, Reaver attacks, early
+defense and valid wins; an observed improvement in detector allocation
+alone does not promote this combination without a win gain.
+
 The isolated Cannon screen's game 2 also lost (frame 25,391). Its third and
 fourth Cannons completed near the natural at frames 12,121 and 13,326.
 By frame 20,880, Zerg had shown 95 Hydralisks across the game and Protodd

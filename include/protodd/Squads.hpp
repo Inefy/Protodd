@@ -54,7 +54,8 @@ public:
     [[nodiscard]] std::vector<Command> detectorEscorts(
         const GameState& state,
         std::span<const Squad> squads,
-        const InfluenceMap& influence) const;
+        const InfluenceMap& influence,
+        bool mobilizeReserveAgainstLurkers = false) const;
 
     [[nodiscard]] static const Squad* selectVanguard(
         std::span<const Squad> squads,

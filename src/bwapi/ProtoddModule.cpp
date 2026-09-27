@@ -950,7 +950,13 @@ void ProtoddModule::updateCombat(
     }
 
     detectorEscorts_.clear();
-    for (const auto& order : squads_.detectorEscorts(state_, formed, influence_)) {
+#ifdef PROTODD_PVZ_DETECTOR_SURGE
+    const auto mobilizeDetectorReserve = state_.enemy.race == Race::zerg;
+#else
+    const auto mobilizeDetectorReserve = false;
+#endif
+    for (const auto& order : squads_.detectorEscorts(
+             state_, formed, influence_, mobilizeDetectorReserve)) {
         detectorEscorts_.push_back(order.actor);
         submit(order);
     }
