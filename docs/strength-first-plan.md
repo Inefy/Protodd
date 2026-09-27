@@ -820,6 +820,25 @@ predeclared frame-12,000 timing, and both the first-Cannon and natural-Cannon
 safeguards failed. The functional and win gates failed. Keep proactive
 Reaver off. The next experiment should address a concrete spending or
 defense failure without assuming faster Reaver tech is the answer.
+
+An opt-in `PROTODD_PVZ_ARMY_FLOOR` screen now tests the two-base spending
+bottleneck separately from Reaver tech and the earlier mineral fallback.
+After frame 9,600 and only with two completed Nexuses, two Cannons, Core,
+two Gateways and at least 26 Probes, it compares completed ground defenders
+with one per three Probes (bounded to 12–22). While below that floor, it
+defers another Nexus, caps routine Probe growth at 44, and reserves up to
+four Zealots when at least 600 minerals are banked. Known Mutalisks or a
+strong air threat veto this ground-only branch. Its native test and Win32
+build pass. The DLL SHA-256 is
+`E0751566D304D85B66A38BFF262141EF1297953048468135706F66436C49F5EE`.
+The four-game frozen campaign at
+`build/pvz-army-floor-screen-640-20260927/candidate` has the same 415
+non-DLL inputs as the isolated powered-Cannon screen after normalizing
+ports. The screen will require an observed floor trigger and funded Zealot,
+first two Cannon starts and natural Cannon completion within 300 frames of
+reference where observed, no added early losses, and a valid paired win
+gain before more games. The rule is off by default.
+
 The isolated Cannon screen's game 2 also lost (frame 25,391). Its third and
 fourth Cannons completed near the natural at frames 12,121 and 13,326.
 By frame 20,880, Zerg had shown 95 Hydralisks across the game and Protodd

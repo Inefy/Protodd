@@ -331,6 +331,47 @@ StrategicPlan StrategyEngine::plan(
     addPostPressureTransition(result, state, threat);
     addMapControlEconomy(result, state, threat);
 
+    // A later PvZ base can be requested again by the generic economy pass.
+    // Hold that request while the two-base ground screen is thin, and turn a
+    // large mineral surplus into defenders before financing more Probes.
+    if (pvzArmyFloor_ && state.enemy.race == Race::zerg &&
+        state.frame >= 9600 && state.frame < 26400 &&
+        count(state, UnitKind::nexus, true) >= 2 &&
+        count(state, UnitKind::cyberneticsCore, true) >= 1 &&
+        count(state, UnitKind::photonCannon, true) >= 2 &&
+        count(state, UnitKind::gateway, true) >= 2 &&
+        count(state, UnitKind::probe, true) >= 26 &&
+        threat.air <= 0.42 && recentEnemyCount(state, UnitKind::mutalisk) == 0) {
+        const auto workers = count(state, UnitKind::probe);
+        const auto groundArmy = static_cast<int>(std::ranges::count_if(
+            state.self.units, [](const UnitSnapshot& unit) {
+                return unit.completed && !unit.disabled && !unit.loaded &&
+                       !unit.hallucination && !unit.flying &&
+                       !isBuilding(unit.kind) && !isWorker(unit.kind) &&
+                       isCombatUnit(unit.kind);
+            }));
+        const auto floor = std::clamp(workers / 3, 12, 22);
+        if (groundArmy < floor) {
+            const auto committedBases = count(state, UnitKind::nexus);
+            const auto baseCap = std::max(2, committedBases);
+            result.desiredBases = std::min(result.desiredBases, baseCap);
+            result.maximumBases = std::min(result.maximumBases, baseCap);
+            result.desiredWorkers = std::min(result.desiredWorkers,
+                                             std::max(workers, 44));
+            result.name += " [two-base ground army floor]";
+            for (auto& objective : result.goals) {
+                if (objective.goal == GoalKind::expand &&
+                    objective.target == UnitKind::nexus)
+                    objective.desiredCount = std::min(objective.desiredCount, baseCap);
+            }
+            if (state.self.minerals >= 600) {
+                goal(result, GoalKind::train, UnitKind::zealot,
+                     count(state, UnitKind::zealot) + std::min(4, floor - groundArmy),
+                     103, "spend two-base mineral surplus on ground defenders", true);
+            }
+        }
+    }
+
     // The generic saturated-economy pass can reintroduce a Nexus after the
     // PvZ timing is chosen. That immediately changes the squad mission to
     // cover-expansion and recalls the force. Reconcile the short timing here,

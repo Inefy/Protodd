@@ -6138,6 +6138,55 @@ void testPvZPoweredCannonScreenOption() {
         "additional Cannons do not alter the first two Cannon timing");
 }
 
+void testPvZArmyFloorOption() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 16800;
+    state.self.id = 1;
+    state.enemy.id = 2;
+    state.self.race = Race::protoss;
+    state.enemy.race = Race::zerg;
+    state.self.minerals = 900;
+    state.self.supplyUsed = 120;
+    state.self.supplyTotal = 160;
+    state.self.units = {unit(1, UnitKind::nexus, true),
+        unit(2, UnitKind::nexus, true), unit(3, UnitKind::pylon, true),
+        unit(4, UnitKind::forge, true), unit(5, UnitKind::gateway, true),
+        unit(6, UnitKind::gateway, true),
+        unit(7, UnitKind::cyberneticsCore, true),
+        unit(8, UnitKind::photonCannon, true),
+        unit(9, UnitKind::photonCannon, true)};
+    for (int id = 20; id < 62; ++id) {
+        auto probe = unit(id, UnitKind::probe, true);
+        probe.role = UnitRole::worker;
+        state.self.units.push_back(probe);
+    }
+    for (int id = 70; id < 76; ++id)
+        state.self.units.push_back(unit(id, UnitKind::zealot, true));
+    const StrategyEngine reference{false, false, false, true, false, false, true};
+    const StrategyEngine armyFloor{false, false, false, true, false, false,
+                                   true, false, true};
+    const auto baseline = reference.plan(state, {});
+    const auto thin = armyFloor.plan(state, {});
+    const auto fundedZealots = [](const StrategicPlan& plan) {
+        return std::ranges::any_of(plan.goals, [](const ProductionGoal& demand) {
+            return demand.target == UnitKind::zealot && demand.priority >= 103 &&
+                   demand.blocking;
+        });
+    };
+    expect(baseline.desiredBases > 2 && thin.desiredBases == 2 &&
+           thin.desiredWorkers <= 44 && fundedZealots(thin),
+        "thin two-base PvZ army blocks another Nexus and funds defenders");
+    state.frame = 8400;
+    expect(!fundedZealots(armyFloor.plan(state, {})),
+        "army floor leaves the Core and first Cannons' opening window intact");
+    state.frame = 16800;
+    for (int id = 76; id < 85; ++id)
+        state.self.units.push_back(unit(id, UnitKind::zealot, true));
+    expect(armyFloor.plan(state, {}).desiredBases > 2,
+        "expansion resumes after the ground army reaches its worker-scaled floor");
+}
+
 void testPvZArchivesBeforeDropsOption() {
     using namespace protodd;
     GameState state;
@@ -6343,6 +6392,7 @@ int main() {
     testPvZEarlySplashOption();
     testPvZReplayOpeningOption();
     testPvZPoweredCannonScreenOption();
+    testPvZArmyFloorOption();
     testPvZArchivesBeforeDropsOption();
     testProtectedLateEconomyOption();
     testVenatorCloakedContainment();
