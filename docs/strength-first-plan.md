@@ -4,9 +4,9 @@
 
 The latest default source includes the clearer in-game status overlay, combat
 and scouting correctness fixes, and several bounded strategy changes. The
-experimental PvZ early-splash and PvP fog-detection rules are build options
-that remain **off** in the default bot. The overlay improves diagnosis; it is
-not evidence of stronger play. At this checkpoint all 41 development test
+experimental PvZ and PvP tactics are build options that remain **off** in the
+default bot. The overlay improves diagnosis; it is not evidence of stronger
+play. At this checkpoint all 42 development test
 suites pass and the default Win32 BWAPI DLL builds successfully.
 
 A fresh, structurally healthy four-game development baseline against
@@ -28,7 +28,7 @@ three concrete bottlenecks:
    after the army had already collapsed; one late Reaver died before firing.
    More late Reaver priority is not the next useful variant.
 
-Current order of work:
+Current order of work (updated after the 27 September PvZ screens):
 
 1. Finish the same-input, four-game-per-arm PvP fog-detection screen on
    Benzene and Destination. Check Observer completion **before** the first
@@ -38,9 +38,11 @@ Current order of work:
    exited before game 1 without a recorded exception. The candidate has not
    started. Reprepare both arms for a complete comparison; do not treat the
    partial result as a win-rate screen.
-2. Run the prepared current-default PvT baseline against UABTerran so the
-   next intervention is chosen from all three matchups rather than another
-   PvZ guess.
+2. Address the fresh PvT baseline's repeated natural-base collapse against
+   Steamhammer mech. Inspect the defender's engagement estimate, mine and
+   siege coverage, Reaver firing, and whether a protected third base can be
+   established before the first two mineral lines run low. Choose one bounded
+   correction and compare frozen binaries on both maps and starting sides.
 3. Attack the earliest repeatable loss mechanism: opening mobile defense,
    protected tech/expansion transitions, army cohesion and detector coverage.
    Choose one bounded change at a time and compare frozen binaries in healthy
@@ -51,6 +53,33 @@ Current order of work:
 
 The target is a stronger full-game bot. No current result establishes a
 major win-rate gain or tournament readiness.
+
+### Current-default PvT baseline against Steamhammer — 27 September
+
+`build/current-strength-steamhammer-640-20260927` pinned the default DLL
+(`52C5D39DD5D7E125BE4C6F778FB045BD1620BCB7339929DCE700784991500012`)
+for four games on Benzene and Destination, both starting sides. The package
+verified before and after play. Both players reported consistent normal ends
+without crashes or timeouts; the Protodd telemetry recorded enemy activity in
+every game. All four were losses, ending at frames 25,019, 33,265, 27,964
+and 26,445. This is a development sample against one opponent, not a ladder
+win-rate estimate.
+
+The two mech-heavy games exposed a repeatable natural-base defense problem.
+In Destination game 1, Protodd had 44 Probes, two Nexuses and 27 army units
+at frame 24,000, yet Terran's growing Factory force pushed through its
+natural; by frame 28,800 the state held no Probes and one Nexus while 28
+army units remained. A natural defense squad was present and its simulation
+still predicted a favorable local fight shortly before the collapse. In
+Benzene game 2, 50 Probes, two Nexuses and 31 army units at frame 19,200 fell
+to 44 Probes, one Nexus and eight army units by frame 24,000. The opponent
+had observed Siege Tanks, Vultures and Spider Mines. These traces suggest
+both engagement evaluation and defense execution merit inspection; they do
+not isolate a single cause. Game 0 against a bio-heavy opening also lost an
+expansion and most of its army late. Game 1's main mineral field was depleted
+and the natural nearly depleted by frame 26,400, while the requested third
+Nexus had not completed. Review third-base protection alongside tactical
+defense, without assuming that an earlier expansion alone would survive.
 
 ## Manual priority update — 26 September UTC
 
@@ -891,6 +920,20 @@ non-DLL inputs of the army-floor run after port normalization. Compare
 escort movement, detection-blocked main-army time, Reaver attacks, early
 defense and valid wins; an observed improvement in detector allocation
 alone does not promote this combination without a win gain.
+
+The completed detector screen has four matched, normal games with identical
+non-DLL inputs; both versions lost 0/4. The candidate made escort orders after
+seeing Lurkers in games 0, 1 and 3, but only game 3 exposed Lurkers in both
+arms. In that game, detection-blocked main-army unit samples fell from 33% to
+31% over frames 14,000–21,000. Cannon start timing and early army losses met
+the safeguard. Games 0 and 1 cannot isolate a detector effect because the
+reference did not observe a Lurker in the review window. The functional gate
+passed, but the win gate failed, so the rule stays opt-in and no larger PvZ
+screen follows. The frozen report is
+`build/pvz-detector-surge-screen-640-20260927/review.json`. The game-3
+candidate survived to frame 30,754, but this screen does not establish the
+detector rule as its cause. Redirect effort to matchup baselines and the
+earliest recurring losses instead of more closely related PvZ variants.
 
 The isolated Cannon screen's game 2 also lost (frame 25,391). Its third and
 fourth Cannons completed near the natural at frames 12,121 and 13,326.
