@@ -33,8 +33,11 @@ Current order of work:
 1. Finish the same-input, four-game-per-arm PvP fog-detection screen on
    Benzene and Destination. Check Observer completion **before** the first
    Dark Templar, Probe survival, combat strength, and adjudicated wins. Keep
-   the option off unless those results justify promotion. The frozen
-   reference is running; the candidate is prepared but has not started.
+   the option off unless those results justify promotion. The first reference
+   attempt produced one valid loss, then its manager and client processes
+   exited before game 1 without a recorded exception. The candidate has not
+   started. Reprepare both arms for a complete comparison; do not treat the
+   partial result as a win-rate screen.
 2. Run the prepared current-default PvT baseline against UABTerran so the
    next intervention is chosen from all three matchups rather than another
    PvZ guess.
@@ -686,8 +689,10 @@ breach is occurring. Its native plan/spending test passes. The default option
 remains off. Frozen DLL SHA-256: reference
 `52C5D39DD5D7E125BE4C6F778FB045BD1620BCB7339929DCE700784991500012`,
 candidate `98590F6DF4B1C0851EC17E4BB4E537087F97E7A94D53EFB2619747D9F43AD009`.
-The same-input BananaBrain screen has four games per arm across Benzene and
-Destination, alternating sides, under `build/pvp-fog-screen-20260927`.
+The same-input BananaBrain screen was prepared for four games per arm across
+Benzene and Destination, alternating sides, under
+`build/pvp-fog-screen-20260927`. The reference attempt stopped after one
+healthy reported loss and must be rerun; the candidate has not started.
 The functional gate is Observatory/Observer ahead of the first DT in eligible
 games without a new opening collapse. Promotion requires a real win gain with
 healthy paired reports; earlier detection alone is insufficient.
