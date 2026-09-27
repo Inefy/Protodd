@@ -65,12 +65,14 @@ public:
                             bool pvzReplayOpening = false,
                             bool pvzArchivesFirst = false,
                             bool lateEconomyRecovery = false,
-                            bool pvzPoweredCannonScreen = false) noexcept
+                            bool pvzPoweredCannonScreen = false,
+                            bool pvzProactiveReaver = false) noexcept
         : pvzGatewayOpening_(pvzGatewayOpening), pvzEarlySplash_(pvzEarlySplash),
           pvpFogDetection_(pvpFogDetection), pvzReplayOpening_(pvzReplayOpening),
           pvzArchivesFirst_(pvzArchivesFirst),
           lateEconomyRecovery_(lateEconomyRecovery),
-          pvzPoweredCannonScreen_(pvzPoweredCannonScreen) {}
+          pvzPoweredCannonScreen_(pvzPoweredCannonScreen),
+          pvzProactiveReaver_(pvzProactiveReaver) {}
 
     [[nodiscard]] StrategicPlan plan(
         const GameState& state,
@@ -85,6 +87,7 @@ private:
     bool pvzArchivesFirst_{};
     bool lateEconomyRecovery_{};
     bool pvzPoweredCannonScreen_{};
+    bool pvzProactiveReaver_{};
     [[nodiscard]] StrategicPlan planPvT(
         const GameState& state,
         const ThreatAssessment& threat) const;

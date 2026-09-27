@@ -677,11 +677,12 @@ A train-only opening slice in `build/human-hydra-zvp-20260927.json` selects
 the same 256 frozen ZvP games and then the 11 with at least ten visible
 Hydralisks at frame 9,600. Those surviving perspectives had a median of 33
 Probes, five Zealots and two completed Cannons at frame 8,400; by frame
-10,800 the median was five Cannons. In the replay-opening candidate's early
-Hydra loss on Destination, Protodd had 37 Probes, five Zealots and two
-Cannons at frame 8,400, then lost its natural after 21 Hydralisks appeared
-near frame 9,600. This small selected sample is descriptive, not proof that
-more Cannons would win. A future defensive experiment should measure
+10,800 the median was five Cannons. Separately, in the replay-opening
+candidate's early Zergling loss on Destination, Protodd had 37 Probes, five
+Zealots and two Cannons at frame 8,400, then faced 21 visible Zerglings
+near frame 9,600 and lost its natural. These are different attack types;
+the small selected Hydra sample is descriptive and cannot establish a
+counter to that Zergling loss. A defensive experiment should measure
 powered and completed natural Cannons before contact, preserve the first two
 Cannon start times, and avoid the previously observed second-Cannon
 placement delay. Repeating a simple third-Cannon count goal would not
@@ -702,17 +703,137 @@ four-game screen started on the shared local clients after the original
 mineral-fallback campaign completed. Review completed Cannon timing, natural survival,
 early economy and valid paired wins before promotion.
 In the three valid replay-opening reference games, the Core finished at
-frames 11,112, 7,137 and 10,417. Only the early Hydra loss (game 1) has
+frames 11,112, 7,137 and 10,417. Only the early Zergling loss (game 1) has
 the Core, both Cannons, four Zealots and enough Probes in place near frame
 7,200 for this staged rule to add a Cannon before frame 9,600. The other
-seeds test later defense and cost, not the early Hydra timing hypothesis.
-In that Hydra loss, the first two Cannon coordinates were both near the
+seeds test later defense and cost, not the early Zergling timing hypothesis.
+In that Zergling loss, the first two Cannon coordinates were both near the
 starting Nexus (2,112x3,824); the natural Nexus at 992x3,472 had a completed
 Pylon but no Cannon. The second Cannon began before natural construction
 finished. By the new rule's eligibility window the natural is powered, so
 the placement code should choose its undefended Nexus for the third Cannon.
 The live screen must verify that actual position; total Cannon count alone
 cannot establish natural protection.
+Game 0 of the powered-Cannon screen was a valid loss at frame 12,154. Its
+first two Cannons started at frames 2,886 and 4,845, earlier than the
+replay-opening reference's 2,909 and 5,520, but its Core never completed;
+the new rule never became eligible. A 33-unit Zerg force was visible at
+frame 9,600 and the natural fell. This early divergence is not evidence that
+the extra Cannon rule harmed or helped the game.
+Game 1 shows the intended build mechanism: the first two Cannon starts were
+2,775 and 5,676 versus the reference's 2,786 and 5,770. The third started
+at 7,385, completed at 8,206 by the powered natural (1,088x3,584), and
+the fourth completed at 9,251 by the main. The reference had no Cannon
+within 416 pixels of the natural by frame 9,600. The opponent's observed
+composition had already diverged by frame 4,800, before this rule acted:
+the reference later sent a large Zergling wave while this trial showed a
+Hydralisk Den and no comparable attack at frame 9,600. Any survival or
+economy difference cannot be credited to the Cannons from this pairing.
+Game 1 nevertheless lost at frame 24,988. It had 71 Probes, four Nexuses,
+48 army units and full 400 supply at frame 19,200. At frame 20,400 a large
+Hydra wave left 30 army units and 324/400 supply, while the bot held 4,271
+minerals, only 32 gas and ten idle Gateways with no macro action. By frame
+21,600 all Gateways were busy with emergency production, but the delayed
+cycle could not stop the later collapse. This exposes a specific combination
+to test: keep the successful natural Cannon timing, then apply the existing
+mineral-surplus fallback to fill the newly open supply during a gas-starved
+Hydra battle. The combined behavior has not been screened and cannot be
+inferred from either isolated loss.
+The opt-in combined DLL compiles with both rules. Its prepared four-game
+campaign is `build/pvz-cannon-mineral-combo-screen-640-20260927/candidate`,
+DLL SHA-256
+`7FEB5FF9B005BEE5E6A6D40CDE2ED0CB3ECAB48AB203F53A2947BC73141E2B8B`.
+All 415 non-DLL inputs match the replay-opening and Cannon screens after
+normalizing ports. Its isolated screen began after the Cannon run completed.
+In game 0 the fallback issued 16 accepted extra Zealot training commands
+starting at frame 17,281, but the game still lost at frame 22,043. At frame
+16,800 Protodd had 64 Probes on four Nexuses and only seven combat units;
+Storm had not finished. By the time the fallback filled some Gateways, the
+enemy attack was already removing bases. A future experiment should test
+whether a temporary two-base army floor before further expansion is worth
+more than another economic base, while preserving the early Core and Cannons.
+Earlier worker-cap and eight-Zealot targets delayed key tech; any new gate
+must activate only at this later, demonstrated vulnerability window.
+Combined game 1 lost at frame 16,587 before the mineral rule's start; its
+third and fourth Cannons completed near the natural, but a 31-Hydralisk
+opponent history preceded the economic collapse. Game 2 lost at frame
+13,332 before the third Cannon finished or the mineral window opened.
+These two losses did not test the added spending behavior.
+Game 3 later lost at frame 22,012 without fallback activation. The combined
+campaign finished with four valid losses. Against the four valid isolated
+Cannon games, all frozen inputs and actual matches aligned, so the strict
+review was fully paired. The Cannon placement rule remained functional,
+but the spending rule fired only in game 0 (16 accepted extra Zealot orders),
+the high-bank idle reduction gate failed, and wins stayed 0/4 versus 0/4.
+See `build/pvz-cannon-mineral-combo-screen-640-20260927/mineral-review.json`
+and `cannon-review.json`. Keep this combination off.
+
+A further isolated tactic is a proactive first Reaver after the *third*
+Cannon completes. The rejected reactive early-splash rule
+waited for Hydra evidence and produced a first Reaver at frame 13,694 in a
+collapse game; it died before firing. This option reserves Robotics at
+priority 104, Support Bay at 103 and the first Reaver at 104 after the
+completed third Cannon/Core/two-base safety checkpoints, while raising gas
+workers to at least six. It deliberately comes before the fourth Cannon
+and optional Stargate/Citadel spending, but cannot delay the first three
+Cannons. Native goal and funding tests plus the Win32 build pass. The frozen
+four-game campaign at `build/pvz-proactive-reaver-screen-640-20260927/candidate`
+has DLL SHA-256
+`C3C9A3EC8F42A907EE1A17EAEC88CF82329CD4B7C5DDD199799A987F084DB995`
+and the same 415 non-DLL inputs as the isolated Cannon screen. Its arena
+screen began after the combined mineral campaign completed. Measure first
+Reaver completion, loaded Scarabs,
+natural survival and valid wins before promotion.
+Its game 0 lost at frame 15,006 against a Mutalisk branch. At frame 11,160
+nine Mutalisks were visible while Protodd had 16 Zealots, two Cannons, an
+unfinished Stargate and no active gas workers despite two completed
+Assimilators. The third-Cannon/Reaver checkpoint never became eligible;
+this game does not test proactive splash. A separate anti-air question is
+whether the existing five-Cannon goal at priority 90 should become a funded
+emergency goal as soon as Mutalisks are observed, ahead of gas-starved
+Dragoons and routine Zealot spending. That change needs its own screen.
+Game 1 reached the new tech checkpoint: Robotics completed at frame 9,742,
+Support Bay at 10,276, and the first Reaver at 12,128, 1,728 frames before
+the isolated Cannon reference's first Reaver. But the third Cannon in this
+run was placed by the main; the first natural Cannon completed at 10,031
+versus 8,206 in the reference. The opponent's opening had already diverged,
+and the natural-defense delay exceeds the predeclared 300-frame safeguard.
+The revised review records natural position and completion timing so a
+Reaver speedup cannot conceal that cost. Completing a third Cannon alone
+does not guarantee natural coverage; the build placer selected the main.
+Game 1 still lost at frame 27,995. The first Reaver produced a Scarab by
+frame 12,264 and received its first accepted attack at 14,064, then
+survived until frame 23,340; Storm was cast repeatedly. This differs from
+the earlier Reaver that died without ammunition, so further gains require
+surviving the larger midgame ground army rather than merely completing the
+first splash unit.
+Game 2 also built a Reaver, but it finished at frame 15,966 versus the
+isolated Cannon reference's 13,914. Hydralisks were seen at 14,512; the
+first Scarab ammunition appeared at 16,104 and the first accepted Reaver
+attack at 16,872. The first natural Cannon completed at 13,855 versus
+12,121 in the reference, and there was one additional early loss. Game 3
+lost at frame 12,464 without a Reaver or a completed natural Cannon.
+All four candidate games were valid losses. The strict paired review at
+`build/pvz-proactive-reaver-screen-640-20260927/review.json` matched all
+four games and found 0/4 wins in both arms. No candidate Reaver met the
+predeclared frame-12,000 timing, and both the first-Cannon and natural-Cannon
+safeguards failed. The functional and win gates failed. Keep proactive
+Reaver off. The next experiment should address a concrete spending or
+defense failure without assuming faster Reaver tech is the answer.
+The isolated Cannon screen's game 2 also lost (frame 25,391). Its third and
+fourth Cannons completed near the natural at frames 12,121 and 13,326.
+By frame 20,880, Zerg had shown 95 Hydralisks across the game and Protodd
+had 22 army units, 5,555 minerals, ten idle Gateways and a supply deficit
+after a Pylon and Nexus were destroyed. The combination of resource spending
+and base survival now matters as much as static-defense count. Game 3 lost
+at frame 11,999 despite a natural Cannon completing at 8,094 and a fourth
+at the main completing at 9,424. All four
+candidate games were valid losses. The strict review at
+`build/pvz-powered-cannon-screen-640-20260927/review.json` matched games
+0–2 to the three valid replay-opening reference games. The reference's
+excluded fourth game prevents a full paired gate; both arms won zero
+matched games. The staged placement mechanism fired in games 1–3, but the
+functional and win gates failed overall. Keep the isolated rule off.
 
 ### PvP fog detection screen (2026-09-27)
 
@@ -906,7 +1027,7 @@ Its DLL SHA-256 is
 `CB2E2D9BE309276DF0234EACF869E8CF696CDE974CEA41EF7BAF2E8979B740E8`;
 all 415 non-DLL inputs match after port normalization. The original
 window's game 2 also lost (frame 22,911) without invoking the fallback; it
-had only six high-bank idle samples. Game 3 is still running. The early
+had only six high-bank idle samples. Game 3 later lost at frame 12,030. The early
 variant has not been played.
 The detailed budget trace found zero original-window ready samples and zero
 fallback mentions in the first three games. Game 1 had four state samples

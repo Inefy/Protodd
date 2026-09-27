@@ -6104,9 +6104,35 @@ void testPvZPoweredCannonScreenOption() {
     expect(!stagedGoal(screen.plan(state, {}), 3),
         "third Cannon waits until the Core finishes");
     state.self.units[5].completed = true;
+    const StrategyEngine proactive{false, false, false, true, false, false,
+                                   true, true};
+    const auto protectedTech = [](const StrategicPlan& plan, const UnitKind kind,
+                                  const int priority) {
+        return std::ranges::any_of(plan.goals, [kind, priority](const ProductionGoal& demand) {
+            return demand.target == kind && demand.priority >= priority &&
+                   demand.blocking;
+        });
+    };
+    expect(!protectedTech(proactive.plan(state, {}), UnitKind::roboticsFacility, 104),
+        "proactive splash waits for the natural's third completed Cannon");
     state.self.units.push_back(unit(9, UnitKind::photonCannon, true));
     expect(stagedGoal(screen.plan(state, {}), 4),
         "fourth Cannon follows a completed third Cannon");
+    const auto reaverOpening = proactive.plan(state, {});
+    expect(protectedTech(reaverOpening, UnitKind::roboticsFacility, 104) &&
+           !protectedTech(screen.plan(state, {}), UnitKind::roboticsFacility, 104),
+        "opt-in splash starts Robotics only behind the powered screen");
+    ResourceLedger splashBank{400, 200};
+    const auto splashSpending = MacroPlanner{}.reconcile(state, reaverOpening, splashBank);
+    expect(std::ranges::any_of(splashSpending, [](const MacroAction& action) {
+        return action.target == UnitKind::roboticsFacility && action.reserved;
+    }), "proactive Robotics goal receives a funded reservation");
+    state.self.units.push_back(unit(10, UnitKind::roboticsFacility, true));
+    expect(protectedTech(proactive.plan(state, {}), UnitKind::roboticsSupportBay, 103),
+        "Support Bay follows the committed first Robotics Facility");
+    state.self.units.push_back(unit(11, UnitKind::roboticsSupportBay, true));
+    expect(protectedTech(proactive.plan(state, {}), UnitKind::reaver, 104),
+        "first Reaver is protected after the Support Bay is committed");
     state.frame = 7000;
     expect(!stagedGoal(screen.plan(state, {}), 4),
         "additional Cannons do not alter the first two Cannon timing");

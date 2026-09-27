@@ -1187,6 +1187,28 @@ StrategicPlan StrategyEngine::planPvZ(
                  "staged powered natural screen against Hydra pressure", true);
         }
     }
+    // Begin splash tech after an actual third Cannon completes. Placement can
+    // still select the main, so the arena review separately checks natural
+    // coverage. Waiting for Hydra contact left the earlier Reaver finishing
+    // during the base collapse.
+    if (pvzProactiveReaver_ && state.frame >= 7200 && state.frame < 15840 &&
+        count(state, UnitKind::nexus, true) >= 2 &&
+        count(state, UnitKind::cyberneticsCore, true) >= 1 &&
+        count(state, UnitKind::photonCannon, true) >= 3 &&
+        count(state, UnitKind::probe, true) >= 26 &&
+        count(state, UnitKind::zealot, true) >= 4 &&
+        !hardBreachAtMain(state)) {
+        result.name += " [proactive Reaver behind natural screen]";
+        result.desiredGasWorkers = std::max(6, result.desiredGasWorkers);
+        goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 104,
+             "begin first Reaver before Hydra contact", true);
+        if (count(state, UnitKind::roboticsFacility) > 0)
+            goal(result, GoalKind::build, UnitKind::roboticsSupportBay, 1, 103,
+                 "complete first Reaver technology behind natural screen", true);
+        if (count(state, UnitKind::roboticsSupportBay) > 0)
+            goal(result, GoalKind::train, UnitKind::reaver, 1, 104,
+                 "field first splash unit before a Hydra mass", true);
+    }
     if (pvzEarlySplash_ && hydraEvidence && !airEvidence &&
         count(state, UnitKind::zealot, true) >= 3 &&
         count(state, UnitKind::photonCannon, true) >= 1 &&

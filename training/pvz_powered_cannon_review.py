@@ -49,6 +49,11 @@ def defense(path):
         (positions[identifier][0] - natural[0]) ** 2 +
         (positions[identifier][1] - natural[1]) ** 2 <= 416 ** 2
         for identifier, frame in completed.items() if identifier in positions)
+    natural_completions = sorted(
+        frame for identifier, frame in completed.items() if
+        identifier in positions and natural is not None and
+        (positions[identifier][0] - natural[0]) ** 2 +
+        (positions[identifier][1] - natural[1]) ** 2 <= 416 ** 2)
     return dict(started=sorted(started.values()),
                 completed=sorted(completed.values()),
                 cannon_positions=[dict(id=identifier, started=frame,
@@ -57,6 +62,8 @@ def defense(path):
                                   for identifier, frame in sorted(
                                       started.items(), key=lambda row: row[1])],
                 natural=natural, natural_cannons_9600=natural_cannons_9600,
+                first_natural_cannon_completed=(natural_completions[0]
+                                                if natural_completions else None),
                 checkpoints=checkpoints)
 
 

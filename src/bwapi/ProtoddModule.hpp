@@ -67,6 +67,8 @@ private:
     StrategyEngine strategy_{false, false, false, false, true, true};
 #elif defined(PROTODD_PVZ_REPLAY_OPENING) && defined(PROTODD_PVZ_ARCHIVES_FIRST)
     StrategyEngine strategy_{false, false, false, true, true};
+#elif defined(PROTODD_PVZ_REPLAY_OPENING) && defined(PROTODD_PVZ_PROACTIVE_REAVER)
+    StrategyEngine strategy_{false, false, false, true, false, false, true, true};
 #elif defined(PROTODD_PVZ_REPLAY_OPENING) && defined(PROTODD_PVZ_POWERED_CANNON_SCREEN)
     StrategyEngine strategy_{false, false, false, true, false, false, true};
 #elif defined(PROTODD_PVZ_REPLAY_OPENING)

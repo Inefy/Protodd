@@ -16,6 +16,7 @@ option(PROTODD_STALLED_ARMY_ROUTING "Evaluate terrain waypoints for a stalled at
 option(PROTODD_PVZ_MINERAL_FALLBACK "Evaluate Zealot spending from otherwise idle midgame Gateways" OFF)
 option(PROTODD_PVZ_EARLY_MINERAL_FALLBACK "Evaluate the mineral fallback before the midgame Hydra attack" OFF)
 option(PROTODD_PVZ_POWERED_CANNON_SCREEN "Evaluate powered natural Cannons after the first two complete" OFF)
+option(PROTODD_PVZ_PROACTIVE_REAVER "Evaluate first Reaver behind the completed natural Cannon screen" OFF)
 set(BWAPI_ROOT "" CACHE PATH "Path to an unpacked BWAPI 4.4.0 release")
 set(BWAPI_LIBRARY "" CACHE FILEPATH "Path to a 32-bit BWAPILIB.lib")
 set(PROTODD_WHOLE_GAME_WEIGHTS "" CACHE FILEPATH "Whole-game model weights to embed in Protodd.dll")
@@ -85,13 +86,17 @@ if(PROTODD_BUILD_BWAPI_MODULE)
        (NOT PROTODD_PVZ_REPLAY_OPENING OR PROTODD_PVZ_ARCHIVES_FIRST OR
         PROTODD_LATE_ECONOMY_RECOVERY OR PROTODD_PVZ_GATEWAY_OPENING OR
         PROTODD_PVZ_EARLY_SPLASH OR PROTODD_PVP_FOG_DETECTION OR
-        PROTODD_STALLED_ARMY_ROUTING OR PROTODD_PVZ_MINERAL_FALLBACK))
-        message(FATAL_ERROR "Powered Cannon screen requires the replay PvZ opening alone")
+        PROTODD_STALLED_ARMY_ROUTING))
+        message(FATAL_ERROR "Powered Cannon screen requires the replay PvZ opening")
     endif()
     if(PROTODD_PVZ_EARLY_MINERAL_FALLBACK AND
        (NOT PROTODD_PVZ_REPLAY_OPENING OR NOT PROTODD_PVZ_MINERAL_FALLBACK OR
         PROTODD_PVZ_POWERED_CANNON_SCREEN))
         message(FATAL_ERROR "Early mineral fallback requires its base flag and replay PvZ opening")
+    endif()
+    if(PROTODD_PVZ_PROACTIVE_REAVER AND
+       (NOT PROTODD_PVZ_POWERED_CANNON_SCREEN OR PROTODD_PVZ_MINERAL_FALLBACK))
+        message(FATAL_ERROR "Proactive Reaver requires the isolated powered Cannon screen")
     endif()
     if(PROTODD_WHOLE_GAME_EVALUATION_BUILD AND NOT PROTODD_WHOLE_GAME_CONTROL)
         message(FATAL_ERROR "Evaluation build requires whole-game control")
@@ -191,6 +196,9 @@ if(PROTODD_BUILD_BWAPI_MODULE)
     endif()
     if(PROTODD_PVZ_POWERED_CANNON_SCREEN)
         target_compile_definitions(protodd_bwapi PRIVATE PROTODD_PVZ_POWERED_CANNON_SCREEN=1)
+    endif()
+    if(PROTODD_PVZ_PROACTIVE_REAVER)
+        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_PVZ_PROACTIVE_REAVER=1)
     endif()
     if(PROTODD_WHOLE_GAME_CONTROL)
         if(NOT PROTODD_WHOLE_GAME_WEIGHTS)
