@@ -6034,6 +6034,63 @@ void testPvPFogDetectionOption() {
         "an unanchored opening keeps its resources for the initial defense");
 }
 
+void testPvPScoutedTwoGateAnchorOption() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 3360;
+    state.self.race = state.enemy.race = Race::protoss;
+    state.self.supplyUsed = 28;
+    state.self.supplyTotal = 40;
+    state.self.units = {unit(1, UnitKind::nexus, true),
+        unit(2, UnitKind::pylon, true), unit(3, UnitKind::pylon, true),
+        unit(4, UnitKind::gateway, true), unit(5, UnitKind::gateway, true),
+        unit(6, UnitKind::zealot, true)};
+    state.self.units.back().completed = false;
+    for (int id = 20; id < 33; ++id)
+        state.self.units.push_back(unit(id, UnitKind::probe, true));
+    state.enemy.units = {unit(100, UnitKind::gateway, false, {3000, 3000}),
+        unit(101, UnitKind::gateway, false, {3150, 3000})};
+    auto construction = state;
+    construction.enemy.units.back().completed = false;
+    construction.self.units.erase(std::remove_if(construction.self.units.begin(),
+        construction.self.units.end(), [](const UnitSnapshot& own) {
+            return own.kind == UnitKind::gateway && own.id == 5;
+        }), construction.self.units.end());
+    const auto earlyForge = [](const StrategicPlan& plan) {
+        return std::ranges::any_of(plan.goals, [](const ProductionGoal& goal) {
+            return goal.goal == GoalKind::build && goal.target == UnitKind::forge &&
+                   goal.blocking && goal.priority >= 118;
+        });
+    };
+    expect(!earlyForge(StrategyEngine{}.plan(state, {})),
+           "default PvP opening waits before reserving a Forge");
+    StrategyEngine candidate{false, false, false, false, false, false, false,
+                             false, false, true};
+    const auto opening = candidate.plan(construction, {});
+    expect(opening.name.find("PvP two-gate robotics control") != std::string::npos &&
+               std::ranges::any_of(opening.goals, [](const ProductionGoal& goal) {
+                   return goal.target == UnitKind::gateway && goal.desiredCount >= 2 &&
+                          goal.blocking;
+               }),
+           "scouted incomplete second Gateway enters the mobile defense opening");
+    expect(earlyForge(candidate.plan(state, {})),
+           "scouted two-Gateway option reserves a Forge after mobile production starts");
+    auto control = state;
+    control.enemy.units.pop_back();
+    expect(!earlyForge(candidate.plan(control, {})),
+           "one enemy Gateway does not pay for the early static anchor");
+    control = state;
+    control.self.units.erase(std::remove_if(control.self.units.begin(), control.self.units.end(),
+        [](const UnitSnapshot& own) { return own.kind == UnitKind::zealot; }),
+        control.self.units.end());
+    expect(!earlyForge(candidate.plan(control, {})),
+           "first Zealot starts before the early Forge commitment");
+    control = state;
+    control.enemy.units.push_back(unit(102, UnitKind::cyberneticsCore, false, {3000, 3100}));
+    expect(!earlyForge(candidate.plan(control, {})),
+           "seen ranged tech keeps the early Forge option off");
+}
+
 void testPvZReplayOpeningOption() {
     using namespace protodd;
     GameState state;
@@ -6447,6 +6504,7 @@ int main() {
     testVenatorCloakedContainment();
     testVenatorDetectionDeadline();
     testPvPFogDetectionOption();
+    testPvPScoutedTwoGateAnchorOption();
     testForwardReinforcementOwnership();
     testDefensivePerimeterBreakout();
     testPayloadReloadTravel();

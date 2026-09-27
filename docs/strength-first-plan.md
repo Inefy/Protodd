@@ -53,6 +53,13 @@ Current order of work (updated after the 27 September PvZ screens):
 The target is a stronger full-game bot. No current result establishes a
 major win-rate gain or tournament readiness.
 
+The repository now carries the complete 59,391-file cwal.gg source replay
+snapshot as six Git LFS archives under `replays/cwal-source/`, alongside the
+frozen split manifest. Restore defaults to the 11,183 approved training
+games; the source archives also preserve validation, test, and unassigned
+games and must not be treated as additional training examples without a new
+split review. See `replays/README.md` for the restoration command and hashes.
+
 ### PvP default reference on both maps — 27 September
 
 `build/pvp-fog-screen-640-20260927/reference` completed four healthy
@@ -73,6 +80,47 @@ exposure to test its intended benefit. No matched strength claim is made for
 that candidate, and the option stays off. The next bounded experiment should
 protect the first mobile screen and first Reaver timing, with a healthy
 four-game reference and safeguards for workers, early losses and detection.
+
+The first bounded PvP response is `PROTODD_PVP_SCOUTED_TWO_GATE_ANCHOR`.
+Game 3 showed both enemy Gateways by frame 2,068, but Protodd's Forge began
+at 3,981 and its first Cannon began at 4,788. The Cannon was destroyed at
+5,528, about ten frames short of its build timer. The option requests one
+Forge as soon as both enemy Gateways are known, our second Gateway and first
+Zealot have started, at least 12 Probes exist, and no enemy ranged tech or
+hard breach is visible. The existing first-Cannon rule then owns placement
+and spending. Its native plan test and Win32 build passed; first DLL SHA-256:
+`553069308CEF1101A3B99456F9FABFC008E7813DD17EAF73CB433D0592494720`.
+The frozen first four-game candidate at
+`build/pvp-early-two-gate-screen-640-20260927/candidate` differs from the
+healthy PvP reference only in the DLL. All four games had healthy normal
+losses (0/4 versus reference 0/4), and the new early goal never activated.
+In candidate game 3 the scout remembered two enemy Gateways at frame 3,600,
+but the generic quiet-opening branch remained active because it counted only
+completed Gateways for pressure. Protodd built the Core and delayed its
+second Gateway until frame 5,696; the Forge began at 5,338, later than the
+reference. This is a failed functional pilot, not evidence for an early
+Forge improvement.
+
+The revised option treats two scouted enemy Gateways, including one still
+warping, as opening-pressure evidence before frame 7,200. That enters the
+existing mobile two-Gateway response before considering its Forge anchor.
+The native regression test covers an incomplete second Gateway; the Win32
+DLL builds and has SHA-256
+`5A07E75AEB371F17DAAE4624970AABAAAC4B96A87E2C3724CFEDB1B6A540247A`.
+The revised four-game package at
+`build/pvp-early-two-gate-screen-640-20260927/candidate-v2` verified and
+matched the reference's maps, sides, seeds, and all non-DLL inputs. Both
+players reported normal ends, enemy activity was observed, and no runtime
+errors were logged. It lost all four games at frames 15,719, 16,339, 21,299,
+and 20,307, versus four reference losses. The new branch never activated:
+none of the revised games had two enemy Gateways in the scout's known
+composition before frame 7,200, while reference games 1 and 3 did. Opponent
+opening variation makes this an unexposed live test of the revised condition,
+not evidence that it holds or fails against an actual early two-Gateway rush.
+The option remains off. The native test establishes the planned response for
+that observation, but a promotion needs live exposure and a win gain without
+extra opening collapses. Next PvP work should address the mobile opening
+screen that fails across both one- and two-Gateway openings.
 
 ### Current-default PvT baseline against Steamhammer — 27 September
 

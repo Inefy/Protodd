@@ -1367,7 +1367,17 @@ StrategicPlan StrategyEngine::planPvP(
     const ThreatAssessment& threat) const {
     // Supply and actual structures own the opening. Re-evaluate safety every
     // pass; no stored phase or irreversible script cursor is required.
-    const auto meleeEvidence = recentEnemyCount(state, UnitKind::zealot) >= 2 ||
+    // The worker scout can see both Gateways while they are still warping.
+    // Waiting for completion leaves the quiet Core opening active through
+    // the entire second-Gateway build, after which its own mobile response
+    // and Forge are too late for the first Zealot crossing.
+    const auto scoutedTwoGatewayConstruction = pvpScoutedTwoGateAnchor_ &&
+        state.frame < 5 * 60 * 24 &&
+        std::ranges::count(state.enemy.units, UnitKind::gateway,
+                           &UnitSnapshot::kind) >= 2 &&
+        recentEnemyCount(state, UnitKind::cyberneticsCore) == 0;
+    const auto meleeEvidence = scoutedTwoGatewayConstruction ||
+        recentEnemyCount(state, UnitKind::zealot) >= 2 ||
         (recentEnemyCount(state, UnitKind::gateway) >= 2 &&
          recentEnemyCount(state, UnitKind::cyberneticsCore) == 0);
     const auto pressureEvidence = hardBreachAtMain(state) || meleeEvidence ||
@@ -1819,7 +1829,20 @@ StrategicPlan StrategyEngine::planPvP(
                                     !visibleRangedOpening &&
                                     count(state, UnitKind::forge) == 0 &&
                                     cannonsReady == 0;
-    const auto hiddenMeleeTechSignal = staticFirstOpening || openingForgeSignal ||
+    // A confirmed second enemy Gateway is stronger evidence than the usual
+    // late single-Gateway prior. Start the first Forge after our second
+    // Gateway and first Zealot have begun, so a Cannon can finish before a
+    // four-Zealot crossing. This option is isolated until matched live games
+    // establish that the earlier static spend repays any lost mobile tempo.
+    const auto earlyScoutedTwoGate = pvpScoutedTwoGateAnchor_ &&
+        state.frame >= 2 * 60 * 24 && state.frame < 5 * 60 * 24 &&
+        enemyGatewayCount >= 2 && enemyRangedCount == 0 && !visibleRangedOpening &&
+        count(state, UnitKind::gateway) >= 2 && count(state, UnitKind::zealot) >= 1 &&
+        count(state, UnitKind::probe, true) >= 12 &&
+        count(state, UnitKind::forge) == 0 && cannonsReady == 0 &&
+        !hardBreachAtMain(state);
+    const auto hiddenMeleeTechSignal = earlyScoutedTwoGate ||
+                                       staticFirstOpening || openingForgeSignal ||
                                        (state.frame >= 6 * 60 * 24 &&
                                         state.frame < 8 * 60 * 24 &&
                                         enemyGatewayCount >= 1 &&
@@ -1828,8 +1851,10 @@ StrategicPlan StrategyEngine::planPvP(
                                         zealotsReady >= 1);
     if (hiddenMeleeTechSignal) {
         goal(result, GoalKind::build, UnitKind::forge, 1, 118,
-             "insurance Forge for an unscouted melee transition", true);
-        result.name += " [melee-tech insurance]";
+             earlyScoutedTwoGate ? "scouted two-Gateway Forge anchor" :
+                                   "insurance Forge for an unscouted melee transition", true);
+        result.name += earlyScoutedTwoGate ? " [scouted two-gate anchor]" :
+                                                  " [melee-tech insurance]";
     }
     const auto stabilizingMeleeAnchor = state.frame >= 5 * 60 * 24 &&
                                         state.frame < 8 * 60 * 24 &&

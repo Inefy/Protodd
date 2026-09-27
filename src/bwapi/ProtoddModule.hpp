@@ -58,6 +58,9 @@ private:
     StrategyEngine strategy_{true};
 #elif defined(PROTODD_PVP_FOG_DETECTION)
     StrategyEngine strategy_{false, false, true};
+#elif defined(PROTODD_PVP_SCOUTED_TWO_GATE_ANCHOR)
+    StrategyEngine strategy_{false, false, false, false, false, false, false,
+                             false, false, true};
 #elif defined(PROTODD_PVZ_REPLAY_OPENING) && defined(PROTODD_PVZ_ARCHIVES_FIRST) && \
     defined(PROTODD_LATE_ECONOMY_RECOVERY)
     StrategyEngine strategy_{false, false, false, true, true, true};
