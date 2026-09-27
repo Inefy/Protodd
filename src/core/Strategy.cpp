@@ -287,7 +287,7 @@ StrategicPlan StrategyEngine::plan(
     }
     applyOpeningStyle(result, state, style);
     addAdaptiveCounters(result, state);
-    addEconomicRecovery(result, state);
+    addEconomicRecovery(result, state, lateEconomyRecovery_);
     // Safety runs last so an opponent-specific economic style cannot override
     // direct evidence of an all-in at our main.
     addSafetyReactions(result, threat);
@@ -1171,6 +1171,22 @@ StrategicPlan StrategyEngine::planPvZ(
         std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& enemy) {
             return enemy.kind == UnitKind::spire || enemy.kind == UnitKind::greaterSpire;
         });
+    // Approved train replays of fast Hydra attacks commonly have a third
+    // powered Cannon after the natural's first two are finished. Stage each
+    // extra Cannon so this screen cannot displace the second or the Core.
+    if (pvzPoweredCannonScreen_ && state.frame >= 7200 && state.frame < 15840 &&
+        count(state, UnitKind::nexus, true) >= 2 &&
+        count(state, UnitKind::cyberneticsCore, true) >= 1 &&
+        count(state, UnitKind::probe, true) >= 26 &&
+        count(state, UnitKind::zealot, true) >= 4 &&
+        !hardBreachAtMain(state)) {
+        const auto completedCannons = count(state, UnitKind::photonCannon, true);
+        if (completedCannons >= 2 && completedCannons < 4) {
+            goal(result, GoalKind::build, UnitKind::photonCannon,
+                 completedCannons + 1, 100,
+                 "staged powered natural screen against Hydra pressure", true);
+        }
+    }
     if (pvzEarlySplash_ && hydraEvidence && !airEvidence &&
         count(state, UnitKind::zealot, true) >= 3 &&
         count(state, UnitKind::photonCannon, true) >= 1 &&
@@ -3346,7 +3362,8 @@ void StrategyEngine::addSafetyReactions(
 
 void StrategyEngine::addEconomicRecovery(
     StrategicPlan& plan,
-    const GameState& state) {
+    const GameState& state,
+    const bool lateEconomyRecovery) {
     const auto workers = countRole(state, UnitRole::worker);
     const auto nexuses = count(state, UnitKind::nexus);
     const auto completedNexuses = count(state, UnitKind::nexus, true);
@@ -3395,6 +3412,48 @@ void StrategyEngine::addEconomicRecovery(
         plan.desiredWorkers = std::max(plan.desiredWorkers, 8);
         goal(plan, GoalKind::train, UnitKind::probe, 8, 105,
              "rebuild a minimum income behind the defensive screen", true);
+    }
+
+    if (lateEconomyRecovery && state.frame >= 12 * 60 * 24 &&
+        plan.posture != Posture::defend && !hardBreachAtMain(state)) {
+        const auto mobileArmy = std::ranges::count_if(state.self.units,
+            [](const UnitSnapshot& unit) {
+                return unit.completed && !unit.hallucination &&
+                    !isWorker(unit.kind) && !isBuilding(unit.kind) &&
+                    isCombatUnit(unit.kind);
+            });
+        if (mobileArmy >= 8 && activeBases > 0) {
+            // The long PvZ control game fell to twelve Probes on two mineral
+            // bases while ~35 combat units survived. The old threshold only
+            // reacted below twelve and could not outbid routine production.
+            const auto incomeFloor = std::clamp(activeBases * 12, 12, 28);
+            if (workers < incomeFloor) {
+                plan.name += " [protected income recovery]";
+                plan.desiredWorkers = std::max(plan.desiredWorkers, incomeFloor);
+                goal(plan, GoalKind::train, UnitKind::probe, incomeFloor, 115,
+                     "restore income behind the surviving field army", true);
+            }
+            const auto ownedMinerals = std::accumulate(state.bases.begin(),
+                state.bases.end(), 0, [&state](const int total,
+                                               const BaseSnapshot& base) {
+                    return total + (base.ownerId == state.self.id ?
+                                    base.mineralsRemaining : 0);
+                });
+            const auto neutralMinerals = std::ranges::any_of(state.bases,
+                [](const BaseSnapshot& base) {
+                    return base.ownerId < 0 && !base.island &&
+                        base.center.valid() && base.mineralsRemaining >= 4000;
+                });
+            if (completedNexuses >= 2 && completedNexuses < 8 &&
+                pendingNexuses == 0 && neutralMinerals &&
+                ownedMinerals < activeBases * 4500) {
+                plan.name += " [pre-depletion expansion]";
+                plan.desiredBases = std::max(plan.desiredBases, completedNexuses + 1);
+                goal(plan, GoalKind::expand, UnitKind::nexus,
+                     completedNexuses + 1, 114,
+                     "replace mining capacity before the owned patches empty", true);
+            }
+        }
     }
 
     const auto depletedEconomy = completedNexuses > 0 && activeBases < completedNexuses;

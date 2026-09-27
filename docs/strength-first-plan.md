@@ -673,6 +673,47 @@ base was overrun. The functional and decisive-win gates both failed. Do not
 promote this option or repeat another reactive splash timing variant without
 a materially earlier defensive mechanism and broader opponent evidence.
 
+A train-only opening slice in `build/human-hydra-zvp-20260927.json` selects
+the same 256 frozen ZvP games and then the 11 with at least ten visible
+Hydralisks at frame 9,600. Those surviving perspectives had a median of 33
+Probes, five Zealots and two completed Cannons at frame 8,400; by frame
+10,800 the median was five Cannons. In the replay-opening candidate's early
+Hydra loss on Destination, Protodd had 37 Probes, five Zealots and two
+Cannons at frame 8,400, then lost its natural after 21 Hydralisks appeared
+near frame 9,600. This small selected sample is descriptive, not proof that
+more Cannons would win. A future defensive experiment should measure
+powered and completed natural Cannons before contact, preserve the first two
+Cannon start times, and avoid the previously observed second-Cannon
+placement delay. Repeating a simple third-Cannon count goal would not
+address that failure.
+
+The new opt-in powered-Cannon screen waits for two completed Cannons, a
+completed Core, two completed Nexuses, at least 26 Probes and four Zealots
+before requesting a third Cannon. It requests a fourth only after the third
+finishes, within frames 7,200–15,840 and outside a hard main-base breach.
+The build placer requires a powered Pylon near the chosen Nexus and spreads
+Cannons toward the least-defended powered base. Native tests confirm that an
+unfinished second Cannon or unfinished Core vetoes the extra goal, and the
+first extra Cannon receives a funded reservation; the Win32
+candidate compiled. The four-game frozen campaign at
+`build/pvz-powered-cannon-screen-640-20260927/candidate` matches all 415
+non-DLL replay-opening inputs after normalizing arena ports. Its isolated
+four-game screen started on the shared local clients after the original
+mineral-fallback campaign completed. Review completed Cannon timing, natural survival,
+early economy and valid paired wins before promotion.
+In the three valid replay-opening reference games, the Core finished at
+frames 11,112, 7,137 and 10,417. Only the early Hydra loss (game 1) has
+the Core, both Cannons, four Zealots and enough Probes in place near frame
+7,200 for this staged rule to add a Cannon before frame 9,600. The other
+seeds test later defense and cost, not the early Hydra timing hypothesis.
+In that Hydra loss, the first two Cannon coordinates were both near the
+starting Nexus (2,112x3,824); the natural Nexus at 992x3,472 had a completed
+Pylon but no Cannon. The second Cannon began before natural construction
+finished. By the new rule's eligibility window the natural is powered, so
+the placement code should choose its undefended Nexus for the third Cannon.
+The live screen must verify that actual position; total Cannon count alone
+cannot establish natural protection.
+
 ### PvP fog detection screen (2026-09-27)
 
 A fresh four-game PvP/PvZ baseline with the current default DLL was structurally
@@ -744,6 +785,17 @@ candidate and reference, a fresh paired campaign under
 `build/pvz-replay-opening-v2-screen-640-20260927` pins the same 640-frame
 slow-frame allowance in both arms; the old reports remain unchanged. The
 arena preparer and its regression test now pin that development-only setting.
+The first candidate completed with three valid losses and one slow-frame
+forfeit excluded by the arena. The refined candidate completed with three
+valid losses and one frame-limit draw excluded by the arena. Its early Nexus
+started at frames 4,612, 4,705 and 4,665 in the three valid games, with
+19 Probes at frame 4,800 in each. This repaired the intended timing but did
+not show a win gain. Its frozen reference completed with four valid losses.
+For the three valid matched games, the candidate had 7, 8 and 7 more Probes
+at frame 4,800, and its natural began 2,508, 1,759 and 2,262 frames sooner.
+It took one extra early loss in the first match and won none of the three.
+The excluded fourth candidate game prevents the full paired gate from
+passing. Neither opening option is promoted.
 The extended train-split benchmark has 177 surviving samples at frame 12,000:
 median 45 Probes, four Gateways, a completed Templar Archives and two
 Corsairs. In the first candidate loss at that frame, Protodd had 46 Probes,
@@ -767,14 +819,106 @@ Citadel, Archives, then the first High Templar and Storm research ahead of
 optional Reaver drop production. Immediate ground pressure still vetoes the
 tech window. Native tests and the Win32 build pass; frozen combined DLL
 SHA-256 is `B906F5E4019B2A4CEDFD60EB5ED7225073AD68D1C09A268D8FCD53C55BFE4758`.
-The final four-game 640-frame-allowance screen is prepared as `candidate-v2`
-in `build/pvz-archives-first-screen-640-20260927` for comparison with the
-refined economy candidate. The earlier `candidate` package was never run; it
-was replaced so Storm research takes precedence over the first Templar cycle.
-The functional gate is Archives at least 720
-frames earlier in two eligible games, two first Templar by frame 15,600,
-and no extra early losses. A larger campaign needs an actual win gain;
-tech timing alone does not promote the build.
+The four-game 640-frame-allowance `candidate-v2` screen in
+`build/pvz-archives-first-screen-640-20260927` completed with four valid
+losses. The earlier `candidate` package was never run; it was replaced so
+Storm research takes precedence over the first Templar cycle. Against the
+three valid replay-opening matches, Archives finished 3,243 and 1,079 frames
+earlier in games 0 and 2 and also completed in game 1 where the reference
+never reached it. Two High Templar finished by frame 13,002, but no Reaver
+was built in those three games; one extra early loss occurred in game 2.
+Both arms won zero games, and the replay-opening reference's excluded fourth
+game prevents the full paired gate from passing. The declared functional and
+win gates failed. Archives-first stays off.
+
+The refined economy candidate's fourth game exposed a distinct late-game
+failure before ending at the frame limit; the arena excluded that result.
+At frame 53,640 it had about 50 combat units,
+12 Probes, two completed Nexuses and no minerals remaining at either owned
+base, while several neutral mineral bases remained available. The log showed
+routine Pylon/army savings ahead of Probe recovery and a new Nexus. At frame
+24,000 it already had only 12 Probes across two bases, with roughly 9,100
+minerals still present at those bases. The recovery rule currently activates
+below 12 workers for two bases, and its priority is lower than late combat
+goals; the expansion rule reacts after a base has nearly mined out. An opt-in
+late-economy candidate now protects a modest worker floor while safe, then
+reserves a replacement base before the owned patches are empty. Its native
+spending test and Win32 build pass. Its frozen four-game screen under
+`build/pvz-late-recovery-screen-640-20260927/candidate` completed with four
+valid losses. The worker-floor branch fired in game 2 and Probes rose from
+15 at frame 17,280 to 21 at frame 19,200, but a later Hydra attack killed
+the economy. The pre-depletion Nexus branch fired in games 0 and 3. Game 0
+lasted to frame 37,946 rather than the replay-opening reference's 23,035,
+but both were losses and the openings had already diverged before the new
+rule activated. The original long-game seed lost at frame 23,066 in this
+run, so its late mined-out scenario was not reproduced. No win gain was
+shown; the late-economy option stays off.
+Measure funded Probes, new Nexus timing, remaining owned minerals, army
+survival, and valid wins in paired games. The long game is mechanism evidence,
+not a valid win.
+The same game also shows a late movement failure: a ground unit remained at
+1584x3644 from at least frame 67,920 to 71,520 while `Attack_Move` toward
+2080x656 was repeatedly accepted and its native order still said moving.
+Several nearby army units likewise held their positions. A Corsair alternated
+between scout travel and raid extraction commands every few dozen frames.
+Later incident logs show several combat units motionless for more than 26,000
+frames with `AttackMove` still accepted. An opt-in stalled-army routing build
+switches to a persistent terrain waypoint when at least a quarter of a main
+army has stopped for 240 frames. Its Win32 DLL and frozen four-game screen
+are prepared under `build/pvz-stalled-routing-screen-640-20260927`;
+live movement, frame cost and outcomes remain untested. Actual movement and
+valid wins are required before promotion.
+
+The replay-opening candidate's game 0 exposed a separate midgame spending
+bottleneck. At frame 14,400 it held 1,624 minerals and seven of eight
+Gateways were idle; at frame 16,800 it held 3,982 minerals and seven of
+eight completed Gateways were idle. The composition filler refuses to exceed
+its Zealot share while gas-heavy units wait, so the large mineral bank did
+not become an army before the Hydra wave. An opt-in
+`PROTODD_PVZ_MINERAL_FALLBACK` candidate spends at most four extra Zealots
+from idle Gateways per planning pass when at least 800 minerals are banked,
+gas is scarce and 400 free minerals can remain after each purchase. It
+reserves higher-priority goals first. Native reservation tests and its Win32
+build pass; the frozen four-game screen is prepared under
+`build/pvz-mineral-fallback-screen-640-20260927/candidate`. Measure Zealot
+production, idle Gateway time, bank size, early losses and valid wins before
+considering promotion. This is a later mineral-surplus intervention, distinct
+from the rejected early eight-Zealot target that delayed Core construction.
+Its first game reached the frame-86,402 limit and is excluded. Between frames
+12,000 and 18,000 it had 1,136 idle-Gateway samples but no sample with both
+at least two idle Gateways and 800 minerals; the fallback could not fire.
+The same seed's replay-opening reference had a large midgame bank, but this
+run diverged before the rule's eligibility window: it had only one completed
+Cannon at frame 7,200 rather than two. The result tests exposure, not the
+effect of fallback spending. Game 1 was a valid loss at frame 19,160. It had
+75 midgame samples with at least two idle Gateways and 800 minerals, mainly
+before the original frame-17,280 activation; by that threshold it had lost
+most of its economy and never invoked the fallback. A second isolated variant
+opens at frame 12,000 only after two completed Nexuses, Core and Cannons and
+26 Probes. This preserves the first defense and tech checkpoints while
+allowing the observed frame-12,480 to 13,920 bank to fund Zealots. Native
+reservation tests and Win32 build pass. A first package at
+`build/pvz-early-mineral-fallback-screen-640-20260927/candidate` was prepared
+but never run. It still vetoed fallback with 130 free gas while six Gateways
+were idle. The revised `candidate-v2` permits a small mineral-surplus Zealot
+cycle regardless of a modest gas bank, after higher-priority reservations.
+Its DLL SHA-256 is
+`CB2E2D9BE309276DF0234EACF869E8CF696CDE974CEA41EF7BAF2E8979B740E8`;
+all 415 non-DLL inputs match after port normalization. The original
+window's game 2 also lost (frame 22,911) without invoking the fallback; it
+had only six high-bank idle samples. Game 3 is still running. The early
+variant has not been played.
+The detailed budget trace found zero original-window ready samples and zero
+fallback mentions in the first three games. Game 1 had four state samples
+meeting the revised early-window budget, supply and completed-defense gates.
+This is a plausible exposure opportunity, not evidence of an improved result.
+The original-window campaign finished with three valid losses and one
+frame-limit exclusion (game 0). Game 3 lost at frame 12,030. The strict
+review in `build/pvz-mineral-fallback-screen-640-20260927/review.json`
+matched only games 1 and 2 because game 0 was excluded here and game 3 was
+excluded in the replay-opening reference. Neither matched game was won,
+the fallback never appeared in any of the four candidate logs, and both
+the functional and paired gates failed. Keep the original-window option off.
 
 - No new full-corpus fit until a bounded experiment addresses a demonstrated
   bottleneck and meets its declared development gates. Do not restart the completed

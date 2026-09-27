@@ -690,6 +690,40 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         }
     }
 
+    const auto earlyFallbackReady = !earlyPvzMineralFallback_ ||
+        (countCompleted(state, UnitKind::nexus) >= 2 &&
+         countCompleted(state, UnitKind::cyberneticsCore) >= 1 &&
+         countCompleted(state, UnitKind::photonCannon) >= 2 &&
+         countCompleted(state, UnitKind::probe) >= 26);
+    if (pvzMineralFallback_ && state.enemy.race == Race::zerg &&
+        state.frame >= (earlyPvzMineralFallback_ ? 12000 : 12 * 60 * 24) &&
+        earlyFallbackReady && state.self.minerals >= 800 &&
+        (earlyPvzMineralFallback_ || ledger.freeGas() < 125) &&
+        ledger.freeMinerals() >= 600 &&
+        countCompleted(state, UnitKind::nexus) > 0 &&
+        countCompleted(state, UnitKind::gateway) >= 4 &&
+        std::ranges::any_of(plan.composition, [](const CompositionTarget& target) {
+            return target.kind == UnitKind::zealot && target.weight > 0.0;
+        })) {
+        // The PvZ replay-opening game held more than 5,000 minerals while
+        // seven powered Gateways sat idle. Preserve every higher-priority
+        // reservation, then turn only the remaining mineral surplus into a
+        // small Zealot cycle instead of waiting indefinitely for gas tech.
+        const auto& zealot = unitStats(UnitKind::zealot);
+        auto& slots = openProducerSlots[UnitKind::gateway];
+        for (auto cycle = 0; cycle < 4 && slots > 0 &&
+             ledger.freeMinerals() >= zealot.minerals + 400; ++cycle) {
+            if (state.self.supplyTotal > 0 &&
+                plannedSupply + zealot.supply > state.self.supplyTotal) break;
+            if (!ledger.reserve(zealot.minerals, 0)) break;
+            actions.push_back({MacroActionKind::train, UnitKind::zealot, 57,
+                zealot.minerals, 0, true,
+                "spend mineral surplus in idle PvZ Gateways"});
+            plannedSupply += zealot.supply;
+            --slots;
+        }
+    }
+
     std::ranges::stable_sort(actions, [](const MacroAction& left, const MacroAction& right) {
         if (left.reserved != right.reserved) {
             return left.reserved > right.reserved;

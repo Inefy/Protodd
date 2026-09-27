@@ -1549,6 +1549,71 @@ void testMacroReservations() {
            "supply invariant does not duplicate an in-progress pylon");
 }
 
+void testPvZMineralFallback() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 18000;
+    state.self.race = Race::protoss;
+    state.enemy.race = Race::zerg;
+    state.self.minerals = 1600;
+    state.self.supplyUsed = 40;
+    state.self.supplyTotal = 100;
+    state.self.units = {unit(1, UnitKind::nexus, true),
+        unit(2, UnitKind::cyberneticsCore, true)};
+    for (int id = 10; id < 14; ++id)
+        state.self.units.push_back(unit(id, UnitKind::gateway, true));
+    for (int id = 20; id < 30; ++id)
+        state.self.units.push_back(unit(id, UnitKind::zealot, true));
+    StrategicPlan plan;
+    plan.goals = {{GoalKind::expand, UnitKind::nexus, 2, 120, true,
+                   "protect a replacement base"}};
+    plan.composition = {{UnitKind::zealot, 0.1}, {UnitKind::dragoon, 0.9}};
+    ResourceLedger baselineBank{1600, 0};
+    ResourceLedger candidateBank{1600, 0};
+    const auto baseline = MacroPlanner{}.reconcile(state, plan, baselineBank);
+    const auto candidate = MacroPlanner{true}.reconcile(state, plan, candidateBank);
+    const auto zealots = [](const std::vector<MacroAction>& actions) {
+        return std::ranges::count_if(actions, [](const MacroAction& action) {
+            return action.action == MacroActionKind::train &&
+                action.target == UnitKind::zealot && action.reserved;
+        });
+    };
+    expect(zealots(baseline) == 0 && zealots(candidate) == 4 &&
+           std::ranges::any_of(candidate, [](const MacroAction& action) {
+               return action.target == UnitKind::nexus && action.reserved;
+           }) && candidateBank.freeMinerals() >= 400,
+        "PvZ fallback fills idle Gateways from true surplus while preserving expansion funds");
+    state.self.minerals = 700;
+    ResourceLedger lowBank{700, 0};
+    expect(zealots(MacroPlanner{true}.reconcile(state, plan, lowBank)) == 0,
+        "the fallback leaves a smaller mineral bank for the planned base");
+    state.frame = 12960;
+    state.self.minerals = 1600;
+    state.self.units.push_back(unit(3, UnitKind::nexus, true));
+    state.self.units.push_back(unit(4, UnitKind::photonCannon, true));
+    state.self.units.push_back(unit(5, UnitKind::photonCannon, true));
+    for (int id = 40; id < 66; ++id) {
+        auto probe = unit(id, UnitKind::probe, true);
+        probe.role = UnitRole::worker;
+        state.self.units.push_back(probe);
+    }
+    ResourceLedger oldWindowBank{1600, 0};
+    ResourceLedger earlyWindowBank{1600, 0};
+    expect(zealots(MacroPlanner{true}.reconcile(state, plan, oldWindowBank)) == 0 &&
+           zealots(MacroPlanner{true, true}.reconcile(state, plan, earlyWindowBank)) == 4,
+        "earlier fallback can spend a defended midgame mineral bank before Hydras arrive");
+    std::ranges::find(state.self.units, 4, &UnitSnapshot::id)->completed = false;
+    ResourceLedger incompleteDefenseBank{1600, 0};
+    expect(zealots(MacroPlanner{true, true}.reconcile(
+        state, plan, incompleteDefenseBank)) == 0,
+        "earlier fallback waits for the natural's defensive screen");
+    std::ranges::find(state.self.units, 4, &UnitSnapshot::id)->completed = true;
+    ResourceLedger gasAvailableBank{1600, 150};
+    expect(zealots(MacroPlanner{true, true}.reconcile(
+        state, plan, gasAvailableBank)) > 0,
+        "earlier fallback can use an idle Gateway despite a modest gas bank");
+}
+
 void testOpponentLearning() {
     protodd::OpponentHistory transfer;
     transfer.parse("Bot,Old,aggressive,8,0\r\nOther,New,economic,100,0\n");
@@ -5991,6 +6056,62 @@ void testPvZReplayOpeningOption() {
         "visible ground pressure cancels the replay economy timing");
 }
 
+void testPvZPoweredCannonScreenOption() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 8400;
+    state.self.id = 1;
+    state.enemy.id = 2;
+    state.self.race = Race::protoss;
+    state.enemy.race = Race::zerg;
+    state.self.supplyUsed = 70;
+    state.self.supplyTotal = 100;
+    state.self.units = {unit(1, UnitKind::nexus, true),
+        unit(2, UnitKind::nexus, true), unit(3, UnitKind::pylon, true),
+        unit(4, UnitKind::forge, true), unit(5, UnitKind::gateway, true),
+        unit(6, UnitKind::cyberneticsCore, true),
+        unit(7, UnitKind::photonCannon, true),
+        unit(8, UnitKind::photonCannon, true)};
+    for (int id = 20; id < 48; ++id) {
+        auto probe = unit(id, UnitKind::probe, true);
+        probe.role = UnitRole::worker;
+        state.self.units.push_back(probe);
+    }
+    for (int id = 50; id < 55; ++id)
+        state.self.units.push_back(unit(id, UnitKind::zealot, true));
+    const StrategyEngine screen{false, false, false, true, false, false, true};
+    const auto stagedGoal = [](const StrategicPlan& plan, const int count) {
+        return std::ranges::any_of(plan.goals, [count](const ProductionGoal& demand) {
+            return demand.target == UnitKind::photonCannon &&
+                demand.desiredCount == count && demand.priority >= 100 &&
+                demand.blocking;
+        });
+    };
+    expect(stagedGoal(screen.plan(state, {}), 3) &&
+           !stagedGoal(StrategyEngine{false, false, false, true}.plan(state, {}), 3),
+        "powered screen adds a third Cannon only to the opt-in replay opening");
+    ResourceLedger defenseBank{250, 0};
+    const auto spending = MacroPlanner{}.reconcile(
+        state, screen.plan(state, {}), defenseBank);
+    expect(std::ranges::any_of(spending, [](const MacroAction& action) {
+        return action.target == UnitKind::photonCannon && action.reserved;
+    }), "staged Cannon demand can fund its first extra defense");
+    state.self.units[7].completed = false;
+    expect(!stagedGoal(screen.plan(state, {}), 3),
+        "third Cannon waits until both opening Cannons finish");
+    state.self.units[7].completed = true;
+    state.self.units[5].completed = false;
+    expect(!stagedGoal(screen.plan(state, {}), 3),
+        "third Cannon waits until the Core finishes");
+    state.self.units[5].completed = true;
+    state.self.units.push_back(unit(9, UnitKind::photonCannon, true));
+    expect(stagedGoal(screen.plan(state, {}), 4),
+        "fourth Cannon follows a completed third Cannon");
+    state.frame = 7000;
+    expect(!stagedGoal(screen.plan(state, {}), 4),
+        "additional Cannons do not alter the first two Cannon timing");
+}
+
 void testPvZArchivesBeforeDropsOption() {
     using namespace protodd;
     GameState state;
@@ -6048,6 +6169,66 @@ void testPvZArchivesBeforeDropsOption() {
     const auto unlocked = candidate.plan(state, {});
     expect(unlocked.harassmentDrops == 1,
         "the optional drop package resumes after the first High Templar");
+}
+
+void testProtectedLateEconomyOption() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 24000;
+    state.self.id = 1;
+    state.enemy.id = 2;
+    state.self.race = Race::protoss;
+    state.enemy.race = Race::zerg;
+    state.self.supplyUsed = 80;
+    state.self.supplyTotal = 150;
+    state.bases = {
+        {1, {256, 256}, {320, 256}, 4000, 2000, 1},
+        {2, {1024, 256}, {1088, 256}, 3500, 2000, 1},
+        {3, {2048, 256}, {2112, 256}, 6500, 3000, -1},
+    };
+    state.self.units = {unit(1, UnitKind::nexus, true, {256, 256}),
+        unit(2, UnitKind::nexus, true, {1024, 256}),
+        unit(3, UnitKind::pylon, true), unit(4, UnitKind::forge, true),
+        unit(5, UnitKind::photonCannon, true),
+        unit(6, UnitKind::gateway, true),
+        unit(7, UnitKind::cyberneticsCore, true)};
+    for (int id = 20; id < 32; ++id) {
+        auto probe = unit(id, UnitKind::probe, true);
+        probe.role = UnitRole::worker;
+        state.self.units.push_back(probe);
+    }
+    for (int id = 40; id < 50; ++id)
+        state.self.units.push_back(unit(id, UnitKind::zealot, true));
+    const auto baseline = StrategyEngine{}.plan(state, {});
+    StrategyEngine candidate{false, false, false, false, false, true};
+    const auto recovery = candidate.plan(state, {});
+    const auto fundedGoal = [](const StrategicPlan& plan, const UnitKind kind,
+                               const int priority) {
+        return std::ranges::any_of(plan.goals,
+            [=](const ProductionGoal& demand) {
+                return demand.target == kind && demand.blocking &&
+                    demand.priority >= priority;
+            });
+    };
+    expect(!fundedGoal(baseline, UnitKind::probe, 115) &&
+           fundedGoal(recovery, UnitKind::probe, 115) &&
+           fundedGoal(recovery, UnitKind::nexus, 114),
+        "late recovery protects workers and an expansion before mining ends");
+    MacroPlanner macro;
+    ResourceLedger bank{450, 0};
+    const auto actions = macro.reconcile(state, recovery, bank);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::probe && action.reserved;
+    }) && std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::nexus && action.reserved;
+    }), "the protected late economy can fund one Probe and one Nexus together");
+    ThreatAssessment attack;
+    attack.combatEnemiesNearMain = 5;
+    attack.immediateGround = 0.8;
+    const auto threatened = candidate.plan(state, attack);
+    expect(!fundedGoal(threatened, UnitKind::probe, 115) &&
+           !fundedGoal(threatened, UnitKind::nexus, 114),
+        "direct pressure vetoes protected late economic spending");
 }
 
 void testPvZEarlySplashOption() {
@@ -6135,7 +6316,9 @@ void testPvZEarlySplashOption() {
 int main() {
     testPvZEarlySplashOption();
     testPvZReplayOpeningOption();
+    testPvZPoweredCannonScreenOption();
     testPvZArchivesBeforeDropsOption();
+    testProtectedLateEconomyOption();
     testVenatorCloakedContainment();
     testVenatorDetectionDeadline();
     testPvPFogDetectionOption();
@@ -6169,6 +6352,7 @@ int main() {
     testStrategicTargeting();
     testEconomicRecovery();
     testMacroReservations();
+    testPvZMineralFallback();
     testOpponentLearning();
     testInfluenceAndCombat();
     testCommandArbitration();

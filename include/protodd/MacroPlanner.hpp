@@ -44,12 +44,18 @@ struct ResourceLedger {
 
 class MacroPlanner {
 public:
+    explicit MacroPlanner(bool pvzMineralFallback = false,
+                          bool earlyPvzMineralFallback = false) noexcept
+        : pvzMineralFallback_(pvzMineralFallback),
+          earlyPvzMineralFallback_(earlyPvzMineralFallback) {}
     [[nodiscard]] std::vector<MacroAction> reconcile(
         const GameState& state,
         const StrategicPlan& plan,
         ResourceLedger& ledger) const;
 
 private:
+    bool pvzMineralFallback_{};
+    bool earlyPvzMineralFallback_{};
     struct PendingGoal {
         GoalKind goal{GoalKind::build};
         UnitKind target{UnitKind::unknown};

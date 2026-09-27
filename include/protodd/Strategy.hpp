@@ -63,10 +63,14 @@ public:
                             bool pvzEarlySplash = false,
                             bool pvpFogDetection = false,
                             bool pvzReplayOpening = false,
-                            bool pvzArchivesFirst = false) noexcept
+                            bool pvzArchivesFirst = false,
+                            bool lateEconomyRecovery = false,
+                            bool pvzPoweredCannonScreen = false) noexcept
         : pvzGatewayOpening_(pvzGatewayOpening), pvzEarlySplash_(pvzEarlySplash),
           pvpFogDetection_(pvpFogDetection), pvzReplayOpening_(pvzReplayOpening),
-          pvzArchivesFirst_(pvzArchivesFirst) {}
+          pvzArchivesFirst_(pvzArchivesFirst),
+          lateEconomyRecovery_(lateEconomyRecovery),
+          pvzPoweredCannonScreen_(pvzPoweredCannonScreen) {}
 
     [[nodiscard]] StrategicPlan plan(
         const GameState& state,
@@ -79,6 +83,8 @@ private:
     bool pvpFogDetection_{};
     bool pvzReplayOpening_{};
     bool pvzArchivesFirst_{};
+    bool lateEconomyRecovery_{};
+    bool pvzPoweredCannonScreen_{};
     [[nodiscard]] StrategicPlan planPvT(
         const GameState& state,
         const ThreatAssessment& threat) const;
@@ -94,7 +100,8 @@ private:
         const ThreatAssessment& threat);
     static void addAdaptiveCounters(StrategicPlan& plan, const GameState& state);
     static void addSafetyReactions(StrategicPlan& plan, const ThreatAssessment& threat);
-    static void addEconomicRecovery(StrategicPlan& plan, const GameState& state);
+    static void addEconomicRecovery(StrategicPlan& plan, const GameState& state,
+                                    bool lateEconomyRecovery);
     static void addPostPressureTransition(StrategicPlan& plan, const GameState& state,
                                           const ThreatAssessment& threat);
     static void addMapControlEconomy(StrategicPlan& plan, const GameState& state,

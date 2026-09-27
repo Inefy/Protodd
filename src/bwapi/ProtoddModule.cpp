@@ -127,7 +127,13 @@ void ProtoddModule::onStart() {
     opponent_.reset(state_.enemy.race);
     strategicDirector_.reset();
     expansion_.reset();
-    macro_ = {};
+#ifdef PROTODD_PVZ_EARLY_MINERAL_FALLBACK
+    macro_ = MacroPlanner{true, true};
+#elif defined(PROTODD_PVZ_MINERAL_FALLBACK)
+    macro_ = MacroPlanner{true};
+#else
+    macro_ = MacroPlanner{};
+#endif
     workers_ = {};
     plan_ = {};
     phases_.clear();
@@ -164,6 +170,7 @@ void ProtoddModule::onStart() {
     leasedScouts_.clear();
     advanceWaypoints_.clear();
     navigationSignatures_.clear();
+    stalledAdvances_.clear();
     navigationRefresh_ = -1;
     firstCounterattackFrame_ = -1;
     firstEnemyContactFrame_ = -1;
@@ -787,6 +794,62 @@ void ProtoddModule::updateCombat(
                 objective = advanceWaypoints_[squadIndex];
             }
         }
+        const auto engagementKey = engagements_.identify(squad.units, state_.frame);
+#ifdef PROTODD_STALLED_ARMY_ROUTING
+        // A distant attack-move can remain accepted while an entire army is
+        // motionless behind terrain. Only invoke A* after several members
+        // have actually stalled; preserve its waypoint until the group gets
+        // there so the next direct order cannot pull it back into the wall.
+        if (squad.role == SquadRole::mainArmy && squad.enemies.empty() &&
+            hasGroundUnit && travelGoal == plan_.attackTarget &&
+            travelGoal.valid() && squad.center.valid()) {
+            auto route = stalledAdvances_.find(engagementKey);
+            if (route != stalledAdvances_.end() &&
+                (state_.frame - route->second.lastSeen > 10 * 24 ||
+                 distanceSquared(route->second.destination, travelGoal) > 128 * 128)) {
+                stalledAdvances_.erase(route);
+                route = stalledAdvances_.end();
+            }
+            const auto groundCount = std::ranges::count_if(squad.units,
+                [](const UnitSnapshot& unit) { return !unit.flying; });
+            const auto stalledCount = std::ranges::count_if(squad.units,
+                [this](const UnitSnapshot& unit) {
+                    if (unit.flying) return false;
+                    const auto sample = motionSamples_.find(unit.id);
+                    return sample != motionSamples_.end() &&
+                        state_.frame - sample->second.since >= 240 &&
+                        distanceSquared(sample->second.anchor, unit.position) <= 24 * 24;
+                });
+            if (route == stalledAdvances_.end() &&
+                stalledCount >= std::max<std::ptrdiff_t>(3, groundCount / 4)) {
+                route = stalledAdvances_.emplace(engagementKey,
+                    StalledAdvance{travelGoal, {-1, -1}, -1, state_.frame}).first;
+            }
+            if (route != stalledAdvances_.end()) {
+                route->second.lastSeen = state_.frame;
+                if (navigation_.lineWalkable(squad.center, travelGoal)) {
+                    stalledAdvances_.erase(route);
+                } else {
+                    if (!route->second.waypoint.valid() ||
+                        distanceSquared(squad.center, route->second.waypoint) <= 96 * 96 ||
+                        state_.frame - route->second.waypointSince >= 720) {
+                        route->second.waypoint = navigation_.nextWaypoint(
+                            squad.center, travelGoal, 12, 30000);
+                        route->second.waypointSince = state_.frame;
+                    }
+                    if (route->second.waypoint.valid()) {
+                        objective = route->second.waypoint;
+                        travelReason = "stalled-terrain-route";
+                    }
+                }
+            }
+        }
+        if (stalledAdvances_.size() > 128U) {
+            std::erase_if(stalledAdvances_, [this](const auto& entry) {
+                return state_.frame - entry.second.lastSeen > 10 * 24;
+            });
+        }
+#endif
         const auto supportedArmy = SquadPlanner::combatSupport(squad, friendly, &navigation_);
         auto estimate = combat_.evaluate(
             supportedArmy, squad.enemies, requiredRatio,
@@ -794,7 +857,6 @@ void ProtoddModule::updateCombat(
                                   : opponent_.assessment().uncertainty,
             runSimulation);
         const auto proposedDecision = estimate.decision;
-        const auto engagementKey = engagements_.identify(squad.units, state_.frame);
         estimate.decision = engagements_.stabilize(
             engagementKey, estimate.decision, estimate.ratio,
             requiredRatio, state_.frame, !squad.enemies.empty());

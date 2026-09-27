@@ -44,34 +44,41 @@ def review(reference_path, candidate_path):
     reference, candidate = campaign(reference_path), campaign(candidate_path)
     ref = {row["game_id"]: row for row in reference["rows"]}
     cand = {row["game_id"]: row for row in candidate["rows"]}
-    paired = reference["healthy"] and candidate["healthy"] and \
-        reference["inputs"] == candidate["inputs"] and ref.keys() == cand.keys() and \
-        all(ref[i]["map"] == cand[i]["map"] and
-            ref[i]["host"] == cand[i]["host"] and
-            ref[i]["match"] == cand[i]["match"] for i in ref)
+    inputs_match = reference["inputs"] == candidate["inputs"]
+    matched = [i for i in sorted(ref.keys() & cand.keys()) if
+               inputs_match and ref[i]["map"] == cand[i]["map"] and
+               ref[i]["host"] == cand[i]["host"] and
+               ref[i]["match"] == cand[i]["match"]]
+    paired = (reference["healthy"] and candidate["healthy"] and
+              len(matched) == len(ref) == len(cand))
     runtime = paired and all(row["enemy_activity"] and not row["errors"]
                              for row in (*ref.values(), *cand.values()))
     for rows in (ref, cand):
         for row in rows.values():
             row.update(timings(row["log"]))
+    observed = [i for i in matched if all(
+        row["enemy_activity"] and not row["errors"]
+        for row in (ref[i], cand[i]))]
     metrics = {}
-    if runtime:
+    if observed:
         metrics = dict(
-            archive_complete_reference=[ref[i]["archive_complete"] for i in ref],
-            archive_complete_candidate=[cand[i]["archive_complete"] for i in ref],
-            first_templar_reference=[ref[i]["first_templar"] for i in ref],
-            first_templar_candidate=[cand[i]["first_templar"] for i in ref],
-            first_storm_reference=[ref[i]["first_storm"] for i in ref],
-            first_storm_candidate=[cand[i]["first_storm"] for i in ref],
-            support_bay_started_reference=[ref[i]["support_bay_started"] for i in ref],
-            support_bay_started_candidate=[cand[i]["support_bay_started"] for i in ref],
-            first_reaver_reference=[ref[i]["first_reaver"] for i in ref],
-            first_reaver_candidate=[cand[i]["first_reaver"] for i in ref],
+            game_ids=observed,
+            archive_complete_reference=[ref[i]["archive_complete"] for i in observed],
+            archive_complete_candidate=[cand[i]["archive_complete"] for i in observed],
+            first_templar_reference=[ref[i]["first_templar"] for i in observed],
+            first_templar_candidate=[cand[i]["first_templar"] for i in observed],
+            first_storm_reference=[ref[i]["first_storm"] for i in observed],
+            first_storm_candidate=[cand[i]["first_storm"] for i in observed],
+            support_bay_started_reference=[ref[i]["support_bay_started"] for i in observed],
+            support_bay_started_candidate=[cand[i]["support_bay_started"] for i in observed],
+            first_reaver_reference=[ref[i]["first_reaver"] for i in observed],
+            first_reaver_candidate=[cand[i]["first_reaver"] for i in observed],
             extra_early_losses=[cand[i]["early_losses"] - ref[i]["early_losses"]
-                                for i in ref],
-            wins_reference=sum(ref[i]["won"] for i in ref),
-            wins_candidate=sum(cand[i]["won"] for i in ref))
-    exposed = [i for i in ref if ref[i]["frame"] >= 13200 and cand[i]["frame"] >= 13200]
+                                for i in observed],
+            wins_reference=sum(ref[i]["won"] for i in observed),
+            wins_candidate=sum(cand[i]["won"] for i in observed))
+    exposed = [i for i in observed if ref[i]["frame"] >= 13200 and
+               cand[i]["frame"] >= 13200]
     earlier_archives = runtime and sum(
         cand[i]["archive_complete"] is not None and
         (ref[i]["archive_complete"] is None or
@@ -83,7 +90,9 @@ def review(reference_path, candidate_path):
     functional = earlier_archives and first_templar and \
         all(loss <= 0 for loss in metrics["extra_early_losses"])
     return dict(schema="protodd-pvz-archives-review-v1", reference=reference,
-                candidate=candidate, checks=dict(paired=paired, runtime=runtime),
+                candidate=candidate, checks=dict(inputs_match=inputs_match,
+                                                 matched_games=matched,
+                                                 paired=paired, runtime=runtime),
                 eligible_games=exposed, metrics=metrics, functional_pass=functional,
                 screen_more_games=functional and
                 metrics["wins_candidate"] > metrics["wins_reference"],

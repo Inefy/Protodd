@@ -14,6 +14,20 @@ from tools.log_analyzer import parse_key_values
 
 
 MILESTONES = (4800, 6000, 7200, 8400, 9600)
+PORT_SETTINGS = ("server/server_settings.json", "client1/client_settings.json",
+                 "client2/client_settings.json")
+
+
+def frozen_inputs(path, manifest):
+    components = {name: digest for name, digest in manifest["components"].items()
+                  if name != "server/bots/Protodd/AI/Protodd.dll" and
+                  name not in PORT_SETTINGS}
+    settings = {}
+    for name in PORT_SETTINGS:
+        value = json.loads((path / name).read_text())
+        value.pop("serverPort" if name.startswith("server/") else "ServerAddress")
+        settings[name] = value
+    return dict(components=components, normalized_settings=settings)
 
 
 def trace(path):
@@ -74,10 +88,7 @@ def campaign(path):
     return dict(path=str(path.resolve()),
                 manifest_sha256=sha256(path / "manifest.json"),
                 dll_sha256=manifest["components"]["server/bots/Protodd/AI/Protodd.dll"],
-                inputs={name: digest for name, digest in manifest["components"].items()
-                        if name in ("server/server.jar", "server/required/maps.zip",
-                                    "server/bots/McRaveZ/AI/McRaveZ.dll",
-                                    "client1/client.jar", "client2/client.jar")},
+                inputs=frozen_inputs(path, manifest),
                 healthy=(manifest["purpose"] == "development" and
                          manifest["games"] == len(rows) == inspection["scheduled"] and
                          not inspection["excluded"]),
@@ -88,32 +99,42 @@ def review(reference, candidate):
     ref, cand = campaign(reference), campaign(candidate)
     refs = {row["game_id"]: row for row in ref["rows"]}
     cands = {row["game_id"]: row for row in cand["rows"]}
-    paired = ref["healthy"] and cand["healthy"] and ref["inputs"] == cand["inputs"] and \
-        refs.keys() == cands.keys() and all(
-            refs[i]["map"] == cands[i]["map"] and refs[i]["host"] == cands[i]["host"] and
-            refs[i]["match"] == cands[i]["match"] for i in refs)
+    inputs_match = ref["inputs"] == cand["inputs"]
+    matched = [i for i in sorted(refs.keys() & cands.keys()) if
+               inputs_match and refs[i]["map"] == cands[i]["map"] and
+               refs[i]["host"] == cands[i]["host"] and
+               refs[i]["match"] == cands[i]["match"]]
+    paired = (ref["healthy"] and cand["healthy"] and
+              len(matched) == len(refs) == len(cands))
     runtime = paired and all(row["enemy_activity"] and not row["errors"] and
                              "4800" in row["states"] and "7200" in row["states"]
                              for row in (*refs.values(), *cands.values()))
+    observed = [i for i in matched if all(
+        row["enemy_activity"] and not row["errors"] and
+        "4800" in row["states"] and "7200" in row["states"]
+        for row in (refs[i], cands[i]))]
     metrics = {}
-    if runtime:
+    if observed:
         metrics = dict(
+            game_ids=observed,
             probe_gain_4800=[cands[i]["states"]["4800"]["probes"] -
-                             refs[i]["states"]["4800"]["probes"] for i in refs],
+                             refs[i]["states"]["4800"]["probes"] for i in observed],
             probe_gain_7200=[cands[i]["states"]["7200"]["probes"] -
-                             refs[i]["states"]["7200"]["probes"] for i in refs],
-            natural_started_reference=[refs[i]["natural_started"] for i in refs],
-            natural_started_candidate=[cands[i]["natural_started"] for i in refs],
+                             refs[i]["states"]["7200"]["probes"] for i in observed],
+            natural_started_reference=[refs[i]["natural_started"] for i in observed],
+            natural_started_candidate=[cands[i]["natural_started"] for i in observed],
             extra_early_losses=[cands[i]["early_losses"] - refs[i]["early_losses"]
-                                for i in refs],
-            wins_reference=sum(refs[i]["won"] for i in refs),
-            wins_candidate=sum(cands[i]["won"] for i in refs))
+                                for i in observed],
+            wins_reference=sum(refs[i]["won"] for i in observed),
+            wins_candidate=sum(cands[i]["won"] for i in observed))
     mechanism = runtime and sum(gain >= 3 for gain in metrics["probe_gain_4800"]) >= 3 and \
         sum(frame is not None and frame <= 4800 for frame in
             metrics["natural_started_candidate"]) >= 3 and \
         all(loss <= 0 for loss in metrics["extra_early_losses"])
     return dict(schema="protodd-pvz-replay-opening-review-v1", reference=ref,
-                candidate=cand, checks=dict(paired=paired, runtime=runtime),
+                candidate=cand, checks=dict(inputs_match=inputs_match,
+                                            matched_games=matched,
+                                            paired=paired, runtime=runtime),
                 metrics=metrics, mechanism_pass=mechanism,
                 screen_more_games=mechanism and
                 metrics["wins_candidate"] > metrics["wins_reference"],

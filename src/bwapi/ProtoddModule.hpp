@@ -58,18 +58,35 @@ private:
     StrategyEngine strategy_{true};
 #elif defined(PROTODD_PVP_FOG_DETECTION)
     StrategyEngine strategy_{false, false, true};
+#elif defined(PROTODD_PVZ_REPLAY_OPENING) && defined(PROTODD_PVZ_ARCHIVES_FIRST) && \
+    defined(PROTODD_LATE_ECONOMY_RECOVERY)
+    StrategyEngine strategy_{false, false, false, true, true, true};
+#elif defined(PROTODD_PVZ_REPLAY_OPENING) && defined(PROTODD_LATE_ECONOMY_RECOVERY)
+    StrategyEngine strategy_{false, false, false, true, false, true};
+#elif defined(PROTODD_PVZ_ARCHIVES_FIRST) && defined(PROTODD_LATE_ECONOMY_RECOVERY)
+    StrategyEngine strategy_{false, false, false, false, true, true};
 #elif defined(PROTODD_PVZ_REPLAY_OPENING) && defined(PROTODD_PVZ_ARCHIVES_FIRST)
     StrategyEngine strategy_{false, false, false, true, true};
+#elif defined(PROTODD_PVZ_REPLAY_OPENING) && defined(PROTODD_PVZ_POWERED_CANNON_SCREEN)
+    StrategyEngine strategy_{false, false, false, true, false, false, true};
 #elif defined(PROTODD_PVZ_REPLAY_OPENING)
     StrategyEngine strategy_{false, false, false, true};
 #elif defined(PROTODD_PVZ_ARCHIVES_FIRST)
     StrategyEngine strategy_{false, false, false, false, true};
+#elif defined(PROTODD_LATE_ECONOMY_RECOVERY)
+    StrategyEngine strategy_{false, false, false, false, false, true};
 #else
     StrategyEngine strategy_;
 #endif
     StrategicDirector strategicDirector_;
     ExpansionCoordinator expansion_;
+#ifdef PROTODD_PVZ_EARLY_MINERAL_FALLBACK
+    MacroPlanner macro_{true, true};
+#elif defined(PROTODD_PVZ_MINERAL_FALLBACK)
+    MacroPlanner macro_{true};
+#else
     MacroPlanner macro_;
+#endif
     WorkerManager workers_;
     ScoutManager scouts_;
     CombatEvaluator combat_;
@@ -104,6 +121,13 @@ private:
     std::vector<Position> advanceWaypoints_;
     std::vector<std::uint64_t> navigationSignatures_;
     Frame navigationRefresh_{-1};
+    struct StalledAdvance {
+        Position destination{-1, -1};
+        Position waypoint{-1, -1};
+        Frame waypointSince{-1};
+        Frame lastSeen{-1};
+    };
+    std::map<std::uint64_t, StalledAdvance> stalledAdvances_;
     Frame firstCounterattackFrame_{-1};
     Frame firstEnemyContactFrame_{-1};
     Frame firstBaseBreachFrame_{-1};
