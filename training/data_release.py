@@ -60,7 +60,7 @@ def verify_pins(identity, snapshot, root=ROOT):
     checked, historical = {}, {}
     training_only = {(root / identity["config"][key]).resolve() for key in ("python", "model_tool")}
     for name, expected in identity["hashes"].items():
-        path = Path(name)
+        path = Path(name).resolve()
         is_source = path.parent == root / "training"
         if is_source:
             archived = snapshot / "training" / path.name
@@ -77,7 +77,7 @@ def verify_pins(identity, snapshot, root=ROOT):
                 raise ValueError(f"Pinned extraction input changed: {path}")
         checked[name] = actual
     required = {str(root / "training" / name) for name in EXTRACTION_SOURCES}
-    if not required.issubset(checked):
+    if not required.issubset({str(Path(name).resolve()) for name in checked}):
         raise ValueError("Legacy identity omits required extraction sources")
     return {"extraction_hashes": checked, "historical_training_hashes": historical}
 

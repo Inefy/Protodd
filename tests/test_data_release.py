@@ -45,7 +45,10 @@ class ReleaseTests(unittest.TestCase):
                 target = snapshot / "training" / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(source.read_bytes())
-                hashes[str(source)] = release.digest(source)
+                # Identity paths can use a different spelling of the same directory
+                # (for example an 8.3 temp path on Windows).
+                identity_source = source.parent / ".." / "training" / name if name == "replay_pipeline.py" else source
+                hashes[str(identity_source)] = release.digest(source)
                 archived[name] = release.digest(source)
             write(snapshot / "snapshot.json", {"files": archived})
             identity = {"config": {"python": "trainer-python.exe", "model_tool": "model-tool.exe"}, "hashes": hashes}
