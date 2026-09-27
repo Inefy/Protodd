@@ -858,6 +858,15 @@ The functional and win gates failed, so this option stays off. The larger
 army in game 3 suggests the next loss review should inspect force position,
 engagement timing and composition against the late Zerg mass before another
 economy quota experiment.
+That loss reached 41 Zealots, 12 Dragoons, two High Templar and one Reaver
+at frame 19,200, with 1,459 minerals, 195 gas and 58 combat units in the
+state report. The opponent history contained 71 Hydralisks and five Lurkers;
+27 enemy army units were currently visible. By frame 21,600 Protodd had
+19 combat units and only one Nexus, after losing the Reaver and Templar.
+The next bounded diagnosis should check where those splash units stood,
+which engagements depleted the army, and whether reinforcement and supply
+timing could have protected the bases. The first attack at frame 11,976
+shows that the failure was not simply a missing attack order.
 
 The isolated Cannon screen's game 2 also lost (frame 25,391). Its third and
 fourth Cannons completed near the natural at frames 12,121 and 13,326.
