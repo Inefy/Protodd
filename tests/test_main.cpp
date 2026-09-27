@@ -5991,6 +5991,65 @@ void testPvZReplayOpeningOption() {
         "visible ground pressure cancels the replay economy timing");
 }
 
+void testPvZArchivesBeforeDropsOption() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 9 * 60 * 24;
+    state.self.race = Race::protoss;
+    state.enemy.race = Race::zerg;
+    state.self.supplyUsed = 100;
+    state.self.supplyTotal = 200;
+    state.self.units = {unit(1, UnitKind::nexus, true),
+        unit(2, UnitKind::nexus, true), unit(3, UnitKind::pylon, true),
+        unit(4, UnitKind::forge, true), unit(5, UnitKind::photonCannon, true),
+        unit(6, UnitKind::gateway, true),
+        unit(7, UnitKind::cyberneticsCore, true),
+        unit(8, UnitKind::citadelOfAdun, true)};
+    for (int id = 20; id < 50; ++id) {
+        auto probe = unit(id, UnitKind::probe, true);
+        probe.role = UnitRole::worker;
+        state.self.units.push_back(probe);
+    }
+    for (int id = 50; id < 58; ++id)
+        state.self.units.push_back(unit(id, UnitKind::zealot, true));
+    state.enemy.units.push_back(unit(90, UnitKind::drone, false));
+    const auto baseline = StrategyEngine{}.plan(state, {});
+    StrategyEngine candidate{false, false, false, false, true};
+    const auto archive = candidate.plan(state, {});
+    const auto goalFor = [](const StrategicPlan& plan, const UnitKind kind,
+                            const int minimumPriority) {
+        return std::ranges::any_of(plan.goals,
+            [=](const ProductionGoal& demand) {
+                return demand.target == kind && demand.blocking &&
+                    demand.priority >= minimumPriority;
+            });
+    };
+    expect(baseline.harassmentDrops == 1 &&
+           goalFor(baseline, UnitKind::roboticsSupportBay, 102),
+        "default PvZ spends on its optional Reaver drop package");
+    expect(archive.harassmentDrops == 0 &&
+           goalFor(archive, UnitKind::templarArchives, 102),
+        "replay PvZ tech option buys Archives before a drop package");
+    MacroPlanner macro;
+    ResourceLedger bank{250, 250};
+    const auto actions = macro.reconcile(state, archive, bank);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+        return action.target == UnitKind::templarArchives && action.reserved;
+    }), "replay PvZ tech option can fund the Archives at its checkpoint");
+    state.self.units.push_back(unit(100, UnitKind::templarArchives, true));
+    const auto spell = candidate.plan(state, {});
+    expect(std::ranges::any_of(spell.goals, [](const ProductionGoal& demand) {
+        return demand.technology == TechnologyKind::psionicStorm &&
+            demand.priority >= 102 && demand.blocking;
+    }) && goalFor(spell, UnitKind::highTemplar, 101) &&
+           spell.harassmentDrops == 0,
+        "Storm and the first caster receive gas before optional drops");
+    state.self.units.push_back(unit(101, UnitKind::highTemplar, true));
+    const auto unlocked = candidate.plan(state, {});
+    expect(unlocked.harassmentDrops == 1,
+        "the optional drop package resumes after the first High Templar");
+}
+
 void testPvZEarlySplashOption() {
     using namespace protodd;
     GameState state;
@@ -6076,6 +6135,7 @@ void testPvZEarlySplashOption() {
 int main() {
     testPvZEarlySplashOption();
     testPvZReplayOpeningOption();
+    testPvZArchivesBeforeDropsOption();
     testVenatorCloakedContainment();
     testVenatorDetectionDeadline();
     testPvPFogDetectionOption();

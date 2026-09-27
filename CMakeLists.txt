@@ -10,6 +10,7 @@ option(PROTODD_PVZ_GATEWAY_OPENING "Evaluate a gateway-first PvZ opening in isol
 option(PROTODD_PVZ_EARLY_SPLASH "Evaluate an early evidence-triggered PvZ Reaver transition in isolated local games" OFF)
 option(PROTODD_PVP_FOG_DETECTION "Evaluate an early Observer against a poorly scouted PvP two-Gateway opening" OFF)
 option(PROTODD_PVZ_REPLAY_OPENING "Evaluate a replay-derived economic PvZ opening" OFF)
+option(PROTODD_PVZ_ARCHIVES_FIRST "Evaluate replay-derived PvZ Archives before optional Reaver drops" OFF)
 set(BWAPI_ROOT "" CACHE PATH "Path to an unpacked BWAPI 4.4.0 release")
 set(BWAPI_LIBRARY "" CACHE FILEPATH "Path to a 32-bit BWAPILIB.lib")
 set(PROTODD_WHOLE_GAME_WEIGHTS "" CACHE FILEPATH "Whole-game model weights to embed in Protodd.dll")
@@ -60,12 +61,14 @@ protodd_enable_warnings(protodd_core)
 if(PROTODD_BUILD_BWAPI_MODULE)
     if((PROTODD_PVZ_GATEWAY_OPENING AND PROTODD_PVZ_EARLY_SPLASH) OR
        (PROTODD_PVZ_GATEWAY_OPENING AND PROTODD_PVZ_REPLAY_OPENING) OR
-       (PROTODD_PVZ_EARLY_SPLASH AND PROTODD_PVZ_REPLAY_OPENING))
-        message(FATAL_ERROR "Evaluate one PvZ opening intervention at a time")
+       (PROTODD_PVZ_EARLY_SPLASH AND PROTODD_PVZ_REPLAY_OPENING) OR
+       (PROTODD_PVZ_GATEWAY_OPENING AND PROTODD_PVZ_ARCHIVES_FIRST) OR
+       (PROTODD_PVZ_EARLY_SPLASH AND PROTODD_PVZ_ARCHIVES_FIRST))
+        message(FATAL_ERROR "Unsupported combination of PvZ strategy interventions")
     endif()
     if(PROTODD_PVP_FOG_DETECTION AND
        (PROTODD_PVZ_GATEWAY_OPENING OR PROTODD_PVZ_EARLY_SPLASH OR
-        PROTODD_PVZ_REPLAY_OPENING))
+        PROTODD_PVZ_REPLAY_OPENING OR PROTODD_PVZ_ARCHIVES_FIRST))
         message(FATAL_ERROR "Evaluate one opt-in strategy intervention at a time")
     endif()
     if(PROTODD_WHOLE_GAME_EVALUATION_BUILD AND NOT PROTODD_WHOLE_GAME_CONTROL)
@@ -148,6 +151,9 @@ if(PROTODD_BUILD_BWAPI_MODULE)
     endif()
     if(PROTODD_PVZ_REPLAY_OPENING)
         target_compile_definitions(protodd_bwapi PRIVATE PROTODD_PVZ_REPLAY_OPENING=1)
+    endif()
+    if(PROTODD_PVZ_ARCHIVES_FIRST)
+        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_PVZ_ARCHIVES_FIRST=1)
     endif()
     if(PROTODD_WHOLE_GAME_CONTROL)
         if(NOT PROTODD_WHOLE_GAME_WEIGHTS)

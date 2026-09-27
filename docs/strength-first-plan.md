@@ -750,8 +750,31 @@ Corsairs. In the first candidate loss at that frame, Protodd had 46 Probes,
 five Gateways and two Corsairs but no Archives; at frame 13,200 its Archives
 was still unfinished as a large Hydra wave reached home. This makes earlier
 Storm access a separate follow-up hypothesis after the opening comparison.
+Across those 177 games, 114 had a completed Archives, 50 had a completed High
+Templar, 16 had researched Storm, and only three had a completed Robotics
+Support Bay. Protodd was building a Support Bay and reserving extra Reavers
+at frame 12,000 instead. The next tech experiment should prioritize the
+Archives path before optional Reaver harassment and measure first Templar,
+Storm research, army survival and wins; it must not assume Storm was universal
+in the replay sample.
 Later benchmark frames condition on games that lasted that long, so these
 medians are descriptive rather than a causal win recipe.
+
+An opt-in `PROTODD_PVZ_ARCHIVES_FIRST` tactic now tests that separate tech
+hypothesis on top of the replay economy opening. Once two bases, 26 Probes,
+a Core, Cannon and four mobile defenders are established, it reserves
+Citadel, Archives, then the first High Templar and Storm research ahead of
+optional Reaver drop production. Immediate ground pressure still vetoes the
+tech window. Native tests and the Win32 build pass; frozen combined DLL
+SHA-256 is `B906F5E4019B2A4CEDFD60EB5ED7225073AD68D1C09A268D8FCD53C55BFE4758`.
+The final four-game 640-frame-allowance screen is prepared as `candidate-v2`
+in `build/pvz-archives-first-screen-640-20260927` for comparison with the
+refined economy candidate. The earlier `candidate` package was never run; it
+was replaced so Storm research takes precedence over the first Templar cycle.
+The functional gate is Archives at least 720
+frames earlier in two eligible games, two first Templar by frame 15,600,
+and no extra early losses. A larger campaign needs an actual win gain;
+tech timing alone does not promote the build.
 
 - No new full-corpus fit until a bounded experiment addresses a demonstrated
   bottleneck and meets its declared development gates. Do not restart the completed

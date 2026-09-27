@@ -779,7 +779,7 @@ StrategicPlan StrategyEngine::plan(
         setCompositionWeight(result, UnitKind::highTemplar, 0.12);
         normalizeComposition(result);
     }
-    addHarassmentProduction(result, state);
+    addHarassmentProduction(result, state, pvzArchivesFirst_);
     std::ranges::stable_sort(result.goals, std::greater{}, &ProductionGoal::priority);
     return result;
 }
@@ -1196,6 +1196,30 @@ StrategicPlan StrategyEngine::planPvZ(
              "storm versus Zerg mass");
         goal(result, GoalKind::train, UnitKind::highTemplar,
              std::max(2, minute(state) / 3), 72, "storm support");
+    }
+    const auto archiveWindow = pvzArchivesFirst_ && minute(state) >= 6 &&
+        minute(state) < 12 && count(state, UnitKind::nexus, true) >= 2 &&
+        count(state, UnitKind::probe) >= 26 &&
+        count(state, UnitKind::cyberneticsCore, true) > 0 &&
+        count(state, UnitKind::photonCannon, true) > 0 &&
+        count(state, UnitKind::zealot, true) +
+            count(state, UnitKind::dragoon, true) >= 4 &&
+        threat.combatEnemiesNearMain == 0 && !activeApproach(state, threat) &&
+        threat.immediateGround <= 0.45 && !hardBreachAtMain(state);
+    if (archiveWindow) {
+        // Among frozen train-split PvZ survivors at frame 12000, 114/177 had
+        // an Archives but only 3/177 had a Support Bay. The default drop
+        // package reserves Robotics/Reaver before the anti-swarm spell path.
+        goal(result, GoalKind::build, UnitKind::citadelOfAdun, 1, 103,
+             "open the replay-derived Templar tech window", true);
+        goal(result, GoalKind::build, UnitKind::templarArchives, 1, 102,
+             "Archives before optional Reaver harassment", true);
+        if (count(state, UnitKind::templarArchives, true) > 0) {
+            technologyGoal(result, TechnologyKind::psionicStorm, 1, 102,
+                           "research the anti-swarm spell before drops", true);
+            goal(result, GoalKind::train, UnitKind::highTemplar, 1, 101,
+                 "first anti-swarm spellcaster before drops", true);
+        }
     }
 
     if (minute(state) >= 8) {
@@ -2861,13 +2885,17 @@ void StrategyEngine::addPostPressureTransition(
                        "mobile mineral reinforcement for the ranged army");
 }
 
-void StrategyEngine::addHarassmentProduction(StrategicPlan& plan, const GameState& state) {
+void StrategyEngine::addHarassmentProduction(StrategicPlan& plan, const GameState& state,
+                                              const bool pvzArchivesFirst) {
     const auto bases = count(state, UnitKind::nexus, true);
     const auto workers = countRole(state, UnitRole::worker);
     const auto screen = count(state, UnitKind::dragoon, true) + count(state, UnitKind::zealot, true);
     if (minute(state) < 7 || bases < 2 || workers < 28 || screen < 8 ||
         plan.prioritizeReinforcements || plan.posture == Posture::defend ||
         plan.posture == Posture::recover || hardBreachAtMain(state)) return;
+    if (pvzArchivesFirst && state.enemy.race == Race::zerg && minute(state) < 12 &&
+        (count(state, UnitKind::templarArchives, true) == 0 ||
+         count(state, UnitKind::highTemplar, true) == 0)) return;
     const auto enemyEconomy = std::ranges::any_of(state.bases, [&](const BaseSnapshot& base) {
         return state.enemy.id >= 0 && base.ownerId == state.enemy.id && base.mineralsRemaining >= 500;
     }) || std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& enemy) {

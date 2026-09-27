@@ -29,11 +29,12 @@ FIELDS = (
 )
 
 
-def summarize(values: list[float]) -> dict[str, float]:
+def summarize(values: list[float]) -> dict[str, float | int]:
     ordered = sorted(values)
     return {"n": len(ordered), "p25": ordered[len(ordered) // 4],
             "median": statistics.median(ordered),
-            "p75": ordered[(3 * len(ordered)) // 4]}
+            "p75": ordered[(3 * len(ordered)) // 4],
+            "positive": sum(value > 0 for value in ordered)}
 
 
 def benchmark(release: Path, games_dir: Path, schema: Path,

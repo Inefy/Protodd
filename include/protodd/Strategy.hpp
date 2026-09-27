@@ -62,9 +62,11 @@ public:
     explicit StrategyEngine(bool pvzGatewayOpening = false,
                             bool pvzEarlySplash = false,
                             bool pvpFogDetection = false,
-                            bool pvzReplayOpening = false) noexcept
+                            bool pvzReplayOpening = false,
+                            bool pvzArchivesFirst = false) noexcept
         : pvzGatewayOpening_(pvzGatewayOpening), pvzEarlySplash_(pvzEarlySplash),
-          pvpFogDetection_(pvpFogDetection), pvzReplayOpening_(pvzReplayOpening) {}
+          pvpFogDetection_(pvpFogDetection), pvzReplayOpening_(pvzReplayOpening),
+          pvzArchivesFirst_(pvzArchivesFirst) {}
 
     [[nodiscard]] StrategicPlan plan(
         const GameState& state,
@@ -76,6 +78,7 @@ private:
     bool pvzEarlySplash_{};
     bool pvpFogDetection_{};
     bool pvzReplayOpening_{};
+    bool pvzArchivesFirst_{};
     [[nodiscard]] StrategicPlan planPvT(
         const GameState& state,
         const ThreatAssessment& threat) const;
@@ -96,7 +99,8 @@ private:
                                           const ThreatAssessment& threat);
     static void addMapControlEconomy(StrategicPlan& plan, const GameState& state,
                                      const ThreatAssessment& threat);
-    static void addHarassmentProduction(StrategicPlan& plan, const GameState& state);
+    static void addHarassmentProduction(StrategicPlan& plan, const GameState& state,
+                                        bool pvzArchivesFirst);
     static void applyOpeningStyle(
         StrategicPlan& plan,
         const GameState& state,
