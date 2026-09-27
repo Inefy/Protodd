@@ -61,9 +61,10 @@ class StrategyEngine {
 public:
     explicit StrategyEngine(bool pvzGatewayOpening = false,
                             bool pvzEarlySplash = false,
-                            bool pvpFogDetection = false) noexcept
+                            bool pvpFogDetection = false,
+                            bool pvzReplayOpening = false) noexcept
         : pvzGatewayOpening_(pvzGatewayOpening), pvzEarlySplash_(pvzEarlySplash),
-          pvpFogDetection_(pvpFogDetection) {}
+          pvpFogDetection_(pvpFogDetection), pvzReplayOpening_(pvzReplayOpening) {}
 
     [[nodiscard]] StrategicPlan plan(
         const GameState& state,
@@ -74,6 +75,7 @@ private:
     bool pvzGatewayOpening_{};
     bool pvzEarlySplash_{};
     bool pvpFogDetection_{};
+    bool pvzReplayOpening_{};
     [[nodiscard]] StrategicPlan planPvT(
         const GameState& state,
         const ThreatAssessment& threat) const;

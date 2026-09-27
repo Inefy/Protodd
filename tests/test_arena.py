@@ -11,6 +11,23 @@ from training.arena import prepare, inspect, verify
 
 
 class ArenaTests(unittest.TestCase):
+    def test_development_slow_frame_allowance_is_frozen(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = self.fixture(Path(temp))
+            with self.assertRaisesRegex(ValueError, 'slow-frame allowance requires'):
+                prepare(**args, purpose='final-test', slow_frame_allowance=640)
+            self.assertFalse(args['output'].exists())
+            prepare(**args, slow_frame_allowance=640)
+            settings = args['output'] / 'server/server_settings.json'
+            self.assertEqual(json.loads(settings.read_text())['tournamentModuleSettings']
+                             ['timeoutLimits'][0]['frameCount'], 640)
+            self.assertTrue(verify(args['output'])['verified'])
+            value = json.loads(settings.read_text())
+            value['tournamentModuleSettings']['timeoutLimits'][0]['frameCount'] = 320
+            settings.write_text(json.dumps(value))
+            with self.assertRaises(ValueError):
+                verify(args['output'])
+
     def test_worker_intervention_is_training_only_and_frozen(self):
         with tempfile.TemporaryDirectory() as temp:
             args=self.fixture(Path(temp))

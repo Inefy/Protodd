@@ -994,8 +994,18 @@ StrategicPlan StrategyEngine::planPvZ(
         threat.combatEnemiesNearMain > 0 || activeApproach(state, threat) ||
         (minute(state) < 6 && recentEnemyCount(state, UnitKind::zergling) > 0);
     const auto gatewayFirst = pvzGatewayOpening_ && !earlyGroundPressure;
-    result.name = gatewayFirst ? "PvZ gateway-first mobile opening" :
-        "PvZ fortified gateway into corsair-templar";
+    // A Zergling seen at the enemy base is evidence of production, not of an
+    // attack on our fortified natural. The default opening treats any recent
+    // Zergling as pressure; the replay opening uses immediate spatial threat
+    // here so a distant scout does not cancel its economy window for 90 seconds.
+    const auto replayOpeningPressure = openingPressureExpected(state, threat) ||
+        threat.combatEnemiesNearMain > 0 || activeApproach(state, threat) ||
+        threat.immediateGround > 0.45;
+    const auto replayEconomyOpening = pvzReplayOpening_ && !replayOpeningPressure &&
+        threat.workerRush <= 0.30 && !hardBreachAtMain(state) && minute(state) < 8;
+    result.name = replayEconomyOpening ? "PvZ replay-derived fortified expansion" :
+        (gatewayFirst ? "PvZ gateway-first mobile opening" :
+                        "PvZ fortified gateway into corsair-templar");
     result.desiredWorkers = std::min(70, 20 + minute(state) * 4);
     result.desiredBases = minute(state) < 3 ? 1 : (minute(state) < 11 ? 2 : 3);
     result.desiredGasWorkers = !supplyAtLeast(state, 14) ? 0 :
@@ -1036,7 +1046,8 @@ StrategicPlan StrategyEngine::planPvZ(
     // has enough surface area. Pause briefly at eight workers and establish a
     // static anchor; resume Probe growth as soon as either that anchor or two
     // Zealots are complete. This remains safe even when the first scout dies.
-    if (minute(state) < 4 && count(state, UnitKind::zealot, true) < 2 &&
+    if (!replayEconomyOpening && minute(state) < 4 &&
+        count(state, UnitKind::zealot, true) < 2 &&
         count(state, UnitKind::photonCannon, true) == 0) {
         const auto openingWorkerLimit = gatewayFirst &&
             count(state, UnitKind::gateway) > 0 ? 11 : 8;
@@ -1071,17 +1082,34 @@ StrategicPlan StrategyEngine::planPvZ(
             goal(result, GoalKind::build, UnitKind::photonCannon, 1, 99,
                  "baseline anti-ling safety before economic commitment", true);
         }
-        const auto openingGateways = supplyAtLeast(state, 8) ? 2 : 1;
+        const auto replaySecondGatewayReady =
+            count(state, UnitKind::nexus, true) >= 2 &&
+            count(state, UnitKind::probe) >= 28 &&
+            count(state, UnitKind::cyberneticsCore) > 0;
+        const auto openingGateways = replayEconomyOpening && !replaySecondGatewayReady
+            ? 1 : (supplyAtLeast(state, 8) ? 2 : 1);
         goal(result, GoalKind::build, UnitKind::gateway,
-             minute(state) < 8 ? openingGateways : 4,
+             minute(state) < 8 || replayEconomyOpening ? openingGateways : 4,
              gatewayFirst && openingGateways == 1 ? 100 :
                  (openingGateways == 1 ? 98 : 97),
-             "seven-supply gateway into two-gate Zerg safety",
+             replayEconomyOpening ? "one Gateway while the fortified natural starts" :
+                                    "seven-supply gateway into two-gate Zerg safety",
              count(state, UnitKind::gateway) < openingGateways);
         goal(result, GoalKind::train, UnitKind::zealot,
-             std::max(4, minute(state)), 99,
-             "opening defenders before Forge economy",
-             count(state, UnitKind::zealot) < 3);
+             replayEconomyOpening ? std::max(3, minute(state)) :
+                                    std::max(4, minute(state)), 99,
+             replayEconomyOpening ? "opening escort for the fortified natural" :
+                                    "opening defenders before Forge economy",
+             count(state, UnitKind::zealot) < (replayEconomyOpening ? 2 : 3));
+    }
+    if (replayEconomyOpening && count(state, UnitKind::pylon) > 0) {
+        // Frozen qualified PvZ replays had a median 17 Probes and a Nexus
+        // underway by frame 4800, then 26 Probes on two bases by frame 7200.
+        // The default eight-worker pause and second early Gateway miss both
+        // milestones. Keep one Probe cycle ahead of optional army filler.
+        goal(result, GoalKind::train, UnitKind::probe,
+             result.desiredWorkers, 101,
+             "continuous workers in the replay-derived opening", true);
     }
     // The gateway-first pilot fielded four Zealots early, then reserved the
     // whole mineral bank for a Nexus while both Gateways sat idle. Complete a
@@ -1210,12 +1238,24 @@ StrategicPlan StrategyEngine::planPvZ(
             goal(result, GoalKind::build, UnitKind::pylon, 2, 100,
                  "secure reinforcement supply inside the Cannon shell", true);
         }
-    } else if (minute(state) >= 3 &&
+    } else if (replayEconomyOpening && state.frame >= 2 * 60 * 24 &&
+               count(state, UnitKind::probe) >= 12 &&
+               count(state, UnitKind::gateway) >= 1 &&
+               count(state, UnitKind::photonCannon) >= 1) {
+        result.desiredBases = 2;
+        goal(result, GoalKind::expand, UnitKind::nexus, 2, 103,
+             "frozen replay timing for the fortified natural", true);
+    } else if (!replayEconomyOpening && minute(state) >= 3 &&
                (count(state, UnitKind::zealot) >= 2 ||
                 count(state, UnitKind::photonCannon) >= 1)) {
         goal(result, GoalKind::expand, UnitKind::nexus, 2, 91,
              "forge-fast-expand timing");
     }
+    if (replayEconomyOpening && count(state, UnitKind::nexus) < 2)
+        result.desiredBases = std::min(result.desiredBases,
+            count(state, UnitKind::probe) >= 12 &&
+            count(state, UnitKind::gateway) >= 1 &&
+            count(state, UnitKind::photonCannon) >= 1 ? 2 : 1);
     return result;
 }
 

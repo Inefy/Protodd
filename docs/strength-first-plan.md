@@ -673,7 +673,7 @@ base was overrun. The functional and decisive-win gates both failed. Do not
 promote this option or repeat another reactive splash timing variant without
 a materially earlier defensive mechanism and broader opponent evidence.
 
-### PvP fog detection screen (in progress, 2026-09-27)
+### PvP fog detection screen (2026-09-27)
 
 A fresh four-game PvP/PvZ baseline with the current default DLL was structurally
 healthy and lost 0/4. In its second BananaBrain game, a first Dark Templar
@@ -692,10 +692,66 @@ candidate `98590F6DF4B1C0851EC17E4BB4E537087F97E7A94D53EFB2619747D9F43AD009`.
 The same-input BananaBrain screen was prepared for four games per arm across
 Benzene and Destination, alternating sides, under
 `build/pvp-fog-screen-20260927`. The reference attempt stopped after one
-healthy reported loss and must be rerun; the candidate has not started.
+healthy reported loss. The candidate completed four structurally valid games
+and lost all four. Its new Observer goal appeared in games 1 and 3, where
+no enemy Dark Templar was logged; an enemy Dark Templar appeared in game 0
+before the rule became eligible. The trigger missed the target timing and the
+candidate is not promoted. The four-game reference rerun is prepared but has
+not started.
 The functional gate is Observatory/Observer ahead of the first DT in eligible
 games without a new opening collapse. Promotion requires a real win gain with
 healthy paired reports; earlier detection alone is insufficient.
+
+### Replay-derived PvZ economy opening (in progress, 2026-09-27)
+
+In a stable SHA sample of 256 qualified frozen train-split ZvP games, the
+Protoss median was 17 Probes with a second Nexus underway by frame 4,800;
+at frame 7,200 it was 26 Probes on two Nexuses. Recent default losses against
+McRaveZ had 10-11 Probes and one Nexus at frame 4,800, and 16-17 Probes and
+one Nexus at frame 7,200. The benchmark is descriptive and does not use
+validation or test games (`training/human_opening_benchmark.py`,
+`build/human-opening-zvp-20260927.json`).
+
+The opt-in `PROTODD_PVZ_REPLAY_OPENING` build tests continuous Probe production,
+one initial Gateway, and an earlier fortified natural once a Cannon and
+Gateway have started. Observed early ground pressure returns to the defensive
+plan. The native strategy and spending checks pass. Frozen DLL SHA-256:
+reference `52C5D39DD5D7E125BE4C6F778FB045BD1620BCB7339929DCE700784991500012`,
+candidate `F3D9883BAE8F45D96291B9DD9A861BB4F032762CB1864693A6CAF82EE10928F7`.
+Four games per arm against McRaveZ are prepared on Benzene and Destination
+with both host sides in `build/pvz-replay-opening-screen-20260927`; the
+candidate is running. The mechanism gate is a second Nexus underway and at
+least three extra Probes by frame 4,800 in most matched games, with no new
+early collapse. A larger win-rate campaign requires healthy paired reports
+and an actual pilot win gain; the default build stays off pending broader proof.
+In the first two candidate games, Protodd had 19 Probes at frame 4,800 but
+did not start its natural until about frame 7,400. A Zergling last seen at the
+enemy base switched the opening back to the default two-Gateway plan even
+though no enemy army was near the main. A second frozen candidate keeps the
+economy opening through distant Zergling sightings and still cancels it for
+immediate ground pressure. Its native regression test and Win32 build pass;
+DLL SHA-256 is
+`60061B73C16EF650E725AD346CD1D237563EC48F62B6255BB109B415E6F1035A`.
+An initial four-game screen was prepared in
+`build/pvz-replay-opening-v2-screen-20260927` but not launched. The replacement
+paired screen below uses the same mechanism and outcome gates; the first two
+worker counts alone are not strength proof.
+The first candidate's game 2 displayed `won=true`, but McRaveZ exceeded the
+frozen 55 ms slow-frame allowance (321 of 320 frames), so the arena verifier
+excludes it as a runtime forfeit. Its early Nexus and 19 Probes at frame 4,800
+are usable mechanism observations, not win-rate evidence. For the refined
+candidate and reference, a fresh paired campaign under
+`build/pvz-replay-opening-v2-screen-640-20260927` pins the same 640-frame
+slow-frame allowance in both arms; the old reports remain unchanged. The
+arena preparer and its regression test now pin that development-only setting.
+The extended train-split benchmark has 177 surviving samples at frame 12,000:
+median 45 Probes, four Gateways, a completed Templar Archives and two
+Corsairs. In the first candidate loss at that frame, Protodd had 46 Probes,
+five Gateways and two Corsairs but no Archives; at frame 13,200 its Archives
+was still unfinished as a large Hydra wave reached home. This makes earlier
+Storm access a separate follow-up hypothesis after the opening comparison.
+Later benchmark frames condition on games that lasted that long, so these
+medians are descriptive rather than a causal win recipe.
 
 - No new full-corpus fit until a bounded experiment addresses a demonstrated
   bottleneck and meets its declared development gates. Do not restart the completed

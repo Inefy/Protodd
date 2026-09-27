@@ -5921,6 +5921,76 @@ void testPvPFogDetectionOption() {
         "an unanchored opening keeps its resources for the initial defense");
 }
 
+void testPvZReplayOpeningOption() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 3600;
+    state.self.race = Race::protoss;
+    state.enemy.race = Race::zerg;
+    state.self.supplyUsed = 28;
+    state.self.supplyTotal = 50;
+    state.self.units = {unit(1, UnitKind::nexus, true),
+        unit(2, UnitKind::pylon, true), unit(3, UnitKind::forge, true),
+        unit(4, UnitKind::photonCannon, true),
+        unit(5, UnitKind::gateway, true)};
+    state.self.units[3].completed = false;
+    state.self.units[4].completed = false;
+    for (int id = 20; id < 32; ++id) {
+        auto probe = unit(id, UnitKind::probe, true);
+        probe.role = UnitRole::worker;
+        state.self.units.push_back(probe);
+    }
+    ThreatAssessment threat;
+    const auto baseline = StrategyEngine{}.plan(state, threat);
+    StrategyEngine candidate{false, false, false, true};
+    const auto replay = candidate.plan(state, threat);
+    const auto demands = [](const StrategicPlan& plan, const UnitKind kind,
+                            const int desired, const int priority,
+                            const bool mustBlock = true) {
+        return std::ranges::any_of(plan.goals,
+            [=](const ProductionGoal& goal) {
+                return goal.target == kind && goal.desiredCount == desired &&
+                    goal.priority >= priority && (!mustBlock || goal.blocking);
+            });
+    };
+    expect(baseline.desiredWorkers == 8 && replay.desiredWorkers >= 14,
+        "replay PvZ opening replaces the eight-Probe pause after early safety starts");
+    expect(demands(replay, UnitKind::probe, replay.desiredWorkers, 101),
+        "replay PvZ opening protects continuous Probe production");
+    expect(demands(replay, UnitKind::gateway, 1, 98, false) &&
+           demands(baseline, UnitKind::gateway, 2, 97, false),
+        "replay PvZ opening funds one Gateway before a second early Gateway");
+    expect(replay.desiredBases == 2 &&
+           demands(replay, UnitKind::nexus, 2, 103),
+        "replay PvZ opening commits the fortified natural after twelve Probes");
+    MacroPlanner macro;
+    ResourceLedger bank{450, 0};
+    const auto actions = macro.reconcile(state, replay, bank);
+    const auto funded = [&](const UnitKind kind) {
+        return std::ranges::any_of(actions, [kind](const MacroAction& action) {
+            return action.target == kind && action.reserved;
+        });
+    };
+    expect(funded(UnitKind::nexus) && funded(UnitKind::probe),
+        "replay PvZ opening funds the natural and one worker cycle together");
+    auto distantLing = unit(90, UnitKind::zergling, false, {3000, 3000});
+    distantLing.visible = false;
+    distantLing.lastSeen = state.frame;
+    state.enemy.units.push_back(distantLing);
+    const auto scoutedLing = candidate.plan(state, threat);
+    expect(scoutedLing.desiredBases == 2 &&
+           demands(scoutedLing, UnitKind::nexus, 2, 103) &&
+           demands(scoutedLing, UnitKind::gateway, 1, 98, false),
+        "a Zergling last seen at the enemy base does not cancel fortified expansion");
+    auto pressured = threat;
+    pressured.immediateGround = 0.8;
+    pressured.combatEnemiesNearMain = 3;
+    const auto defense = candidate.plan(state, pressured);
+    expect(defense.desiredBases == 1 && defense.desiredWorkers <= 12 &&
+           !demands(defense, UnitKind::nexus, 2, 103),
+        "visible ground pressure cancels the replay economy timing");
+}
+
 void testPvZEarlySplashOption() {
     using namespace protodd;
     GameState state;
@@ -6005,6 +6075,7 @@ void testPvZEarlySplashOption() {
 
 int main() {
     testPvZEarlySplashOption();
+    testPvZReplayOpeningOption();
     testVenatorCloakedContainment();
     testVenatorDetectionDeadline();
     testPvPFogDetectionOption();

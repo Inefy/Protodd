@@ -26,7 +26,7 @@ def write_json(path, value):
 def prepare(template, output, dll, opponents, maps, purpose="development", race="Protoss", rounds=2, port=1347,
             server_jar=None, client_bundle=None, whole_game_observe=False, production_shadow=None, frame_limit=None,
             production_control_receipt=None, production_screen_receipt=None, worker_training_intervention=None,
-            tactical_target_weights=None):
+            tactical_target_weights=None, slow_frame_allowance=None):
     template, output, dll = map(lambda p: Path(p).resolve(), (template, output, dll))
     if purpose not in ("training", "development", "final-test"):
         raise ValueError("unknown campaign purpose")
@@ -46,6 +46,10 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
         raise ValueError('worker interventions require isolated Protoss training without model command control')
     if frame_limit is not None and (type(frame_limit) is not int or frame_limit<240 or purpose=='final-test'):
         raise ValueError('bounded development/training frame limit required')
+    if slow_frame_allowance is not None and (
+            purpose != 'development' or type(slow_frame_allowance) is not int or
+            not 320 <= slow_frame_allowance <= 2000):
+        raise ValueError('slow-frame allowance requires bounded development setting')
     if production_control_receipt:
         if purpose!='development' or not production_shadow or ((frame_limit is None or frame_limit>7200) and not production_screen_receipt):
             raise ValueError('production control is limited to bounded local development scenarios')
@@ -70,6 +74,10 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
             if sha256(candidate_campaign/'server/bots/Protodd/read/ProductionDemand.bin')!=sha256(production_shadow):
                 raise ValueError('screen model differs')
     settings = json.loads((template / "server/server_settings.json").read_text())
+    if slow_frame_allowance is not None:
+        limits = settings["tournamentModuleSettings"]["timeoutLimits"]
+        if not limits or limits[0].get("timeInMS") != 55:
+            raise ValueError('template lacks the expected 55 ms timeout tier')
     available = {b["BotName"]: b for b in settings["bots"]}
     opponents = list(dict.fromkeys(opponents))
     maps = list(dict.fromkeys(maps))
@@ -150,6 +158,8 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
                     maps=maps, serverPort=port, enableBotFileIO=False, lobbyGameSpeed="Fastest")
     settings["tournamentModuleSettings"]["frameSkip"] = 256
     settings["tournamentModuleSettings"]["localSpeed"] = 0
+    if slow_frame_allowance is not None:
+        settings["tournamentModuleSettings"]["timeoutLimits"][0]["frameCount"] = slow_frame_allowance
     if frame_limit is not None:settings['tournamentModuleSettings']['gameFrameLimit']=frame_limit
     write_json(server / "server_settings.json", settings)
     schedule = []
@@ -253,6 +263,8 @@ def main():
     prepare_parser.add_argument('--production-screen-receipt',type=Path,help='Passing bounded control screen for a full-game local comparison')
     prepare_parser.add_argument('--worker-training-intervention',choices=('baseline','plus-one','plus-two'),help='Fixed local worker spending intervention, training episodes only')
     prepare_parser.add_argument('--tactical-target-weights',type=Path,help='Frozen local target scorer weights; DLL still requires opt-in evaluation build')
+    prepare_parser.add_argument('--slow-frame-allowance', type=int,
+                                help='Development-only allowance for 55 ms slow frames, pinned in both arms')
     inspect_parser = commands.add_parser("inspect")
     inspect_parser.add_argument("run", type=Path)
     verify_parser = commands.add_parser("verify")
