@@ -3917,6 +3917,47 @@ void testForwardMainDetectorEscort() {
            "base-defense detector remains behind its guard");
 }
 
+void testDetectorWaitVolley() {
+    using namespace protodd;
+    auto dragoon = unit(740, UnitKind::dragoon, true, {1000, 1000});
+    dragoon.groundWeapon = {20, 30, 0, 192, DamageType::explosive, false, true};
+    auto marine = unit(741, UnitKind::marine, false, {1120, 1000});
+    auto mine = unit(742, UnitKind::spiderMine, false, {1180, 1000});
+    mine.detected = false;
+    CombatEstimate blocked;
+    blocked.decision = FightDecision::engage;
+    blocked.advanceBlocked = true;
+    const auto commands = [&](const bool enabled,
+                              const std::vector<UnitSnapshot>& enemies) {
+        return TacticalController{}.control(std::vector{dragoon}, enemies, blocked,
+            {1800, 1000}, {500, 1000}, InfluenceMap{}, {-1, -1}, 0,
+            false, {}, TacticalIntent::battle, {}, nullptr, {}, nullptr, enabled);
+    };
+    const auto original = commands(false, {marine, mine});
+    expect(original.size() == 1 && original.front().source == "wait-for-mobile-detection",
+           "default behavior still retreats while a mobile detector is absent");
+    const auto volley = commands(true, {marine, mine});
+    expect(volley.size() == 1 && volley.front().type == CommandType::attackUnit &&
+               volley.front().targetUnit == marine.id &&
+               volley.front().source == "detector-wait-volley",
+           "a blocked dragoon can fire at an already in-range detected Marine");
+    blocked.decision = FightDecision::retreat;
+    const auto retreat = commands(true, {marine, mine});
+    expect(retreat.size() == 1 &&
+               retreat.front().source == "wait-for-mobile-detection",
+           "a losing fight still retreats while the detector is absent");
+    blocked.decision = FightDecision::engage;
+    marine.position = {1300, 1000};
+    const auto distant = commands(true, {marine, mine});
+    expect(distant.size() == 1 && distant.front().source == "wait-for-mobile-detection",
+           "detector wait does not chase a distant visible target into mines");
+    marine.position = {1120, 1000};
+    marine.detected = false;
+    const auto hidden = commands(true, {marine, mine});
+    expect(hidden.size() == 1 && hidden.front().source == "wait-for-mobile-detection",
+           "detector wait never targets an undetected unit");
+}
+
 void testContestedDetectorReserve() {
     using namespace protodd;
     GameState state;
@@ -6816,6 +6857,7 @@ int main() {
     testWorkersAndScouts();
     testCoveredPressureRelease();
     testForwardMainDetectorEscort();
+    testDetectorWaitVolley();
     testContestedDetectorReserve();
     testForwardThirdScreen();
     testThreatenedNaturalRally();

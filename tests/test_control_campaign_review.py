@@ -17,6 +17,8 @@ SQUAD,120,MainArmy,key=2,units=31,travelReason=assemble-at-rally,detectionBlocke
 SQUAD,120,MainArmy,key=3,units=20,travelReason=cover-expansion,detectionBlocked=0
 ORDER,120,7,0,-1,10,20,detector-escort,1
 ORDER,120,8,0,-1,30,40,detector-escort,1
+ORDER,120,9,1,741,-1,-1,detector-wait-volley,1
+ORDER,240,9,0,-1,10,20,wait-for-mobile-detection,1
 DETECTOR_ALLOC,120,blockedMain=2,observers=2,escorts=2
 EVENT,120,forward-third-screen,site=400x1000
 STATE,120,Opening,Hold,Unknown,army=37,nexuses=3,probes=42,selfComp=Nexus=3/2
@@ -41,6 +43,8 @@ class ControlCampaignReviewTests(unittest.TestCase):
                 "main_detection_blocked_ticks": 1,
                 "multiple_main_groups_blocked_ticks": 1,
                 "dual_escort_order_frames": 1,
+                "detector_wait_volley_frames": 1,
+                "detector_wait_retreat_frames": 1,
                 "dual_escort_with_multiple_blocked_main": 1,
                 "large_main_rally_ticks": 1,
                 "large_main_route_ticks": {

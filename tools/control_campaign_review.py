@@ -44,6 +44,8 @@ def audit_log(path: Path) -> dict:
     large_main_rally = set()
     large_main_routes = set()
     escort_orders = defaultdict(set)
+    detector_wait_volleys = set()
+    detector_wait_retreats = set()
     reserve_telemetry_seen = False
     contested_reserve_releases = set()
     peak_army = 0
@@ -60,8 +62,13 @@ def audit_log(path: Path) -> dict:
                 continue
             if line.startswith("ORDER,"):
                 order = line.rstrip("\n").split(",", 8)
-                if len(order) > 7 and order[7] == "detector-escort":
-                    escort_orders[int(order[1])].add(order[2])
+                if len(order) > 7:
+                    if order[7] == "detector-escort":
+                        escort_orders[int(order[1])].add(order[2])
+                    elif order[7] == "detector-wait-volley":
+                        detector_wait_volleys.add(int(order[1]))
+                    elif order[7] == "wait-for-mobile-detection":
+                        detector_wait_retreats.add(int(order[1]))
                 continue
             parsed = fields(line)
             if parsed is None:
@@ -130,6 +137,8 @@ def audit_log(path: Path) -> dict:
         "multiple_main_groups_blocked_ticks": sum(
             groups >= 2 for groups in blocked_main_groups.values()),
         "dual_escort_order_frames": len(dual_escort_frames),
+        "detector_wait_volley_frames": len(detector_wait_volleys),
+        "detector_wait_retreat_frames": len(detector_wait_retreats),
         "dual_escort_with_multiple_blocked_main": sum(
             blocked_main_groups[frame] >= 2 for frame in dual_escort_frames),
         "large_main_rally_ticks": len(large_main_rally),

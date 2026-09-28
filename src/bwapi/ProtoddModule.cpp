@@ -962,6 +962,11 @@ void ProtoddModule::updateCombat(
             fight_ = estimate;
         }
         const auto targets = SquadPlanner::tacticalTargets(squad, state_.enemy.units);
+#ifdef PROTODD_DETECTOR_WAIT_VOLLEY
+        constexpr auto detectorWaitVolley = true;
+#else
+        constexpr auto detectorWaitVolley = false;
+#endif
         for (const auto& order : tactics_.control(
                  squad.units, targets, estimate, objective,
                  squad.retreat, influence_, squad.center, state_.latencyFrames,
@@ -969,7 +974,8 @@ void ProtoddModule::updateCombat(
                  defense, squad.withdrawing ? TacticalIntent::withdraw :
                      squad.role == SquadRole::harassment ? TacticalIntent::raid : TacticalIntent::battle,
                  supportedArmy, &navigation_, state_.self.units,
-                 tacticalTargetControl_ ? &tacticalTarget_ : nullptr)) {
+                 tacticalTargetControl_ ? &tacticalTarget_ : nullptr,
+                 detectorWaitVolley)) {
             submit(order);
         }
         if (aggressive)

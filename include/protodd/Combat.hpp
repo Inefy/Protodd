@@ -147,7 +147,8 @@ public:
         std::span<const UnitSnapshot> support = {},
         const NavigationGrid* navigation = nullptr,
         std::span<const UnitSnapshot> obstacles = {},
-        const TacticalTargetModel* targetModel = nullptr) const;
+        const TacticalTargetModel* targetModel = nullptr,
+        bool detectorWaitVolley = false) const;
 };
 
 }  // namespace protodd

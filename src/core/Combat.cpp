@@ -687,7 +687,8 @@ std::vector<Command> TacticalController::control(
     const std::span<const UnitSnapshot> support,
     const NavigationGrid* navigation,
     const std::span<const UnitSnapshot> obstacles,
-    const TacticalTargetModel* targetModel) const {
+    const TacticalTargetModel* targetModel,
+    const bool detectorWaitVolley) const {
     std::vector<Command> commands;
     commands.reserve(friendly.size());
     CombatEvaluator evaluator;
@@ -870,6 +871,41 @@ std::vector<Command> TacticalController::control(
         // pursuit. Air-only harassment remains independent; endangered ground
         // units can still escape while the escort catches up.
         if (estimate.advanceBlocked && !unit.flying) {
+            if (detectorWaitVolley && estimate.decision != FightDecision::retreat &&
+                intent != TacticalIntent::withdraw &&
+                unit.healthFraction() >= 0.28 &&
+                unit.weaponCooldown == 0 &&
+                ((unit.kind != UnitKind::reaver && unit.kind != UnitKind::carrier) ||
+                 unit.ammo > 0)) {
+                std::vector<UnitSnapshot> firingTargets;
+                for (const auto& candidate : enemy) {
+                    if (!candidate.visible || !candidate.detected || candidate.loaded ||
+                        candidate.invincible || candidate.hallucination ||
+                        !unit.canAttack(candidate)) continue;
+                    const auto& weapon = candidate.flying ? unit.airWeapon : unit.groundWeapon;
+                    const auto range = weaponDistance(unit, candidate);
+                    if (range >= weapon.minRange && range <= weapon.maxRange)
+                        firingTargets.push_back(candidate);
+                }
+                if (const auto* shot = evaluator.selectTarget(
+                        unit, firingTargets, allocations, targetModel)) {
+                    commands.push_back({unit.id, CommandType::attackUnit, shot->id,
+                                        {-1, -1}, UnitKind::unknown, 100, 0,
+                                        "detector-wait-volley"});
+                    const auto allocation = std::ranges::find(
+                        allocations, shot->id, &TargetAllocation::target);
+                    const auto committed = allocation == allocations.end() ? 0.0 :
+                        allocation->committedDamage;
+                    const auto remaining = std::max(
+                        0.0, shot->durability() - shot->incomingDamage - committed);
+                    const auto damage = std::min(
+                        remaining, attackDamage(unit, *shot, remaining));
+                    if (allocation == allocations.end())
+                        allocations.push_back({shot->id, damage});
+                    else allocation->committedDamage += damage;
+                    continue;
+                }
+            }
             commands.push_back({unit.id, CommandType::move, -1,
                 influence.safestStep(unit.position, retreatPoint, false),
                 UnitKind::unknown, 100, 0, "wait-for-mobile-detection"});

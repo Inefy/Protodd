@@ -162,6 +162,28 @@ next design must coordinate army movement, Observer survival and mine
 clearance as a single executed contract, not merely change the escort
 waypoint by another few pixels.
 
+A new isolated `PROTODD_DETECTOR_WAIT_VOLLEY` experiment addresses the
+command-level consequence of the block. The current combat controller sends
+every ground member toward retreat before considering legal shots whenever
+its squad lacks mobile coverage, including a Dragoon that already has a
+visible, detected enemy inside weapon range. The option permits only an
+immediate, in-range attack on a detected unit from a healthy, ready fighter
+only when the fight evaluator accepts engage or kite. It still retreats on a
+losing fight, when the target is hidden, or when the shot would require
+pursuit. A native test covers those cases. The first evaluation binary missed
+the losing-fight guard and was stopped after its first normal loss at frame
+31,653; that incomplete screen is diagnostic only. Its volley orders exposed
+the guard error. The corrected `candidate-v2` completed four healthy, fully
+paired PvT games and lost 0/4 at frames 26,352, 41,108, 23,562 and 42,007,
+matching the reference's 0/4. It issued accepted wait-volley orders in 8,
+32, 18 and 24 distinct frames, while detector-wait retreat orders appeared
+in 67, 692, 149 and 440 frames. The long Destination games still had 362 and
+294 detection-blocked squad samples. The additional legal shots neither
+preserved the economy nor won a game. Keep the option off and close this
+narrow fix. A larger control change must align detector assignment, safe
+staging, threat engagement and the expansion decision, then show both actual
+movement/damage and a matched win gain.
+
 The completed matched pressure-release repeat was healthy and paired on all
 four maps/sides/seeds. Both the previous reference and the release candidate
 won 0/4 games. The release fired 11, 26, 9 and 45 times across the candidate
