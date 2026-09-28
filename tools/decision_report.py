@@ -99,7 +99,7 @@ class DecisionTrace:
             except (ValueError, IndexError):
                 self.malformed += 1
             return
-        supported = {"HEALTH", "SQUAD", "PHASE", "BELIEF", "ENTITY", "LOSS", "MACRO", "STRATEGY", "ORDER", "EVENT", "STATE", "WORKERS", "SCOUT", "SNAPSHOT", "ACTION", "ACTION_TOTAL", "INCIDENT", "DAMAGE", "LIFECYCLE", "ERROR"}
+        supported = {"HEALTH", "SQUAD", "PHASE", "BELIEF", "ENTITY", "LOSS", "MACRO", "STRATEGY", "DETECTOR_ALLOC", "ORDER", "EVENT", "STATE", "WORKERS", "SCOUT", "SNAPSHOT", "ACTION", "ACTION_TOTAL", "INCIDENT", "DAMAGE", "LIFECYCLE", "ERROR"}
         if kind not in supported:
             return
         try:
@@ -267,6 +267,12 @@ class DecisionTrace:
                         "text": f'{row["plan"]} | {route} | {row["mission"]}'})
                 self.strategy = row
                 self.append(self.strategies, row)
+            elif kind == "DETECTOR_ALLOC":
+                allocation = extras(fields[2:])
+                self.append(self.events, {"frame": frame, "kind": "DETECTOR",
+                    "text": (f'{allocation.get("escorts", 0)} of '
+                             f'{allocation.get("observers", 0)} Observers escort '
+                             f'{allocation.get("blockedMain", 0)} blocked main groups')})
             elif kind == "ORDER":
                 self.append(self.events, {"frame": frame, "kind": kind, "actor": int(fields[2]),
                     "text": f'#{fields[2]} {fields[7]} → #{fields[4]} / {fields[5]},{fields[6]} | ' +
@@ -602,6 +608,7 @@ class DecisionReportTests(unittest.TestCase):
         trace = DecisionTrace()
         trace.feed("STRATEGY,24,Opening,Hold,Hold,Unknown,Wait,0")
         trace.feed("STRATEGY,240,Push,Hold,Hold,FastTech,Expand,0,strategyPosture=Pressure,policyEnabled=1,policyAction=3,policyWeights=0")
+        trace.feed("DETECTOR_ALLOC,240,blockedMain=2,observers=2,escorts=2")
         trace.feed("BELIEF,24,Unknown,0.9")
         trace.feed("BELIEF,240,Unknown,0.1")
         payload = trace.payload()
@@ -609,6 +616,9 @@ class DecisionReportTests(unittest.TestCase):
         self.assertEqual(payload["strategies"][1]["strategyPosture"], "Pressure")
         self.assertEqual(payload["strategies"][1]["policyAction"], 3)
         self.assertEqual(payload["strategies"][1]["policyWeights"], 0)
+        self.assertTrue(any(event["kind"] == "DETECTOR" and
+                            "2 of 2 Observers" in event["text"]
+                            for event in payload["events"]))
         self.assertEqual(payload["beliefHistory"][0]["values"]["Unknown"], 0.9)
 
     def test_embedded_log_cannot_inject_script(self):

@@ -471,7 +471,9 @@ std::vector<Command> SquadPlanner::detectorEscorts(
     const GameState& state,
     const std::span<const Squad> squads,
     const InfluenceMap& influence,
-    const bool mobilizeReserveAgainstLurkers) const {
+    const bool mobilizeReserveAgainstLurkers,
+    const bool centerBlockedMainEscort,
+    const bool mobilizeContestedReserve) const {
     std::vector<const UnitSnapshot*> observers;
     for (const auto& unit : state.self.units) {
         if (unit.kind == UnitKind::observer && unit.completed && !unit.loaded &&
@@ -517,14 +519,27 @@ std::vector<Command> SquadPlanner::detectorEscorts(
     // escort, leaving no unit to watch a siege push before it reaches a base.
     const auto detectionDemand = static_cast<std::size_t>(std::ranges::count_if(
         priorities, [](const Squad* squad) { return squad->needsDetection; }));
-    const auto escortCapacity = lurkerAtHome
+    const auto blockedMainGroups = std::ranges::count_if(priorities, [](const Squad* squad) {
+        return squad->role == SquadRole::mainArmy && squad->needsDetection &&
+               !squad->enemies.empty();
+    });
+    // A scout reserve has less value than two active main groups unable to
+    // fire through mines or cloak. Keep the reserve when one escort suffices.
+    const auto contestedReserve = mobilizeContestedReserve &&
+        blockedMainGroups >= 2 && detectionDemand >= observers.size();
+    const auto escortCapacity = lurkerAtHome || contestedReserve
         ? std::min(observers.size(), detectionDemand)
         : (observers.size() > 1 ? observers.size() - 1 : observers.size());
     const auto count = std::min(escortCapacity, priorities.size());
     result.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
         const auto* squad = priorities[i];
-        const auto anchor = moveToward(squad->center, squad->retreat, 96.0);
+        // A blocked main army needs the Observer to cover its next 128px step.
+        // Parking 96px behind the center can leave that step just outside the
+        // conservative sight radius and hold the army under enemy fire.
+        const auto anchor = centerBlockedMainEscort &&
+                            squad->role == SquadRole::mainArmy && squad->needsDetection
+            ? squad->center : moveToward(squad->center, squad->retreat, 96.0);
         const auto closest = std::min_element(observers.begin() + static_cast<std::ptrdiff_t>(i),
             observers.end(), [anchor](const UnitSnapshot* left, const UnitSnapshot* right) {
                 const auto leftReady = left->healthFraction() >= 0.25;
@@ -744,14 +759,56 @@ std::vector<UnitSnapshot> SquadPlanner::combatSupport(
 }
 
 bool SquadPlanner::shouldCoverExpansion(
-    const GameState& state, const StrategicPlan& plan) noexcept {
+    const GameState& state, const StrategicPlan& plan,
+    const bool coverForwardThird) noexcept {
     // Establishing the natural moves the whole defensive line out of the main.
     // Subsequent economic requests must not recall that field army, especially
     // to an unbuilt third behind an already secured front.
-    return plan.expansionTarget.valid() && plan.posture != Posture::attack &&
-        std::ranges::count_if(state.self.units, [](const UnitSnapshot& unit) {
+    if (!plan.expansionTarget.valid() || plan.posture == Posture::attack)
+        return false;
+    const auto completedNexuses = std::ranges::count_if(
+        state.self.units, [](const UnitSnapshot& unit) {
             return unit.kind == UnitKind::nexus && unit.completed;
-        }) < 2;
+        });
+    if (completedNexuses < 2) return true;
+    const auto thirdUnderConstruction = std::ranges::any_of(
+        state.self.units, [&plan](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::nexus && !unit.completed &&
+                unit.position.valid() &&
+                distanceSquared(unit.position, plan.expansionTarget) <= 128 * 128;
+        });
+    if (!coverForwardThird || completedNexuses != 2 ||
+        (plan.desiredBases < 3 && !thirdUnderConstruction) ||
+        !plan.attackTarget.valid() ||
+        plan.posture == Posture::defend || plan.posture == Posture::recover)
+        return false;
+    const auto mobileArmy = std::ranges::count_if(state.self.units,
+        [](const UnitSnapshot& unit) {
+            return unit.completed && !unit.disabled && !unit.loaded &&
+                !unit.hallucination && !isBuilding(unit.kind) &&
+                !isWorker(unit.kind) && isCombatUnit(unit.kind);
+        });
+    if (mobileArmy < 14) return false;
+    const auto siteToEnemy = distance(plan.expansionTarget, plan.attackTarget);
+    const auto alreadyForward = std::ranges::count_if(state.self.units,
+        [&plan, siteToEnemy](const UnitSnapshot& unit) {
+            return unit.completed && !unit.disabled && !unit.loaded &&
+                !unit.hallucination && !isBuilding(unit.kind) &&
+                !isWorker(unit.kind) && isCombatUnit(unit.kind) &&
+                unit.position.valid() &&
+                distance(unit.position, plan.attackTarget) + 128.0 < siteToEnemy;
+        });
+    if (alreadyForward * 2 >= mobileArmy) return false;
+    auto frontDistance = std::numeric_limits<double>::infinity();
+    for (const auto& nexus : state.self.units) {
+        if (nexus.kind == UnitKind::nexus && nexus.completed &&
+            nexus.position.valid())
+            frontDistance = std::min(frontDistance,
+                distance(nexus.position, plan.attackTarget));
+    }
+    // A third farther behind the existing front is an economy request, not a
+    // reason to pull the main army off its current attack or defensive screen.
+    return siteToEnemy + 256.0 < frontDistance;
 }
 
 DefenseArea SquadPlanner::expansionDefense(

@@ -4,9 +4,9 @@
 
 The latest default source includes the clearer in-game status overlay, combat
 and scouting correctness fixes, and several bounded strategy changes. The
-experimental PvZ and PvP tactics are build options that remain **off** in the
-default bot. The overlay improves diagnosis; it is not evidence of stronger
-play. The current default Win32 BWAPI DLL builds successfully. The 39
+experimental PvZ, PvP and PvT control tactics are build options that remain
+**off** in the default bot. The overlay improves diagnosis; it is not evidence of stronger
+play. The current default Win32 BWAPI DLL builds successfully. All 43
 configured CTest suites that use the default Python environment pass, and
 the PyTorch model suite passes with `build/model-venv/Scripts/python.exe`.
 
@@ -31,29 +31,36 @@ three concrete bottlenecks:
 
 Current order of work (updated after the 27 September control screens):
 
-1. Stabilize the PvP opening against early Zealot and Dragoon pressure.
+1. Repair whole-game control. The PvT screens repeatedly show an empty frozen
+   policy holding a large pressure-ready army near rally and main groups
+   waiting for mobile detection. The large-army release removed the measured
+   rally stall but won 0/4; the Observer variants also established no
+   reliable win gain. Shift to earlier natural/worker survival and to
+   detection that stays with each active combat group. Trace actual issued
+   orders and resulting positions before another live candidate. The earlier
+   policy-off, threatened-rally, Cannon-leash and 14-unit pressure variants
+   also won no full screens.
+2. Stabilize the PvP opening against early Zealot and Dragoon pressure.
    The fresh four-game default reference lost 0/4 without a logged Dark
    Templar. Measure the first mobile army, first Reaver, powered Cannon
    coverage, and Probe survival before spending on optional detector count.
-   A fog-only Observer rule missed its target timing in an earlier four-game
-   candidate; keep it off and avoid another copy of that screen until a
-   genuine early cloak exposure is available.
-2. Address the PvT natural-base collapse and stalled counterpressure against
-   Steamhammer mech. The larger mobile screen lost all four controlled games;
-   a closer third base built in one paired game but also did not win. Simply
-   disabling the empty-table frozen policy also lost 0/4. Two Cannon-leash
-   variants also lost 0/4 and were removed. Keep the legal-target correction.
-   A threatened-natural rally option did activate in four matched games but
-   also lost 0/4, so it remains off. Next inspect mine coverage, actual
-   Reaver and Observer execution, and worker-line interception; test an
-   explicit last stand only when income cannot be rebuilt.
-3. Attack the earliest repeatable loss mechanism: opening mobile defense,
-   protected tech/expansion transitions, army cohesion and detector coverage.
-   Choose one bounded change at a time and compare frozen binaries in healthy
-   matched games on both starting sides.
-4. Promote a trained tactic only after its action contract, legal runtime
-   execution and matched live outcome are verified. The existing offline
-   target/command metrics and failed screens do not establish a win gain.
+   The fog-only Observer rule missed its target timing in an earlier screen.
+3. Improve trained action quality using the approved replay train split.
+   Increase tactical example diversity and legal candidate coverage, then
+   check that trained choices survive command arbitration and produce damage
+   or saved units in the game. Existing offline target/command metrics do not
+   establish a live gain. Advance the existing
+   [whole-game controller plan](whole-game-model.md) to a strategic-control
+   head:
+   the current frozen arena package has no `Policy.q`, and `frozen-empty` is
+   an untrained table. Approved training replays can supply supervised
+   opening, army movement, engagement, retreat and expansion examples;
+   live outcomes must then select among legal, executed actions. Track the
+   count of reviewed examples and held-out action accuracy by matchup before
+   producing a weight snapshot. Do not call the empty table trained.
+4. Promote only after healthy paired development games across both starting
+   sides, followed by broader opponents and maps. Track win rate together
+   with economy survival, army travel, detection and realized attacks.
 
 The target is a stronger full-game bot. No current result establishes a
 major win-rate gain or tournament readiness.
@@ -89,12 +96,147 @@ Broaden the work from build-order selection to **control of the entire game**:
    economy, army use and late conversion. A four-game screen is diagnostic,
    not an overall win-rate claim.
 
+`tools/control_campaign_review.py` now reads archived arena logs and results
+for each game. It counts sampled frames where an empty frozen policy holds a
+pressure plan, a 30-unit main force routes to rally, main groups wait for
+detection, or two Observer escort orders are issued. It also records peak
+army/Probes and Nexus-count drops while at least 14 fighters survive. These are
+mechanism measurements, not substitute win-rate evidence. The reference
+four-game PvT campaign had 632 empty-policy pressure-hold ticks, 287
+large-army rally ticks and 668 main detection-blocked ticks. The centered
+escort candidate had 768, 250 and 816, respectively.
+Openings and later fights diverged, so this comparison diagnoses control
+behavior without estimating the escort's causal effect.
+
 The immediate control comparison uses the same Protodd DLL and fixed
 Steamhammer `Vultures` opponent with only the coarse `Policy-mode` changed.
 Distinguish the missing-weight fallback from a properly trained policy before
 making any control change permanent. Trace remaining losses from strategic
 posture through squad allocation to
 the BWAPI command that actually reached each unit.
+
+The latest control audit found a second authority conflict. At frame 12,000
+in the Benzene PvT trace, the matchup plan's two-base phase was raised to a
+third Nexus by the generic saturated-economy rule as soon as two bases had
+about 40 workers. That forward Nexus started at frame 12,258 and died at
+14,273. At frame 14,016 the main squad still had 14 fighters assembling
+near the main while the third-base approach was under mech pressure. This
+does not prove that postponing the Nexus wins; it identifies a concrete
+economy-versus-map-control decision to test after the posture experiment.
+Gate the early third on a mobile screen and a safe route, then compare the
+Nexus survival, Probe income, and subsequent army trades in matched games.
+An earlier pressure-release win kept that third alive, so a blanket delay may
+discard a useful economic advantage.
+
+An opt-in `PROTODD_COVERED_PRESSURE_RELEASE` experiment now allows the
+matchup's pressure posture through an empty-policy `defend` override only
+when a sizeable army covers two owned bases, no worker is under attack, and
+the perimeter contact is small and outside the Nexus breach radius. Local
+base-defense allocation still runs. The viewer marks release events. The
+feature remains off in the default DLL pending the matched live comparison;
+activation is a mechanism check, not strength evidence.
+
+After the 14-unit release failed its full repeat, the next isolated variant
+requires at least 30 completed fighters and at least five per visible
+perimeter enemy, while retaining the immediate-base and worker-attack
+guards. It applies only to the empty-weight policy, so a later trained
+policy's defend decision retains authority. A late Destination loss with
+51–67 fighters repeatedly routed toward rally motivated this test. The
+healthy, fully paired four-game screen lost 0/4 at frames 23,810, 37,605,
+34,629 and 37,202, matching the reference's 0/4. The release fired 0, 12,
+0 and 66 logged decisions. In the activated Destination games, peak army was
+36 and 46, and large-army rally ticks fell from 100 and 187 in the matched
+reference to zero, but the main groups still logged 282 and 145
+detection-blocked ticks. This confirms a movement effect, not a win gain.
+Game one lost with only 22 peak fighters and game three with 21, so the rule
+could not address their earlier failures. Keep it off and close this release
+family. The next control change needs to protect the early economy or make
+detector coverage actionable before issuing a broad attack order.
+
+The completed matched pressure-release repeat was healthy and paired on all
+four maps/sides/seeds. Both the previous reference and the release candidate
+won 0/4 games. The release fired 11, 26, 9 and 45 times across the candidate
+games, so this was an exercised behavior, not a dormant flag. Candidate loss
+frames were 25,763, 36,706, 28,491 and 32,769; reference loss frames were
+42,503, 37,233, 23,469 and 41,542. One interrupted earlier candidate
+campaign had a normal Benzene win, but a fresh same-seed run lost after its
+opening had diverged before release eligibility. Keep the option off; do not
+promote a one-game win as a strength gain.
+
+On Destination the candidate built a 36–43 unit army,
+but around frame 27,600 its main squad waited for mobile detection: its
+Observer was trailing the moving center, just outside the conservative
+coverage test for the next step. The enemy's Vulture and mine force then
+expanded while that army failed to convert its advantage. A separate opt-in
+`PROTODD_FORWARD_DETECTOR_ESCORT` option moves an Observer assigned to a
+blocked main squad toward the squad center; base-defense escorts retain their
+rear anchor. A native test verifies the resulting coverage geometry. Its
+healthy paired four-game screen lost 0/4, matching the previous reference's
+0/4; keep the feature off pending stronger evidence.
+
+The centered-escort screen exposed a second bottleneck on Destination: at
+frame 27,600 two separate main squads needed mobile detection, but with two
+completed Observers the planner assigned only one as an escort and reserved
+the other for scouting. The opt-in `PROTODD_CONTESTED_DETECTOR_RESERVE` rule
+releases that scout only while at least two main squads have enemy contact
+and need detection. It still preserves a scout when extra Observers exist.
+This narrower control change has a native allocation test and a separate
+frozen campaign. Compare it primarily with the centered-escort DLL to isolate
+the reserve rule. The four completed games were healthy and paired; the
+combined candidate won 1/4 against the centered-escort candidate's 0/4.
+Its result frames were 35,435 (win), 52,733, 31,529 and 41,294.
+The sole win cannot be attributed to reserve release: its dual Observer
+escort orders occurred after three Observers had completed, when the old
+planner could also assign two. Its economy also reached 80 Probes versus 53
+in the centered-escort game's same slot, so these trajectories diverged
+substantially. In one Destination loss, two main groups were
+blocked with two completed Observers, but issued orders alone do not prove
+the new assignment reached both groups. Keep both options off.
+New experimental builds trace the number of completed Observers and assigned
+escorts whenever multiple main groups need detection; the decision viewer
+shows those allocation events. The completed combined campaign binary lacks
+this trace, so its missing activation count cannot be treated as zero.
+
+The third combined game exposed a separate control gap. At frame 16,560 on
+Benzene, a third Nexus was being built at `416x1264`, ahead of the completed
+natural, while a 22-unit main group was routed to the home rally at
+`416x3024`. The Nexus count fell from three to two at frame 21,240 and to one
+at 23,400, with 20 and 17 fighters still alive. The existing expansion escort
+intentionally stops once the natural is complete, including this exposed
+forward site. An opt-in `PROTODD_FORWARD_THIRD_SCREEN` now escorts only a
+planned PvT third that is at least 256 pixels closer to the enemy target than
+the existing front, with at least 14 mobile fighters; it leaves a force
+already beyond the site on its attack. A native test covers forward, rear,
+thin-army and committed-attack cases.
+The completed first version was healthy and paired across four PvT games and
+lost 0/4, at frames 24,926, 37,078, 35,280 and 27,344. It issued a
+forward-third cover route in 42, 0, 356 and 2 sampled frames respectively.
+It cannot be promoted on that result.
+In its first live game a 12-unit vanguard was already well beyond the
+planned third and fighting near the opponent at frame 13,200. The Nexus
+started anyway and the count dropped at frame 15,240 while 22 fighters
+survived. The new forward-third route then appeared for 42 sampled frames
+from 15,288 through 17,928, after that first Nexus had died. This suggests a
+second, separate experiment:
+stage a forward third only after a field screen can reach its approach, and
+compare the delayed 400-mineral commitment with the current expansion timing.
+The third game exercised the forward escort for 356 sampled frames and still
+lost its first new Nexus at frame 14,280. The route began at 12,216, but
+stopped at 12,840 when construction started: the plan's `desiredBases` fell
+from three to two because the pending Nexus already satisfied the request.
+The continuity revision now treats a paid Nexus at the planned site as an
+active escort commitment until it completes. A native regression test covers
+that transition. Its healthy, fully paired repeat lost all four games at
+frames 21,268, 25,825, 24,120 and 36,768. No game reached a completed third
+Nexus, so the intended paid-Nexus transition was not exercised live. In game
+two, the forward screen was planned for ten logged events but no Nexus was
+started. Between frames 13,200 and 14,040 the target alternated between the
+forward site and no site while the desired base count alternated between
+three and two. The natural then fell around frame 15,000. This exposes
+unstable expansion intent as a separate problem; a guard tied only to a
+pending Nexus cannot solve a commitment that never gets placed. Keep the
+forward-third option off. Before another third-base experiment, record a
+stable expansion commitment, route safety, and whether construction begins.
 
 The full four-game policy-off arm used the same DLL and differed intentionally
 only in `Policy-mode` (plus the arena port). It matched all maps, sides and

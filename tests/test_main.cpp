@@ -2459,6 +2459,65 @@ void testWorkersAndScouts() {
            "flying scout ignores ground-only danger and shadows the army");
 }
 
+void testCoveredPressureRelease() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 24000;
+    state.self.id = 1;
+    state.enemy.race = Race::terran;
+    BaseSnapshot main;
+    main.id = 1;
+    main.ownerId = 1;
+    main.center = {2000, 3000};
+    BaseSnapshot natural;
+    natural.id = 2;
+    natural.ownerId = 1;
+    natural.center = {1000, 3000};
+    state.bases = {main, natural};
+    state.self.units = {unit(1, UnitKind::nexus, true, main.center),
+                        unit(2, UnitKind::nexus, true, natural.center)};
+    for (auto id = 0; id < 25; ++id)
+        state.self.units.push_back(unit(10 + id, UnitKind::probe, true, main.center));
+    for (auto id = 0; id < 32; ++id)
+        state.self.units.push_back(unit(100 + id, UnitKind::dragoon, true, main.center));
+    for (auto id = 0; id < 2; ++id) {
+        auto vulture = unit(200 + id, UnitKind::vulture, false,
+                            {1400 + id * 32, 3000});
+        vulture.visible = true;
+        state.enemy.units.push_back(vulture);
+    }
+    StrategicPlan plan;
+    plan.posture = Posture::pressure;
+    plan.attackTarget = {3500, 500};
+    expect(StrategyEngine::coveredPressureRelease(state, plan),
+           "two perimeter Vultures do not hold a large covered army indefinitely");
+    state.enemy.units.front().position = {1200, 3000};
+    expect(!StrategyEngine::coveredPressureRelease(state, plan),
+           "an enemy inside the base screen retains the emergency defense");
+    state.enemy.units.front().position = {1400, 3000};
+    state.self.units[2].underAttack = true;
+    expect(!StrategyEngine::coveredPressureRelease(state, plan),
+           "a worker under attack retains the emergency defense");
+    state.self.units[2].underAttack = false;
+    for (auto id = 0; id < 5; ++id) {
+        auto vulture = unit(210 + id, UnitKind::vulture, false,
+                            {1400 + id * 32, 3000});
+        vulture.visible = true;
+        state.enemy.units.push_back(vulture);
+    }
+    expect(!StrategyEngine::coveredPressureRelease(state, plan),
+           "a larger perimeter force does not release pressure");
+    state.enemy.units.resize(2);
+    const auto fullArmy = state.self.units;
+    state.self.units.resize(2 + 25 + 14);
+    expect(!StrategyEngine::coveredPressureRelease(state, plan),
+           "the understrength 14-unit army cannot repeat the failed early release");
+    state.self.units = fullArmy;
+    plan.posture = Posture::defend;
+    expect(!StrategyEngine::coveredPressureRelease(state, plan),
+           "an explicit defensive strategy is not overridden by the policy release");
+}
+
 void testThreatenedNaturalRally() {
     using namespace protodd;
     GameState state;
@@ -3823,6 +3882,122 @@ void testReportImprovements() {
     expect(!orders.empty() && orders.front().type == CommandType::move &&
                orders.front().targetPosition != squad.center,
            "contact with an undetected threat sends the army home instead of turtling in place");
+}
+
+void testForwardMainDetectorEscort() {
+    using namespace protodd;
+    GameState state;
+    auto observer = unit(700, UnitKind::observer, true, {870, 1000});
+    observer.flying = true;
+    observer.sightRange = 288;
+    state.self.units = {observer};
+    Squad main;
+    main.role = SquadRole::mainArmy;
+    main.center = {1000, 1000};
+    main.objective = {1800, 1000};
+    main.retreat = {0, 1000};
+    main.needsDetection = true;
+    main.units = {unit(701, UnitKind::dragoon, true, main.center)};
+    InfluenceMap influence;
+    const auto regular = SquadPlanner{}.detectorEscorts(
+        state, std::span<const Squad>(&main, 1), influence);
+    const auto centered = SquadPlanner{}.detectorEscorts(
+        state, std::span<const Squad>(&main, 1), influence, false, true);
+    expect(regular.size() == 1 && centered.size() == 1 &&
+               regular.front().targetPosition.x == 904 &&
+               centered.front().targetPosition == main.center,
+           "blocked main-army Observer can move to the squad center instead of trailing its retreat line");
+    state.self.units.front().position = centered.front().targetPosition;
+    expect(SquadPlanner::mobileDetectionReady(state, main),
+           "centered Observer covers the army and its next advance step");
+    main.role = SquadRole::baseDefense;
+    const auto guard = SquadPlanner{}.detectorEscorts(
+        state, std::span<const Squad>(&main, 1), influence, false, true);
+    expect(guard.size() == 1 && guard.front().targetPosition == regular.front().targetPosition,
+           "base-defense detector remains behind its guard");
+}
+
+void testContestedDetectorReserve() {
+    using namespace protodd;
+    GameState state;
+    auto leftObserver = unit(710, UnitKind::observer, true, {950, 1000});
+    auto rightObserver = unit(711, UnitKind::observer, true, {2050, 1000});
+    leftObserver.flying = rightObserver.flying = true;
+    state.self.units = {leftObserver, rightObserver};
+    Squad left;
+    left.role = SquadRole::mainArmy;
+    left.center = {1000, 1000};
+    left.objective = {1500, 1000};
+    left.retreat = {800, 1000};
+    left.needsDetection = true;
+    left.units = {unit(720, UnitKind::dragoon, true, left.center)};
+    left.enemies = {unit(730, UnitKind::spiderMine, false, {1400, 1000})};
+    auto right = left;
+    right.center = {2000, 1000};
+    right.objective = {2500, 1000};
+    right.retreat = {1800, 1000};
+    right.units = {unit(721, UnitKind::dragoon, true, right.center)};
+    right.enemies = {unit(731, UnitKind::spiderMine, false, {2400, 1000})};
+    const std::array squads{left, right};
+    InfluenceMap influence;
+    const auto reserved = SquadPlanner{}.detectorEscorts(state, squads, influence);
+    const auto contested = SquadPlanner{}.detectorEscorts(
+        state, squads, influence, false, true, true);
+    expect(reserved.size() == 1 && contested.size() == 2 &&
+               contested[0].actor != contested[1].actor,
+           "two blocked main squads can use both completed Observers instead of reserving one for scouting");
+    state.self.units.push_back(unit(712, UnitKind::observer, true, {3000, 1000}));
+    const auto spare = SquadPlanner{}.detectorEscorts(
+        state, squads, influence, false, true, true);
+    expect(spare.size() == 2,
+           "an unneeded third Observer stays available for strategic scouting");
+}
+
+void testForwardThirdScreen() {
+    using namespace protodd;
+    GameState state;
+    state.self.units = {unit(1, UnitKind::nexus, true, {400, 3000}),
+                        unit(2, UnitKind::nexus, true, {400, 2000})};
+    for (auto id = 0; id < 20; ++id)
+        state.self.units.push_back(unit(100 + id, UnitKind::dragoon, true,
+                                        {450 + id * 8, 2100}));
+    StrategicPlan plan;
+    plan.posture = Posture::hold;
+    plan.desiredBases = 3;
+    plan.attackTarget = {3500, 500};
+    plan.expansionTarget = {400, 1000};
+    expect(!SquadPlanner::shouldCoverExpansion(state, plan),
+           "the default third-base behavior does not recall the field army");
+    expect(SquadPlanner::shouldCoverExpansion(state, plan, true),
+           "an opted-in field army covers a third ahead of its completed natural");
+    plan.desiredBases = 2;
+    auto pendingThird = unit(3, UnitKind::nexus, true, plan.expansionTarget);
+    pendingThird.completed = false;
+    state.self.units.push_back(pendingThird);
+    expect(SquadPlanner::shouldCoverExpansion(state, plan, true),
+           "the forward screen remains assigned after the paid third starts and the desired count falls");
+    state.self.units.pop_back();
+    expect(!SquadPlanner::shouldCoverExpansion(state, plan, true),
+           "an unfunded third is not escorted after the strategic request ends");
+    plan.desiredBases = 3;
+    for (auto& fighter : state.self.units)
+        if (fighter.kind == UnitKind::dragoon) fighter.position = {2400, 900};
+    expect(!SquadPlanner::shouldCoverExpansion(state, plan, true),
+           "a field army already beyond the third is not recalled from its attack");
+    for (auto& fighter : state.self.units)
+        if (fighter.kind == UnitKind::dragoon) fighter.position = {500, 2100};
+    plan.expansionTarget = {400, 2700};
+    expect(!SquadPlanner::shouldCoverExpansion(state, plan, true),
+           "a rear third does not recall the army from its established front");
+    plan.expansionTarget = {400, 1000};
+    const auto fullArmy = state.self.units;
+    state.self.units.resize(2 + 13);
+    expect(!SquadPlanner::shouldCoverExpansion(state, plan, true),
+           "a thin field force cannot escort an exposed third");
+    state.self.units = fullArmy;
+    plan.posture = Posture::attack;
+    expect(!SquadPlanner::shouldCoverExpansion(state, plan, true),
+           "an active committed attack is not redirected toward construction");
 }
 
 void testPvZDetectorSurgeOption() {
@@ -6639,6 +6814,10 @@ int main() {
     testCommandArbitration();
     testFrameBudget();
     testWorkersAndScouts();
+    testCoveredPressureRelease();
+    testForwardMainDetectorEscort();
+    testContestedDetectorReserve();
+    testForwardThirdScreen();
     testThreatenedNaturalRally();
     testLocalSquadsAndDetection();
     testTransportMissions();

@@ -262,6 +262,42 @@ bool defensiveExpansionWindow(const GameState& state, const ThreatAssessment& th
 
 }  // namespace
 
+bool StrategyEngine::coveredPressureRelease(
+    const GameState& state, const StrategicPlan& plan) noexcept {
+    if (state.enemy.race != Race::terran || state.frame < 9600 ||
+        plan.posture != Posture::pressure || plan.prioritizeReinforcements ||
+        !plan.attackTarget.valid() || count(state, UnitKind::nexus, true) < 2 ||
+        count(state, UnitKind::probe, true) < 20) return false;
+    const auto army = std::ranges::count_if(state.self.units, [](const UnitSnapshot& unit) {
+        return unit.completed && !unit.disabled && !unit.loaded &&
+            !unit.hallucination && !isBuilding(unit.kind) &&
+            !isWorker(unit.kind) && isCombatUnit(unit.kind);
+    });
+    // A small army can win the immediate perimeter estimate yet still feed
+    // unseen tanks as it advances. The first 14-unit release lost its repeat
+    // screen; this variant waits for a substantial connected field force.
+    if (army < 30) return false;
+    if (std::ranges::any_of(state.self.units, [](const UnitSnapshot& unit) {
+            return isWorker(unit.kind) && unit.underAttack;
+        })) return false;
+
+    auto nearby = 0;
+    for (const auto& enemy : state.enemy.units) {
+        if (!enemy.visible || !enemy.completed || enemy.hallucination ||
+            !enemy.position.valid() || !isCombatUnit(enemy.kind)) continue;
+        for (const auto& base : state.bases) {
+            if (base.ownerId != state.self.id || !base.center.valid()) continue;
+            const auto separation = distanceSquared(enemy.position, base.center);
+            // Immediate contact still belongs to the emergency defense.
+            if (separation <= 320 * 320) return false;
+            if (separation <= 640 * 640) { ++nearby; break; }
+        }
+    }
+    // Keep local base-defense allocation for perimeter contact, but do not
+    // let a few Vultures hold a near-max army at its rally indefinitely.
+    return nearby <= 8 && army >= nearby * 5;
+}
+
 StrategicPlan StrategyEngine::plan(
     const GameState& state,
     const ThreatAssessment& threat,

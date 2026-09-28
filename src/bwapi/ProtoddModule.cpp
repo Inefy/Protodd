@@ -537,9 +537,15 @@ void ProtoddModule::updateStrategy() {
         action == PolicyAction::economy ? OpeningStyle::economic : OpeningStyle::standard;
     auto candidate = strategy_.plan(state_, opponent_.assessment(), style);
     const auto strategyPosture = candidate.posture;
+    auto coveredPressureReleased = false;
     if (policy_.enabled() && action == PolicyAction::defend &&
-        candidate.posture != Posture::defend && candidate.posture != Posture::recover)
-        candidate.posture = Posture::hold;
+        candidate.posture != Posture::defend && candidate.posture != Posture::recover) {
+#ifdef PROTODD_COVERED_PRESSURE_RELEASE
+        if (!policy_.weightsLoaded())
+            coveredPressureReleased = StrategyEngine::coveredPressureRelease(state_, candidate);
+#endif
+        if (!coveredPressureReleased) candidate.posture = Posture::hold;
+    }
     const auto proposed = candidate.posture;
     plan_ = strategicDirector_.stabilize(std::move(candidate), state_, opponent_.assessment());
     auto naturalRallyOverride = false;
@@ -569,7 +575,8 @@ void ProtoddModule::updateStrategy() {
         std::to_string(policy_.enabled()) + ",policyAction=" +
         std::to_string(static_cast<int>(action)) + ",policyWeights=" +
         std::to_string(policy_.weightsLoaded()) + ",naturalRallyOverride=" +
-        std::to_string(naturalRallyOverride));
+        std::to_string(naturalRallyOverride) + ",coveredPressureRelease=" +
+        std::to_string(coveredPressureReleased));
 }
 
 void ProtoddModule::updateMacro() {
@@ -722,7 +729,23 @@ void ProtoddModule::updateCombat(
     auto debugSquadSize = std::size_t{0};
     const auto logSquads = lastSquadLogFrame_ < 0 || state_.frame - lastSquadLogFrame_ >= 24;
     const auto* vanguard = SquadPlanner::selectVanguard(formed, plan_.attackTarget);
-    const auto coverExpansion = SquadPlanner::shouldCoverExpansion(state_, plan_);
+#ifdef PROTODD_FORWARD_THIRD_SCREEN
+    const auto coverForwardThird = state_.enemy.race == Race::terran;
+#else
+    const auto coverForwardThird = false;
+#endif
+    const auto coverExpansion = SquadPlanner::shouldCoverExpansion(
+        state_, plan_, coverForwardThird);
+#ifdef PROTODD_FORWARD_THIRD_SCREEN
+    if (coverExpansion && coverForwardThird &&
+        std::ranges::count_if(state_.self.units, [](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::nexus && unit.completed;
+        }) == 2) {
+        trace("forwardThirdScreen", "EVENT,forward-third-screen,site=" +
+            std::to_string(plan_.expansionTarget.x) + 'x' +
+            std::to_string(plan_.expansionTarget.y), 120);
+    }
+#endif
     for (std::size_t squadIndex = 0; squadIndex < formed.size(); ++squadIndex) {
         const auto& squad = formed[squadIndex];
         auto requiredRatio = squad.requiredRatio;
@@ -968,11 +991,39 @@ void ProtoddModule::updateCombat(
 #else
     const auto mobilizeDetectorReserve = false;
 #endif
+#ifdef PROTODD_FORWARD_DETECTOR_ESCORT
+    const auto centerBlockedMainEscort = true;
+#else
+    const auto centerBlockedMainEscort = false;
+#endif
+#ifdef PROTODD_CONTESTED_DETECTOR_RESERVE
+    const auto mobilizeContestedReserve = true;
+#else
+    const auto mobilizeContestedReserve = false;
+#endif
     for (const auto& order : squads_.detectorEscorts(
-             state_, formed, influence_, mobilizeDetectorReserve)) {
+             state_, formed, influence_, mobilizeDetectorReserve,
+             centerBlockedMainEscort, mobilizeContestedReserve)) {
         detectorEscorts_.push_back(order.actor);
         submit(order);
     }
+#ifdef PROTODD_CONTESTED_DETECTOR_RESERVE
+    const auto blockedMainGroups = std::ranges::count_if(formed, [](const Squad& squad) {
+        return squad.role == SquadRole::mainArmy && squad.needsDetection &&
+            !squad.enemies.empty();
+    });
+    if (blockedMainGroups >= 2) {
+        const auto completedObservers = std::ranges::count_if(
+            state_.self.units, [](const UnitSnapshot& unit) {
+                return unit.kind == UnitKind::observer && unit.completed &&
+                    !unit.loaded && !unit.disabled && !unit.hallucination;
+            });
+        trace("detectorReserve", "DETECTOR_ALLOC,blockedMain=" +
+            std::to_string(blockedMainGroups) + ",observers=" +
+            std::to_string(completedObservers) + ",escorts=" +
+            std::to_string(detectorEscorts_.size()), 24);
+    }
+#endif
     for (const auto& order : transportOrders) {
         submit(order);
     }

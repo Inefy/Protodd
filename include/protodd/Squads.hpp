@@ -58,7 +58,9 @@ public:
         const GameState& state,
         std::span<const Squad> squads,
         const InfluenceMap& influence,
-        bool mobilizeReserveAgainstLurkers = false) const;
+        bool mobilizeReserveAgainstLurkers = false,
+        bool centerBlockedMainEscort = false,
+        bool mobilizeContestedReserve = false) const;
 
     [[nodiscard]] static const Squad* selectVanguard(
         std::span<const Squad> squads,
@@ -77,7 +79,8 @@ public:
     [[nodiscard]] static DefenseArea defensiveArea(
         const GameState& state, Position rally);
     [[nodiscard]] static bool shouldCoverExpansion(
-        const GameState& state, const StrategicPlan& plan) noexcept;
+        const GameState& state, const StrategicPlan& plan,
+        bool coverForwardThird = false) noexcept;
     [[nodiscard]] static DefenseArea expansionDefense(
         const Squad& squad, Position assembly, Position expansion,
         DefenseArea currentDefense = {}) noexcept;
