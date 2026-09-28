@@ -151,7 +151,16 @@ detection-blocked ticks. This confirms a movement effect, not a win gain.
 Game one lost with only 22 peak fighters and game three with 21, so the rule
 could not address their earlier failures. Keep it off and close this release
 family. The next control change needs to protect the early economy or make
-detector coverage actionable before issuing a broad attack order.
+detector coverage actionable before issuing a broad attack order. In the
+fourth candidate game at frame 20,064, a 19-fighter main squad centered at
+`1372x3467` was detection-blocked while completed Observers were at
+`1119x3382`, `1524x3223` and `2129x3399`. The two nearest were about 267 and
+287 pixels away, just beyond the 256-pixel conservative coverage radius;
+accepted escort orders alone did not put a detector inside that radius.
+The centered-escort variant already lost its own four-game screen, so the
+next design must coordinate army movement, Observer survival and mine
+clearance as a single executed contract, not merely change the escort
+waypoint by another few pixels.
 
 The completed matched pressure-release repeat was healthy and paired on all
 four maps/sides/seeds. Both the previous reference and the release candidate
