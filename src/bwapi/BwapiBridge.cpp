@@ -651,6 +651,15 @@ void BwapiBridge::executeWorkers(const std::span<const WorkerAssignment> assignm
                 }
                 continue;
             }
+            if (assignment.priority == 80) {
+                const auto last = worker->getLastCommand();
+                if (last.getType() == UnitCommandTypes::Move &&
+                    !worker->isIdle() &&
+                    distanceSquared(fromBwapi(last.getTargetPosition()),
+                                    assignment.targetPosition) <= 96 * 96) {
+                    continue;
+                }
+            }
             issue(UnitCommand::move(worker, toBwapiPosition(assignment.targetPosition)), "worker-evacuate");
             continue;
         }
@@ -704,9 +713,6 @@ void BwapiBridge::executeWorkers(const std::span<const WorkerAssignment> assignm
             }
             continue;
         }
-        const auto anchor = assignment.targetPosition.valid()
-                                ? toBwapiPosition(assignment.targetPosition)
-                                : worker->getPosition();
         const auto currentTarget = worker->getOrderTarget();
         Unit target = nullptr;
         if (assignment.job == WorkerJob::gas) {
@@ -718,8 +724,6 @@ void BwapiBridge::executeWorkers(const std::span<const WorkerAssignment> assignm
             const auto selected = mineralTargets.find(assignment.worker);
             if (selected != mineralTargets.end()) {
                 target = Broodwar->getUnit(selected->second);
-            } else {
-                target = Broodwar->getClosestUnit(anchor, Filter::IsMineralField);
             }
         }
         const auto atAssignedBase = currentTarget != nullptr &&

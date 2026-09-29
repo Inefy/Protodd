@@ -75,7 +75,9 @@ public:
         const GameState& state,
         const StrategicPlan& plan,
         const InfluenceMap& influence,
-        std::span<const UnitId> reservedBuilders = {}) const;
+        std::span<const UnitId> reservedBuilders = {},
+        bool evacuateAbandonedBase = false,
+        bool safeRemoteMining = false) const;
 
 private:
     mutable GasBankController gasBank_;

@@ -1,12 +1,31 @@
 # Strength-first development plan — 24 September 2026
 
+The 28 September [broader control improvement cycle](control-expansion-20260928.md)
+links full-game economic losses to actual main-army routes. An isolated guard
+for expansion missions completed a one-win, three-loss development screen;
+its only win had no guard activation, so the guard remains off. A separate
+worker-evacuation experiment lost both paired games earlier than its reference;
+it also remains off. A larger emergency-defense consolidation survived longer
+on both Destination sides but lost both paired games, so it remains off too.
+That screen exposed a separate default worker-control error: when owned
+mineral fields emptied, the bridge could send Probes to a distant enemy-held
+patch. The bounded correction and its live screens are detailed in the cycle
+document. The next strength work must connect base survival to army
+preservation, safe resource expansion and useful attacks. A late remote-mining
+pilot activated but added little income and lost earlier. The new opt-in
+PvT contain-break pilot tests whether a connected, detector-covered army can
+attack a reachable outer Command Center before Terran's mines and tanks
+finish closing the map. The target-only diagnostic changed attack orders but
+left the chosen Command Center unharmed and lost; the two guarded-release
+diagnostics had no activation after losing a base. None supports promotion.
+
 ## Current checkpoint — 27 September 2026
 
 The latest default source includes the clearer in-game status overlay, combat
 and scouting correctness fixes, and several bounded strategy changes. The
 experimental PvZ, PvP and PvT control tactics are build options that remain
 **off** in the default bot. The overlay improves diagnosis; it is not evidence of stronger
-play. The current default Win32 BWAPI DLL builds successfully. All 43
+play. The current default Win32 BWAPI DLL builds successfully. All 44
 configured CTest suites that use the default Python environment pass, and
 the PyTorch model suite passes with `build/model-venv/Scripts/python.exe`.
 
@@ -32,14 +51,23 @@ three concrete bottlenecks:
 Current order of work (updated after the 27 September control screens):
 
 1. Repair whole-game control. The PvT screens repeatedly show an empty frozen
-   policy holding a large pressure-ready army near rally and main groups
-   waiting for mobile detection. The large-army release removed the measured
-   rally stall but won 0/4; the Observer variants also established no
-   reliable win gain. Shift to earlier natural/worker survival and to
-   detection that stays with each active combat group. Trace actual issued
-   orders and resulting positions before another live candidate. The earlier
-   policy-off, threatened-rally, Cannon-leash and 14-unit pressure variants
-   also won no full screens.
+   policy holding a pressure-ready army near rally and main groups waiting
+   for mobile detection. The large-army release removed the measured rally
+   stall but won 0/4; the Observer variants also established no reliable win
+   gain. Test a coordinated timing against a known outer Terran economy only
+   when a connected field force, its Observer and local power lead are
+   present. Measure its actual target, travel, fire and worker survival.
+   Avoid chasing the distant main through mines while outer Command Centers
+   mine freely. The target-only diagnostic reached an outer-base route but
+   left the Command Center unharmed; the next check is whether favorable
+   perimeter defenders can become one field army. If that fails, prioritize
+   a short contain-clearing objective and mine-aware route over a depot
+   destination behind the siege line. In the newest side-0 trace, 21 main
+   units covered a planned expansion while the last Nexus faced a nearby
+   attack and six local defenders had a losing estimate. Resolve that
+   objective conflict before letting a one-base army chase an outer depot.
+   The earlier policy-off, threatened-rally, Cannon-leash and
+   14-unit pressure variants won no full screens.
 2. Stabilize the PvP opening against early Zealot and Dragoon pressure.
    The fresh four-game default reference lost 0/4 without a logged Dark
    Templar. Measure the first mobile army, first Reaver, powered Cannon

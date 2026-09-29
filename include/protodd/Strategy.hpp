@@ -61,6 +61,8 @@ class StrategyEngine {
 public:
     [[nodiscard]] static bool coveredPressureRelease(
         const GameState& state, const StrategicPlan& plan) noexcept;
+    [[nodiscard]] static Position pvTContainBreakTarget(
+        const GameState& state, const StrategicPlan& plan) noexcept;
     explicit StrategyEngine(bool pvzGatewayOpening = false,
                             bool pvzEarlySplash = false,
                             bool pvpFogDetection = false,

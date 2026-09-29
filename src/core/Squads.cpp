@@ -91,7 +91,8 @@ std::vector<Squad> SquadPlanner::form(
     const std::span<const UnitSnapshot> friendly,
     const std::span<const UnitSnapshot> enemy,
     const StrategicPlan& plan,
-    const Position fallbackRetreat, const NavigationGrid* navigation) const {
+    const Position fallbackRetreat, const NavigationGrid* navigation,
+    const bool emergencyConsolidation) const {
     std::vector<Squad> result;
     std::unordered_set<UnitId> assigned;
     auto nextId = 1;
@@ -144,7 +145,13 @@ std::vector<Squad> SquadPlanner::form(
                             distanceSquared(ally.position, unit.position) <= 640 * 640;
                     })) fieldPower += power;
             }
-            if (fieldPower > 0.0 && fieldPower >= mobilePower * 0.60) continue;
+            // In PvT the same nearby Tanks and mines can be a real contain.
+            // Release the field group only when it also has a substantial
+            // local power lead; otherwise retain the base-defense response.
+            const auto localBreakoutLead = state.enemy.race != Race::terran ||
+                fieldPower >= threatPower * 1.60;
+            if (fieldPower > 0.0 && fieldPower >= mobilePower * 0.60 &&
+                localBreakoutLead) continue;
         }
         if (threatPower > 0.0) threats.push_back({&base, std::move(nearby), threatPower});
     }
@@ -225,9 +232,24 @@ std::vector<Squad> SquadPlanner::form(
                                      (plan.posture == Posture::defend ? 1.45 : 1.30) +
                                  0.35;
         const auto minimumMobile = std::min<std::size_t>(2, candidates.size());
+        const auto visibleAttackers = std::ranges::count_if(baseThreats,
+            [](const UnitSnapshot& threat) {
+                return threat.visible && threat.groundWeapon.damage > 0 &&
+                    isCombatUnit(threat.kind);
+            });
+        // A small static screen can satisfy the power quota while the mobile
+        // army remains detached. When a large observed group is contesting
+        // the economy, commit the field force to the same defense authority.
+        const auto emergency = emergencyConsolidation && baseThreats.size() >= 6 &&
+            visibleAttackers >= 2 && candidates.size() >= 8;
+        const auto committedMinimum = emergency
+            ? std::min(candidates.size(),
+                       std::max<std::size_t>(8, (candidates.size() * 3 + 3) / 4))
+            : minimumMobile;
+        defense.emergencyDefense = emergency;
         auto mobileCount = std::size_t{0};
         for (const auto& candidate : candidates) {
-            if (mobileCount >= minimumMobile && committedPower >= targetPower) break;
+            if (mobileCount >= committedMinimum && committedPower >= targetPower) break;
             defense.units.push_back(candidate);
             ++mobileCount;
             assigned.insert(candidate.id);
@@ -809,6 +831,25 @@ bool SquadPlanner::shouldCoverExpansion(
     // A third farther behind the existing front is an economy request, not a
     // reason to pull the main army off its current attack or defensive screen.
     return siteToEnemy + 256.0 < frontDistance;
+}
+
+bool SquadPlanner::survivingBaseUnderThreat(const GameState& state) noexcept {
+    for (const auto& base : state.bases) {
+        if (base.ownerId != state.self.id || !base.center.valid()) continue;
+        auto nearbyAttackers = 0;
+        for (const auto& enemy : state.enemy.units) {
+            if (!enemy.position.valid() || !enemy.completed || enemy.disabled ||
+                enemy.invincible || enemy.hallucination || enemy.loaded ||
+                (!enemy.visible && (enemy.lastSeen <= 0 ||
+                                    state.frame - enemy.lastSeen > 3 * 24)) ||
+                (enemy.groundWeapon.damage <= 0 && enemy.role != UnitRole::spellcaster))
+                continue;
+            const auto separation = distanceSquared(enemy.position, base.center);
+            if (separation <= 320 * 320) return true;
+            if (separation <= 800 * 800 && ++nearbyAttackers >= 2) return true;
+        }
+    }
+    return false;
 }
 
 DefenseArea SquadPlanner::expansionDefense(

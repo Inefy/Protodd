@@ -2459,6 +2459,64 @@ void testWorkersAndScouts() {
            "flying scout ignores ground-only danger and shadows the army");
 }
 
+void testDepletedMineralControl() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 33840;
+    state.mapWidthPixels = 4096;
+    state.mapHeightPixels = 4096;
+    state.self.id = 1;
+    state.enemy.id = 2;
+    state.bases.push_back({1, {512, 512}, {576, 512}, 0, 0, 1, 0,
+                           true, false, 0, 0});
+    state.bases.push_back({2, {2200, 512}, {2272, 512}, 6000, 0, 1, 0,
+                           false, false, 8, 0});
+    auto probe = unit(9, UnitKind::probe, true, {544, 512});
+    probe.role = UnitRole::worker;
+    state.self.units.push_back(probe);
+    InfluenceMap influence;
+    influence.update(state);
+    const auto transfer = WorkerManager{}.assign(state, StrategicPlan{}, influence);
+    expect(transfer.size() == 1 && transfer.front().job == WorkerJob::transfer &&
+               transfer.front().baseId == 2,
+           "depleted home minerals transfer workers to a live owned mineral line");
+
+    state.bases.back().mineralsRemaining = 0;
+    state.bases.back().mineralPatches = 0;
+    state.self.units.front().position = {1800, 1200};
+    influence.update(state);
+    const auto exhausted = WorkerManager{}.assign(state, StrategicPlan{}, influence);
+    expect(exhausted.size() == 1 && exhausted.front().job == WorkerJob::evacuate &&
+               exhausted.front().baseId >= 0,
+           "fully depleted economy recalls a stranded worker instead of mining remotely");
+
+    state.bases.push_back({3, {2800, 512}, {2752, 512}, 6000, 0, -1, 0,
+                           false, false, 8, 0});
+    StrategicPlan plan;
+    plan.expansionTarget = {2800, 512};
+    for (auto id = 10; id < 21; ++id) {
+        auto extra = probe;
+        extra.id = id;
+        extra.position = {1780 + id, 1200};
+        state.self.units.push_back(extra);
+    }
+    influence.update(state);
+    const auto remote = WorkerManager{}.assign(state, plan, influence, {}, false, true);
+    expect(std::ranges::count_if(remote, [](const WorkerAssignment& assignment) {
+               return assignment.job == WorkerJob::transfer && assignment.baseId == 3;
+           }) == 8,
+           "remote mining leases at most eight workers to a planned neutral site");
+    auto raider = unit(50, UnitKind::vulture, false, {2820, 512});
+    raider.visible = true;
+    raider.groundWeapon = {20, 30, 0, 160, DamageType::normal, false, true};
+    state.enemy.units.push_back(raider);
+    influence.update(state);
+    const auto unsafe = WorkerManager{}.assign(state, plan, influence, {}, false, true);
+    expect(std::ranges::none_of(unsafe, [](const WorkerAssignment& assignment) {
+               return assignment.job == WorkerJob::transfer && assignment.baseId == 3;
+           }), "an observed attacker vetoes remote mining at the neutral site");
+}
+
 void testCoveredPressureRelease() {
     using namespace protodd;
     GameState state;
@@ -2516,6 +2574,99 @@ void testCoveredPressureRelease() {
     plan.posture = Posture::defend;
     expect(!StrategyEngine::coveredPressureRelease(state, plan),
            "an explicit defensive strategy is not overridden by the policy release");
+}
+
+void testPvTContainBreakTarget() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 24000;
+    state.self.id = 1;
+    state.enemy.id = 2;
+    state.enemy.race = Race::terran;
+    BaseSnapshot main;
+    main.id = 1;
+    main.ownerId = 1;
+    main.center = {1000, 200};
+    BaseSnapshot natural = main;
+    natural.id = 2;
+    natural.center = {1400, 500};
+    state.bases = {main, natural};
+    for (auto id = 0; id < 18; ++id)
+        state.self.units.push_back(unit(100 + id, UnitKind::dragoon, true,
+                                        {1650 + (id % 3) * 30, 650 + (id / 3) * 30}));
+    auto observer = unit(200, UnitKind::observer, true, {1700, 620});
+    state.self.units.push_back(observer);
+    auto nearDepot = unit(300, UnitKind::commandCenter, false, {300, 1700});
+    nearDepot.role = UnitRole::resourceDepot;
+    auto farDepot = unit(301, UnitKind::commandCenter, false, {2800, 3200});
+    farDepot.role = UnitRole::resourceDepot;
+    state.enemy.units = {nearDepot, farDepot};
+    StrategicPlan plan;
+    plan.posture = Posture::pressure;
+    plan.attackTarget = farDepot.position;
+    expect(StrategyEngine::pvTContainBreakTarget(state, plan) == nearDepot.position,
+           "a detector-covered connected field army targets the nearer Terran economy");
+    state.enemy.units.pop_back();
+    expect(!StrategyEngine::pvTContainBreakTarget(state, plan).valid(),
+           "a lone remembered Terran main does not trigger a cross-map breakout");
+    state.enemy.units.push_back(farDepot);
+    state.enemy.units.front().completed = false;
+    expect(StrategyEngine::pvTContainBreakTarget(state, plan) == nearDepot.position,
+           "an unfinished outer Command Center is still a breakout target");
+    state.enemy.units.front().completed = true;
+    state.self.units.back().position = {3000, 3500};
+    expect(!StrategyEngine::pvTContainBreakTarget(state, plan).valid(),
+           "a distant Observer does not license a minefield breakout");
+    state.self.units.back() = observer;
+    auto raider = unit(302, UnitKind::vulture, false, natural.center);
+    state.enemy.units.push_back(raider);
+    expect(!StrategyEngine::pvTContainBreakTarget(state, plan).valid(),
+           "a current economy breach retains base-defense authority");
+}
+
+void testPvTContainBreakFormation() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 24000;
+    state.self.id = 1;
+    state.enemy.id = 2;
+    state.enemy.race = Race::terran;
+    state.bases = {{1, {512, 512}, {512, 600}, 8000, 5000, 1}};
+    std::vector<UnitSnapshot> friendly;
+    for (auto id = 0; id < 20; ++id) {
+        auto fighter = unit(100 + id, UnitKind::dragoon, true,
+                            {640 + (id % 4) * 24, 440 + (id / 4) * 24});
+        fighter.groundWeapon = {20, 30, 0, 192, DamageType::normal, false, true};
+        friendly.push_back(fighter);
+    }
+    std::vector<UnitSnapshot> enemy;
+    for (auto id = 0; id < 3; ++id) {
+        auto vulture = unit(200 + id, UnitKind::vulture, false,
+                            {880 + id * 12, 512});
+        vulture.groundWeapon = {20, 30, 0, 160, DamageType::normal, false, true};
+        enemy.push_back(vulture);
+    }
+    StrategicPlan plan;
+    plan.posture = Posture::pressure;
+    plan.breakContainment = true;
+    plan.attackTarget = {1600, 512};
+    const auto released = SquadPlanner{}.form(
+        state, friendly, enemy, plan, {512, 512}, nullptr, true);
+    expect(std::ranges::any_of(released, [](const Squad& squad) {
+               return squad.role == SquadRole::mainArmy && squad.units.size() >= 16;
+           }), "a strong PvT field force can leave a weak outer contain");
+    for (auto id = 3; id < 18; ++id) {
+        auto vulture = enemy.front();
+        vulture.id = 200 + id;
+        vulture.position.x += id * 6;
+        enemy.push_back(vulture);
+    }
+    const auto defended = SquadPlanner{}.form(
+        state, friendly, enemy, plan, {512, 512}, nullptr, true);
+    expect(std::ranges::any_of(defended, [](const Squad& squad) {
+               return squad.role == SquadRole::baseDefense &&
+                      squad.units.size() >= 8;
+           }), "a larger Terran contain retains base-defense allocation");
 }
 
 void testThreatenedNaturalRally() {
@@ -4039,6 +4190,122 @@ void testForwardThirdScreen() {
     plan.posture = Posture::attack;
     expect(!SquadPlanner::shouldCoverExpansion(state, plan, true),
            "an active committed attack is not redirected toward construction");
+}
+
+void testSurvivingBaseThreatBlocksExpansionEscort() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 12000;
+    state.self.id = 1;
+    state.bases = {{1, {2000, 3000}, {2050, 3000}, 8000, 5000, 1}};
+    auto raider = unit(10, UnitKind::vulture, false, {2600, 3000});
+    raider.groundWeapon = {20, 30, 0, 160, DamageType::normal, false, true};
+    raider.visible = true;
+    state.enemy.units = {raider};
+    expect(!SquadPlanner::survivingBaseUnderThreat(state),
+           "one distant raider cannot prevent the first expansion escort");
+    auto second = raider;
+    second.id = 11;
+    second.position = {2500, 3100};
+    state.enemy.units.push_back(second);
+    expect(SquadPlanner::survivingBaseUnderThreat(state),
+           "two attackers near a surviving Nexus keep the field army at home");
+    for (auto& enemy : state.enemy.units) {
+        enemy.visible = false;
+        enemy.lastSeen = state.frame - 4 * 24;
+    }
+    expect(!SquadPlanner::survivingBaseUnderThreat(state),
+           "stale sightings release the expansion escort");
+    state.enemy.units.front().visible = true;
+    state.enemy.units.front().position = {2240, 3000};
+    expect(SquadPlanner::survivingBaseUnderThreat(state),
+           "one attacker already inside the Nexus perimeter is urgent");
+}
+
+void testThreatenedAbandonedBaseWorkerEvacuation() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 24000;
+    state.self.id = 1;
+    state.self.units = {unit(1, UnitKind::nexus, true, {256, 256}),
+                        unit(2, UnitKind::probe, true, {1200, 256})};
+    state.bases = {{1, {256, 256}, {256, 320}, 8000, 5000, 1},
+                   {2, {1200, 256}, {1200, 320}, 8000, 5000, -1}};
+    auto vulture = unit(3, UnitKind::vulture, false, {1250, 300});
+    vulture.groundWeapon = {20, 30, 0, 160, DamageType::normal, false, true};
+    vulture.visible = true;
+    state.enemy.units = {vulture};
+    const auto guarded = WorkerManager{}.assign(state, {}, InfluenceMap{}, {}, true);
+    expect(guarded.size() == 1 && guarded.front().job == WorkerJob::evacuate &&
+               guarded.front().baseId == 1 && guarded.front().targetPosition.valid(),
+           "a Probe at a lost threatened natural escapes toward the surviving main");
+    const auto defaultAssignments = WorkerManager{}.assign(state, {}, InfluenceMap{});
+    expect(defaultAssignments.size() == 1 &&
+               defaultAssignments.front().job != WorkerJob::evacuate,
+           "abandoned-base evacuation remains opt-in for its isolated screen");
+    state.enemy.units.front().visible = false;
+    state.enemy.units.front().lastSeen = state.frame - 4 * 24;
+    const auto stale = WorkerManager{}.assign(state, {}, InfluenceMap{}, {}, true);
+    expect(stale.front().job != WorkerJob::evacuate,
+           "stale threat memory does not strand the worker away from minerals");
+}
+
+void testEmergencyBaseDefenseConsolidation() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 15000;
+    state.self.id = 1;
+    state.bases = {{1, {512, 512}, {512, 600}, 8000, 5000, 1}};
+    std::vector<UnitSnapshot> friendly;
+    for (auto id = 0; id < 20; ++id) {
+        auto dragoon = unit(100 + id, UnitKind::dragoon, true,
+                            {1400 + id * 4, 512});
+        dragoon.groundWeapon = {20, 30, 0, 192, DamageType::normal, false, true};
+        friendly.push_back(dragoon);
+    }
+    for (auto id = 0; id < 6; ++id) {
+        auto cannon = unit(200 + id, UnitKind::photonCannon, true,
+                           {480 + id * 16, 512});
+        cannon.groundWeapon = {20, 30, 0, 224, DamageType::normal, false, true};
+        friendly.push_back(cannon);
+    }
+    for (auto id = 0; id < 8; ++id) {
+        auto attacker = unit(300 + id, UnitKind::vulture, false,
+                             {760 + id * 4, 512});
+        attacker.groundWeapon = {20, 30, 0, 160, DamageType::normal, false, true};
+        attacker.visible = true;
+        state.enemy.units.push_back(attacker);
+    }
+    StrategicPlan plan;
+    plan.posture = Posture::hold;
+    plan.rallyPoint = {1400, 512};
+    plan.attackTarget = {3000, 512};
+    const auto baseline = SquadPlanner{}.form(
+        state, friendly, state.enemy.units, plan, {512, 512});
+    const auto candidate = SquadPlanner{}.form(
+        state, friendly, state.enemy.units, plan, {512, 512}, nullptr, true);
+    const auto mobileDefenders = [](const std::vector<Squad>& squads) {
+        auto count = std::size_t{};
+        for (const auto& squad : squads) {
+            if (squad.role != SquadRole::baseDefense) continue;
+            count += static_cast<std::size_t>(std::ranges::count_if(squad.units, [](const UnitSnapshot& member) {
+                return !isBuilding(member.kind);
+            }));
+        }
+        return count;
+    };
+    expect(mobileDefenders(candidate) >= 15 &&
+               mobileDefenders(candidate) > mobileDefenders(baseline) &&
+               std::ranges::any_of(candidate, [](const Squad& squad) {
+                   return squad.role == SquadRole::baseDefense && squad.emergencyDefense;
+               }),
+           "a large economy attack consolidates most mobile fighters under base defense");
+    state.enemy.units.resize(1);
+    const auto scout = SquadPlanner{}.form(
+        state, friendly, state.enemy.units, plan, {512, 512}, nullptr, true);
+    expect(std::ranges::none_of(scout, [](const Squad& squad) {
+        return squad.emergencyDefense;
+    }), "one raider cannot recall the field army into emergency defense");
 }
 
 void testPvZDetectorSurgeOption() {
@@ -6855,11 +7122,17 @@ int main() {
     testCommandArbitration();
     testFrameBudget();
     testWorkersAndScouts();
+    testDepletedMineralControl();
     testCoveredPressureRelease();
+    testPvTContainBreakTarget();
+    testPvTContainBreakFormation();
     testForwardMainDetectorEscort();
     testDetectorWaitVolley();
     testContestedDetectorReserve();
     testForwardThirdScreen();
+    testSurvivingBaseThreatBlocksExpansionEscort();
+    testThreatenedAbandonedBaseWorkerEvacuation();
+    testEmergencyBaseDefenseConsolidation();
     testThreatenedNaturalRally();
     testLocalSquadsAndDetection();
     testTransportMissions();

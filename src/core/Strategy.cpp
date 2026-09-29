@@ -298,6 +298,96 @@ bool StrategyEngine::coveredPressureRelease(
     return nearby <= 8 && army >= nearby * 5;
 }
 
+Position StrategyEngine::pvTContainBreakTarget(
+    const GameState& state, const StrategicPlan& plan) noexcept {
+    if (state.enemy.race != Race::terran || state.frame < 12 * 60 * 24 ||
+        plan.posture != Posture::pressure || !plan.attackTarget.valid()) return {-1, -1};
+    auto bases = 0;
+    for (const auto& base : state.bases) {
+        if (base.ownerId != state.self.id || !base.center.valid()) continue;
+        ++bases;
+        for (const auto& enemy : state.enemy.units) {
+            if (!enemy.visible || !enemy.completed || enemy.disabled ||
+                enemy.hallucination || !enemy.position.valid() ||
+                !isCombatUnit(enemy.kind) ||
+                distanceSquared(enemy.position, base.center) > 320 * 320) continue;
+            return {-1, -1};
+        }
+    }
+    if (bases < 2 || std::ranges::any_of(state.self.units, [](const UnitSnapshot& unit) {
+            return isWorker(unit.kind) && unit.underAttack;
+        })) return {-1, -1};
+
+    std::vector<const UnitSnapshot*> army;
+    for (const auto& unit : state.self.units) {
+        if (unit.completed && !unit.disabled && !unit.loaded &&
+            !unit.hallucination && unit.position.valid() &&
+            !isBuilding(unit.kind) && !isWorker(unit.kind) &&
+            isCombatUnit(unit.kind) && !unit.flying) army.push_back(&unit);
+    }
+    if (army.size() < 16) return {-1, -1};
+    // A connected field force must own the push. Supply scattered among home
+    // guards, air units, and reinforcements is not a breakout opportunity.
+    const UnitSnapshot* anchor = nullptr;
+    auto nearbyMax = std::size_t{0};
+    for (const auto* candidate : army) {
+        const auto nearby = static_cast<std::size_t>(std::ranges::count_if(army, [candidate](const UnitSnapshot* unit) {
+            return distanceSquared(unit->position, candidate->position) <= 640 * 640;
+        }));
+        if (nearby > nearbyMax) { nearbyMax = nearby; anchor = candidate; }
+    }
+    if (anchor == nullptr || nearbyMax < 16) return {-1, -1};
+    const auto detectorReady = std::ranges::any_of(state.self.units, [anchor](const UnitSnapshot& unit) {
+        return unit.kind == UnitKind::observer && unit.completed && !unit.disabled &&
+            !unit.loaded && !unit.hallucination && unit.healthFraction() >= 0.25 &&
+            unit.position.valid() &&
+            distanceSquared(unit.position, anchor->position) <= 512 * 512;
+    });
+    if (!detectorReady) return {-1, -1};
+
+    auto fieldPower = 0.0;
+    auto opposition = 0.0;
+    for (const auto* unit : army) {
+        if (distanceSquared(unit->position, anchor->position) <= 640 * 640)
+            fieldPower += unitStats(unit->kind).combatValue *
+                std::clamp(unit->healthFraction(), 0.15, 1.0);
+    }
+    for (const auto& enemy : state.enemy.units) {
+        if (!enemy.completed || enemy.disabled || enemy.hallucination ||
+            !enemy.position.valid() || !isCombatUnit(enemy.kind) ||
+            (!enemy.visible && state.frame - enemy.lastSeen > 8 * 24) ||
+            distanceSquared(enemy.position, anchor->position) > 960 * 960) continue;
+        opposition += unitStats(enemy.kind).combatValue *
+            std::clamp(enemy.healthFraction(), 0.15, 1.0);
+    }
+    if (fieldPower < std::max(4.0, opposition) * 1.6) return {-1, -1};
+
+    auto best = Position{-1, -1};
+    auto bestScore = std::numeric_limits<double>::infinity();
+    auto knownDepots = 0;
+    for (const auto& depot : state.enemy.units) {
+        if (depot.role != UnitRole::resourceDepot || depot.hallucination ||
+            !depot.position.valid()) continue;
+        ++knownDepots;
+        // An unfinished outer Command Center is the best timing to interrupt
+        // Terran's map control; it need not finish before becoming a target.
+        auto score = distance(anchor->position, depot.position) -
+                     (depot.completed ? 0.0 : 256.0);
+        for (const auto& defender : state.enemy.units) {
+            if (!defender.completed || defender.disabled || !defender.position.valid() ||
+                defender.groundWeapon.damage <= 0 ||
+                (!defender.visible && !isBuilding(defender.kind) &&
+                 state.frame - defender.lastSeen > 30 * 24) ||
+                distanceSquared(defender.position, depot.position) > 800 * 800) continue;
+            score += unitStats(defender.kind).combatValue * 128.0;
+        }
+        if (score < bestScore) { bestScore = score; best = depot.position; }
+    }
+    // A lone remembered main is not a breakout destination through an
+    // established minefield. Wait until scouting finds an outer economy.
+    return knownDepots >= 2 ? best : Position{-1, -1};
+}
+
 StrategicPlan StrategyEngine::plan(
     const GameState& state,
     const ThreatAssessment& threat,

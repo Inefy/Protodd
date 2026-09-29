@@ -538,16 +538,30 @@ void ProtoddModule::updateStrategy() {
     auto candidate = strategy_.plan(state_, opponent_.assessment(), style);
     const auto strategyPosture = candidate.posture;
     auto coveredPressureReleased = false;
+    auto containBreak = false;
+#ifdef PROTODD_PVT_CONTAIN_BREAK
+    if (const auto target = StrategyEngine::pvTContainBreakTarget(state_, candidate);
+        target.valid()) {
+        candidate.attackTarget = target;
+        containBreak = true;
+        trace("pvtContainBreak", "EVENT,pvt-contain-break,target=" +
+            std::to_string(target.x) + 'x' + std::to_string(target.y), 120);
+    }
+#endif
     if (policy_.enabled() && action == PolicyAction::defend &&
         candidate.posture != Posture::defend && candidate.posture != Posture::recover) {
 #ifdef PROTODD_COVERED_PRESSURE_RELEASE
         if (!policy_.weightsLoaded())
             coveredPressureReleased = StrategyEngine::coveredPressureRelease(state_, candidate);
 #endif
-        if (!coveredPressureReleased) candidate.posture = Posture::hold;
+        if (!coveredPressureReleased && !(containBreak && !policy_.weightsLoaded()))
+            candidate.posture = Posture::hold;
     }
     const auto proposed = candidate.posture;
     plan_ = strategicDirector_.stabilize(std::move(candidate), state_, opponent_.assessment());
+    const auto containBreakCommitted = containBreak &&
+        (plan_.posture == Posture::pressure || plan_.posture == Posture::attack);
+    if (containBreakCommitted) plan_.breakContainment = true;
     auto naturalRallyOverride = false;
 #ifdef PROTODD_THREATENED_NATURAL_RALLY
     if (const auto rally = SquadPlanner::threatenedNaturalRally(state_, plan_)) {
@@ -576,7 +590,9 @@ void ProtoddModule::updateStrategy() {
         std::to_string(static_cast<int>(action)) + ",policyWeights=" +
         std::to_string(policy_.weightsLoaded()) + ",naturalRallyOverride=" +
         std::to_string(naturalRallyOverride) + ",coveredPressureRelease=" +
-        std::to_string(coveredPressureReleased));
+        std::to_string(coveredPressureReleased) + ",containBreak=" +
+        std::to_string(containBreak) + ",containBreakCommit=" +
+        std::to_string(containBreakCommitted));
 }
 
 void ProtoddModule::updateMacro() {
@@ -618,7 +634,23 @@ void ProtoddModule::updateWorkers() {
     reserved.insert(reserved.end(), leasedScouts_.begin(), leasedScouts_.end());
     std::ranges::sort(reserved);
     reserved.erase(std::unique(reserved.begin(), reserved.end()), reserved.end());
-    const auto assignments = workers_.assign(state_, plan_, influence_, reserved);
+#ifdef PROTODD_ABANDONED_BASE_WORKER_EVACUATION
+    constexpr auto evacuateAbandonedBase = true;
+#else
+    constexpr auto evacuateAbandonedBase = false;
+#endif
+#ifdef PROTODD_SAFE_REMOTE_MINING
+    constexpr auto safeRemoteMining = true;
+#else
+    constexpr auto safeRemoteMining = false;
+#endif
+    const auto assignments = workers_.assign(
+        state_, plan_, influence_, reserved, evacuateAbandonedBase, safeRemoteMining);
+    if (std::ranges::any_of(assignments, [](const WorkerAssignment& assignment) {
+            return assignment.job == WorkerJob::transfer && assignment.priority == 60;
+        })) {
+        trace("safeRemoteMining", "EVENT,safe-remote-mining", 120);
+    }
     const auto gas = std::ranges::count(assignments, WorkerJob::gas, &WorkerAssignment::job);
     const auto minerals = std::ranges::count(assignments, WorkerJob::minerals, &WorkerAssignment::job);
     const auto ids = [](const std::span<const UnitId> units) {
@@ -707,7 +739,18 @@ void ProtoddModule::updateCombat(
     const auto aggressive = plan_.posture == Posture::pressure ||
                             plan_.posture == Posture::attack ||
                             plan_.posture == Posture::harass;
-    const auto formed = squads_.form(state_, friendly, enemy, plan_, retreatPoint(), &navigation_);
+#ifdef PROTODD_BASE_DEFENSE_CONSOLIDATION
+    constexpr auto emergencyConsolidation = true;
+#else
+    constexpr auto emergencyConsolidation = false;
+#endif
+    const auto formed = squads_.form(state_, friendly, enemy, plan_, retreatPoint(),
+                                     &navigation_, emergencyConsolidation);
+    if (std::ranges::any_of(formed, [](const Squad& squad) {
+            return squad.emergencyDefense;
+        })) {
+        trace("emergencyDefenseConsolidation", "EVENT,emergency-defense-consolidation", 120);
+    }
     const auto resetNavigation = advanceWaypoints_.size() != formed.size() ||
                                  navigationSignatures_.size() != formed.size();
     const auto periodicNavigationRefresh = navigationRefresh_ < 0 ||
@@ -734,8 +777,17 @@ void ProtoddModule::updateCombat(
 #else
     const auto coverForwardThird = false;
 #endif
-    const auto coverExpansion = SquadPlanner::shouldCoverExpansion(
+    const auto requestedExpansionCover = SquadPlanner::shouldCoverExpansion(
         state_, plan_, coverForwardThird);
+#ifdef PROTODD_BASE_THREAT_EXPANSION_GUARD
+    const auto baseThreatBlocksCover = requestedExpansionCover &&
+        SquadPlanner::survivingBaseUnderThreat(state_);
+    if (baseThreatBlocksCover)
+        trace("baseThreatExpansionGuard", "EVENT,base-threat-expansion-guard", 120);
+    const auto coverExpansion = requestedExpansionCover && !baseThreatBlocksCover;
+#else
+    const auto coverExpansion = requestedExpansionCover;
+#endif
 #ifdef PROTODD_FORWARD_THIRD_SCREEN
     if (coverExpansion && coverForwardThird &&
         std::ranges::count_if(state_.self.units, [](const UnitSnapshot& unit) {

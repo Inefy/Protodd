@@ -37,12 +37,20 @@ def audit_log(path: Path) -> dict:
     pressure_held = set()
     pressure_released = set()
     forward_third_screen = set()
+    base_threat_expansion_guard = set()
+    emergency_defense_consolidation = set()
+    safe_remote_mining = set()
+    pvt_contain_break = set()
+    contain_break_strategy = set()
     expansion_cover_routes = set()
     nexus_samples = []
     main_detection_blocked = set()
     blocked_main_groups = Counter()
     large_main_rally = set()
     large_main_routes = set()
+    favorable_main_rally = set()
+    favorable_main_detection_blocked = set()
+    pressured_defense = defaultdict(lambda: {"defenders": 0, "main": 0})
     escort_orders = defaultdict(set)
     detector_wait_volleys = set()
     detector_wait_retreats = set()
@@ -59,6 +67,14 @@ def audit_log(path: Path) -> dict:
                 event = line.rstrip("\n").split(",", 3)
                 if len(event) > 2 and event[2] == "forward-third-screen":
                     forward_third_screen.add(int(event[1]))
+                if len(event) > 2 and event[2] == "base-threat-expansion-guard":
+                    base_threat_expansion_guard.add(int(event[1]))
+                if len(event) > 2 and event[2] == "emergency-defense-consolidation":
+                    emergency_defense_consolidation.add(int(event[1]))
+                if len(event) > 2 and event[2] == "safe-remote-mining":
+                    safe_remote_mining.add(int(event[1]))
+                if len(event) > 2 and event[2] == "pvt-contain-break":
+                    pvt_contain_break.add(int(event[1]))
                 continue
             if line.startswith("ORDER,"):
                 order = line.rstrip("\n").split(",", 8)
@@ -83,16 +99,28 @@ def audit_log(path: Path) -> dict:
                     pressure_held.add(frame)
                 if values.get("coveredPressureRelease") == "1":
                     pressure_released.add(frame)
+                if values.get("containBreak") == "1":
+                    contain_break_strategy.add(frame)
             elif kind == "DETECTOR_ALLOC":
                 reserve_telemetry_seen = True
                 observers = int(values.get("observers", "0"))
                 if observers >= 2 and int(values.get("escorts", "0")) >= observers:
                     contested_reserve_releases.add(frame)
+            elif kind == "SQUAD" and line.split(",", 3)[2] == "BaseDefense":
+                if int(values.get("enemies", "0")) >= 6:
+                    pressured_defense[frame]["defenders"] += int(values.get("units", "0"))
             elif kind == "SQUAD" and line.split(",", 3)[2] == "MainArmy":
+                pressured_defense[frame]["main"] += int(values.get("units", "0"))
                 if values.get("detectionBlocked") == "1":
                     main_detection_blocked.add(frame)
                     blocked_main_groups[frame] += 1
                 units = int(values.get("units", "0"))
+                if units >= 16 and int(values.get("enemies", "0")) > 0 and \
+                        float(values.get("ratio", "0")) >= 1.6:
+                    if values.get("travelReason") == "assemble-at-rally":
+                        favorable_main_rally.add(frame)
+                    if values.get("detectionBlocked") == "1":
+                        favorable_main_detection_blocked.add(frame)
                 if units >= 30:
                     route = values.get("travelReason", "unknown")
                     large_main_routes.add((frame, route))
@@ -126,11 +154,39 @@ def audit_log(path: Path) -> dict:
         sample = bisect_right(nexus_frames, frame) - 1
         if sample >= 0 and nexus_samples[sample][1] == 2:
             forward_third_routes.add(frame)
+    pressured_frames = [sample for sample in pressured_defense.values()
+                        if sample["defenders"] > 0]
+    defense_share = [sample["defenders"] / (sample["defenders"] + sample["main"])
+                     for sample in pressured_frames]
+    pressured_with_main = [sample for sample in pressured_frames
+                           if sample["main"] >= 12]
+    defense_share_with_main = [sample["defenders"] / (sample["defenders"] + sample["main"])
+                               for sample in pressured_with_main]
+    pressured_with_force = [sample for sample in pressured_frames
+                            if sample["defenders"] + sample["main"] >= 12]
+    defense_share_with_force = [sample["defenders"] / (sample["defenders"] + sample["main"])
+                                for sample in pressured_with_force]
     return {
         "empty_policy_pressure_hold_ticks": len(pressure_held),
         "covered_pressure_release_ticks": len(pressure_released),
         "forward_third_screen_ticks": len(forward_third_routes),
         "forward_third_event_ticks": len(forward_third_screen),
+        "base_threat_expansion_guard_ticks": len(base_threat_expansion_guard),
+        "emergency_defense_consolidation_ticks": len(emergency_defense_consolidation),
+        "safe_remote_mining_event_ticks": len(safe_remote_mining),
+        "pvt_contain_break_event_ticks": len(pvt_contain_break),
+        "contain_break_strategy_ticks": len(contain_break_strategy),
+        "large_base_threat_ticks": len(pressured_frames),
+        "large_base_threat_mean_defense_share": (
+            round(sum(defense_share) / len(defense_share), 3) if defense_share else None),
+        "large_base_threat_with_main_ticks": len(pressured_with_main),
+        "large_base_threat_with_main_mean_defense_share": (
+            round(sum(defense_share_with_main) / len(defense_share_with_main), 3)
+            if defense_share_with_main else None),
+        "large_base_threat_with_force_ticks": len(pressured_with_force),
+        "large_base_threat_with_force_mean_defense_share": (
+            round(sum(defense_share_with_force) / len(defense_share_with_force), 3)
+            if defense_share_with_force else None),
         "contested_reserve_release_ticks": (
             len(contested_reserve_releases) if reserve_telemetry_seen else None),
         "main_detection_blocked_ticks": len(main_detection_blocked),
@@ -142,6 +198,8 @@ def audit_log(path: Path) -> dict:
         "dual_escort_with_multiple_blocked_main": sum(
             blocked_main_groups[frame] >= 2 for frame in dual_escort_frames),
         "large_main_rally_ticks": len(large_main_rally),
+        "favorable_main_rally_ticks": len(favorable_main_rally),
+        "favorable_main_detection_blocked_ticks": len(favorable_main_detection_blocked),
         "large_main_route_ticks": dict(sorted(routes.items())),
         "peak_army": peak_army,
         "peak_probes": peak_probes,

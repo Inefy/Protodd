@@ -137,7 +137,9 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     const GameState& state,
     const StrategicPlan& plan,
     const InfluenceMap& influence,
-    const std::span<const UnitId> reservedBuilders) const {
+    const std::span<const UnitId> reservedBuilders,
+    const bool evacuateAbandonedBase,
+    const bool safeRemoteMining) const {
     std::vector<const UnitSnapshot*> workers;
     for (const auto& unit : state.self.units) {
         if (isWorker(unit.kind) && unit.completed && !unit.loaded &&
@@ -187,6 +189,46 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         if (builders.contains(worker->id)) {
             result.push_back({worker->id, WorkerJob::build, -1, -1, {-1, -1}, 100});
             continue;
+        }
+
+        if (evacuateAbandonedBase && safeBase != nullptr) {
+            // After a Nexus falls, its surviving Probes can keep receiving
+            // ordinary mining/transfer orders through a hostile mineral line.
+            // Give the still-exposed workers a high-priority safe route before
+            // regular resource balancing attempts to recover production.
+            const BaseSnapshot* localBase = nullptr;
+            auto localDistance = 640 * 640 + 1;
+            for (const auto& base : state.bases) {
+                if (!base.center.valid()) continue;
+                const auto separation = distanceSquared(worker->position, base.center);
+                if (separation < localDistance) {
+                    localDistance = separation;
+                    localBase = &base;
+                }
+            }
+            if (localBase != nullptr && localBase->ownerId != state.self.id &&
+                localBase->id != safeBase->id &&
+                distanceSquared(localBase->center, safeBase->center) > 640 * 640) {
+                const auto threatening = [&state](const BaseSnapshot& base) {
+                    return std::ranges::any_of(state.enemy.units, [&state, &base](
+                        const UnitSnapshot& enemy) {
+                        return enemy.position.valid() && enemy.completed &&
+                            !enemy.disabled && !enemy.hallucination && !enemy.loaded &&
+                            enemy.groundWeapon.damage > 0 &&
+                            (enemy.visible || (enemy.lastSeen > 0 &&
+                                state.frame - enemy.lastSeen <= 3 * 24)) &&
+                            distanceSquared(enemy.position, base.center) <= 800 * 800;
+                    });
+                };
+                if (threatening(*localBase) && !threatening(*safeBase)) {
+                    const auto destination = safeBase->mineralLine.valid()
+                        ? safeBase->mineralLine : safeBase->center;
+                    result.push_back({worker->id, WorkerJob::evacuate, safeBase->id,
+                        -1, influence.safestStep(worker->position,
+                                                 destination, false), 98});
+                    continue;
+                }
+            }
         }
 
         const auto rangedBio = std::ranges::min_element(
@@ -586,6 +628,50 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         ++gasAssigned;
     }
 
+    if (safeRemoteMining && !ownedBases.empty() && plan.expansionTarget.valid() &&
+        std::ranges::none_of(ownedBases, [](const BaseSnapshot* base) {
+            return base->mineralsRemaining > 0;
+        })) {
+        const auto remote = std::ranges::find_if(state.bases,
+            [&state, &plan](const BaseSnapshot& base) {
+                if (base.ownerId >= 0 || base.island || !base.mineralLine.valid() ||
+                    base.mineralsRemaining < 1000 ||
+                    distanceSquared(base.center, plan.expansionTarget) > 384 * 384)
+                    return false;
+                return std::ranges::none_of(state.enemy.units,
+                    [&state, &base](const UnitSnapshot& enemy) {
+                        return enemy.position.valid() && enemy.completed &&
+                            !enemy.disabled && !enemy.hallucination && !enemy.loaded &&
+                            enemy.groundWeapon.damage > 0 &&
+                            (enemy.visible || (enemy.lastSeen > 0 &&
+                                state.frame - enemy.lastSeen <= 3 * 24)) &&
+                            distanceSquared(enemy.position, base.center) <= 640 * 640;
+                    });
+            });
+        if (remote != state.bases.end() &&
+            influence.at(remote->center).groundThreat <= 0.25F) {
+            std::ranges::sort(available, [&remote](const UnitSnapshot* left,
+                                                   const UnitSnapshot* right) {
+                const auto leftDistance = distanceSquared(left->position, remote->center);
+                const auto rightDistance = distanceSquared(right->position, remote->center);
+                return leftDistance != rightDistance ? leftDistance < rightDistance :
+                       left->id < right->id;
+            });
+            auto sent = 0;
+            for (auto worker = available.begin(); worker != available.end() && sent < 8;) {
+                if (influence.maximumGroundThreat((*worker)->position,
+                                                   remote->mineralLine) > 0.25F) {
+                    ++worker;
+                    continue;
+                }
+                result.push_back({(*worker)->id, WorkerJob::transfer, remote->id,
+                                  -1, remote->mineralLine, 60});
+                worker = available.erase(worker);
+                ++sent;
+            }
+        }
+    }
+
     // Greedily equalize mineral saturation while retaining a small distance
     // bias. A transfer order is explicit so the adapter retargets workers that
     // are already gathering at an oversaturated base.
@@ -594,6 +680,7 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         const BaseSnapshot* bestBase = nullptr;
         auto bestScore = std::numeric_limits<double>::infinity();
         for (const auto* base : ownedBases) {
+            if (base->mineralsRemaining <= 0) continue;
             const auto patches = base->mineralPatches > 0 ? base->mineralPatches : 8;
             const auto capacity = std::clamp(patches * 2, 4, 16);
             const auto saturation = static_cast<double>(assignedPerBase[base->id] + 1) /
@@ -612,7 +699,20 @@ std::vector<WorkerAssignment> WorkerManager::assign(
             }
         }
         if (bestBase == nullptr) {
-            result.push_back({worker->id, WorkerJob::idle, -1, -1, {-1, -1}, 0});
+            // An exhausted Nexus is still an owned base, but it has no local
+            // patch to mine. Return stranded workers to safety instead of
+            // leaving their previous remote gather order running.
+            const auto refuge = safeBase != nullptr && safeBase->mineralLine.valid()
+                ? safeBase->mineralLine :
+                safeBase != nullptr ? safeBase->center : Position{-1, -1};
+            if (refuge.valid() &&
+                distanceSquared(worker->position, refuge) > 256 * 256) {
+                result.push_back({worker->id, WorkerJob::evacuate, safeBase->id,
+                    -1, influence.safestStep(worker->position,
+                                             refuge, false), 80});
+            } else {
+                result.push_back({worker->id, WorkerJob::idle, -1, -1, {-1, -1}, 0});
+            }
             continue;
         }
         ++assignedPerBase[bestBase->id];

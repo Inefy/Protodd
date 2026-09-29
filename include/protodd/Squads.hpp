@@ -31,6 +31,7 @@ struct Squad {
     Position retreat{-1, -1};
     double requiredRatio{1.2};
     bool needsDetection{};
+    bool emergencyDefense{};
     DefenseArea defense;
     bool withdrawing{};
     std::string missionReason;
@@ -52,7 +53,8 @@ public:
         std::span<const UnitSnapshot> friendly,
         std::span<const UnitSnapshot> enemy,
         const StrategicPlan& plan,
-        Position fallbackRetreat, const NavigationGrid* navigation = nullptr) const;
+        Position fallbackRetreat, const NavigationGrid* navigation = nullptr,
+        bool emergencyConsolidation = false) const;
 
     [[nodiscard]] std::vector<Command> detectorEscorts(
         const GameState& state,
@@ -81,6 +83,8 @@ public:
     [[nodiscard]] static bool shouldCoverExpansion(
         const GameState& state, const StrategicPlan& plan,
         bool coverForwardThird = false) noexcept;
+    [[nodiscard]] static bool survivingBaseUnderThreat(
+        const GameState& state) noexcept;
     [[nodiscard]] static DefenseArea expansionDefense(
         const Squad& squad, Position assembly, Position expansion,
         DefenseArea currentDefense = {}) noexcept;
