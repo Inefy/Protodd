@@ -196,8 +196,8 @@ its natural, but the rule requires two owned bases. At frame 19,560, a
 21-unit main group with a favorable local estimate was still routed to
 `cover-expansion` while the remaining Nexus was under nearby Terran pressure;
 the base-defense squad had six units and an unfavorable estimate. This is a
-separate command-ownership problem. Three one-game contain-break diagnostics
-have no win gain: two never exposed the rule, and the exposed target-only
+separate command-ownership problem. Four one-game contain-break diagnostics
+have no win gain: three never exposed the rule, and the exposed target-only
 variant never damaged the chosen Command Center. The guarded release remains
 off by default and needs a matched exposure before any promotion. After these
 screens, the source also requires a known outer depot and lets the strategic
