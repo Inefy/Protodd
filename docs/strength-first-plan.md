@@ -1724,3 +1724,8 @@ before testing another attack release. Promote attack logic only if it
 improves normal wins across both starting sides. Detailed traces and exact
 campaign paths are in
 `docs/control-expansion-20260928.md`.
+
+Do not force a boundary Observer straight toward home: recorded Wraith
+positions show that home can lie behind the pursuer. A first such candidate
+was stopped and reverted before a valid result. The next escape test should
+use enemy direction and friendly anti-air cover.

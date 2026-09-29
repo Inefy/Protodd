@@ -293,3 +293,10 @@ alone; all ten last had `observer-evade` orders. Several died at the map
 boundary, including three at y=16 near the end of side 1. Disabling the
 policy globally is not promotable. Isolate boundary escape and keep the
 near tank line plus Nexus defense in the same attack decision.
+
+An isolated boundary candidate that forced an inboard step toward home was
+stopped before a valid game result: on the recorded side-1 loss, Wraiths were
+between several cornered Observers and home, so that step could move into
+their weapons. The candidate was reverted. The next escape change must
+consider enemy direction and friendly anti-air cover, and must be tested
+against the preserved safety build on both starting sides.
