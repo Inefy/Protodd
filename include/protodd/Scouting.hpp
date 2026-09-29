@@ -73,6 +73,11 @@ public:
     }
     [[nodiscard]] std::optional<Command> controlWorkerScout(
         const GameState& state, const InfluenceMap& influence, const NavigationGrid* terrain = nullptr);
+    [[nodiscard]] std::vector<Command> protectObservers(
+        const GameState& state, const InfluenceMap& influence);
+    [[nodiscard]] static bool observerInDanger(
+        const GameState& state, const UnitSnapshot& observer,
+        const InfluenceMap& influence) noexcept;
 
 private:
     std::unordered_map<UnitId, ScoutOrder> previousOrders_;
@@ -83,6 +88,7 @@ private:
     bool returningMission_{};
     ProbeHarasser harasser_;
     ProbeHarasser returnHarasser_;
+    std::unordered_map<UnitId, Frame> observerEvadeUntil_;
 };
 
 }  // namespace protodd

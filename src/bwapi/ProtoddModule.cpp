@@ -459,6 +459,11 @@ void ProtoddModule::runFrame() {
         measure("combat", [this] { updateCombat(frameBudget_.allowSimulation(state_.frame),
                      frameBudget_.navigationInterval(state_.frame),
                      frameBudget_.combatCommandLimit(state_.frame)); });
+        measure("observer-safety", [this] {
+            for (const auto& command : scouts_.protectObservers(state_, influence_)) {
+                if (bridge_.execute(command)) debug_.orders[command.actor] = command.source;
+            }
+        });
     }
     if (state_.frame % 24 == 5) {
         measure("maintenance", [this] { bridge_.runMaintenance(maintenanceMineralReserve_, maintenanceGasReserve_); });
@@ -676,6 +681,7 @@ void ProtoddModule::updateScouting() {
     for (const auto& unit : state_.self.units) {
         if (unit.kind == UnitKind::observer && unit.completed) {
             if (std::ranges::find(detectorEscorts_, unit.id) != detectorEscorts_.end()) continue;
+            if (ScoutManager::observerInDanger(state_, unit, influence_)) continue;
             // Combat has already leased the escort. Reserving another first
             // observer here left a two-Observer build with no active scout.
             available.push_back(unit.id);
@@ -1049,7 +1055,7 @@ void ProtoddModule::updateCombat(
 #else
     const auto mobilizeDetectorReserve = false;
 #endif
-#ifdef PROTODD_FORWARD_DETECTOR_ESCORT
+#if defined(PROTODD_FORWARD_DETECTOR_ESCORT) || defined(PROTODD_DIRECT_DETECTOR_RENDEZVOUS)
     const auto centerBlockedMainEscort = true;
 #else
     const auto centerBlockedMainEscort = false;
@@ -1059,9 +1065,15 @@ void ProtoddModule::updateCombat(
 #else
     const auto mobilizeContestedReserve = false;
 #endif
+#ifdef PROTODD_DIRECT_DETECTOR_RENDEZVOUS
+    constexpr auto directSafeRendezvous = true;
+#else
+    constexpr auto directSafeRendezvous = false;
+#endif
     for (const auto& order : squads_.detectorEscorts(
              state_, formed, influence_, mobilizeDetectorReserve,
-             centerBlockedMainEscort, mobilizeContestedReserve)) {
+             centerBlockedMainEscort, mobilizeContestedReserve,
+             directSafeRendezvous)) {
         detectorEscorts_.push_back(order.actor);
         submit(order);
     }

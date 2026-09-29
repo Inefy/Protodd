@@ -2425,6 +2425,7 @@ void testWorkersAndScouts() {
     riskState.mapHeightPixels = 2048;
     riskState.self.id = 1;
     riskState.enemy.id = 2;
+    riskState.enemy.race = protodd::Race::terran;
     auto riskProbe = unit(300, protodd::UnitKind::probe, true, {128, 128});
     riskProbe.role = protodd::UnitRole::worker;
     riskState.self.units.push_back(riskProbe);
@@ -2457,6 +2458,46 @@ void testWorkersAndScouts() {
                flyingOrder.front().target == protodd::Position{520, 128} &&
                flyingOrder.front().purpose == protodd::ScoutPurpose::watchArmy,
            "flying scout ignores ground-only danger and shadows the army");
+    riskState.enemy.units.clear();
+    auto turret = unit(302, protodd::UnitKind::missileTurret, false, {600, 128});
+    turret.role = protodd::UnitRole::detector;
+    turret.airWeapon = {.damage = 20, .cooldown = 15, .maxRange = 224,
+                        .targetsAir = true};
+    riskState.enemy.units.push_back(turret);
+    riskInfluence.update(riskState);
+    riskScouting.reset();
+    const auto safeObserverOrder = riskScouting.assign(
+        riskState, riskScoutIds, riskInfluence, {});
+    expect(safeObserverOrder.size() == 1 &&
+               safeObserverOrder.front().target == protodd::Position{128, 1800},
+           "Observer scouting rejects a known missile-turret corridor");
+    riskState.self.units.front().position = {870, 128};
+    expect(protodd::ScoutManager::observerInDanger(
+        riskState, riskState.self.units.front(), riskInfluence),
+           "an Observer inside turret coverage is in danger before it is hit");
+    const auto escape = riskScouting.protectObservers(riskState, riskInfluence);
+    expect(escape.size() == 1 && escape.front().source == "observer-evade" &&
+               escape.front().targetPosition != riskState.self.units.front().position,
+           "Observer safety issues an immediate escape from missile-turret coverage");
+    const auto noReentry = riskScouting.assign(
+        riskState, riskScoutIds, riskInfluence, {});
+    expect(noReentry.empty(),
+           "an escaping Observer is not immediately reassigned to scout through danger");
+    riskState.enemy.units = {unit(303, protodd::UnitKind::scienceVessel,
+                                  false, {870, 128})};
+    riskState.enemy.units.front().role = protodd::UnitRole::detector;
+    riskInfluence.update(riskState);
+    expect(protodd::ScoutManager::observerInDanger(
+        riskState, riskState.self.units.front(), riskInfluence),
+           "Science Vessel detection also triggers Observer withdrawal");
+    auto wraith = unit(304, protodd::UnitKind::wraith, false, {870, 128});
+    wraith.airWeapon = {.damage = 20, .cooldown = 22, .maxRange = 160,
+                        .targetsAir = true};
+    riskState.enemy.units = {wraith};
+    riskInfluence.update(riskState);
+    expect(protodd::ScoutManager::observerInDanger(
+        riskState, riskState.self.units.front(), riskInfluence),
+           "a Wraith in firing range triggers Observer withdrawal");
 }
 
 void testDepletedMineralControl() {
@@ -4068,6 +4109,49 @@ void testForwardMainDetectorEscort() {
            "base-defense detector remains behind its guard");
 }
 
+void testSafeDetectorRendezvous() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 20000;
+    state.mapWidthPixels = 4096;
+    state.mapHeightPixels = 4096;
+    state.self.id = 1;
+    state.enemy.id = 2;
+    auto observer = unit(710, UnitKind::observer, true, {1300, 1000});
+    observer.flying = true;
+    observer.sightRange = 288;
+    state.self.units = {observer};
+    Squad main;
+    main.role = SquadRole::mainArmy;
+    main.center = {1000, 1000};
+    main.objective = {800, 1000};
+    main.retreat = {1500, 1000};
+    main.needsDetection = true;
+    main.units = {unit(711, UnitKind::dragoon, true, main.center)};
+    InfluenceMap influence;
+    influence.update(state);
+    const auto regular = SquadPlanner{}.detectorEscorts(
+        state, std::span<const Squad>(&main, 1), influence, false, true);
+    const auto direct = SquadPlanner{}.detectorEscorts(
+        state, std::span<const Squad>(&main, 1), influence, false, true,
+        false, true);
+    expect(regular.size() == 1 && direct.size() == 1 &&
+               regular.front().targetPosition != main.center &&
+               direct.front().targetPosition == main.center,
+           "a blocked army gets direct Observer rendezvous through a safe corridor");
+    auto turret = unit(712, UnitKind::missileTurret, false, {1050, 1000});
+    turret.airWeapon = {20, 15, 0, 224, DamageType::normal, true, false};
+    turret.visible = true;
+    turret.lastSeen = state.frame;
+    state.enemy.units.push_back(turret);
+    influence.update(state);
+    const auto unsafe = SquadPlanner{}.detectorEscorts(
+        state, std::span<const Squad>(&main, 1), influence, false, true,
+        false, true);
+    expect(unsafe.size() == 1 && unsafe.front().targetPosition != main.center,
+           "direct rendezvous rejects a known missile-turret corridor");
+}
+
 void testDetectorWaitVolley() {
     using namespace protodd;
     auto dragoon = unit(740, UnitKind::dragoon, true, {1000, 1000});
@@ -4572,6 +4656,16 @@ void testContainmentRecovery() {
     const auto timingSquads = SquadPlanner{}.form(state, army, {}, timing, {512, 512});
     expect(timingSquads.size() == 1 && timingSquads.front().units.size() == 8,
            "a home guard cannot remove the units required to launch the declared timing");
+    auto reserveArmy = army;
+    for (int i = 0; i < 4; ++i)
+        reserveArmy.push_back(unit(500 + i, UnitKind::dragoon, true,
+                                  {720 + i * 12, 512}));
+    const auto reserveSquads = SquadPlanner{}.form(
+        state, reserveArmy, {}, timing, {512, 512});
+    const auto homeGuard = std::ranges::find(
+        reserveSquads, SquadRole::baseDefense, &Squad::role);
+    expect(homeGuard != reserveSquads.end() && homeGuard->center.valid(),
+           "a home guard reports the centroid of its actual units");
     auto fog = state.enemy.units.front();
     fog.visible = false;
     fog.lastSeen = state.frame - 24;
@@ -7127,6 +7221,7 @@ int main() {
     testPvTContainBreakTarget();
     testPvTContainBreakFormation();
     testForwardMainDetectorEscort();
+    testSafeDetectorRendezvous();
     testDetectorWaitVolley();
     testContestedDetectorReserve();
     testForwardThirdScreen();

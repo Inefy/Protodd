@@ -317,6 +317,7 @@ std::vector<Squad> SquadPlanner::form(
                 guard.units.assign(candidates.begin(), candidates.begin() +
                     static_cast<std::ptrdiff_t>(guardCount));
                 for (const auto& unit : guard.units) assigned.insert(unit.id);
+                guard.center = centroid(guard.units);
                 finishSquad(guard);
                 guard.enemies = localEnemies(enemy, guard.units, guard.objective, 900, state.frame);
                 guard.needsDetection = std::ranges::any_of(guard.enemies, detectionThreat);
@@ -495,7 +496,8 @@ std::vector<Command> SquadPlanner::detectorEscorts(
     const InfluenceMap& influence,
     const bool mobilizeReserveAgainstLurkers,
     const bool centerBlockedMainEscort,
-    const bool mobilizeContestedReserve) const {
+    const bool mobilizeContestedReserve,
+    const bool directSafeRendezvous) const {
     std::vector<const UnitSnapshot*> observers;
     for (const auto& unit : state.self.units) {
         if (unit.kind == UnitKind::observer && unit.completed && !unit.loaded &&
@@ -573,7 +575,34 @@ std::vector<Command> SquadPlanner::detectorEscorts(
             });
         std::iter_swap(observers.begin() + static_cast<std::ptrdiff_t>(i), closest);
         const auto* observer = observers[i];
-        const auto destination = influence.safestStep(observer->position, anchor, true);
+        auto destination = influence.safestStep(
+            observer->position, anchor, true, directSafeRendezvous);
+        // A local gradient can keep a cloaked Observer circling just outside
+        // coverage while the army waits for detection. On a clear air corridor,
+        // issue the actual rendezvous point and let pathing close the gap.
+        if (directSafeRendezvous && squad->role == SquadRole::mainArmy &&
+            squad->needsDetection && anchor.valid() && observer->position.valid() &&
+            distanceSquared(observer->position, anchor) <= 384 * 384) {
+            auto clearCorridor = true;
+            const auto steps = std::max(1, static_cast<int>(std::ceil(
+                distance(observer->position, anchor) / 64.0)));
+            for (auto step = 0; step <= steps; ++step) {
+                const auto fraction = static_cast<double>(step) / steps;
+                const Position point{
+                    observer->position.x + static_cast<int>(std::lround(
+                        (anchor.x - observer->position.x) * fraction)),
+                    observer->position.y + static_cast<int>(std::lround(
+                        (anchor.y - observer->position.y) * fraction)),
+                };
+                const auto cell = influence.at(point);
+                if (cell.airThreat > 0.05F || cell.detection > 0.05F ||
+                    influence.stormDanger(point) > 0.05F) {
+                    clearCorridor = false;
+                    break;
+                }
+            }
+            if (clearCorridor) destination = anchor;
+        }
         result.push_back({observer->id, CommandType::move, -1, destination,
                           UnitKind::unknown, squad->needsDetection ? 96 : 72, 0,
                           "detector-escort"});

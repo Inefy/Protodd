@@ -1703,3 +1703,24 @@ research artifacts. The subsequent bounded comparison and both macro-intent
 probes failed development; the current research cycle is closed. Generalization,
 execution, improved win rate and tournament readiness remain unproven. See the
 execution report for metrics, verification and the remaining dependency gates.
+
+## PvT Observer control follow-up — 29 September 2026
+
+The current controlled Destination comparison shows that preserving Observers
+is a prerequisite for the late attack. The initial safety intervention cut
+Observer losses from 6/13 to 3/0 across matched sides and extended both
+losses, but won neither game. The side-1 survivor fielded 50 mobile units
+yet repeatedly held a favorable main army at its rally. A combined follow-up
+with Terran perimeter scouting, route cancellation, map-edge escape, and
+exclusive escape authority lost both games; its second side collapsed much
+earlier. It was rejected, and the source returned to the first safety
+behavior. The next matched test uses that exact safety DLL with its empty
+frozen policy disabled. It produced a late 36-unit attack but lost both
+games and eight Observers on its second side. Several Observers died at the
+map edge while trying to evade; side 0 lost both Nexuses while the army
+headed to a distant target. Keep the policy-off variant rejected. Isolate
+boundary escape, then choose contain clearance and base defense together
+before testing another attack release. Promote attack logic only if it
+improves normal wins across both starting sides. Detailed traces and exact
+campaign paths are in
+`docs/control-expansion-20260928.md`.

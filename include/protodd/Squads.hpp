@@ -62,7 +62,8 @@ public:
         const InfluenceMap& influence,
         bool mobilizeReserveAgainstLurkers = false,
         bool centerBlockedMainEscort = false,
-        bool mobilizeContestedReserve = false) const;
+        bool mobilizeContestedReserve = false,
+        bool directSafeRendezvous = false) const;
 
     [[nodiscard]] static const Squad* selectVanguard(
         std::span<const Squad> squads,

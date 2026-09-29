@@ -236,3 +236,60 @@ contain, Command Centers, own army, and Probes across both starting sides.
    owned site, worker target site ownership, mobile army survival and damage
    after the first defended attack. A defended but mined-out economy must
    choose a safe expansion or decisive attack before its income disappears.
+
+## Observer survival and attack conversion — 29 September
+
+The user's turret/Wraith/Science Vessel observation is supported by the
+logs. In the earlier long side-1 contain loss, 18 Observers died; 16 last
+received `scout-travel`. The new matched Destination reference lost 6 and 13
+Observers across the two sides, including 5 and 12 whose last action was
+`scout-travel`. The old scout selector sampled only eight route points over a
+whole map, merely discounted air risk, and could send an Observer to the
+exact center of a known Terran base. The bridge kept issuing that destination
+every few frames. It had no Observer escape controller.
+
+A direct Observer rendezvous with the main army is isolated behind
+`PROTODD_DIRECT_DETECTOR_RENDEZVOUS`, off by default. Its paired run used
+the same seeds, 202609900 and 202609901, and lost both games at frames
+24,058 and 22,415, compared with reference losses at 23,035 and 27,871.
+There is no win gain and the earlier 26,400-frame favorable detection window
+was not reached. Do not promote the option from this screen.
+
+The first Observer-survival build refused known air-threat/detection routes
+at 64-pixel samples, withdrew damaged or endangered Observers each combat
+cadence, and kept a brief escape lease. Its matched games still lost, but
+Observer deaths fell from 6 to 3 and from 13 to zero. The games lasted to
+frames 31,312 and 45,076; the latter peaked at 50 mobile army units versus
+20 in its reference. These are a control/survival improvement, not a win-rate
+improvement. The live trace also showed escort orders fighting escape orders,
+and all three remaining Observer deaths occurred while evading Wraith or
+Science Vessel pressure near map edges.
+
+The stricter combined follow-up staged Terran scouting at a perimeter,
+cancelled an in-flight unsafe mission, changed map-edge escape, and excluded
+endangered Observers from escort assignment. Its paired campaign
+`build/pvt-detector-rendezvous-screen-20260928/observer-safety-v3` still
+lost both games at frames 32,025 and 28,336, with one Observer death each.
+The side-1 economy and army collapsed much earlier than in the first safety
+build. That bundle was rejected; source again uses the first safety behavior.
+Its individual changes need isolation before any retry.
+
+Keeping the Observers alive exposed the next conversion failure more clearly:
+in the survival-only side-1 loss, a 31-unit main army at frame 28,080 had a
+very favorable local estimate but remained at its rally under a Hold
+posture. The audit counted 277 favorable main-army rally samples and 49
+favorable detection-blocked samples, all sampled decisions rather than
+independent missed wins. The next paired experiment uses the exact first
+safety DLL and disables only its empty frozen policy through the package
+setting. Judge it by normal wins, Probe/Nexus survival, attack routes, and
+damage to Terran bases, not just the selected posture.
+
+That policy-off experiment lost both matched games at frames 38,659 and
+44,456. It removed the empty-policy Hold and sent a 36-unit main army into
+combat on side 1, but did not convert the attack to a win. On side 0, the
+main force traveled toward a distant target while tanks destroyed both
+Nexuses. Observer losses were 2 and 8, compared with 3 and 0 for safety
+alone; all ten last had `observer-evade` orders. Several died at the map
+boundary, including three at y=16 near the end of side 1. Disabling the
+policy globally is not promotable. Isolate boundary escape and keep the
+near tank line plus Nexus defense in the same attack decision.

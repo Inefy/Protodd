@@ -23,7 +23,8 @@ double routeRisk(
     const Position from,
     const Position to,
     const bool flying) {
-    constexpr auto samples = 8;
+    const auto samples = std::max(8, static_cast<int>(std::ceil(
+        distance(from, to) / 64.0)));
     auto average = 0.0;
     auto peak = 0.0;
     for (auto step = 1; step <= samples; ++step) {
@@ -38,6 +39,23 @@ double routeRisk(
         peak = std::max(peak, risk);
     }
     return average / static_cast<double>(samples) + peak * 0.65;
+}
+
+bool unsafeObserverRoute(const InfluenceMap& influence,
+                         const Position from, const Position to) {
+    const auto samples = std::max(1, static_cast<int>(std::ceil(
+        distance(from, to) / 64.0)));
+    for (auto step = 0; step <= samples; ++step) {
+        const auto ratio = static_cast<double>(step) / samples;
+        const Position point{
+            from.x + static_cast<int>(std::lround((to.x - from.x) * ratio)),
+            from.y + static_cast<int>(std::lround((to.y - from.y) * ratio)),
+        };
+        const auto cell = influence.at(point);
+        if (cell.airThreat > 0.08F || cell.detection > 0.08F ||
+            influence.stormDanger(point) > 0.08F) return true;
+    }
+    return false;
 }
 
 Position friendlyMain(const GameState& state) {
@@ -225,6 +243,92 @@ void ScoutManager::reset() noexcept {
     returningMission_ = false;
     harasser_.reset();
     returnHarasser_.reset();
+    observerEvadeUntil_.clear();
+}
+
+bool ScoutManager::observerInDanger(
+    const GameState& state, const UnitSnapshot& observer,
+    const InfluenceMap& influence) noexcept {
+    if (observer.kind != UnitKind::observer || !observer.position.valid() ||
+        !observer.completed || observer.loaded || observer.disabled) return false;
+    if (observer.underAttack || observer.underStorm ||
+        observer.hitPoints < observer.maxHitPoints / 2 ||
+        observer.shields < observer.maxShields / 2) return true;
+    const auto cell = influence.at(observer.position);
+    if (cell.airThreat > 0.08F || cell.detection > 0.08F ||
+        influence.stormDanger(observer.position) > 0.08F) return true;
+    for (const auto& enemy : state.enemy.units) {
+        if (!enemy.position.valid() || !enemy.completed || enemy.disabled ||
+            (!enemy.visible && !isBuilding(enemy.kind) &&
+             state.frame - enemy.lastSeen > 8 * 24)) continue;
+        const auto detector = enemy.role == UnitRole::detector ||
+            enemy.kind == UnitKind::scienceVessel ||
+            enemy.kind == UnitKind::missileTurret;
+        const auto reach = std::max(enemy.airWeapon.maxRange,
+            detector ? std::max(224, enemy.sightRange) : 0);
+        if (reach > 0 && distanceSquared(observer.position, enemy.position) <=
+                (reach + 128) * (reach + 128)) return true;
+    }
+    return false;
+}
+
+std::vector<Command> ScoutManager::protectObservers(
+    const GameState& state, const InfluenceMap& influence) {
+    std::vector<Command> orders;
+    const auto home = friendlyMain(state);
+    for (const auto& observer : state.self.units) {
+        if (observer.kind != UnitKind::observer || !observer.completed ||
+            observer.loaded || observer.disabled || !observer.position.valid()) continue;
+        const auto urgent = observerInDanger(state, observer, influence);
+        if (urgent) observerEvadeUntil_[observer.id] = state.frame + 5 * 24;
+        const auto lease = observerEvadeUntil_.find(observer.id);
+        if (lease == observerEvadeUntil_.end() || lease->second <= state.frame) continue;
+        if (!urgent && home.valid() &&
+            distanceSquared(observer.position, home) <= 256 * 256) {
+            observerEvadeUntil_.erase(lease);
+            continue;
+        }
+        const UnitSnapshot* closest = nullptr;
+        auto closestDistance = std::numeric_limits<int>::max();
+        for (const auto& enemy : state.enemy.units) {
+            if (!enemy.position.valid() || !enemy.completed || enemy.disabled ||
+                (!enemy.visible && !isBuilding(enemy.kind) &&
+                 state.frame - enemy.lastSeen > 8 * 24) ||
+                (enemy.airWeapon.damage <= 0 &&
+                 enemy.role != UnitRole::detector &&
+                 enemy.kind != UnitKind::scienceVessel &&
+                 enemy.kind != UnitKind::missileTurret)) continue;
+            const auto range = distanceSquared(observer.position, enemy.position);
+            if (range < closestDistance) {
+                closestDistance = range;
+                closest = &enemy;
+            }
+        }
+        auto destination = home.valid() ? home : observer.position;
+        if (closest != nullptr && closestDistance <= 640 * 640 &&
+            closest->position != observer.position) {
+            const Position away{
+                observer.position.x * 2 - closest->position.x,
+                observer.position.y * 2 - closest->position.y,
+            };
+            destination = moveToward(observer.position, away, 512.0);
+        }
+        destination = influence.safestStep(
+            observer.position, destination, true, true);
+        if (destination == observer.position && closest != nullptr &&
+            closest->position != observer.position) {
+            destination = moveToward(observer.position,
+                {observer.position.x * 2 - closest->position.x,
+                 observer.position.y * 2 - closest->position.y}, 128.0);
+        }
+        if (destination.valid() && destination != observer.position)
+            orders.push_back({observer.id, CommandType::move, -1, destination,
+                              UnitKind::unknown, 110, 0, "observer-evade"});
+    }
+    std::erase_if(observerEvadeUntil_, [&state](const auto& entry) {
+        return entry.second <= state.frame;
+    });
+    return orders;
 }
 
 UnitId ScoutManager::selectWorkerScout(
@@ -413,6 +517,10 @@ std::vector<ScoutOrder> ScoutManager::assign(
         if (!scout) {
             continue;
         }
+        if (scout->kind == UnitKind::observer &&
+            (observerInDanger(state, *scout, influence) ||
+             (observerEvadeUntil_.contains(scoutId) &&
+              observerEvadeUntil_.at(scoutId) > state.frame))) continue;
         std::size_t bestIndex = 0;
         auto bestScore = -std::numeric_limits<double>::infinity();
         for (std::size_t i = 0; i < candidates.size(); ++i) {
@@ -421,12 +529,15 @@ std::vector<ScoutOrder> ScoutManager::assign(
                  candidates[i].purpose == ScoutPurpose::patrolDropPath))) {
                 continue;
             }
+            const auto target = candidates[i].position;
+            if (scout->kind == UnitKind::observer && unsafeObserverRoute(
+                    influence, scout->position, target)) continue;
             const auto risk = routeRisk(influence, scout->position,
-                                        candidates[i].position, scout->flying);
+                                        target, scout->flying);
             // Refuse known dangerous worker missions; air scouts retain their
             // own risk-weighted policy.
             if (scout->kind == UnitKind::probe && risk > 1.0) continue;
-            const auto travel = distance(scout->position, candidates[i].position) / 1000.0;
+            const auto travel = distance(scout->position, target) / 1000.0;
             const auto riskWeight = scout->kind == UnitKind::probe
                                         ? 8.0
                                         : (scout->kind == UnitKind::observer ? 3.0 : 1.8);
@@ -434,8 +545,8 @@ std::vector<ScoutOrder> ScoutManager::assign(
             const auto previous = previousOrders_.find(scoutId);
             if (previous != previousOrders_.end() &&
                 previous->second.purpose == candidates[i].purpose &&
-                distanceSquared(previous->second.target, candidates[i].position) < 128 * 128 &&
-                distanceSquared(scout->position, candidates[i].position) > 112 * 112) {
+                distanceSquared(previous->second.target, target) < 128 * 128 &&
+                distanceSquared(scout->position, target) > 112 * 112) {
                 score += 3.0;
             }
             if (score > bestScore) {
