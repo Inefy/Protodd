@@ -83,7 +83,9 @@ Position friendlyMain(const GameState& state) {
 }
 
 double observerEscapeRisk(const GameState& state, const InfluenceMap& influence,
-                          const Position position) {
+                          const UnitSnapshot& observer, const Position position) {
+    if (state.enemy.race == Race::protoss && observer.cloaked)
+        return ScoutManager::observerExposure(state, observer, influence, position);
     const auto cell = influence.at(position);
     auto risk = static_cast<double>(cell.airThreat) * 8.0 +
                 static_cast<double>(cell.detection) * 2.0 +
@@ -299,6 +301,8 @@ bool ScoutManager::observerInDanger(
     if (observer.underAttack || observer.underStorm ||
         observer.hitPoints < observer.maxHitPoints / 2 ||
         observer.shields < observer.maxShields / 2) return true;
+    if (state.enemy.race == Race::protoss && observer.cloaked)
+        return observerExposure(state, observer, influence, observer.position) > 0.08;
     const auto cell = influence.at(observer.position);
     if (cell.airThreat > 0.08F || cell.detection > 0.08F ||
         influence.stormDanger(observer.position) > 0.08F) return true;
@@ -319,16 +323,73 @@ bool ScoutManager::observerInDanger(
     return false;
 }
 
+double ScoutManager::observerExposure(
+    const GameState& state, const UnitSnapshot& observer,
+    const InfluenceMap& influence, const Position position) noexcept {
+    if (!position.valid()) return std::numeric_limits<double>::infinity();
+    const auto cell = influence.at(position);
+    const auto storm = influence.stormDanger(position) * 16.0;
+    if (state.enemy.race != Race::protoss || !observer.cloaked)
+        return cell.airThreat * 8.0 + cell.detection * 2.0 + storm;
+    auto detectable = cell.detection > 0.08F;
+    auto armed = 0.0;
+    for (const auto& enemy : state.enemy.units) {
+        if (!enemy.position.valid() || !enemy.completed || enemy.disabled || enemy.loaded ||
+            enemy.hallucination || (unitStats(enemy.kind).requiresPsi && !enemy.powered) ||
+            (!enemy.visible && !isBuilding(enemy.kind) &&
+             (state.frame < enemy.lastSeen || state.frame - enemy.lastSeen > 8 * 24))) continue;
+        const auto detector = enemy.role == UnitRole::detector;
+        if (detector) {
+            const auto radius = std::max(224, enemy.sightRange) + 128;
+            detectable = detectable || distanceSquared(position, enemy.position) <= radius * radius;
+        }
+        if (enemy.airWeapon.damage <= 0) continue;
+        const auto radius = enemy.airWeapon.maxRange + 48;
+        const auto separation = distance(position, enemy.position);
+        if (separation < radius)
+            armed += std::max(0.10, 3.0 * (radius - separation) / std::max(1, radius));
+    }
+    // Own `detected` reports our vision, not enemy vision. Use only legally
+    // observed detector coverage; unknown detection remains a scouting risk.
+    return storm + (detectable ? armed : 0.0);
+}
+
+bool ScoutManager::observerRouteSafe(
+    const GameState& state, const UnitSnapshot& observer,
+    const InfluenceMap& influence, const Position target) noexcept {
+    if (!observer.position.valid() || !target.valid()) return false;
+    if (state.enemy.race != Race::protoss || !observer.cloaked)
+        return !unsafeObserverRoute(influence, observer.position, target);
+    const auto samples = std::max(1, static_cast<int>(std::ceil(distance(observer.position, target) / 32.0)));
+    for (auto step = 0; step <= samples; ++step) {
+        const auto fraction = static_cast<double>(step) / samples;
+        const Position point{
+            observer.position.x + static_cast<int>(std::lround((target.x - observer.position.x) * fraction)),
+            observer.position.y + static_cast<int>(std::lround((target.y - observer.position.y) * fraction))};
+        if (observerExposure(state, observer, influence, point) > 0.08) return false;
+    }
+    return true;
+}
+
 std::vector<Command> ScoutManager::protectObservers(
-    const GameState& state, const InfluenceMap& influence) {
+    const GameState& state, const InfluenceMap& influence, const std::span<const UnitId> escorts) {
     std::vector<Command> orders;
     const auto home = friendlyMain(state);
     for (const auto& observer : state.self.units) {
         if (observer.kind != UnitKind::observer || !observer.completed ||
             observer.loaded || observer.disabled || !observer.position.valid()) continue;
+        const auto escort = std::ranges::find(escorts, observer.id) != escorts.end();
+        if (escort) {
+            previousOrders_.erase(observer.id);
+            if (!observerInDanger(state, observer, influence)) {
+                observerEvadeUntil_.erase(observer.id);
+                observerEscapeWaypoint_.erase(observer.id);
+                continue;
+            }
+        }
         const auto mission = previousOrders_.find(observer.id);
         const auto routeBlocked = mission != previousOrders_.end() &&
-            (unsafeObserverRoute(influence, observer.position, mission->second.target) ||
+            (!observerRouteSafe(state, observer, influence, mission->second.target) ||
              (terranObserverScreen(state) &&
               (mission->second.purpose == ScoutPurpose::checkTech ||
                mission->second.purpose == ScoutPurpose::watchArmy)));
@@ -373,8 +434,8 @@ std::vector<Command> ScoutManager::protectObservers(
             };
             if (candidate == observer.position) continue;
             const auto halfway = moveToward(observer.position, candidate, 64.0);
-            const auto danger = std::max(observerEscapeRisk(state, influence, halfway),
-                                         observerEscapeRisk(state, influence, candidate));
+            const auto danger = std::max(observerEscapeRisk(state, influence, observer, halfway),
+                                         observerEscapeRisk(state, influence, observer, candidate));
             const auto homeCost = home.valid() ? distance(candidate, home) / 4096.0 : 0.0;
             const auto score = danger + homeCost;
             if (score + 0.001 < best) {
@@ -388,12 +449,12 @@ std::vector<Command> ScoutManager::protectObservers(
             distanceSquared(observer.position, previous->second) <= 192 * 192) {
             const auto halfway = moveToward(observer.position, previous->second, 64.0);
             const auto previousRisk = std::max(
-                observerEscapeRisk(state, influence, halfway),
-                observerEscapeRisk(state, influence, previous->second)) +
+                observerEscapeRisk(state, influence, observer, halfway),
+                observerEscapeRisk(state, influence, observer, previous->second)) +
                 (home.valid() ? distance(previous->second, home) / 4096.0 : 0.0);
             const auto improvesCurrent =
-                observerEscapeRisk(state, influence, previous->second) + 0.15 <
-                observerEscapeRisk(state, influence, observer.position);
+                observerEscapeRisk(state, influence, observer, previous->second) + 0.15 <
+                observerEscapeRisk(state, influence, observer, observer.position);
             if (previousRisk <= best + 0.5 || improvesCurrent)
                 destination = previous->second;
         }
@@ -614,8 +675,8 @@ std::vector<ScoutOrder> ScoutManager::assign(
                 continue;
             }
             const auto target = candidates[i].position;
-            if (scout->kind == UnitKind::observer && unsafeObserverRoute(
-                    influence, scout->position, target)) continue;
+            if (scout->kind == UnitKind::observer && !observerRouteSafe(
+                    state, *scout, influence, target)) continue;
             const auto risk = routeRisk(influence, scout->position,
                                         target, scout->flying);
             // Refuse known dangerous worker missions; air scouts retain their

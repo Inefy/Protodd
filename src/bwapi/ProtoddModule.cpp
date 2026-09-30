@@ -460,7 +460,7 @@ void ProtoddModule::runFrame() {
                      frameBudget_.navigationInterval(state_.frame),
                      frameBudget_.combatCommandLimit(state_.frame)); });
         measure("observer-safety", [this] {
-            for (const auto& command : scouts_.protectObservers(state_, influence_)) {
+            for (const auto& command : scouts_.protectObservers(state_, influence_, detectorEscorts_)) {
                 if (!bridge_.commandActive(command) && bridge_.execute(command))
                     debug_.orders[command.actor] = command.source;
             }

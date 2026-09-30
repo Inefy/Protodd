@@ -74,7 +74,8 @@ public:
     [[nodiscard]] std::optional<Command> controlWorkerScout(
         const GameState& state, const InfluenceMap& influence, const NavigationGrid* terrain = nullptr);
     [[nodiscard]] std::vector<Command> protectObservers(
-        const GameState& state, const InfluenceMap& influence);
+        const GameState& state, const InfluenceMap& influence,
+        std::span<const UnitId> escorts = {});
     [[nodiscard]] bool observerEvading(UnitId observer, Frame frame) const noexcept {
         const auto lease = observerEvadeUntil_.find(observer);
         return lease != observerEvadeUntil_.end() && lease->second > frame;
@@ -82,6 +83,12 @@ public:
     [[nodiscard]] static bool observerInDanger(
         const GameState& state, const UnitSnapshot& observer,
         const InfluenceMap& influence) noexcept;
+    [[nodiscard]] static double observerExposure(
+        const GameState& state, const UnitSnapshot& observer,
+        const InfluenceMap& influence, Position position) noexcept;
+    [[nodiscard]] static bool observerRouteSafe(
+        const GameState& state, const UnitSnapshot& observer,
+        const InfluenceMap& influence, Position target) noexcept;
 
 private:
     std::unordered_map<UnitId, ScoutOrder> previousOrders_;
