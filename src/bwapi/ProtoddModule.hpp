@@ -52,7 +52,10 @@ private:
     OpponentModel opponent_;
     InfluenceMap influence_;
     NavigationGrid navigation_;
-#ifdef PROTODD_PVZ_EARLY_SPLASH
+#ifdef PROTODD_PVP_COVERED_RANGED_NATURAL
+    StrategyEngine strategy_{false, false, false, false, false, false, false,
+                             false, false, false, true};
+#elif defined(PROTODD_PVZ_EARLY_SPLASH)
     StrategyEngine strategy_{false, true};
 #elif defined(PROTODD_PVZ_GATEWAY_OPENING)
     StrategyEngine strategy_{true};

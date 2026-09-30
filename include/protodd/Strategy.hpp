@@ -72,7 +72,8 @@ public:
                             bool pvzPoweredCannonScreen = false,
                             bool pvzProactiveReaver = false,
                             bool pvzArmyFloor = false,
-                            bool pvpScoutedTwoGateAnchor = false) noexcept
+                            bool pvpScoutedTwoGateAnchor = false,
+                            bool pvpCoveredRangedNatural = false) noexcept
         : pvzGatewayOpening_(pvzGatewayOpening), pvzEarlySplash_(pvzEarlySplash),
           pvpFogDetection_(pvpFogDetection), pvzReplayOpening_(pvzReplayOpening),
           pvzArchivesFirst_(pvzArchivesFirst),
@@ -80,7 +81,8 @@ public:
           pvzPoweredCannonScreen_(pvzPoweredCannonScreen),
           pvzProactiveReaver_(pvzProactiveReaver),
           pvzArmyFloor_(pvzArmyFloor),
-          pvpScoutedTwoGateAnchor_(pvpScoutedTwoGateAnchor) {}
+          pvpScoutedTwoGateAnchor_(pvpScoutedTwoGateAnchor),
+          pvpCoveredRangedNatural_(pvpCoveredRangedNatural) {}
 
     [[nodiscard]] StrategicPlan plan(
         const GameState& state,
@@ -98,6 +100,7 @@ private:
     bool pvzProactiveReaver_{};
     bool pvzArmyFloor_{};
     bool pvpScoutedTwoGateAnchor_{};
+    bool pvpCoveredRangedNatural_{};
     [[nodiscard]] StrategicPlan planPvT(
         const GameState& state,
         const ThreatAssessment& threat) const;

@@ -260,6 +260,58 @@ bool defensiveExpansionWindow(const GameState& state, const ThreatAssessment& th
     return mobileArmy >= 6;
 }
 
+bool coveredRangedNatural(const GameState& state, const ThreatAssessment& threat) {
+    if (state.enemy.race != Race::protoss || state.frame < 5 * 60 * 24 ||
+        state.frame >= 12 * 60 * 24 || count(state, UnitKind::nexus) != 1 ||
+        count(state, UnitKind::nexus, true) != 1 || count(state, UnitKind::probe, true) < 18 ||
+        count(state, UnitKind::cyberneticsCore, true) == 0 ||
+        count(state, UnitKind::roboticsFacility) == 0 || hardBreachAtMain(state) ||
+        threat.workerRush > 0.30 || threat.proxy + threat.staticContain > 0.34 ||
+        threat.air > 0.45) return false;
+    const auto home = ourMain(state);
+    const auto natural = nearestExpansionSite(state);
+    if (!home.valid() || !natural.valid()) return false;
+    const auto rangedTech = std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& enemy) {
+        return enemy.kind == UnitKind::cyberneticsCore || enemy.kind == UnitKind::roboticsFacility;
+    }) || recentEnemyCount(state, UnitKind::dragoon) > 0;
+    if (!rangedTech) return false;
+    const auto detector = count(state, UnitKind::observer, true) > 0;
+    if (!detector && (threat.cloak > 0.20 ||
+        recentEnemyCount(state, UnitKind::darkTemplar) > 0 ||
+        std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& enemy) {
+            return enemy.kind == UnitKind::citadelOfAdun || enemy.kind == UnitKind::templarArchives;
+        }))) return false;
+    if (std::ranges::any_of(state.self.units, [](const UnitSnapshot& unit) {
+        return isWorker(unit.kind) && unit.underAttack;
+    })) return false;
+
+    auto screenPower = 0.0;
+    auto healthyDragoons = 0;
+    for (const auto& ally : state.self.units) {
+        if (!ally.completed || ally.disabled || ally.loaded || ally.hallucination ||
+            !ally.position.valid() || isBuilding(ally.kind) || !isCombatUnit(ally.kind) ||
+            distanceSquared(ally.position, home) > 1400 * 1400) continue;
+        screenPower += unitStats(ally.kind).combatValue * ally.healthFraction();
+        if (ally.kind == UnitKind::dragoon && ally.healthFraction() >= 0.60) ++healthyDragoons;
+    }
+    if (healthyDragoons < 6) return false;
+    auto pressurePower = 0.0;
+    for (const auto& enemy : state.enemy.units) {
+        if (!enemy.completed || enemy.disabled || enemy.hallucination || !enemy.position.valid() ||
+            (!enemy.visible && (state.frame < enemy.lastSeen || state.frame - enemy.lastSeen > 8 * 24)) ||
+            isWorker(enemy.kind) || (!isCombatUnit(enemy.kind) && !isStaticDefense(enemy.kind))) continue;
+        if (distanceSquared(enemy.position, home) > 1400 * 1400 &&
+            distanceSquared(enemy.position, natural) > 960 * 960) continue;
+        if (!enemy.detected && (enemy.cloaked || enemy.burrowed || enemy.kind == UnitKind::darkTemplar))
+            return false;
+        // Equal Dragoon counts do not cover a splash-supported crossing.
+        if (enemy.kind == UnitKind::reaver && count(state, UnitKind::reaver, true) == 0)
+            return false;
+        pressurePower += unitStats(enemy.kind).combatValue * enemy.healthFraction();
+    }
+    return screenPower >= pressurePower * 1.50;
+}
+
 }  // namespace
 
 bool StrategyEngine::coveredPressureRelease(
@@ -605,6 +657,7 @@ StrategicPlan StrategyEngine::plan(
     // reservation, builder routing, placement, and cover all share one
     // location.
     const auto existingNexuses = count(state, UnitKind::nexus);
+    auto rangedNaturalWindow = pvpCoveredRangedNatural_ && coveredRangedNatural(state, threat);
     const auto rangedMirrorExpansion = state.enemy.race == Race::protoss &&
         (std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& enemy) {
              return enemy.kind == UnitKind::cyberneticsCore && enemy.position.valid();
@@ -618,7 +671,7 @@ StrategicPlan StrategyEngine::plan(
         recentEnemyCount(state, UnitKind::reaver) > 0 ? 2 : 1;
     if (existingNexuses == 1 && result.desiredBases > 1 && rangedMirrorExpansion &&
         count(state, UnitKind::reaver, true) < splashScreenTarget &&
-        !establishedRangedLead && minute(state) < 12) {
+        !establishedRangedLead && !rangedNaturalWindow && minute(state) < 12) {
         // A six-Dragoon screen is not yet the planned combined army. Buying
         // the natural first outranks Robotics and moves those Dragoons away
         // from home while the first Reaver is still several production steps
@@ -676,6 +729,20 @@ StrategicPlan StrategyEngine::plan(
         result.sustainEconomy = false;
         result.desiredWorkers = std::min(result.desiredWorkers, std::max(12, count(state, UnitKind::probe)));
         result.name += " [reinforce threatened economy]";
+    }
+    rangedNaturalWindow = rangedNaturalWindow && !exposedEconomy;
+    if (rangedNaturalWindow) {
+        // A covered pressure wave is not an all-in. Grow behind the field
+        // screen rather than paying for a Cannon shell and two completed
+        // Reavers on a saturated one-base economy.
+        result.desiredBases = 2;
+        result.maximumBases = std::max(2, result.maximumBases);
+        result.expansionTarget = nearestExpansionSite(state);
+        result.rallyPoint = result.expansionTarget;
+        result.posture = Posture::hold;
+        result.sustainEconomy = true;
+        result.breakContainment = false;
+        result.name += " [covered ranged natural]";
     }
     // Start saving while income still exists. Matchup army checkpoints and
     // stale perimeter pressure must not strand a surviving force on an empty
@@ -952,6 +1019,17 @@ StrategicPlan StrategyEngine::plan(
         }
         goal(result, GoalKind::train, UnitKind::reaver, fundedSplashTarget, 122,
              "complete the paid-for splash screen before further Gateway cycles", true);
+    }
+    if (rangedNaturalWindow) {
+        suppressNew(UnitKind::forge, "fund the covered natural before optional static defense");
+        suppressNew(UnitKind::photonCannon, "cover the natural with the existing ranged army");
+        suppressNew(UnitKind::shieldBattery, "fund the natural before optional home sustain");
+        suppressNew(UnitKind::gateway, "expand the mining economy before adding more Gateway capacity");
+        for (auto& demand : result.goals) {
+            if (demand.target == UnitKind::roboticsFacility ||
+                demand.target == UnitKind::roboticsSupportBay || demand.target == UnitKind::reaver)
+                demand.priority = std::min(demand.priority, 119);
+        }
     }
     if ((result.posture == Posture::hold || result.posture == Posture::defend) &&
         !result.expansionTarget.valid() && !hardBreachAtMain(state)) {
