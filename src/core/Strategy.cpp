@@ -677,6 +677,33 @@ StrategicPlan StrategyEngine::plan(
         result.desiredWorkers = std::min(result.desiredWorkers, std::max(12, count(state, UnitKind::probe)));
         result.name += " [reinforce threatened economy]";
     }
+    // Start saving while income still exists. Matchup army checkpoints and
+    // stale perimeter pressure must not strand a surviving force on an empty
+    // main after losing its natural. A real breach still cancels this bank.
+    const auto ownedMinerals = std::accumulate(state.bases.begin(), state.bases.end(), 0,
+        [&state](int total, const BaseSnapshot& base) {
+            return total + (base.ownerId == state.self.id ? base.mineralsRemaining : 0);
+        });
+    const auto miningSite = nearestExpansionSite(state);
+    const auto pendingNexus = existingNexuses > count(state, UnitKind::nexus, true);
+    const auto preserveMining = state.frame >= 10 * 60 * 24 && existingNexuses > 0 &&
+        !supplyCapCloseout && !decisiveLeadCloseout &&
+        existingNexuses < 8 && !pendingNexus && ownedMinerals < 4500 &&
+        count(state, UnitKind::probe, true) >= 12 && ownMobileCount >= 8 &&
+        miningSite.valid() && !exposedEconomy && !hardBreachAtMain(state) &&
+        threat.workerRush <= 0.30 && threat.proxy + threat.staticContain <= 0.34 &&
+        !std::ranges::any_of(state.self.units, [](const UnitSnapshot& unit) {
+            return isWorker(unit.kind) && unit.underAttack;
+        });
+    if (preserveMining) {
+        result.desiredBases = existingNexuses + 1;
+        result.maximumBases = std::max(result.maximumBases, result.desiredBases);
+        result.expansionTarget = miningSite;
+        result.sustainEconomy = true;
+        result.name += " [protect remaining mining income]";
+        goal(result, GoalKind::expand, UnitKind::nexus, result.desiredBases, 120,
+             "fund replacement mining before depletion", true);
+    }
     if (!result.expansionTarget.valid()) {
         for (const auto& nexus : state.self.units) {
             if (nexus.kind == UnitKind::nexus && !nexus.completed &&
@@ -990,7 +1017,12 @@ StrategicPlan StrategyEngine::planPvT(
         });
     // Fortify only when current observations justify the economic cost.
     // Unknown Terran openings use the Gateway/Core baseline.
-    const auto rushEvidence = forwardBio || threat.workerRush > 0.30 ||
+    const auto productionRush = minute(state) < 6 &&
+        recentEnemyCount(state, UnitKind::barracks) >= 2 &&
+        recentEnemyCount(state, UnitKind::factory) == 0 &&
+        recentEnemyCount(state, UnitKind::commandCenter) <= 1;
+    const auto bioOpening = forwardBio || productionRush;
+    const auto rushEvidence = bioOpening || threat.workerRush > 0.30 ||
         threat.proxy + threat.staticContain > 0.34 ||
         threat.combatEnemiesNearMain > 0 || activeApproach(state, threat) ||
         threat.immediateGround > 0.45;
@@ -999,9 +1031,9 @@ StrategicPlan StrategyEngine::planPvT(
         result.desiredWorkers = std::min(result.desiredWorkers, 7);
     }
     if (rushEvidence && supplyAtLeast(state, 7)) {
-        goal(result, GoalKind::build, UnitKind::forge, 1, forwardBio ? 113 : 100,
+        goal(result, GoalKind::build, UnitKind::forge, 1, bioOpening ? 113 : 100,
              "fortified anti-bio opening anchor", true);
-        goal(result, GoalKind::build, UnitKind::photonCannon, 2, forwardBio ? 112 : 99,
+        goal(result, GoalKind::build, UnitKind::photonCannon, 2, bioOpening ? 112 : 99,
              "overlap the intercept before first contact", true);
         goal(result, GoalKind::build, UnitKind::gateway, 1, 98,
              "field mobile defense behind the completed static intercept", true);
@@ -1034,6 +1066,12 @@ StrategicPlan StrategyEngine::planPvT(
         if (count(state, UnitKind::dragoon) >= 1)
             technologyGoal(result, TechnologyKind::singularityCharge, 1, 98,
                            "range follows the first Dragoon before expansion", true);
+    }
+    if (productionRush && count(state, UnitKind::photonCannon, true) < 2) {
+        result.desiredWorkers = std::min(result.desiredWorkers, 16);
+        // The observed production is an earlier warning than Marines reaching
+        // our perimeter. Spend on the intercept while they cross the map.
+        if (state.self.gas >= 100) result.desiredGasWorkers = 0;
     }
     if (count(state, UnitKind::nexus) >= 2 || rushEvidence || threat.cloak > 0.28) {
         goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 78,
@@ -1507,11 +1545,14 @@ StrategicPlan StrategyEngine::planPvP(
     // Waiting for completion leaves the quiet Core opening active through
     // the entire second-Gateway build, after which its own mobile response
     // and Forge are too late for the first Zealot crossing.
-    const auto scoutedTwoGatewayConstruction = pvpScoutedTwoGateAnchor_ &&
-        state.frame < 5 * 60 * 24 &&
+    const auto scoutedTwoGatewayConstruction = state.frame < 5 * 60 * 24 &&
         std::ranges::count(state.enemy.units, UnitKind::gateway,
                            &UnitSnapshot::kind) >= 2 &&
-        recentEnemyCount(state, UnitKind::cyberneticsCore) == 0;
+        std::ranges::none_of(state.enemy.units, [](const UnitSnapshot& enemy) {
+            return enemy.kind == UnitKind::cyberneticsCore ||
+                   enemy.kind == UnitKind::roboticsFacility ||
+                   enemy.kind == UnitKind::dragoon || enemy.kind == UnitKind::reaver;
+        });
     const auto meleeEvidence = scoutedTwoGatewayConstruction ||
         recentEnemyCount(state, UnitKind::zealot) >= 2 ||
         (recentEnemyCount(state, UnitKind::gateway) >= 2 &&
@@ -2586,16 +2627,14 @@ StrategicPlan StrategyEngine::planPvP(
         // already lost in the live rush trace.
         const auto gasTransitionWindow = state.frame >= 3 * 60 * 24 + 24 * 24 &&
                                          zealotsReady >= 2 &&
+                                         count(state, UnitKind::photonCannon, true) > 0 &&
                                          threat.combatEnemiesNearMain == 0 &&
                                          !hardBreachAtMain(state);
         result.desiredGasWorkers = gasTransitionWindow ? 3 : 0;
-        // The first response window is too short for a Forge plus a Cannon
-        // while the mobile screen is still tiny. Keep four bodies mobile
-        // before paying the Forge tax; that gives the Probe line a real
-        // escort and lets the first Cannon finish behind the screen instead
-        // of being surrounded during construction.
+        // Pay for the first escort, then start the static chain while it
+        // trains. Forge plus Cannon construction outlasts another unit cycle.
         const auto mobileRushOpening = state.frame < 4 * 60 * 24 &&
-                                       zealotsReady < 4;
+                                       count(state, UnitKind::zealot) == 0;
         // A covert-tech suspicion is normally enough to reserve Robotics and
         // detection before the first visible ranged unit.  It must not win
         // over a current two-Gateway melee opening, though: in the live
@@ -2629,6 +2668,12 @@ StrategicPlan StrategyEngine::planPvP(
             goal(result, GoalKind::train, UnitKind::zealot, 6, 114,
                  "mobile-first response to scouted double production", true);
         } else {
+            if (count(state, UnitKind::photonCannon) == 0) {
+                goal(result, GoalKind::build, UnitKind::forge, 1, 120,
+                     "start the melee intercept behind the first paid escort", true);
+                goal(result, GoalKind::build, UnitKind::photonCannon, 1, 120,
+                     "complete the first melee anchor before more infrastructure", true);
+            }
             // Once the mobile screen has four bodies, gas is no longer a
             // luxury: the opponent's next wave is likely Dragoons. Re-enable
             // three gas workers before the eight-minute scouting window ends

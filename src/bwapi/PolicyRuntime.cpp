@@ -23,6 +23,9 @@ void PolicyRuntime::start() {
     const auto loaded = snapshot.empty() || learner_.parse(snapshot);
     weightsLoaded_ = !snapshot.empty() && loaded;
     if (!loaded) enabled_ = false; // fail closed, don't silently train a corrupt table
+    // Frozen deployment without a trained table is observation-only. The
+    // learner's untrained emergency fallback must not veto strategy closeouts.
+    if (!training_ && !weightsLoaded_) enabled_ = false;
     learner_.freeze(!training_);
     const auto selfRace = BWAPI::Broodwar->self()->getRace().getName();
     const auto enemy = BWAPI::Broodwar->enemy();

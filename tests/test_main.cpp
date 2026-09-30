@@ -5064,8 +5064,8 @@ void testOpeningRangedCommitment() {
     ResourceLedger coreBank{200, 100};
     const auto coreActions = MacroPlanner{}.reconcile(coreTiming, StrategyEngine{}.plan(coreTiming, {}), coreBank);
     expect(std::ranges::any_of(coreActions, [](const MacroAction& action) {
-        return action.target == UnitKind::cyberneticsCore && action.reserved && action.executable;
-    }), "the quiet ranged opener funds its Core as soon as the Gateway and gas are committed");
+        return action.target == UnitKind::zealot && action.reserved && action.executable;
+    }), "the quiet ranged opener delivers its first bodyguard before funding an unstarted Core");
     state.self.units[3].completed = false;
     state.self.units[3].buildProgress = 50;
     MacroPlanner macro;
@@ -6988,11 +6988,13 @@ void testPvPScoutedTwoGateAnchorOption() {
                    goal.blocking && goal.priority >= 118;
         });
     };
-    expect(!earlyForge(StrategyEngine{}.plan(state, {})),
-           "default PvP opening waits before reserving a Forge");
+    expect(earlyForge(StrategyEngine{}.plan(state, {})),
+           "default PvP completes the static chain after the first paid escort against two scouted Gateways");
     StrategyEngine candidate{false, false, false, false, false, false, false,
                              false, false, true};
     const auto opening = candidate.plan(construction, {});
+    expect(earlyForge(StrategyEngine{}.plan(construction, {})),
+           "default PvP counts the observed unfinished second Gateway as a production commitment");
     expect(opening.name.find("PvP two-gate robotics control") != std::string::npos &&
                std::ranges::any_of(opening.goals, [](const ProductionGoal& goal) {
                    return goal.target == UnitKind::gateway && goal.desiredCount >= 2 &&

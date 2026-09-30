@@ -214,7 +214,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         const auto urgentStaticAnchor =
             (target == UnitKind::forge || target == UnitKind::photonCannon) &&
             priority >= 110;
-        if (urgentStaticAnchor) {
+        if (urgentStaticAnchor || (target == UnitKind::nexus && priority >= 120)) {
             ledger.protect(minerals, gas);
             return;
         }
@@ -398,6 +398,23 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             else if (demand.goal != GoalKind::train)
                 demand.priority = std::min(111, demand.priority);
         }
+    }
+    // A ready first Gateway must deliver bodies before optional opening
+    // infrastructure consumes its bank. Count paid-for queues, not just
+    // completed units, so this never reserves a second layer of production.
+    const auto openingScreen = countExisting(state, UnitKind::zealot) +
+        countExisting(state, UnitKind::dragoon) +
+        static_cast<int>(std::ranges::count(state.self.queuedUnits, UnitKind::zealot)) +
+        static_cast<int>(std::ranges::count(state.self.queuedUnits, UnitKind::dragoon));
+    if (!plan.requireMobileDetection && state.enemy.race != Race::zerg &&
+        state.frame >= 2 * 60 * 24 &&
+        state.frame < 4 * 60 * 24 &&
+        openingScreen < 2 && countExisting(state, UnitKind::cyberneticsCore) == 0 &&
+        usableProducers(state, UnitKind::gateway) >
+            queuedForProducer(state, UnitKind::gateway)) {
+        goals.push_back({GoalKind::train, UnitKind::zealot,
+            countExisting(state, UnitKind::zealot) + 1, openingScreen == 0 ? 127 : 119, true,
+            "deliver the first mobile screen before opening infrastructure"});
     }
     std::ranges::stable_sort(goals, std::greater{}, &ProductionGoal::priority);
 
