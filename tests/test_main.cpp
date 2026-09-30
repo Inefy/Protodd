@@ -2471,6 +2471,60 @@ void testWorkersAndScouts() {
     expect(safeObserverOrder.size() == 1 &&
                safeObserverOrder.front().target == protodd::Position{128, 1800},
            "Observer scouting rejects a known missile-turret corridor");
+    auto screenedState = riskState;
+    screenedState.frame = 6000;
+    screenedState.enemy.units = {
+        unit(309, protodd::UnitKind::commandCenter, false, {900, 128}),
+        unit(310, protodd::UnitKind::missileTurret, false, {1800, 1800})};
+    screenedState.bases.front().ownerId = screenedState.enemy.id;
+    screenedState.bases.back().ownerId = -1;
+    protodd::InfluenceMap screenedInfluence;
+    screenedInfluence.update(screenedState);
+    protodd::ScoutManager screenedScouting;
+    const auto screenedOrder = screenedScouting.assign(
+        screenedState, riskScoutIds, screenedInfluence, {});
+    expect(screenedOrder.size() == 1 &&
+               screenedOrder.front().target == protodd::Position{128, 1800},
+           "spare Observer checks a neutral expansion rather than a known screened Terran main");
+    auto screenArrivesState = screenedState;
+    const auto remoteTurret = screenArrivesState.enemy.units.back();
+    screenArrivesState.enemy.units.pop_back();
+    screenArrivesState.self.units.push_back(unit(311, protodd::UnitKind::nexus,
+                                                  true, {128, 128}));
+    screenedInfluence.update(screenArrivesState);
+    protodd::ScoutManager screenArrivesScouting;
+    const auto oldTechRoute = screenArrivesScouting.assign(
+        screenArrivesState, riskScoutIds, screenedInfluence, {});
+    expect(oldTechRoute.size() == 1 &&
+               oldTechRoute.front().purpose == protodd::ScoutPurpose::checkTech,
+           "Observer may check the Terran main before anti-air is discovered");
+    screenArrivesState.enemy.units.push_back(remoteTurret);
+    screenedInfluence.update(screenArrivesState);
+    const auto abandonedTechRoute = screenArrivesScouting.protectObservers(
+        screenArrivesState, screenedInfluence);
+    expect(abandonedTechRoute.size() == 1 &&
+               abandonedTechRoute.front().type == protodd::CommandType::stop,
+           "newly observed Terran anti-air cancels an existing tech-scout order");
+    auto routeState = riskState;
+    routeState.enemy.units.clear();
+    routeState.self.units.push_back(unit(308, protodd::UnitKind::nexus,
+                                         true, {128, 128}));
+    protodd::InfluenceMap routeInfluence;
+    routeInfluence.update(routeState);
+    protodd::ScoutManager routeScouting;
+    const auto originalRoute = routeScouting.assign(
+        routeState, riskScoutIds, routeInfluence, {});
+    expect(originalRoute.size() == 1 &&
+               originalRoute.front().target == protodd::Position{900, 128},
+           "Observer begins a clear scouting route");
+    routeState.enemy.units.push_back(turret);
+    routeInfluence.update(routeState);
+    const auto cancelledRoute = routeScouting.protectObservers(
+        routeState, routeInfluence);
+    expect(cancelledRoute.size() == 1 &&
+               cancelledRoute.front().type == protodd::CommandType::stop &&
+               cancelledRoute.front().source == "observer-abort-unsafe-route",
+           "newly seen turret cancels an in-flight Observer route before contact");
     riskState.self.units.front().position = {870, 128};
     expect(protodd::ScoutManager::observerInDanger(
         riskState, riskState.self.units.front(), riskInfluence),
@@ -2479,6 +2533,8 @@ void testWorkersAndScouts() {
     expect(escape.size() == 1 && escape.front().source == "observer-evade" &&
                escape.front().targetPosition != riskState.self.units.front().position,
            "Observer safety issues an immediate escape from missile-turret coverage");
+    expect(riskScouting.observerEvading(riskScoutIds[0], riskState.frame),
+           "Observer remains reserved from escort control during its escape lease");
     const auto noReentry = riskScouting.assign(
         riskState, riskScoutIds, riskInfluence, {});
     expect(noReentry.empty(),
@@ -2498,6 +2554,72 @@ void testWorkersAndScouts() {
     expect(protodd::ScoutManager::observerInDanger(
         riskState, riskState.self.units.front(), riskInfluence),
            "a Wraith in firing range triggers Observer withdrawal");
+
+    riskState.self.units.front().position = {512, 512};
+    riskState.self.units.push_back(unit(305, protodd::UnitKind::nexus,
+                                       true, {256, 256}));
+    auto vessel = unit(306, protodd::UnitKind::scienceVessel,
+                       false, {640, 512});
+    vessel.role = protodd::UnitRole::detector;
+    vessel.sightRange = 320;
+    wraith.position = {512, 640};
+    riskState.enemy.units = {vessel, wraith};
+    riskInfluence.update(riskState);
+    riskScouting.reset();
+    const auto multiThreatEscape = riskScouting.protectObservers(
+        riskState, riskInfluence);
+    expect(multiThreatEscape.size() == 1 &&
+               multiThreatEscape.front().targetPosition.x < 512 &&
+               multiThreatEscape.front().targetPosition.y < 512,
+           "Observer escapes a Vessel and Wraith together instead of following one enemy's away vector");
+    riskState.self.units.front().position = protodd::moveToward(
+        riskState.self.units.front().position,
+        multiThreatEscape.front().targetPosition, 20.0);
+    const auto continuedEscape = riskScouting.protectObservers(
+        riskState, riskInfluence);
+    expect(continuedEscape.size() == 1 &&
+               continuedEscape.front().targetPosition ==
+                   multiThreatEscape.front().targetPosition,
+           "Observer keeps a safe escape waypoint while moving toward it");
+
+    riskState.self.units.front().position = {16, 1024};
+    riskState.self.units.back().position = {1024, 1024};
+    riskState.enemy.units = {unit(307, protodd::UnitKind::scienceVessel,
+                                  false, {200, 1024})};
+    riskState.enemy.units.front().role = protodd::UnitRole::detector;
+    riskState.enemy.units.front().sightRange = 320;
+    riskInfluence.update(riskState);
+    riskScouting.reset();
+    const auto edgeEscape = riskScouting.protectObservers(riskState, riskInfluence);
+    expect(edgeEscape.size() == 1 &&
+               edgeEscape.front().targetPosition.x >= 16 &&
+               edgeEscape.front().targetPosition.x < riskState.mapWidthPixels,
+           "Observer retreat stays on the map when a Vessel pins it near an edge");
+
+    auto recoveryState = routeState;
+    recoveryState.frame = 1000;
+    recoveryState.self.units.front().position = {128, 1000};
+    turret.position = {400, 1000};
+    recoveryState.enemy.units = {turret};
+    protodd::InfluenceMap observerRecoveryInfluence;
+    observerRecoveryInfluence.update(recoveryState);
+    protodd::ScoutManager recoveryScouting;
+    (void)recoveryScouting.protectObservers(recoveryState, observerRecoveryInfluence);
+    recoveryState.frame += 5 * 24 + 1;
+    recoveryState.enemy.units.clear();
+    observerRecoveryInfluence.update(recoveryState);
+    const auto homebound = recoveryScouting.protectObservers(
+        recoveryState, observerRecoveryInfluence);
+    expect(homebound.size() == 1 &&
+               recoveryScouting.observerEvading(riskScoutIds[0], recoveryState.frame),
+           "Observer stays on the homebound escape lease after the nearby threat disappears");
+    recoveryState.self.units.front().position = {128, 128};
+    recoveryState.frame += 6;
+    const auto recovered = recoveryScouting.protectObservers(
+        recoveryState, observerRecoveryInfluence);
+    expect(recovered.empty() &&
+               !recoveryScouting.observerEvading(riskScoutIds[0], recoveryState.frame),
+           "Observer releases the escape lease after reaching the safe home area");
 }
 
 void testDepletedMineralControl() {
@@ -3866,6 +3988,16 @@ void testReportImprovements() {
     thirdBase.bases.back().groundDistanceFromMain = 650;
     expect(strategy.plan(thirdBase, {}).expansionTarget == Position{3200, 1200},
            "a nearby gas third remains preferable when its route penalty is small");
+    auto latePerimeter = thirdBase;
+    latePerimeter.frame = 18 * 60 * 24;
+    latePerimeter.bases[0].mineralsRemaining = 0;
+    latePerimeter.bases[3].mineralsRemaining = 200;
+    ThreatAssessment lateApproach;
+    lateApproach.combatEnemiesNearMain = 1;
+    lateApproach.immediateGround = 0.4;
+    const auto latePlan = strategy.plan(latePerimeter, lateApproach);
+    expect(latePlan.desiredWorkers > 14 && latePlan.desiredBases >= 3,
+           "late perimeter pressure must not freeze workers and third-base demand at opening levels");
     auto zergState = state;
     zergState.enemy.race = Race::zerg;
     zergState.frame = 5 * 60 * 24;
@@ -4109,6 +4241,119 @@ void testForwardMainDetectorEscort() {
            "base-defense detector remains behind its guard");
 }
 
+void testUncloakedWraithDoesNotHoldMainArmy() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 30000;
+    state.self.id = 1;
+    state.enemy.id = 2;
+    state.enemy.race = Race::terran;
+    auto dragoon = unit(900, UnitKind::dragoon, true, {1000, 1000});
+    dragoon.groundWeapon = {.damage = 20, .maxRange = 192, .targetsGround = true};
+    dragoon.airWeapon = {.damage = 20, .maxRange = 192, .targetsAir = true};
+    auto wraith = unit(901, UnitKind::wraith, false, {1120, 1000});
+    wraith.flying = true;
+    wraith.groundWeapon = {.damage = 8, .maxRange = 160, .targetsGround = true};
+    wraith.airWeapon = {.damage = 20, .maxRange = 160, .targetsAir = true};
+    StrategicPlan plan;
+    plan.posture = Posture::hold;
+    plan.attackTarget = {2000, 1000};
+    const std::vector<UnitSnapshot> friendly{dragoon};
+    const auto groups = SquadPlanner{}.form(
+        state, friendly, std::span<const UnitSnapshot>(&wraith, 1),
+        plan, {512, 1000});
+    const auto main = std::ranges::find_if(groups, [](const Squad& squad) {
+        return squad.role == SquadRole::mainArmy;
+    });
+    expect(main != groups.end() && !main->enemies.empty() &&
+               !main->needsDetection &&
+               SquadPlanner::mobileDetectionReady(state, *main),
+           "visible uncloaked Wraith does not halt a Dragoon for missing detection");
+    wraith.cloaked = true;
+    const auto cloaked = SquadPlanner{}.form(
+        state, friendly, std::span<const UnitSnapshot>(&wraith, 1),
+        plan, {512, 1000});
+    const auto blocked = std::ranges::find_if(cloaked, [](const Squad& squad) {
+        return squad.role == SquadRole::mainArmy;
+    });
+    expect(blocked != cloaked.end() && blocked->needsDetection &&
+               !SquadPlanner::mobileDetectionReady(state, *blocked),
+           "cloaked Wraith still requires an Observer before ground advance");
+}
+
+void testFavorableTerranFrontReleasesOnlyFormedArmy() {
+    using namespace protodd;
+    GameState state;
+    state.self.id = 1;
+    state.enemy.id = 2;
+    state.enemy.race = Race::terran;
+    state.self.units = {
+        unit(1, UnitKind::nexus, true, {1056, 272}),
+        unit(2, UnitKind::nexus, true, {2080, 656}),
+    };
+    state.bases = {
+        {1, {1056, 272}, {1000, 320}, 0, 3000, 1},
+        {2, {2080, 656}, {2000, 700}, 80, 3000, 1},
+    };
+    Squad field;
+    field.role = SquadRole::mainArmy;
+    field.center = {1996, 763};
+    auto dragoon = unit(10, UnitKind::dragoon, true, field.center);
+    dragoon.airWeapon = {.damage = 20, .maxRange = 192, .targetsAir = true};
+    dragoon.groundWeapon = {.damage = 20, .maxRange = 192, .targetsGround = true};
+    field.units.assign(31, dragoon);
+    auto wraith = unit(20, UnitKind::wraith, false, {2413, 892});
+    wraith.flying = true;
+    auto wraith2 = wraith;
+    wraith2.id = 21;
+    wraith2.position = {2440, 900};
+    auto wraith3 = wraith;
+    wraith3.id = 22;
+    wraith3.position = {2450, 910};
+    field.enemies = {wraith, wraith2, wraith3};
+    CombatEstimate estimate;
+    estimate.decision = FightDecision::engage;
+    estimate.ratio = 27.77;
+    expect(SquadPlanner::favorableTerranFrontTarget(state, field, estimate) ==
+               wraith.position,
+        "a 31-unit advantaged field army clears visible Terran contact near the natural");
+    field.units.resize(4);
+    expect(!SquadPlanner::favorableTerranFrontTarget(state, field, estimate).valid(),
+        "detached base guards do not inflate the attacking field formation");
+    field.units.assign(31, dragoon);
+    estimate.advanceBlocked = true;
+    expect(!SquadPlanner::favorableTerranFrontTarget(state, field, estimate).valid(),
+        "a real cloak or mine threat still requires mobile detection");
+    estimate.advanceBlocked = false;
+    estimate.ratio = 1.1;
+    expect(!SquadPlanner::favorableTerranFrontTarget(state, field, estimate).valid(),
+        "an unfavorable local fight never triggers the release");
+    estimate.ratio = 27.77;
+    for (auto& enemy : field.enemies) enemy.detected = false;
+    expect(!SquadPlanner::favorableTerranFrontTarget(state, field, estimate).valid(),
+        "undetected Wraiths cannot be selected as attack targets");
+    for (std::size_t i = 0; i < field.enemies.size(); ++i) {
+        field.enemies[i].detected = true;
+        field.enemies[i].position = {1450 + static_cast<int>(i) * 20,
+                                     500 + static_cast<int>(i) * 10};
+    }
+    state.self.units.pop_back();
+    field.units.resize(16);
+    expect(SquadPlanner::favorableTerranFrontTarget(state, field, estimate).valid(),
+        "a formed 16-unit reserve can clear a favorable front after losing its natural");
+    field.units.assign(16, unit(30, UnitKind::zealot, true, field.center));
+    expect(!SquadPlanner::favorableTerranFrontTarget(state, field, estimate).valid(),
+        "a ground-only reserve cannot chase an air target that most members cannot hit");
+    field.units.assign(16, dragoon);
+    field.enemies = {unit(40, UnitKind::vulture, false, {1500, 500})};
+    expect(!SquadPlanner::favorableTerranFrontTarget(state, field, estimate).valid(),
+        "the reserve does not leave its screen to chase a lone Vulture scout");
+    field.enemies.front().kind = UnitKind::siegeTank;
+    expect(SquadPlanner::favorableTerranFrontTarget(state, field, estimate) ==
+               field.enemies.front().position,
+        "a visible tank threatening an owned base remains a valid local break target");
+}
+
 void testSafeDetectorRendezvous() {
     using namespace protodd;
     GameState state;
@@ -4148,8 +4393,14 @@ void testSafeDetectorRendezvous() {
     const auto unsafe = SquadPlanner{}.detectorEscorts(
         state, std::span<const Squad>(&main, 1), influence, false, true,
         false, true);
-    expect(unsafe.size() == 1 && unsafe.front().targetPosition != main.center,
-           "direct rendezvous rejects a known missile-turret corridor");
+    expect(unsafe.empty(),
+           "endangered Observer is not reissued an escort order into turret coverage");
+    state.self.units.front().position = {1500, 1000};
+    const auto unsafeDestination = SquadPlanner{}.detectorEscorts(
+        state, std::span<const Squad>(&main, 1), influence, false, true,
+        false, true);
+    expect(unsafeDestination.empty(),
+           "a safe Observer does not rendezvous at an army position inside turret coverage");
 }
 
 void testDetectorWaitVolley() {
@@ -7221,6 +7472,8 @@ int main() {
     testPvTContainBreakTarget();
     testPvTContainBreakFormation();
     testForwardMainDetectorEscort();
+    testUncloakedWraithDoesNotHoldMainArmy();
+    testFavorableTerranFrontReleasesOnlyFormedArmy();
     testSafeDetectorRendezvous();
     testDetectorWaitVolley();
     testContestedDetectorReserve();

@@ -54,7 +54,8 @@ public:
         std::span<const UnitSnapshot> enemy,
         const StrategicPlan& plan,
         Position fallbackRetreat, const NavigationGrid* navigation = nullptr,
-        bool emergencyConsolidation = false) const;
+        bool emergencyConsolidation = false,
+        bool limitStaticCoverage = false) const;
 
     [[nodiscard]] std::vector<Command> detectorEscorts(
         const GameState& state,
@@ -71,6 +72,9 @@ public:
     [[nodiscard]] static MainArmyTravelMode mainArmyTravelMode(
         const Squad& squad, const Squad* vanguard, bool aggressive,
         int minimumAttackSize) noexcept;
+    [[nodiscard]] static Position favorableTerranFrontTarget(
+        const GameState& state, const Squad& squad,
+        const CombatEstimate& estimate) noexcept;
     [[nodiscard]] static std::vector<Command> supportEscorts(
         const Squad& squad, Position objective);
 

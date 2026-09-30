@@ -1729,3 +1729,89 @@ Do not force a boundary Observer straight toward home: recorded Wraith
 positions show that home can lie behind the pursuer. A first such candidate
 was stopped and reverted before a valid result. The next escape test should
 use enemy direction and friendly anti-air cover.
+
+The 29 September local contain-clearance and mech-bank variants each lost
+both Destination games and were reverted. A pending-natural defense variant
+also lost both, although one side kept its natural alive longer; its intended
+early unfinished-Nexus breach did not repeat in the live run, so it was
+reverted. The first isolated Observer threat-field variant cancelled unsafe
+scout routes and considered Wraith, Vessel, turret, and edge risk. It lost
+both games at frames 39,620 and 27,561 with Observer losses 3/1, versus
+3/0 in the saved safety reference. Trace review found thousands of evade
+orders, escort and evade commands fighting on the same frames, and an escape
+lease ending before the Observer reached home. That variant is rejected.
+The revised Observer candidate holds a safe escape waypoint, keeps leased
+evaders out of escort control, and returns them to a friendly Nexus before
+scouting again. Its paired screen is running under
+`build/pvt-detector-rendezvous-screen-20260928/observer-threat-field-v5`.
+The next attack experiment must count the formed field squad separately
+from allocated base defenders and choose a reachable tank line only after
+mobile detection and home coverage are confirmed. Do not infer a win-rate
+gain from survival alone.
+
+That Observer screen finished with two normal losses at frames 43,774 and
+59,119. Side 1 remained on two bases until both mineral lines were empty;
+its third Nexus never started despite a funded, repeated build request.
+A specific combat gate also held a 31-unit main squad with a 27.77 local
+ratio because visible uncloaked Wraiths were classified as requiring an
+Observer. The next bounded candidate corrects the detection rule and
+commits an actual formed field army of at least 20 units to clear a nearby
+neutral third as the two owned bases approach mineral exhaustion. The
+local regression suite passes; the paired Destination screen is running
+under `build/pvt-detector-rendezvous-screen-20260928/economic-window-v1`.
+Review third-base construction, field movement, both normal game outcomes,
+and Observer deaths before promoting it.
+
+That screen lost both normal games at frames 41,108 and 25,701, and still
+built no third Nexus. Its side-0 field advance activated, but a mech wave
+soon reached the natural; side 1 lost the natural before the trigger could
+activate. Do not promote the field trigger from this evidence. A second
+screen, `economic-window-builder-route-v2` in the same campaign directory,
+adds terrain waypoints for Nexus Probes that keep moving without closing
+on a buildable reserved third. Inspect route-guide orders, builder distance,
+third-base start, home survival, and wins on both sides.
+The v2 first side lost at frame 27,747 with no third. Its 38 accepted
+guide moves oscillated near the natural, showing that a freshly computed
+short waypoint each time is insufficient. The next route revision stores
+one path per leased Nexus Probe and advances its waypoints in order.
+V2 finished 0/2 at frames 27,747 and 25,515 with no third. Its first
+builder accepted 38 guide moves but stayed at the choke. The cached-path
+revision is running under `economic-window-cached-route-v3` in the same
+campaign directory. This remains an unpromoted experiment.
+V3 side 0 lost at frame 35,590 with no third. Its guide made progress as
+orders but not as construction, and a lease bug discarded some guided
+Moves as `order-lost`. The next candidate fixes that lease and switches
+away from a third-base site after two failed construction leases, subject
+to an unowned, mineral-rich alternate without nearby observed ground fire.
+V3 finished 0/2 at frames 35,590 and 39,589 with no third. V4 is running
+as `alternate-third-site-v4` under the same campaign directory. Keep it
+experimental until a third Nexus actually starts and the two-side outcomes
+are reviewed.
+V4 finished 0/2 at frames 25,980 and 27,592, with no third. One side
+changed expansion target, but lost its natural before the alternative
+could form an economy. The window push and builder-routing/site-switch
+changes were removed from the default candidate. The next paired screen,
+`favorable-front-v1`, tests a local formed-army opportunity: attack visible
+Terran units near an owned base only when the actual field squad has at
+least 20 members, its fight estimate is favorable, and detection is ready.
+Compare activation, local tank/Wraith clearance, two-base income, and
+normal wins; a unit count or supply lead alone is insufficient.
+The first favorable-front pair lost at frames 30,227 and 27,282 without
+the 20-unit formed-army condition activating. V2 lowers that formed-force
+gate to 16, requires at least eight members able to hit the chosen target,
+and permits a favorable clear after the natural falls. Its two-side screen
+is running as `favorable-front-v2`; no win gain is established yet.
+It finished with two normal losses at frames 31,653 and 42,441. The next
+correction fixes defense allocation that undervalued unknown cloaked health
+and credited rear Cannons against uncovered attackers. All portable and Win32
+release tests pass. A fresh current-source reference and candidate are frozen
+under `build/defense-allocation-20260929/`; the experiment record is
+`docs/defense-allocation-20260929.md`. Require completed paired outcomes before
+claiming any win benefit.
+That comparison is complete: both arms won 0/2 healthy, paired games. Candidate
+loss frames were 30,165 and 22,756 versus 27,282 and 43,929 in the fresh
+reference. No third Nexus formed in either arm. Static-credit changes are now
+off by default behind `PROTODD_STATIC_DEFENSE_COVERAGE`; default allocation
+retains only conservative unknown enemy health, consistent with combat and
+influence. The health-only default has native verification but no separate live
+win-rate evidence. All owned campaign services were closed after completion.

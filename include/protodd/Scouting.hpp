@@ -75,6 +75,10 @@ public:
         const GameState& state, const InfluenceMap& influence, const NavigationGrid* terrain = nullptr);
     [[nodiscard]] std::vector<Command> protectObservers(
         const GameState& state, const InfluenceMap& influence);
+    [[nodiscard]] bool observerEvading(UnitId observer, Frame frame) const noexcept {
+        const auto lease = observerEvadeUntil_.find(observer);
+        return lease != observerEvadeUntil_.end() && lease->second > frame;
+    }
     [[nodiscard]] static bool observerInDanger(
         const GameState& state, const UnitSnapshot& observer,
         const InfluenceMap& influence) noexcept;
@@ -89,6 +93,7 @@ private:
     ProbeHarasser harasser_;
     ProbeHarasser returnHarasser_;
     std::unordered_map<UnitId, Frame> observerEvadeUntil_;
+    std::unordered_map<UnitId, Position> observerEscapeWaypoint_;
 };
 
 }  // namespace protodd

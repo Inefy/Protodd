@@ -1,5 +1,6 @@
 #include "protodd/Squads.hpp"
 
+#include "protodd/Scouting.hpp"
 #include "protodd/UnitCatalog.hpp"
 
 #include <algorithm>
@@ -18,7 +19,6 @@ bool harassmentUnit(const UnitSnapshot& unit) {
 bool detectionThreat(const UnitSnapshot& unit) {
     return unit.cloaked || unit.burrowed || !unit.detected ||
            unit.kind == UnitKind::darkTemplar || unit.kind == UnitKind::lurker ||
-           unit.kind == UnitKind::wraith || unit.kind == UnitKind::ghost ||
            unit.kind == UnitKind::spiderMine;
 }
 
@@ -37,8 +37,12 @@ const BaseSnapshot* nearestOwnedBase(const GameState& state, const Position posi
 }
 
 double allocationPower(const UnitSnapshot& unit) {
+    // Match combat evaluation: zero health on an undetected enemy is an
+    // unavailable observation, not evidence of a wounded attacker.
+    const auto vitality = !unit.ours && !unit.detected && unit.durability() == 0
+        ? 1.0 : unit.healthFraction();
     return unitStats(unit.kind).combatValue *
-           std::clamp(unit.healthFraction(), 0.15, 1.0);
+           std::clamp(vitality, 0.15, 1.0);
 }
 
 Position defensiveScreen(const GameState& state, const BaseSnapshot& base) {
@@ -92,7 +96,7 @@ std::vector<Squad> SquadPlanner::form(
     const std::span<const UnitSnapshot> enemy,
     const StrategicPlan& plan,
     const Position fallbackRetreat, const NavigationGrid* navigation,
-    const bool emergencyConsolidation) const {
+    const bool emergencyConsolidation, const bool limitStaticCoverage) const {
     std::vector<Squad> result;
     std::unordered_set<UnitId> assigned;
     auto nextId = 1;
@@ -226,11 +230,28 @@ std::vector<Squad> SquadPlanner::form(
         }
         defense.requiredRatio = 0.55;
         defense.units = std::move(staticSupport);
+        const auto defenseMargin = plan.posture == Posture::defend ? 1.45 : 1.30;
+        const auto targetPower = highestThreat * defenseMargin + 0.35;
         auto committedPower = 0.0;
         for (const auto& unit : defense.units) committedPower += allocationPower(unit);
-        const auto targetPower = highestThreat *
-                                     (plan.posture == Posture::defend ? 1.45 : 1.30) +
-                                 0.35;
+        if (limitStaticCoverage) {
+            // The isolated coverage experiment limits static credit to the
+            // attackers in range, leaving mobile units for uncovered threats.
+            auto coveredThreatPower = 0.0;
+            for (const auto& threat : baseThreats) {
+                if (!threat.visible || !threat.detected || threat.invincible ||
+                    threat.loaded || threat.hallucination) continue;
+                const auto covered = std::ranges::any_of(defense.units,
+                    [&threat](const UnitSnapshot& defender) {
+                        const auto& weapon = threat.flying ? defender.airWeapon : defender.groundWeapon;
+                        const auto separation = weaponDistance(defender, threat);
+                        return defender.canAttack(threat) && separation >= weapon.minRange &&
+                            separation <= weapon.maxRange;
+                    });
+                if (covered) coveredThreatPower += allocationPower(threat);
+            }
+            committedPower = std::min(committedPower, coveredThreatPower * defenseMargin);
+        }
         const auto minimumMobile = std::min<std::size_t>(2, candidates.size());
         const auto visibleAttackers = std::ranges::count_if(baseThreats,
             [](const UnitSnapshot& threat) {
@@ -501,7 +522,9 @@ std::vector<Command> SquadPlanner::detectorEscorts(
     std::vector<const UnitSnapshot*> observers;
     for (const auto& unit : state.self.units) {
         if (unit.kind == UnitKind::observer && unit.completed && !unit.loaded &&
-            !unit.disabled && !unit.hallucination) observers.push_back(&unit);
+            !unit.disabled && !unit.hallucination && unit.position.valid() &&
+            !ScoutManager::observerInDanger(state, unit, influence))
+            observers.push_back(&unit);
     }
     std::ranges::sort(observers, {}, [](const UnitSnapshot* unit) { return unit->id; });
 
@@ -564,6 +587,10 @@ std::vector<Command> SquadPlanner::detectorEscorts(
         const auto anchor = centerBlockedMainEscort &&
                             squad->role == SquadRole::mainArmy && squad->needsDetection
             ? squad->center : moveToward(squad->center, squad->retreat, 96.0);
+        auto atAnchor = *observers.front();
+        atAnchor.position = anchor;
+        if (!anchor.valid() ||
+            ScoutManager::observerInDanger(state, atAnchor, influence)) continue;
         const auto closest = std::min_element(observers.begin() + static_cast<std::ptrdiff_t>(i),
             observers.end(), [anchor](const UnitSnapshot* left, const UnitSnapshot* right) {
                 const auto leftReady = left->healthFraction() >= 0.25;
@@ -648,6 +675,63 @@ MainArmyTravelMode SquadPlanner::mainArmyTravelMode(
         return MainArmyTravelMode::assemble;
     return vanguard == &squad ? MainArmyTravelMode::attack
                               : MainArmyTravelMode::joinVanguard;
+}
+
+Position SquadPlanner::favorableTerranFrontTarget(
+    const GameState& state, const Squad& squad,
+    const CombatEstimate& estimate) noexcept {
+    // The frozen empty policy can turn an advantaged PvT field army back to
+    // its rally while Terran units occupy a mining-base approach.
+    // Commit only the formed, unassigned force after its actual local fight
+    // estimate accepts contact; the separately allocated base guards remain.
+    if (state.enemy.race != Race::terran ||
+        squad.role != SquadRole::mainArmy || squad.withdrawing ||
+        !squad.center.valid() || squad.units.size() < 16 ||
+        estimate.advanceBlocked || estimate.decision != FightDecision::engage ||
+        estimate.ratio < 1.8 ||
+        std::ranges::count_if(state.self.units, [](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::nexus && unit.completed;
+        }) < 1) return {-1, -1};
+
+    const auto visibleContact = std::ranges::count_if(
+        squad.enemies, [&squad](const UnitSnapshot& enemy) {
+            return enemy.visible && enemy.detected && enemy.completed &&
+                enemy.kind != UnitKind::spiderMine && isCombatUnit(enemy.kind) &&
+                enemy.position.valid() &&
+                distanceSquared(squad.center, enemy.position) <= 640 * 640;
+        });
+    const UnitSnapshot* best = nullptr;
+    auto bestScore = std::numeric_limits<double>::infinity();
+    for (const auto& enemy : squad.enemies) {
+        if (!enemy.visible || !enemy.detected || !enemy.completed ||
+            enemy.loaded || enemy.invincible || enemy.hallucination ||
+            !enemy.position.valid() || enemy.kind == UnitKind::spiderMine ||
+            (!isCombatUnit(enemy.kind) && enemy.kind != UnitKind::scienceVessel) ||
+            distanceSquared(squad.center, enemy.position) > 640 * 640 ||
+            !std::ranges::any_of(state.bases, [&state, &enemy](const BaseSnapshot& base) {
+                return base.ownerId == state.self.id && base.center.valid() &&
+                    distanceSquared(base.center, enemy.position) <= 800 * 800;
+            }) ||
+            (enemy.kind != UnitKind::siegeTank && visibleContact < 2)) continue;
+        const auto targeters = std::ranges::count_if(
+            squad.units, [&enemy](const UnitSnapshot& ally) {
+                return ally.completed && !ally.disabled && !ally.loaded &&
+                    ally.canAttack(enemy);
+            });
+        if (targeters < std::max<std::ptrdiff_t>(8, squad.units.size() / 3))
+            continue;
+        const auto priority = enemy.kind == UnitKind::siegeTank ? 240.0 :
+            enemy.kind == UnitKind::goliath ? 120.0 :
+            enemy.kind == UnitKind::vulture ? 100.0 :
+            enemy.kind == UnitKind::wraith ? 80.0 : 0.0;
+        const auto score = distance(squad.center, enemy.position) - priority;
+        if (score < bestScore ||
+            (score == bestScore && (best == nullptr || enemy.id < best->id))) {
+            bestScore = score;
+            best = &enemy;
+        }
+    }
+    return best != nullptr ? best->position : Position{-1, -1};
 }
 
 std::vector<Command> SquadPlanner::supportEscorts(

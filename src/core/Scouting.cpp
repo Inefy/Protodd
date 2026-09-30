@@ -58,6 +58,19 @@ bool unsafeObserverRoute(const InfluenceMap& influence,
     return false;
 }
 
+bool terranObserverScreen(const GameState& state) {
+    return state.enemy.race == Race::terran &&
+        std::ranges::any_of(state.enemy.units, [&state](const UnitSnapshot& enemy) {
+            return enemy.completed && enemy.position.valid() &&
+                (enemy.visible || isBuilding(enemy.kind) ||
+                 state.frame - enemy.lastSeen <= 30 * 24) &&
+                (enemy.kind == UnitKind::missileTurret ||
+                 enemy.kind == UnitKind::scienceVessel ||
+                 enemy.kind == UnitKind::wraith ||
+                 enemy.kind == UnitKind::goliath);
+        });
+}
+
 Position friendlyMain(const GameState& state) {
     const auto depot = std::ranges::find_if(state.self.units, [](const UnitSnapshot& unit) {
         return unit.role == UnitRole::resourceDepot || unit.kind == UnitKind::nexus;
@@ -67,6 +80,37 @@ Position friendlyMain(const GameState& state) {
         return candidate.ownerId == state.self.id && candidate.center.valid();
     });
     return base != state.bases.end() ? base->center : Position{-1, -1};
+}
+
+double observerEscapeRisk(const GameState& state, const InfluenceMap& influence,
+                          const Position position) {
+    const auto cell = influence.at(position);
+    auto risk = static_cast<double>(cell.airThreat) * 8.0 +
+                static_cast<double>(cell.detection) * 2.0 +
+                static_cast<double>(influence.stormDanger(position)) * 12.0;
+    for (const auto& enemy : state.enemy.units) {
+        if (!enemy.position.valid() || !enemy.completed || enemy.disabled ||
+            (!enemy.visible && !isBuilding(enemy.kind) &&
+             state.frame - enemy.lastSeen > 8 * 24)) continue;
+        const auto detector = enemy.role == UnitRole::detector ||
+            enemy.kind == UnitKind::scienceVessel ||
+            enemy.kind == UnitKind::missileTurret;
+        const auto weaponRadius = enemy.airWeapon.damage > 0
+            ? enemy.airWeapon.maxRange + (enemy.kind == UnitKind::wraith ? 256 : 160) : 0;
+        const auto detectorRadius = detector ? std::max(224, enemy.sightRange) + 128 : 0;
+        const auto radius = std::max(weaponRadius, detectorRadius);
+        if (radius == 0) continue;
+        const auto separation = distance(position, enemy.position);
+        if (separation < radius) {
+            risk += (enemy.airWeapon.damage > 0 ? 3.0 : 1.25) *
+                    (radius - separation) / static_cast<double>(radius);
+        }
+    }
+    const auto edge = std::min({position.x, position.y,
+        state.mapWidthPixels - 1 - position.x,
+        state.mapHeightPixels - 1 - position.y});
+    if (edge < 160) risk += (160 - edge) / 160.0;
+    return risk;
 }
 
 }  // namespace
@@ -244,6 +288,7 @@ void ScoutManager::reset() noexcept {
     harasser_.reset();
     returnHarasser_.reset();
     observerEvadeUntil_.clear();
+    observerEscapeWaypoint_.clear();
 }
 
 bool ScoutManager::observerInDanger(
@@ -264,10 +309,12 @@ bool ScoutManager::observerInDanger(
         const auto detector = enemy.role == UnitRole::detector ||
             enemy.kind == UnitKind::scienceVessel ||
             enemy.kind == UnitKind::missileTurret;
-        const auto reach = std::max(enemy.airWeapon.maxRange,
-            detector ? std::max(224, enemy.sightRange) : 0);
+        const auto reach = std::max(
+            enemy.airWeapon.damage > 0
+                ? enemy.airWeapon.maxRange + (enemy.kind == UnitKind::wraith ? 256 : 160) : 0,
+            detector ? std::max(224, enemy.sightRange) + 128 : 0);
         if (reach > 0 && distanceSquared(observer.position, enemy.position) <=
-                (reach + 128) * (reach + 128)) return true;
+                reach * reach) return true;
     }
     return false;
 }
@@ -279,54 +326,87 @@ std::vector<Command> ScoutManager::protectObservers(
     for (const auto& observer : state.self.units) {
         if (observer.kind != UnitKind::observer || !observer.completed ||
             observer.loaded || observer.disabled || !observer.position.valid()) continue;
-        const auto urgent = observerInDanger(state, observer, influence);
+        const auto mission = previousOrders_.find(observer.id);
+        const auto routeBlocked = mission != previousOrders_.end() &&
+            (unsafeObserverRoute(influence, observer.position, mission->second.target) ||
+             (terranObserverScreen(state) &&
+              (mission->second.purpose == ScoutPurpose::checkTech ||
+               mission->second.purpose == ScoutPurpose::watchArmy)));
+        const auto urgent = observerInDanger(state, observer, influence) || routeBlocked;
+        if (routeBlocked) previousOrders_.erase(mission);
         if (urgent) observerEvadeUntil_[observer.id] = state.frame + 5 * 24;
         const auto lease = observerEvadeUntil_.find(observer.id);
+        if (lease != observerEvadeUntil_.end() && lease->second <= state.frame &&
+            home.valid() && distanceSquared(observer.position, home) > 256 * 256)
+            lease->second = state.frame + 24;
         if (lease == observerEvadeUntil_.end() || lease->second <= state.frame) continue;
+        if (routeBlocked && home.valid() &&
+            distanceSquared(observer.position, home) <= 256 * 256 &&
+            !observerInDanger(state, observer, influence)) {
+            observerEvadeUntil_.erase(lease);
+            observerEscapeWaypoint_.erase(observer.id);
+            orders.push_back({observer.id, CommandType::stop, -1, {-1, -1},
+                              UnitKind::unknown, 110, 0, "observer-abort-unsafe-route"});
+            continue;
+        }
         if (!urgent && home.valid() &&
             distanceSquared(observer.position, home) <= 256 * 256) {
             observerEvadeUntil_.erase(lease);
+            observerEscapeWaypoint_.erase(observer.id);
             continue;
         }
-        const UnitSnapshot* closest = nullptr;
-        auto closestDistance = std::numeric_limits<int>::max();
-        for (const auto& enemy : state.enemy.units) {
-            if (!enemy.position.valid() || !enemy.completed || enemy.disabled ||
-                (!enemy.visible && !isBuilding(enemy.kind) &&
-                 state.frame - enemy.lastSeen > 8 * 24) ||
-                (enemy.airWeapon.damage <= 0 &&
-                 enemy.role != UnitRole::detector &&
-                 enemy.kind != UnitKind::scienceVessel &&
-                 enemy.kind != UnitKind::missileTurret)) continue;
-            const auto range = distanceSquared(observer.position, enemy.position);
-            if (range < closestDistance) {
-                closestDistance = range;
-                closest = &enemy;
+        // Score the whole nearby threat field. Fleeing just the nearest
+        // detector can run into a second turret or Wraith, especially at an
+        // edge where the old "away" point is outside the map.
+        static constexpr Position directions[]{
+            {-1, -1}, {0, -1}, {1, -1}, {-1, 0},
+            {1, 0}, {-1, 1}, {0, 1}, {1, 1},
+        };
+        auto destination = observer.position;
+        auto best = std::numeric_limits<double>::infinity();
+        for (const auto direction : directions) {
+            const Position candidate{
+                std::clamp(observer.position.x + direction.x * 128, 16,
+                           std::max(16, state.mapWidthPixels - 17)),
+                std::clamp(observer.position.y + direction.y * 128, 16,
+                           std::max(16, state.mapHeightPixels - 17)),
+            };
+            if (candidate == observer.position) continue;
+            const auto halfway = moveToward(observer.position, candidate, 64.0);
+            const auto danger = std::max(observerEscapeRisk(state, influence, halfway),
+                                         observerEscapeRisk(state, influence, candidate));
+            const auto homeCost = home.valid() ? distance(candidate, home) / 4096.0 : 0.0;
+            const auto score = danger + homeCost;
+            if (score + 0.001 < best) {
+                best = score;
+                destination = candidate;
             }
         }
-        auto destination = home.valid() ? home : observer.position;
-        if (closest != nullptr && closestDistance <= 640 * 640 &&
-            closest->position != observer.position) {
-            const Position away{
-                observer.position.x * 2 - closest->position.x,
-                observer.position.y * 2 - closest->position.y,
-            };
-            destination = moveToward(observer.position, away, 512.0);
+        const auto previous = observerEscapeWaypoint_.find(observer.id);
+        if (previous != observerEscapeWaypoint_.end() &&
+            distanceSquared(observer.position, previous->second) > 40 * 40 &&
+            distanceSquared(observer.position, previous->second) <= 192 * 192) {
+            const auto halfway = moveToward(observer.position, previous->second, 64.0);
+            const auto previousRisk = std::max(
+                observerEscapeRisk(state, influence, halfway),
+                observerEscapeRisk(state, influence, previous->second)) +
+                (home.valid() ? distance(previous->second, home) / 4096.0 : 0.0);
+            const auto improvesCurrent =
+                observerEscapeRisk(state, influence, previous->second) + 0.15 <
+                observerEscapeRisk(state, influence, observer.position);
+            if (previousRisk <= best + 0.5 || improvesCurrent)
+                destination = previous->second;
         }
-        destination = influence.safestStep(
-            observer.position, destination, true, true);
-        if (destination == observer.position && closest != nullptr &&
-            closest->position != observer.position) {
-            destination = moveToward(observer.position,
-                {observer.position.x * 2 - closest->position.x,
-                 observer.position.y * 2 - closest->position.y}, 128.0);
-        }
+        if (destination.valid()) observerEscapeWaypoint_[observer.id] = destination;
         if (destination.valid() && destination != observer.position)
             orders.push_back({observer.id, CommandType::move, -1, destination,
                               UnitKind::unknown, 110, 0, "observer-evade"});
     }
     std::erase_if(observerEvadeUntil_, [&state](const auto& entry) {
         return entry.second <= state.frame;
+    });
+    std::erase_if(observerEscapeWaypoint_, [this](const auto& entry) {
+        return !observerEvadeUntil_.contains(entry.first);
     });
     return orders;
 }
@@ -511,6 +591,7 @@ std::vector<ScoutOrder> ScoutManager::assign(
     std::unordered_set<std::size_t> claimed;
     std::vector<ScoutOrder> orders;
     std::unordered_map<UnitId, ScoutOrder> nextOrders;
+    const auto terranAirScreen = terranObserverScreen(state);
     orders.reserve(availableScouts.size());
     for (const auto scoutId : availableScouts) {
         const auto scout = state.findUnit(scoutId);
@@ -524,6 +605,9 @@ std::vector<ScoutOrder> ScoutManager::assign(
         std::size_t bestIndex = 0;
         auto bestScore = -std::numeric_limits<double>::infinity();
         for (std::size_t i = 0; i < candidates.size(); ++i) {
+            if (scout->kind == UnitKind::observer && terranAirScreen &&
+                (candidates[i].purpose == ScoutPurpose::checkTech ||
+                 candidates[i].purpose == ScoutPurpose::watchArmy)) continue;
             if (claimed.contains(i) || (scout->kind == UnitKind::probe &&
                 (candidates[i].purpose == ScoutPurpose::watchArmy ||
                  candidates[i].purpose == ScoutPurpose::patrolDropPath))) {

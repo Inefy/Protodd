@@ -300,3 +300,197 @@ between several cornered Observers and home, so that step could move into
 their weapons. The candidate was reverted. The next escape change must
 consider enemy direction and friendly anti-air cover, and must be tested
 against the preserved safety build on both starting sides.
+
+## Local contain clearance screen — 29 September
+
+Two opt-in PvT variants tried targeting tanks and mines near an owned base
+before a distant Command Center. The first released too early: at frame
+18,264 it saw 26 total fighters, but 22 were allocated to base defense and
+only four formed the main army. Later an 18-unit main force pushed into the
+mine and tank line while combat reported missing mobile detection; it fell
+to two units by frame 23,520. The two games lost normally at frames 31,064
+and 44,332, with no win gain against the saved Observer-safety build.
+
+The second variant required 30 connected fighters, a detector inside the
+combat coverage radius, and a quieter perimeter. It still inherited the
+helper's outer-depot fallback and fired 29 times on side 0, often targeting
+a distant Command Center. It lost normally at frames 39,000 and 31,343;
+side 1 lost the natural by frame 17,380 before the stricter gate activated.
+The source reverted both variants and the breakout flag stays off. This
+family is closed until the bot can retain a defensible natural and measure
+the field squad separately from fighters allocated to base defense.
+
+At frame 15,000 in the second variant's side-1 loss, the natural had 13
+defenders against 16 local enemies including several tanks, while three
+fighters remained in the main squad. The bot held 591 minerals and 479 gas,
+but a blocking third-Nexus goal was reserving minerals even as the siege
+approached from roughly 800–900 pixels away. The exposed-economy check only
+considered visible attackers within 640 pixels of an owned base. The next
+experiment should cancel that distant expansion bank when a substantial
+observed mech group approaches the natural, then measure reinforcements,
+natural survival and normal wins.
+
+The mech-bank release screen did cancel planned expansion saving when a
+recent tank/vulture/goliath group approached an owned base. Both games still
+lost normally, at frames 39,744 and 30,196. On side 0 the bot held two
+Nexuses, 44 Probes and 33 fighters at frame 25,200, but lost a Nexus at
+29,856. On side 1 the natural fell before the proposed third-base bank
+decision mattered. The change was reverted; the result does not establish
+that the bank release improved a matched win outcome.
+
+A separate pending-natural defense candidate treated an unfinished Nexus at
+a neutral map marker as a defended base, and consolidated at least three
+quarters of available mobile fighters there when three attackers breached
+it. Its native scenario passed. In two normal Steamhammer games it still lost
+at frames 42,131 and 53,105. Side 0 retained two Nexuses until frame 35,202,
+substantially later than the saved Observer-safety run's first loss at
+21,409, but side 1 ultimately lost its natural at frame 44,776 and ended
+with one Nexus. The side-1 opponent path did not repeat the earlier
+frame-9,240 unfinished-natural breach, so the live run did not isolate the
+new behavior. The code was reverted, and the frozen campaign remains at
+`build/pvt-detector-rendezvous-screen-20260928/pending-natural-defense`.
+
+## Observer threat-field screen — 29 September
+
+The pending-natural side-1 trace still lost five Observers by frame 45,490.
+The last orders were `observer-evade`, including deaths at x=16 on the map
+edge; nearby threats included Wraiths, Science Vessels and Missile Turrets.
+The new isolated Observer candidate cancels an in-flight scouting order as
+soon as a newly revealed turret blocks its route, refuses escort assignment
+when the current Observer or escort anchor is exposed, begins withdrawal
+earlier around Wraiths, and scores escape steps against all nearby air and
+detection threats plus the map boundary. Native tests cover route
+cancellation, combined Vessel/Wraith pressure, boundary retreat, and unsafe
+escort anchors. Its two-side campaign is
+`build/pvt-detector-rendezvous-screen-20260928/observer-threat-field`.
+That first isolated campaign lost both normal games at frames 39,620 and
+27,561. Observer deaths were 3 and 1, versus 3 and 0 in the saved safety
+reference. The side-1 regression rules out promotion. Its game-0 trace
+contained 2,172 accepted `observer-evade` moves; some frames issued both an
+escort move and an evade move to the same Observer. On side 1 an escape
+lease ended far from home, then `scout-travel` sent the same Observer back
+across enemy territory before it died at the southern edge.
+
+The revised candidate keeps an escape waypoint while it remains safer than
+the alternatives, avoids repeating an active move command, excludes a leased
+evader from escort control, and keeps a withdrawal lease until it reaches a
+friendly Nexus. Tests cover the waypoint and homebound lease. The frozen
+revised campaign is
+`build/pvt-detector-rendezvous-screen-20260928/observer-threat-field-v5`.
+
+That screen finished with two normal losses at frames 43,774 and 59,119.
+Longer survival did not fix the two-base starvation. In side 1 the bot had
+45 Probes, 23 units in its formed MainArmy, and 2,533 banked minerals at
+frame 24,000; only 3,596 minerals remained across its two owned bases.
+The planned third at (2816,240) never started despite repeated Nexus
+orders. By frame 30,000 both owned mineral fields were empty and it still
+had only two Nexuses. At frame 48,960, 31 MainArmy units with a local
+ratio of 27.77 were ordered back to rally. Their nearby Wraith opponents
+were visible, detected, and uncloaked, yet the squad required an Observer
+because `detectionThreat` classified every Wraith as an invisible unit.
+The Nexus build-lease diagnostics show a repeated route failure: from
+frames 15,619 through 36,145, each of 20 Probe leases expired after
+45 seconds while its builder remained roughly 500–1,000 pixels short of
+the (2752,192) footprint. BWAPI still reported the footprint buildable
+and a path available. Reissuing the command without clearing that corridor
+did not produce a Nexus.
+
+The next candidate removes that unconditional Wraith/Ghost classification.
+Actual cloak, burrow, lack of detection, mines, Lurkers, and Dark Templar
+still gate advancement. It also commits a formed PvT field army of at
+least 20 units to a nearby neutral third when exactly two Nexuses remain,
+owned mineral fields have at most 5,000 minerals, and the strategic posture
+is Hold or Pressure. Base-defense squads retain their own assignments;
+the field mission uses the local third's assembly point rather than a
+distant known Command Center. Native tests cover uncloaked/cloaked Wraiths,
+the exhausted economy trigger, the detached-small-force rejection,
+healthy mineral lines, and enemy-owned sites. The paired live screen is
+`build/pvt-detector-rendezvous-screen-20260928/economic-window-v1`.
+Promotion requires actual third-base construction and improved normal
+wins; local tests and an army move alone do not establish either.
+The pair lost normally at frames 41,108 and 25,701, with no third Nexus.
+On side 0 the 24-unit field squad did move toward the third at frame 23,400,
+but the natural approach faced a larger mech wave 600 frames later and
+the force was reallocated to defense. Side 1 lost its natural at frame
+16,222, before the economic-window condition could act. This candidate
+is not promoted. The differing early opponent pressure also limits what
+the two-game outcome can attribute to this change.
+
+The next isolated revision guides a Nexus Probe toward a terrain waypoint
+after six seconds without getting materially closer to its reserved site.
+It retains the same build tile and retries the Nexus when the Probe reaches
+the footprint. Ground-threat checks prevent the guide from routing a
+builder through a currently dangerous short segment. The core and Win32
+builds pass; the two-side screen is
+`build/pvt-detector-rendezvous-screen-20260928/economic-window-builder-route-v2`.
+Its first side lost at frame 27,747 with two Nexuses at peak and 38
+accepted route-guide moves. The guide changed a leased Probe's order from
+PlaceBuilding to Move, but successive fresh A* requests sent it between
+positions near x1,200–1,300 rather than toward the x192 third-base tile.
+That is direct evidence of waypoint oscillation. A further route candidate
+keeps the full path in the pending build lease and advances its cursor only
+after the Probe reaches each waypoint; it replans only if progress toward
+that waypoint stalls. The frozen v2 finished with two normal losses at
+frames 27,747 and 25,515 and no
+third Nexus. Its first side accepted 38 guide moves but never moved the
+builder through the choke. On side 1 both Nexuses were lost under early
+mech pressure before the late economic fix could matter. The cached-path
+revision is frozen in
+`build/pvt-detector-rendezvous-screen-20260928/economic-window-cached-route-v3`
+for a two-side screen; route completion and actual Nexus start are required
+before making any strength claim.
+Its first side lost normally at frame 35,590 with no third Nexus. The
+cached guide issued 57 accepted moves. Several guided Probe leases ended
+as `order-lost` because lease ownership recognized the original Build
+order but not a guided Move; this is fixed in the next build. That same
+trace still shows repeated leases ending hundreds of pixels short of the
+third. The next candidate also records repeated failed Nexus footprints
+and, after two failures with two completed bases, switches to another
+neutral mineral site outside recently observed ground threats. A test
+ensures replanning does not cancel a Probe already leased to the new site.
+The cached-route pair finished with two normal losses at frames 35,590
+and 39,589 and no third Nexus. The alternate-site plus lease-ownership
+revision is frozen as
+`build/pvt-detector-rendezvous-screen-20260928/alternate-third-site-v4`
+for another two-side screen. Its decisive checks are a logged change of
+expansion target, a Probe reaching that alternate footprint, construction
+beginning before mineral exhaustion, and normal game outcomes.
+The v4 pair lost normally at frames 25,980 and 27,592; neither built a
+third. Side 0 did trigger alternate-site selection after the original
+route failed twice, but Terran siege destroyed its natural at frame
+16,915. The site switch had no demonstrated economic or win benefit.
+The economic-window push and builder-routing/alternate-site changes were
+removed from the default code after these negative screens. Their frozen
+DLLs and logs remain under the campaign directory for analysis.
+
+The next isolated combat candidate retains the Observer-control work and
+the visible-Wraith detection fix. A formed PvT MainArmy of at least 20
+units may clear a currently visible, targetable Terran combat unit within
+960 pixels of the squad and 1,100 pixels of an owned base when its local
+combat estimate accepts the fight at ratio at least 1.8. It never borrows
+base-defense units and still waits for detection if a real cloaked or mine
+threat blocks the advance. This is narrower than the failed distant-base
+or third-site pushes. The Win32 build and native regression pass; the
+paired screen is `build/pvt-detector-rendezvous-screen-20260928/favorable-front-v1`.
+It finished with two normal losses at frames 30,227 and 27,282. Neither
+game formed a 20-unit MainArmy at a favorable visible front before losing
+its natural, so the rule did not activate. The outcome cannot establish
+whether it would resolve the saved frame-48,960 stall. A second bounded
+version allows a 16-unit actual field squad and a Defend posture after a
+natural falls, but still requires ratio at least 1.8, a detected visible
+target near an owned base, and at least eight field members that can hit
+that target. Native tests cover those gates. Its paired screen is
+`build/pvt-detector-rendezvous-screen-20260928/favorable-front-v2`.
+
+That v2 screen completed with two normal losses at frames 31,653 and 42,441.
+It exercised the favorable-front rule on side 1 but established no win gain.
+The existing source was preserved for a fresh reference before changing the
+defense allocator. The 29 September correction addresses unavailable enemy
+health and out-of-range static-defense credit; its tests and frozen comparison
+are recorded in `docs/defense-allocation-20260929.md`.
+The fresh allocation screen finished 0/2 for both arms. The candidate lost at
+frames 30,165 and 22,756, versus 27,282 and 43,929 for its exact pre-fix source
+reference. All four results were normal, healthy and paired on actual seeds and
+starting locations; no third Nexus formed. The static-credit variant remains
+available behind an off-by-default evaluation switch. Only the unknown-health
+consistency correction remains in default allocation, without a live win claim.

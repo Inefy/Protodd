@@ -43,6 +43,12 @@ target_compile_features(protodd_hidden_health_tests PRIVATE cxx_std_20)
 protodd_enable_warnings(protodd_hidden_health_tests)
 add_test(NAME protodd_hidden_health_tests COMMAND protodd_hidden_health_tests)
 
+add_executable(protodd_defense_allocation_tests test_defense_allocation.cpp)
+target_link_libraries(protodd_defense_allocation_tests PRIVATE Protodd::Core)
+target_compile_features(protodd_defense_allocation_tests PRIVATE cxx_std_20)
+protodd_enable_warnings(protodd_defense_allocation_tests)
+add_test(NAME protodd_defense_allocation_tests COMMAND protodd_defense_allocation_tests)
+
 add_executable(protodd_policy_tests test_policy_learning.cpp)
 target_link_libraries(protodd_policy_tests PRIVATE Protodd::Core)
 target_compile_features(protodd_policy_tests PRIVATE cxx_std_20)

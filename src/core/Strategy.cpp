@@ -1075,8 +1075,13 @@ StrategicPlan StrategyEngine::planPvT(
                        minute(state) >= 19 ? 2 : 1, 51,
                        "improve zealot durability");
     }
-    if (forwardBio || threat.combatEnemiesNearMain > 0 || activeApproach(state, threat) ||
-        (minute(state) < 8 && threat.aggression > 0.62)) {
+    // This is an opening survival build. Keeping it active against a late
+    // perimeter sighting permanently caps Probe demand at fourteen and the
+    // economy at two bases, even after those mineral lines are exhausted.
+    // The shared safety pass still handles an actual late base breach.
+    if (minute(state) < 10 &&
+        (forwardBio || threat.combatEnemiesNearMain > 0 ||
+         activeApproach(state, threat) || threat.aggression > 0.62)) {
         result.name = "PvT anti-pressure hold";
         result.posture = Posture::defend;
         result.desiredBases = minute(state) < 8 ? 1 : std::min(result.desiredBases, 2);

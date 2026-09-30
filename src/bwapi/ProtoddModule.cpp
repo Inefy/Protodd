@@ -461,7 +461,8 @@ void ProtoddModule::runFrame() {
                      frameBudget_.combatCommandLimit(state_.frame)); });
         measure("observer-safety", [this] {
             for (const auto& command : scouts_.protectObservers(state_, influence_)) {
-                if (bridge_.execute(command)) debug_.orders[command.actor] = command.source;
+                if (!bridge_.commandActive(command) && bridge_.execute(command))
+                    debug_.orders[command.actor] = command.source;
             }
         });
     }
@@ -750,8 +751,13 @@ void ProtoddModule::updateCombat(
 #else
     constexpr auto emergencyConsolidation = false;
 #endif
+#ifdef PROTODD_STATIC_DEFENSE_COVERAGE
+    constexpr auto limitStaticCoverage = true;
+#else
+    constexpr auto limitStaticCoverage = false;
+#endif
     const auto formed = squads_.form(state_, friendly, enemy, plan_, retreatPoint(),
-                                     &navigation_, emergencyConsolidation);
+                                     &navigation_, emergencyConsolidation, limitStaticCoverage);
     if (std::ranges::any_of(formed, [](const Squad& squad) {
             return squad.emergencyDefense;
         })) {
@@ -978,6 +984,24 @@ void ProtoddModule::updateCombat(
             travelReason = "counterattack";
             if (firstCounterattackFrame_ < 0) firstCounterattackFrame_ = state_.frame;
         }
+        if (squad.role == SquadRole::mainArmy && vanguard == &squad &&
+            (plan_.posture == Posture::hold || plan_.posture == Posture::pressure ||
+             plan_.posture == Posture::defend)) {
+            if (const auto target = SquadPlanner::favorableTerranFrontTarget(
+                    state_, squad, estimate); target.valid()) {
+                defense = {};
+                travelGoal = target;
+                objective = hasGroundUnit && !navigation_.lineWalkable(squad.center, target)
+                    ? navigation_.nextWaypoint(squad.center, target, 7, 30000)
+                    : target;
+                if (!objective.valid()) objective = target;
+                travelReason = "clear-favorable-terran-front";
+                trace("favorableTerranFront", "EVENT,favorable-terran-front,target=" +
+                    std::to_string(target.x) + 'x' + std::to_string(target.y) +
+                    ",field=" + std::to_string(squad.units.size()) +
+                    ",ratio=" + std::to_string(estimate.ratio), 120);
+            }
+        }
         const auto reason = estimate.advanceBlocked ? "Wait for mobile detection" :
             estimate.holdScreen ? "Protect economy: intercept within reach" :
             !squad.missionReason.empty() ? squad.missionReason.c_str() :
@@ -1074,6 +1098,7 @@ void ProtoddModule::updateCombat(
              state_, formed, influence_, mobilizeDetectorReserve,
              centerBlockedMainEscort, mobilizeContestedReserve,
              directSafeRendezvous)) {
+        if (scouts_.observerEvading(order.actor, state_.frame)) continue;
         detectorEscorts_.push_back(order.actor);
         submit(order);
     }
