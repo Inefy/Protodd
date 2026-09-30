@@ -82,6 +82,26 @@ int main() {
     check(std::ranges::none_of(warning.goals, [](const ProductionGoal& goal) {
         return goal.target == UnitKind::forge && goal.priority >= 110;
     }), "Factory tech was misclassified as an all-in bio opening");
+    state.enemy.units = {depot, production};
+    auto earlyMarine = unit(95, UnitKind::marine);
+    earlyMarine.position = depot.position;
+    earlyMarine.visible = true; earlyMarine.lastSeen = state.frame;
+    earlyMarine.firstSeen = 2220;
+    state.enemy.units.push_back(earlyMarine);
+    warning = StrategyEngine{}.plan(state, {});
+    check(paid(run(warning, 150), UnitKind::forge),
+          "early Marine timing required scouting a second Barracks before fortifying");
+    state.enemy.units.back().firstSeen = 4400;
+    warning = StrategyEngine{}.plan(state, {});
+    check(std::ranges::none_of(warning.goals, [](const ProductionGoal& goal) {
+        return goal.target == UnitKind::forge && goal.priority >= 110;
+    }), "ordinary later Marine timing was treated as an early bio rush");
+    state.enemy.units.back().firstSeen = 2220;
+    state.enemy.units.push_back(factory);
+    warning = StrategyEngine{}.plan(state, {});
+    check(std::ranges::none_of(warning.goals, [](const ProductionGoal& goal) {
+        return goal.target == UnitKind::forge && goal.priority >= 110;
+    }), "early Marine timing overrode observed Factory tech");
     state.enemy.race = Race::protoss;
     production.kind = second.kind = UnitKind::gateway;
     state.enemy.units = {production, second};

@@ -773,6 +773,21 @@ StrategicPlan StrategyEngine::plan(
         !activeApproach(state, threat) && threat.immediateGround <= 0.45 &&
         threat.workerRush <= 0.30 && threat.proxy + threat.staticContain <= 0.34 &&
         threat.mostLikely != EnemyPlan::fastRush;
+    // A one-Gateway Core with no observed army can reach DTs sooner than the
+    // two-Gateway tech-gap window. Start one insurance detector after paying
+    // the first ranged defender, rather than treating detection as optional scouting.
+    const auto singleGatewayTechGap = state.enemy.race == Race::protoss &&
+        state.frame >= 3 * 60 * 24 + 30 * 24 && minute(state) < 8 &&
+        std::ranges::count(state.enemy.units, UnitKind::gateway, &UnitSnapshot::kind) == 1 &&
+        std::ranges::count(state.enemy.units, UnitKind::cyberneticsCore, &UnitSnapshot::kind) > 0 &&
+        count(state, UnitKind::cyberneticsCore, true) > 0 &&
+        count(state, UnitKind::dragoon) >= 1 && count(state, UnitKind::probe, true) >= 18 &&
+        recentEnemyCount(state, UnitKind::dragoon) == 0 &&
+        recentEnemyCount(state, UnitKind::zealot) == 0 &&
+        !hardBreachAtMain(state) && threat.combatEnemiesNearMain == 0 &&
+        !activeApproach(state, threat) && threat.immediateGround <= 0.45 &&
+        threat.workerRush <= 0.30 && threat.proxy + threat.staticContain <= 0.34 &&
+        threat.mostLikely != EnemyPlan::fastRush;
     // A scouted two-Gateway army can still conceal Dark Templar when its tech
     // has not been revisited. Once Robotics and a home Cannon are present,
     // finish one mobile detector before spending the next gas on splash.
@@ -802,9 +817,9 @@ StrategicPlan StrategyEngine::plan(
           recentEnemyCount(state, UnitKind::factory) >= 2 ||
           recentEnemyCount(state, UnitKind::starport) > 0));
     const auto insuranceDetectorOnly =
-        (mirrorTechGap || twoGatewayFogCloakRisk) && !result.requireMobileDetection;
+        (mirrorTechGap || singleGatewayTechGap || twoGatewayFogCloakRisk) && !result.requireMobileDetection;
     result.requireMobileDetection = result.requireMobileDetection ||
-        mirrorTechGap || twoGatewayFogCloakRisk;
+        mirrorTechGap || singleGatewayTechGap || twoGatewayFogCloakRisk;
     if (result.requireMobileDetection) {
         result.desiredGasWorkers = std::max(3, result.desiredGasWorkers);
         goal(result, GoalKind::build, UnitKind::assimilator, 1, 123,
@@ -1017,8 +1032,14 @@ StrategicPlan StrategyEngine::planPvT(
         });
     // Fortify only when current observations justify the economic cost.
     // Unknown Terran openings use the Gateway/Core baseline.
+    // A very early Marine is evidence even when the scout sees only one
+    // Barracks. Retain that timing warning while the opening crosses the map.
+    const auto earlyMarineTiming = std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& enemy) {
+        return enemy.kind == UnitKind::marine && enemy.completed && !enemy.hallucination &&
+               enemy.firstSeen > 0 && enemy.firstSeen <= 2 * 60 * 24;
+    });
     const auto productionRush = minute(state) < 6 &&
-        recentEnemyCount(state, UnitKind::barracks) >= 2 &&
+        (recentEnemyCount(state, UnitKind::barracks) >= 2 || earlyMarineTiming) &&
         recentEnemyCount(state, UnitKind::factory) == 0 &&
         recentEnemyCount(state, UnitKind::commandCenter) <= 1;
     const auto bioOpening = forwardBio || productionRush;
@@ -1588,9 +1609,15 @@ StrategicPlan StrategyEngine::planPvP(
         if (supplyAtLeast(state, 12))
             goal(opening, GoalKind::build, UnitKind::assimilator, 1, 99, "opening gas", true);
         if (supplyAtLeast(state, 12) && count(state, UnitKind::assimilator) > 0 &&
-            count(state, UnitKind::gateway) > 0)
-            goal(opening, GoalKind::build, UnitKind::cyberneticsCore, 1, 101,
+            count(state, UnitKind::gateway) > 0) {
+            const auto scoutedTech = std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& enemy) {
+                return enemy.kind == UnitKind::cyberneticsCore ||
+                       enemy.kind == UnitKind::roboticsFacility ||
+                       enemy.kind == UnitKind::citadelOfAdun || enemy.kind == UnitKind::templarArchives;
+            });
+            goal(opening, GoalKind::build, UnitKind::cyberneticsCore, 1, scoutedTech ? 119 : 101,
                  "ranged mirror Core before the optional melee queue", true);
+        }
         if (supplyAtLeast(state, 14)) {
             goal(opening, GoalKind::train, UnitKind::zealot, 1, 98, "opening bodyguard", true);
             goal(opening, GoalKind::build, UnitKind::cyberneticsCore, 1, 97, "timely ranged access", true);

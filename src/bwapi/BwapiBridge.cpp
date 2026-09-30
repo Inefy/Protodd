@@ -2,6 +2,7 @@
 #include "TechnologyProducer.hpp"
 
 #include "protodd/Combat.hpp"
+#include "protodd/ConstructionAnchor.hpp"
 #include "protodd/PlacementSearch.hpp"
 #include "protodd/UnitCatalog.hpp"
 #include "protodd/Technology.hpp"
@@ -2528,15 +2529,17 @@ bool BwapiBridge::build(
         lastMacroStatus_ = "build-pending";
         return false;
     }
-    const auto emergencyPylon = action.target == UnitKind::pylon &&
-        Broodwar->self()->supplyUsed() >= Broodwar->self()->supplyTotal();
-    const auto near = emergencyPylon
-                          ? BWAPI::Position(Broodwar->self()->getStartLocation())
-                          : action.target == UnitKind::nexus && plan.expansionTarget.valid()
-                          ? toBwapiPosition(plan.expansionTarget)
-                          : (plan.rallyPoint.valid()
-                                 ? toBwapiPosition(plan.rallyPoint)
-                                 : BWAPI::Position(Broodwar->self()->getStartLocation()));
+    auto home = BWAPI::Position(Broodwar->self()->getStartLocation());
+    if (usesHomeConstructionAnchor(action.target)) {
+        const auto homeNexus = Broodwar->getClosestUnit(home,
+            Filter::IsOwned && Filter::IsCompleted &&
+                Filter::GetType == UnitTypes::Protoss_Nexus);
+        if (homeNexus != nullptr) home = homeNexus->getPosition();
+    }
+    // Builder route checks must use the home placement anchor, not an unsafe
+    // forward rally which the placement search will never use for this tech.
+    const auto near = toBwapiPosition(constructionBuilderAnchor(
+        action.target, fromBwapi(home), plan.rallyPoint, plan.expansionTarget));
     const auto builder = findBuilder(type, near, influence, unavailableBuilders);
     if (builder == nullptr) {
         lastMacroStatus_ = "build-no-builder";

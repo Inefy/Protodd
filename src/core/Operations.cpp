@@ -1,4 +1,5 @@
 #include "protodd/Operations.hpp"
+#include "protodd/Combat.hpp"
 #include "protodd/UnitCatalog.hpp"
 
 #include <algorithm>
@@ -28,6 +29,38 @@ void ExpansionCoordinator::update(StrategicPlan& plan, const GameState& state,
     if (constructing) {
         reason_ = "Protect Nexus while it warps in";
         return;
+    }
+    std::vector<UnitSnapshot> siteEnemies;
+    for (const auto& enemy : state.enemy.units) {
+        const auto radius = std::max(480, enemy.groundWeapon.maxRange + 128);
+        if (enemy.completed && !enemy.disabled && !enemy.loaded &&
+            !enemy.hallucination && !enemy.invincible && enemy.position.valid() &&
+            (enemy.visible || (enemy.lastSeen > 0 && state.frame - enemy.lastSeen <= 5 * 24)) &&
+            enemy.groundWeapon.damage > 0 &&
+            distanceSquared(enemy.position, plan.expansionTarget) <= radius * radius)
+            siteEnemies.push_back(enemy);
+    }
+    if (!siteEnemies.empty()) {
+        std::vector<UnitSnapshot> cover;
+        for (const auto& unit : state.self.units) {
+            if (unit.completed && unit.powered && !unit.loaded && !unit.disabled &&
+                !unit.hallucination && unit.position.valid() &&
+                (isCombatUnit(unit.kind) || isStaticDefense(unit.kind)) &&
+                distanceSquared(unit.position, plan.expansionTarget) <= 384 * 384 &&
+                std::ranges::any_of(siteEnemies, [&unit](const UnitSnapshot& enemy) {
+                    return unit.canAttack(enemy);
+                }))
+                cover.push_back(unit);
+        }
+        // A strong army at home does not protect the construction site. Keep
+        // its assembly mission, but spend only after a local screen can fight.
+        const auto estimate = CombatEvaluator{}.evaluate(cover, siteEnemies, 1.25, 0.15, false);
+        if (cover.empty() || estimate.ratio < 1.25) {
+            plan.deferExpansion = true;
+            releaseBuilder_ = feedback.pending;
+            reason_ = "Clear expansion threats before committing Nexus";
+            return;
+        }
     }
     // A worker still travelling does not trigger this circuit breaker. Stop
     // the stale order before releasing the bank; otherwise it can spend later.

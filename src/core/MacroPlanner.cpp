@@ -214,7 +214,9 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         const auto urgentStaticAnchor =
             (target == UnitKind::forge || target == UnitKind::photonCannon) &&
             priority >= 110;
-        if (urgentStaticAnchor || (target == UnitKind::nexus && priority >= 120)) {
+        const auto urgentMirrorCore = target == UnitKind::cyberneticsCore && priority >= 119 &&
+            state.enemy.race == Race::protoss && state.frame < 8 * 60 * 24;
+        if (urgentStaticAnchor || urgentMirrorCore || (target == UnitKind::nexus && priority >= 120)) {
             ledger.protect(minerals, gas);
             return;
         }
