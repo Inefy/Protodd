@@ -31,11 +31,13 @@ def _offer(bucket, item, seen, limit, rng):
 
 def collect_multislot_windows(release, split, group, *, history=8,
                               per_game_category_limit=2,
-                              category_limit=64, seed=42):
+                              category_limit=64, seed=42, maximum_frame=None):
     if split not in ("train", "validation") or set(group) != set(MATCHUPS):
         raise ValueError("train or validation three-matchup cohort required")
     if history < 1 or per_game_category_limit < 1 or category_limit < 1:
         raise ValueError("positive collection limits required")
+    if maximum_frame is not None and (type(maximum_frame) is not int or maximum_frame < 24):
+        raise ValueError("maximum frame must cover at least one cadence window")
     selected = {game_id for ids in group.values() for game_id in ids}
     if len(selected) != sum(len(ids) for ids in group.values()):
         raise ValueError("duplicate game in collection cohort")
@@ -54,6 +56,8 @@ def collect_multislot_windows(release, split, group, *, history=8,
         local = defaultdict(list)
         local_seen = Counter()
         for sequence in cadence_sequences(trajectory_shard(directory), history=history):
+            if maximum_frame is not None and sequence["observation"]["frame"] > maximum_frame:
+                continue
             category = _category(matchup, sequence)
             windows[category] += 1
             local_seen[category] += 1

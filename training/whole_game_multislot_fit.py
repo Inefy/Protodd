@@ -69,6 +69,11 @@ def _initialize(model, checkpoint, identity_sha):
     saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
     if saved.get("source_identity_sha256") != identity_sha:
         raise ValueError("initial backbone belongs to another replay release")
+    if saved.get("schema") == SCHEMA:
+        # Continue every learned slot and recurrent tensor, not only the
+        # original one-command backbone used to bootstrap this architecture.
+        model.load_state_dict(saved["state_dict"], strict=True)
+        return
     baseline = WholeGameModel(width=model.width,
                               mixture_components=model.mixture_components)
     baseline.load_state_dict(saved["state_dict"], strict=True)
@@ -131,6 +136,8 @@ def fit(args):
             args.per_game_category_limit < 1 or args.learning_rate <= 0 or
             args.encoding_cache_mb < 1 or args.validation_limit_per_category < 1):
         raise ValueError("invalid fit limits")
+    if args.maximum_frame is not None and args.maximum_frame < 24:
+        raise ValueError("maximum frame must cover at least one cadence window")
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
@@ -179,6 +186,7 @@ def fit(args):
                 batch_size=args.batch_size, width=args.width,
                 mixture_components=args.mixture_components,
                 maximum_slots=args.maximum_slots, history=args.history,
+                maximum_frame=args.maximum_frame,
                 category_limit=args.category_limit,
                 per_game_category_limit=args.per_game_category_limit,
                 learning_rate=args.learning_rate, seed=args.seed,
@@ -230,6 +238,7 @@ def fit(args):
         group = groups[order[slot]]
         buckets, info = collect_multislot_windows(
             args.release, "train", group, history=args.history,
+            maximum_frame=args.maximum_frame,
             per_game_category_limit=args.per_game_category_limit,
             category_limit=args.category_limit, seed=args.seed + epoch)
         cache = ObservationCache(args.encoding_cache_mb * 1024 * 1024)
@@ -275,6 +284,7 @@ def fit(args):
     validation, validation_info = collect_multislot_windows(
         args.validation_release, "validation", validation_group,
         history=args.history,
+        maximum_frame=args.maximum_frame,
         per_game_category_limit=args.per_game_category_limit,
         category_limit=args.category_limit, seed=args.seed)
     model.eval()
@@ -326,6 +336,8 @@ def main():
     parser.add_argument("--mixture-components", type=int, default=12)
     parser.add_argument("--maximum-slots", type=int, default=6)
     parser.add_argument("--history", type=int, default=8)
+    parser.add_argument("--maximum-frame", type=int,
+                        help="Limit retained windows to an early-game training scope")
     parser.add_argument("--category-limit", type=int, default=64)
     parser.add_argument("--per-game-category-limit", type=int, default=2)
     parser.add_argument("--validation-limit-per-category", type=int, default=4)

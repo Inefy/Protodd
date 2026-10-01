@@ -7,6 +7,8 @@
 #include "WholeGameRuntime.hpp"
 
 #include "protodd/Combat.hpp"
+#include "protodd/AllInOpening.hpp"
+#include "protodd/HybridPolicy.hpp"
 #include "protodd/Diagnostics.hpp"
 #include "protodd/Operations.hpp"
 #include "protodd/CommandBus.hpp"
@@ -89,6 +91,7 @@ private:
     StrategyEngine strategy_;
 #endif
     StrategicDirector strategicDirector_;
+    AllInOpeningPlanner allIn_;
     ExpansionCoordinator expansion_;
 #ifdef PROTODD_PVZ_EARLY_MINERAL_FALLBACK
     MacroPlanner macro_{true, true};
@@ -122,6 +125,13 @@ private:
     std::vector<std::int64_t> callbackTimes_;
     bool callbackAudit_{};
     WholeGameRuntime wholeGame_;
+    struct HybridProposal { Command command; Frame frame{}; };
+    std::vector<HybridProposal> hybridProposals_;
+    bool hybridControl_{};
+    std::uint64_t hybridReceived_{};
+    std::uint64_t hybridTargets_{};
+    std::uint64_t hybridSubmitted_{};
+    std::uint64_t hybridAccepted_{};
     bool validatedLearning_{false};
     OpeningStyle openingStyle_{OpeningStyle::standard};
     std::string opponentName_;

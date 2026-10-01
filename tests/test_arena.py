@@ -11,6 +11,36 @@ from training.arena import prepare, inspect, verify
 
 
 class ArenaTests(unittest.TestCase):
+    def test_allin_profile_is_development_only_and_frozen(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = self.fixture(Path(temp))
+            for opening, purpose in [('bad', 'development'), ('two-gate-zealot', 'final-test')]:
+                with self.assertRaisesRegex(ValueError, 'all-in opening requires'):
+                    prepare(**args, purpose=purpose, all_in_opening=opening)
+                self.assertFalse(args['output'].exists())
+            prepare(**args, all_in_opening='two-gate-zealot')
+            path = args['output'] / 'server/bots/Protodd/read/AllIn-opening.txt'
+            self.assertEqual(path.read_text(), 'two-gate-zealot\n')
+            self.assertTrue(verify(args['output'])['verified'])
+            path.write_text('dt-pressure\n')
+            with self.assertRaises(ValueError):
+                verify(args['output'])
+
+    def test_hybrid_authority_is_development_only_and_frozen(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = self.fixture(Path(temp))
+            for mode, purpose in [('invalid', 'development'), ('target', 'final-test'), ('shadow', 'training')]:
+                with self.assertRaisesRegex(ValueError, 'hybrid comparison requires'):
+                    prepare(**args, purpose=purpose, whole_game_hybrid_mode=mode)
+                self.assertFalse(args['output'].exists())
+            prepare(**args, whole_game_hybrid_mode='shadow')
+            path = args['output'] / 'server/bots/Protodd/read/WholeGame-hybrid-mode.txt'
+            self.assertEqual(path.read_text(), 'shadow\n')
+            self.assertTrue(verify(args['output'])['verified'])
+            path.write_text('target\n')
+            with self.assertRaises(ValueError):
+                verify(args['output'])
+
     def test_policy_off_is_development_only_and_pinned(self):
         with tempfile.TemporaryDirectory() as temp:
             args = self.fixture(Path(temp))

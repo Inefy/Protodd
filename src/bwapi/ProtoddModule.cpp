@@ -122,7 +122,24 @@ void ProtoddModule::onStart() {
     BWAPI::Broodwar->enableFlag(BWAPI::Flag::UserInput);
     bridge_.onStart();
     wholeGame_.start();
+    hybridProposals_.clear();
+    hybridReceived_ = hybridTargets_ = hybridSubmitted_ = hybridAccepted_ = 0;
+    hybridControl_ = false;
+#ifdef PROTODD_WHOLE_GAME_HYBRID
+    hybridControl_ = wholeGame_.controlling() &&
+        !readFile("bwapi-data/read/WholeGame-hybrid-mode.txt").starts_with("shadow");
+#endif
     state_ = bridge_.observe();
+    if (log_) {
+        log_ << "CONTROLLER,whole-game,weights=" << wholeGame_.modelLoaded()
+             << ",control=" << wholeGame_.controlling()
+#ifdef PROTODD_WHOLE_GAME_HYBRID
+             << ",mode=hybrid,hybridControl=" << hybridControl_
+#else
+             << ",mode=exclusive-or-shadow"
+#endif
+             << '\n';
+    }
     navigation_ = bridge_.navigationGrid();
     opponent_.reset(state_.enemy.race);
     strategicDirector_.reset();
@@ -267,6 +284,17 @@ void ProtoddModule::onStart() {
         history_.merge(readFile(std::filesystem::path("bwapi-data/write") / historyFile));
     openingStyle_ = history_.choose(opponentName_, mapName_,
                                     stableSeed(opponentName_ + "|" + mapName_), !frozenLearning);
+    allIn_.reset(AllInBuild::standard);
+#ifdef PROTODD_ALLIN_LOCAL_EVALUATION
+    auto opening = readFile("bwapi-data/read/AllIn-opening.txt");
+    if (opening.empty() || opening.starts_with("auto")) {
+        // PvP has the strongest comparative evidence. Other matchups remain
+        // opt-in experiments until prospective games validate them.
+        opening = state_.enemy.race == Race::protoss ? "two-gate-zealot" : "standard";
+    }
+    allIn_.reset(allInBuild(opening));
+#endif
+    if (log_) log_ << "ALLIN_SELECTION," << allInBuildName(allIn_.build()) << '\n';
     if (log_) {
         log_ << "LEARNING,mode=" << (frozenLearning ? "frozen" :
                     validatedLearning_ ? "validated-train" : "online") << '\n';
@@ -290,6 +318,9 @@ void ProtoddModule::onEnd(const bool winner) {
             static_cast<std::streamsize>(callbackTimes_.size()*sizeof(std::int64_t)));
     }
     wholeGame_.end();
+    if (log_) log_ << "HYBRID_SUMMARY,received=" << hybridReceived_
+                   << ",targets=" << hybridTargets_ << ",submitted=" << hybridSubmitted_
+                   << ",accepted=" << hybridAccepted_ << '\n';
     policy_.end(winner);
     state_.frame = BWAPI::Broodwar->getFrameCount();
     sampleTelemetry();
@@ -410,13 +441,49 @@ void ProtoddModule::runFrame() {
     if (wholeGame_.enabled()) measure("whole-game-observe", [this, &learnedCommands] {
         learnedCommands = wholeGame_.observe();
     });
-#ifdef PROTODD_WHOLE_GAME_CONTROL
+#ifdef PROTODD_WHOLE_GAME_HYBRID
+    std::erase_if(hybridProposals_, [this](const HybridProposal& proposal) {
+        return !hybridControl_ || !wholeGame_.controlling() || state_.frame - proposal.frame >= 24;
+    });
+    if (wholeGame_.controlling()) {
+        hybridReceived_ += learnedCommands.size();
+        for (const auto& candidate : learnedCommands) {
+            const auto& command = candidate.command;
+            if (command.getType() != BWAPI::UnitCommandTypes::Attack_Unit ||
+                !command.getUnit() || !command.getTarget()) continue;
+            ++hybridTargets_;
+            if (!hybridControl_) continue;
+            Command proposal;
+            proposal.actor = command.getUnit()->getID();
+            proposal.type = CommandType::attackUnit;
+            proposal.targetUnit = command.getTarget()->getID();
+            std::erase_if(hybridProposals_, [&proposal](const HybridProposal& pending) {
+                return pending.command.actor == proposal.actor;
+            });
+            hybridProposals_.push_back({std::move(proposal), state_.frame});
+        }
+    }
+#elif defined(PROTODD_WHOLE_GAME_CONTROL)
     if (state_.self.race == Race::protoss && wholeGame_.controlling()) {
         if (!learnedCommands.empty()) measure("whole-game-control", [this, &learnedCommands] {
-            for (const auto& candidate : learnedCommands)
-                static_cast<void>(bridge_.executeWholeGame(candidate.command));
+            for (const auto& candidate : learnedCommands) {
+                ++commandsAttempted_;
+                if (bridge_.executeWholeGame(candidate.command)) ++commandsAccepted_;
+            }
         });
         measure("damage-log", [this] { logDamage(); });
+        if (state_.frame % 24 == 0) measure("diagnostics", [this] {
+            sampleTelemetry();
+            logDiagnostics();
+        });
+        if (log_ && state_.frame % 120 == 0) {
+            log_ << "LEARNED_STATE," << state_.frame << ",controller=whole-game"
+                 << ",weights=" << wholeGame_.modelLoaded()
+                 << ",control=" << wholeGame_.controlling()
+                 << ",minerals=" << state_.self.minerals << ",gas=" << state_.self.gas
+                 << ",composition=" << composition(state_.self.units, false) << '\n';
+            log_.flush();
+        }
         return;
     }
 #endif
@@ -554,7 +621,14 @@ void ProtoddModule::updateStrategy() {
             std::to_string(target.x) + 'x' + std::to_string(target.y), 120);
     }
 #endif
-    if (policy_.enabled() && action == PolicyAction::defend &&
+    allIn_.apply(candidate, state_, opponent_.assessment());
+    if (allIn_.active()) {
+        trace("allin", "ALLIN,build=" + std::string(allInBuildName(allIn_.build())) +
+            ",phase=" + std::string(allInPhaseName(allIn_.phase())) + ",launch=" +
+            std::to_string(allIn_.launchFrame()) + ",reason=" +
+            std::string(allIn_.transitionReason()), 240);
+    }
+    if (!allIn_.active() && policy_.enabled() && action == PolicyAction::defend &&
         candidate.posture != Posture::defend && candidate.posture != Posture::recover) {
 #ifdef PROTODD_COVERED_PRESSURE_RELEASE
         if (!policy_.weightsLoaded())
@@ -1060,10 +1134,21 @@ void ProtoddModule::updateCombat(
                  detectorWaitVolley)) {
             submit(order);
         }
+#ifdef PROTODD_WHOLE_GAME_HYBRID
+        for (const auto& pending : hybridProposals_) {
+            if (auto proposal = hybridCombatProposal(pending.command, pending.frame,
+                    state_.frame, squad, estimate, targets, defense)) {
+                submit(std::move(*proposal));
+                ++hybridSubmitted_;
+            }
+        }
+#endif
         if (aggressive)
             for (const auto& order : SquadPlanner::supportEscorts(squad, objective)) submit(order);
     }
     if (logSquads) lastSquadLogFrame_ = state_.frame;
+    // A proposal gets one arbitration attempt; never replay it across combat ticks.
+    hybridProposals_.clear();
 
     for (const auto& order : clearExpansionFootprint(state_, plan_.expansionTarget,
              expansionAssemblyPoint(state_, plan_.expansionTarget, retreatPoint()))) submit(order);
@@ -1135,6 +1220,7 @@ void ProtoddModule::updateCombat(
         const auto accepted = bridge_.execute(command);
         if (accepted) {
             ++commandsAccepted_;
+            if (command.source == "hybrid-trained") ++hybridAccepted_;
             commands_.markIssued(command);
             debug_.orders[command.actor] = command.source;
         }

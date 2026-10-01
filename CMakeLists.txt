@@ -38,6 +38,8 @@ set(BWAPI_ROOT "" CACHE PATH "Path to an unpacked BWAPI 4.4.0 release")
 set(BWAPI_LIBRARY "" CACHE FILEPATH "Path to a 32-bit BWAPILIB.lib")
 set(PROTODD_WHOLE_GAME_WEIGHTS "" CACHE FILEPATH "Whole-game model weights to embed in Protodd.dll")
 option(PROTODD_WHOLE_GAME_CONTROL "Allow the embedded whole-game policy to issue BWAPI commands" OFF)
+option(PROTODD_WHOLE_GAME_HYBRID "Retain native systems and arbitrate learned combat targets in local evaluation" OFF)
+option(PROTODD_ALLIN_LOCAL_EVALUATION "Evaluate replay-derived aggressive openings with bounded transitions" OFF)
 option(PROTODD_WHOLE_GAME_EVALUATION_BUILD
     "Build a six-slot controller for local evaluation before it has a promotion receipt" OFF)
 set(PROTODD_WHOLE_GAME_PROMOTION_RECEIPT "" CACHE FILEPATH
@@ -54,10 +56,12 @@ add_library(protodd_core OBJECT
     src/core/InfluenceMap.cpp
     src/core/Navigation.cpp
     src/core/Strategy.cpp
+    src/core/AllInOpening.cpp
     src/core/MacroPlanner.cpp
     src/core/Combat.cpp
     src/core/TacticalTargetModel.cpp
     src/core/CommandBus.cpp
+    src/core/HybridPolicy.cpp
     src/core/Workers.cpp
     src/core/Scouting.cpp
     src/core/Learning.cpp
@@ -125,6 +129,13 @@ if(PROTODD_BUILD_BWAPI_MODULE)
     endif()
     if(PROTODD_WHOLE_GAME_EVALUATION_BUILD AND NOT PROTODD_WHOLE_GAME_CONTROL)
         message(FATAL_ERROR "Evaluation build requires whole-game control")
+    endif()
+    if(PROTODD_WHOLE_GAME_HYBRID AND
+       (NOT PROTODD_WHOLE_GAME_CONTROL OR NOT PROTODD_WHOLE_GAME_EVALUATION_BUILD))
+        message(FATAL_ERROR "Hybrid control requires a weighted local evaluation controller")
+    endif()
+    if(PROTODD_ALLIN_LOCAL_EVALUATION AND NOT PROTODD_WHOLE_GAME_HYBRID)
+        message(FATAL_ERROR "All-in evaluation requires the weighted hybrid controller")
     endif()
     if(NOT WIN32)
         message(FATAL_ERROR "The injected BWAPI module must be built for 32-bit Windows")
@@ -320,6 +331,12 @@ if(PROTODD_BUILD_BWAPI_MODULE)
             endif()
         endif()
         target_compile_definitions(protodd_bwapi PRIVATE PROTODD_WHOLE_GAME_CONTROL=1)
+        if(PROTODD_WHOLE_GAME_HYBRID)
+            target_compile_definitions(protodd_bwapi PRIVATE PROTODD_WHOLE_GAME_HYBRID=1)
+        endif()
+        if(PROTODD_ALLIN_LOCAL_EVALUATION)
+            target_compile_definitions(protodd_bwapi PRIVATE PROTODD_ALLIN_LOCAL_EVALUATION=1)
+        endif()
     endif()
     target_include_directories(protodd_bwapi PRIVATE
         "${BWAPI_INCLUDE_DIR}"
@@ -437,6 +454,21 @@ if(PROTODD_BUILD_TESTS)
         execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import torch, numpy"
             RESULT_VARIABLE PROTODD_MODEL_TRAINING_AVAILABLE OUTPUT_QUIET ERROR_QUIET)
         if(PROTODD_MODEL_TRAINING_AVAILABLE EQUAL 0)
+            foreach(PROTODD_PILOT_TEST IN ITEMS mine_allins hybrid_campaign_review allin_campaign_review)
+                add_test(NAME "protodd_${PROTODD_PILOT_TEST}_tests"
+                    COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+                        -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p "test_${PROTODD_PILOT_TEST}.py")
+                set_tests_properties("protodd_${PROTODD_PILOT_TEST}_tests"
+                    PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+            endforeach()
+            foreach(PROTODD_MULTISLOT_TEST IN ITEMS fit model batch audit export promotion)
+                add_test(NAME "protodd_whole_game_multislot_${PROTODD_MULTISLOT_TEST}_tests"
+                    COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+                        -s "${CMAKE_CURRENT_SOURCE_DIR}/tests"
+                        -p "test_whole_game_multislot_${PROTODD_MULTISLOT_TEST}.py")
+                set_tests_properties("protodd_whole_game_multislot_${PROTODD_MULTISLOT_TEST}_tests"
+                    PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+            endforeach()
             add_test(NAME protodd_tensor_shards_tests
                 COMMAND "${Python3_EXECUTABLE}" -m unittest discover
                     -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p test_tensor_shards.py)

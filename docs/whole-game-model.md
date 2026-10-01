@@ -1,5 +1,19 @@
 # Whole-game learned controller
 
+## Latest Direction - 1 October 2026
+
+The user's requested [trained/native hybrid](hybrid-controller-20261001.md)
+keeps native economy, production, scouting and combat safety running while a
+continued six-slot model supplies bounded local target proposals. The earlier
+exclusive weighted controller starved its opening and lost all four BananaBrain
+games. The hybrid is an opt-in evaluation build, not a promoted ladder model.
+See that report for exact weights, build instructions and matched game evidence.
+
+The subsequent [ladder-derived all-in repertoire](ladder-allins-20261001.md)
+uses a 21,798-game raw win/loss scan to select early pressure and bounded economic
+transitions. It is native strategy inside the weighted hybrid, not newly trained
+neural build weights or tournament promotion.
+
 ## Active direction — 24 September 2026
 
 The [worker spending training pilots](worker-outcome-training-20260925.md)

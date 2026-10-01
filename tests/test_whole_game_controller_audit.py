@@ -30,6 +30,11 @@ class ControllerAuditTests(unittest.TestCase):
             self.assertTrue(report["controller_operational"])
             self.assertFalse(report["strength_validated"])
             self.assertEqual(report["games"][0]["learned_commands_accepted"], 2)
+            with log.open('a') as stream:
+                stream.write('CONTROLLER,whole-game,weights=1,control=1,mode=hybrid,hybridControl=1\n')
+            hybrid = summarize(campaign)
+            self.assertFalse(hybrid['controller_operational'])
+            self.assertIn('hybrid games cannot certify', hybrid['games'][0]['reason'])
             log.write_text("PERF_SUMMARY,241,0.4,25.5,0,0,0,0\n")
             self.assertFalse(summarize(campaign)["controller_operational"])
             (received / "WholeGame-controller.txt").unlink()

@@ -21,10 +21,15 @@ public:
     [[nodiscard]] std::vector<LegalWholeGameCommand> observe();
     void end();
     [[nodiscard]] bool enabled() const noexcept { return enabled_; }
+    [[nodiscard]] bool modelLoaded() const noexcept { return model_ != nullptr; }
     // Version-1 and synthetic execution probes remain diagnostic; only the
     // six-slot architecture can replace the established tournament controller.
     [[nodiscard]] bool controlling() const noexcept {
+#ifdef PROTODD_WHOLE_GAME_CONTROL
         return model_ != nullptr && model_->multiSlot();
+#else
+        return false;
+#endif
     }
 private:
     bool enabled_{};

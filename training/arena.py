@@ -26,7 +26,8 @@ def write_json(path, value):
 def prepare(template, output, dll, opponents, maps, purpose="development", race="Protoss", rounds=2, port=1347,
             server_jar=None, client_bundle=None, whole_game_observe=False, production_shadow=None, frame_limit=None,
             production_control_receipt=None, production_screen_receipt=None, worker_training_intervention=None,
-            tactical_target_weights=None, slow_frame_allowance=None, policy_mode="frozen"):
+            tactical_target_weights=None, slow_frame_allowance=None, policy_mode="frozen",
+            whole_game_hybrid_mode=None, all_in_opening=None):
     template, output, dll = map(lambda p: Path(p).resolve(), (template, output, dll))
     if purpose not in ("training", "development", "final-test"):
         raise ValueError("unknown campaign purpose")
@@ -36,6 +37,13 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
         raise ValueError("race and an even number of rounds >=2 are required")
     if whole_game_observe and race != "Protoss":
         raise ValueError("whole-game live pilot currently supports Protoss only")
+    if whole_game_hybrid_mode is not None and (purpose != 'development' or race != 'Protoss' or
+                                              whole_game_hybrid_mode not in ('shadow', 'target')):
+        raise ValueError('hybrid comparison requires Protoss development and shadow/target mode')
+    if all_in_opening is not None and (purpose != 'development' or race != 'Protoss' or
+            all_in_opening not in ('auto', 'standard', 'two-gate-zealot', 'three-gate-dragoon',
+                                  'four-gate-dragoon', 'dt-pressure')):
+        raise ValueError('all-in opening requires a Protoss development campaign and known profile')
     if output.exists() or not dll.is_file() or not 1024 <= port <= 65535:
         raise ValueError("existing output, missing DLL or invalid port")
     if production_shadow and (race != 'Protoss' or not Path(production_shadow).is_file()):
@@ -154,6 +162,10 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
         shutil.copy2(production_screen_receipt,target/'read/ProductionDemand-screen-receipt.json')
     if whole_game_observe:
         (target / "read/WholeGame-observe.txt").write_text("observe\n")
+    if whole_game_hybrid_mode is not None:
+        (target / "read/WholeGame-hybrid-mode.txt").write_text(whole_game_hybrid_mode + '\n')
+    if all_in_opening is not None:
+        (target / "read/AllIn-opening.txt").write_text(all_in_opening + '\n')
     if tactical_target_weights:
         shutil.copy2(tactical_target_weights, target / "read/TacticalTarget-weights.bin")
         (target / "read/TacticalTarget-mode.txt").write_text("local-target\n")
@@ -261,6 +273,11 @@ def main():
     prepare_parser.add_argument("--server-jar", type=Path, help="Explicitly rebuilt manager, pinned in the campaign")
     prepare_parser.add_argument("--client-bundle", type=Path, help="Rebuilt local client JAR and owned-process cleanup helper")
     prepare_parser.add_argument("--whole-game-observe", action="store_true", help="Record legal live observations from the opt-in BWAPI pilot")
+    prepare_parser.add_argument('--whole-game-hybrid-mode', choices=('shadow', 'target'),
+                                help='Frozen local hybrid authority; requires a hybrid evaluation DLL')
+    prepare_parser.add_argument('--all-in-opening', choices=('auto', 'standard', 'two-gate-zealot',
+        'three-gate-dragoon', 'four-gate-dragoon', 'dt-pressure'),
+        help='Frozen local replay-derived opening profile; requires all-in evaluation DLL')
     prepare_parser.add_argument('--production-shadow', type=Path, help='Frozen production-demand weights; shadow only')
     prepare_parser.add_argument('--frame-limit',type=int,help='Bounded development/training scenario; not strength evidence')
     prepare_parser.add_argument('--production-control-receipt',type=Path,help='Passing shadow/feedback receipt for bounded local train-unit scenarios')

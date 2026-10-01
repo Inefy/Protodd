@@ -175,11 +175,13 @@ def summarize(rows):
 
 
 def audit(checkpoint, train_release, validation_release, output, *,
-          games_per_matchup=8, seed=42, device="cuda"):
+          games_per_matchup=8, seed=42, device="cuda", maximum_frame=None):
     checkpoint, train_release, validation_release, output = map(
         Path, (checkpoint, train_release, validation_release, output))
     if output.exists() or games_per_matchup < 1 or device not in ("cpu", "cuda"):
         raise ValueError("existing output or invalid audit limits")
+    if maximum_frame is not None and (type(maximum_frame) is not int or maximum_frame < 24):
+        raise ValueError("maximum frame must cover at least one cadence window")
     if device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA unavailable")
     train_sha, validation_sha = validate_release_pair(
@@ -213,6 +215,8 @@ def audit(checkpoint, train_release, validation_release, output, *,
             terrain = static_grid(load_terrain(directory))
             memory = None
             for sequence in cadence_sequences(trajectory_shard(directory)):
+                if maximum_frame is not None and sequence["observation"]["frame"] > maximum_frame:
+                    continue
                 batch, ids, _ = encode_observation(sequence["observation"], terrain)
                 prediction = model.forward_slots(
                     {name: value.to(device) for name, value in batch.items()},
@@ -235,6 +239,7 @@ def audit(checkpoint, train_release, validation_release, output, *,
                   training_identity_sha256=train_sha,
                   validation_identity_sha256=validation_sha,
                   device=device, games=dict(games), strength_validated=False,
+                  maximum_frame=maximum_frame,
                   overall=summarize(rows),
                   by_matchup={matchup: summarize([
                       row for row in rows if row["matchup"] == matchup])
@@ -252,10 +257,12 @@ def main():
     parser.add_argument("--games-per-matchup", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
+    parser.add_argument("--maximum-frame", type=int,
+                        help="Audit an early-game scope with continuous causal memory")
     args = parser.parse_args()
     report = audit(args.checkpoint, args.train_release, args.validation_release,
                    args.output, games_per_matchup=args.games_per_matchup,
-                   seed=args.seed, device=args.device)
+                   seed=args.seed, device=args.device, maximum_frame=args.maximum_frame)
     print(json.dumps(dict(output=str(args.output.resolve()),
                           overall=report["overall"]), indent=2))
 

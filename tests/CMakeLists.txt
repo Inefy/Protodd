@@ -7,6 +7,18 @@ protodd_enable_warnings(protodd_tests)
 
 add_test(NAME protodd_core_tests COMMAND protodd_tests)
 
+add_executable(protodd_hybrid_policy_tests test_hybrid_policy.cpp)
+target_link_libraries(protodd_hybrid_policy_tests PRIVATE Protodd::Core)
+target_compile_features(protodd_hybrid_policy_tests PRIVATE cxx_std_20)
+protodd_enable_warnings(protodd_hybrid_policy_tests)
+add_test(NAME protodd_hybrid_policy_tests COMMAND protodd_hybrid_policy_tests)
+
+add_executable(protodd_allin_opening_tests test_allin_opening.cpp)
+target_link_libraries(protodd_allin_opening_tests PRIVATE Protodd::Core)
+target_compile_features(protodd_allin_opening_tests PRIVATE cxx_std_20)
+protodd_enable_warnings(protodd_allin_opening_tests)
+add_test(NAME protodd_allin_opening_tests COMMAND protodd_allin_opening_tests)
+
 add_executable(protodd_deep_audit_tests test_deep_audit.cpp)
 target_link_libraries(protodd_deep_audit_tests PRIVATE Protodd::Core)
 target_compile_features(protodd_deep_audit_tests PRIVATE cxx_std_20)

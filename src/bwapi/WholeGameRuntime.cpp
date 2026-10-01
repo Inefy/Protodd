@@ -323,14 +323,15 @@ std::vector<LegalWholeGameCommand> WholeGameRuntime::observe() {
                 }
             }
             }
-            if (inferenceOutput_ && frame % 240 == 7 &&
-                prediction.heads.contains("domain") && prediction.heads.contains("kind")) {
+            if (inferenceOutput_ && frame % 240 == 7) {
                 const auto top = [](const std::vector<float>& logits) {
                     return std::distance(logits.begin(), std::max_element(logits.begin(), logits.end()));
                 };
                 inferenceOutput_ << frame << ',' << encoded.entityIds.size() << ',' << encoded.overflow
-                                 << ',' << elapsed << ',' << top(prediction.heads.at("domain"))
-                                 << ',' << top(prediction.heads.at("kind")) << '\n';
+                                 << ',' << elapsed << ','
+                                 << (prediction.heads.contains("domain") ? top(prediction.heads.at("domain")) : -1)
+                                 << ',' << (prediction.heads.contains("kind") ? top(prediction.heads.at("kind")) : -1)
+                                 << '\n';
             }
         } catch (const std::exception& error) {
             std::ofstream failure("bwapi-data/write/WholeGame-model-error.txt", std::ios::trunc);

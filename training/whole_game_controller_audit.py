@@ -41,6 +41,8 @@ def _trace(received):
     with log.open(encoding="utf8", errors="replace") as stream:
         for line in stream:
             parts = line.strip().split(",")
+            if parts[0] == "CONTROLLER" and "mode=hybrid" in parts:
+                raise ValueError("hybrid games cannot certify exclusive whole-game control")
             if parts[0] == "PERF_SUMMARY":
                 performance = parts
             elif parts[0] == "ERROR":

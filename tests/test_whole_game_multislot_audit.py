@@ -1,13 +1,22 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 import torch
 
 from training.whole_game_model import KINDS
 from training.whole_game_multislot_audit import (
-    early_mass_probe_moves, score_sequence, summarize)
+    audit, early_mass_probe_moves, score_sequence, summarize)
 
 
 class MultiSlotAuditTest(unittest.TestCase):
+    def test_early_scope_rejects_invalid_frame_before_loading_weights(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for bound in (0, -1, 23, 24.0, True):
+                with self.assertRaisesRegex(ValueError, "maximum frame"):
+                    audit("unused", "unused", "unused", Path(directory) / "output",
+                          maximum_frame=bound, device="cpu")
+
     def test_repeated_probe_moves_are_detected_before_live_games(self):
         moves = [dict(actor=actor, x=1536, y=2048)
                  for actor in (4, 6, 10, 15)]
