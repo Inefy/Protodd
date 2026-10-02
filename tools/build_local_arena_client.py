@@ -7,7 +7,7 @@ import subprocess
 import zipfile
 
 
-def build(template, output, javac, seed_base=None):
+def build(template, output, javac, seed_base=None, archive_pluto_logs=False):
     template, output = Path(template).resolve(), Path(output).resolve()
     if output.exists():
         raise ValueError("output already exists")
@@ -21,6 +21,21 @@ def build(template, output, javac, seed_base=None):
     if client.count(old) != 1:
         raise ValueError("unexpected client crash-log implementation")
     client = client.replace(old, "if(dir.isDirectory() && dir.list() != null && dir.list().length > 0)")
+    if archive_pluto_logs:
+        marker = '// send the write folder back to the server'
+        if client.count(marker) != 1:
+            raise ValueError('unexpected bot-write archive implementation')
+        client = client.replace(marker, '''// Pluto writes engine health evidence outside bwapi-data/write.
+        if (previousInstructions != null && previousBotName().equals("Pluto")) {
+            for (String name : new String[]{"pluto.log", "pluto_infer.log"}) {
+                try {
+                    java.nio.file.Path root = new java.io.File(ClientSettings.Instance().ClientStarcraftDir).toPath();
+                    java.nio.file.Files.copy(root.resolve(name), root.resolve("bwapi-data/write/" + name),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                } catch (IOException e) { e.printStackTrace(); }
+            }
+        }
+        ''' + marker)
     start = commands.index("\t\twhile (WindowsCommandTools.IsWindowsProcessRunning(\"StarCraft.exe\"))")
     end = commands.index("\n\tpublic static void Client_KillExcessWindowsProccess", start)
     replacement = '''        try {
@@ -77,6 +92,7 @@ def build(template, output, javac, seed_base=None):
     digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
     (output / "build.json").write_text(json.dumps(dict(
         seed_base=seed_base,seed_rule='seed_base + game_id' if seed_base is not None else None,
+        archive_pluto_logs=archive_pluto_logs,
         inputs={str(p.resolve()): digest(p) for p in inputs},
         outputs={str(p.relative_to(output)): digest(p) for p in output.rglob("*") if p.is_file()},
         changes=["missing crash log directory tolerated", "cleanup restricted to owned runtime process",
@@ -89,4 +105,5 @@ if __name__ == "__main__":
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--javac", default="javac")
     parser.add_argument('--seed-base',type=int,help='Pin BWAPI host random seed to base + game ID for paired campaigns')
+    parser.add_argument('--archive-pluto-logs', action='store_true', help='Archive Pluto root engine logs with bot-write evidence')
     build(**vars(parser.parse_args()))

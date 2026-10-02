@@ -38,6 +38,69 @@ def opening_observations(path):
                 first_four_fighters_1200_from_home=forward)
 
 
+def banana_evidence(run, gid, outcome=None, map_name=None):
+    received = run / f'server/replays/bot-write/game-{gid}/BananaBrain/received'
+    result = received / 'Results_Protodd.txt'
+    with result.open(newline='') as stream:
+        rows = list(csv.reader(stream))
+    if len(rows) != 1 or len(rows[0]) < 13:
+        raise ValueError('missing or ambiguous BananaBrain game record')
+    opening = rows[0][5]
+    if outcome is not None and (rows[0][4] != map_name or
+            abs(int(rows[0][8]) - outcome['frame']) > 120 or
+            rows[0][12] != ('0' if outcome['won'] else '1')):
+        raise ValueError('BananaBrain game record differs from paired result')
+    frozen = None
+    for directory in ('AI', 'read'):
+        config = run / f'server/bots/BananaBrain/{directory}/Configuration.txt'
+        if config.exists():
+            for line in config.read_text().splitlines():
+                key, sep, value = line.partition('=')
+                if sep and key.strip() == 'PvP_opening':
+                    frozen = value.strip()
+    if frozen and opening != frozen:
+        raise ValueError('BananaBrain changed its frozen opening')
+    return dict(opening=opening, frozen_opening=frozen, evidence_sha256={result.name: sha256(result)})
+
+
+def pluto_evidence(run, gid, outcome, map_name):
+    received = run / f'server/replays/bot-write/game-{gid}/Pluto/received'
+    record = received / 'pluto_bandit_Protodd.txt'
+    lines = record.read_text().splitlines()
+    if not lines or lines[-1] != 'end':
+        raise ValueError('unfinished Pluto game record')
+    records = [json.loads(line) for line in lines if line.startswith('{')]
+    starts = [r for r in records if r.get('t') == 'start']
+    ends = [r for r in records if r.get('t') == 'end']
+    if len(starts) != 1 or len(ends) != 1:
+        raise ValueError('missing or ambiguous Pluto game boundaries')
+    start, end = starts[0], ends[0]
+    events = [r for r in records if r.get('t') == 'event']
+    if any(r.get('t') not in ('start', 'end', 'event') for r in records) or any(
+            e.get('what') not in ('latency_mismatch', 'machine_slow', 'resign') for e in events):
+        raise ValueError('unreviewed Pluto engine error/event')
+    if (start.get('opp') != 'Protodd' or end.get('opp') != 'Protodd' or
+            start.get('id') != end.get('id') or any(e.get('id') != start.get('id') for e in events) or
+            start.get('map') != map_name or
+            start.get('own_race') != 'P' or start.get('opp_race') != 'P' or
+            start.get('mode') != 'block' or start.get('budget_ms') != 40 or
+            start.get('model') != 'md07x02_cog2026_2578600_int8mv' or
+            start.get('fps') != 6 or end.get('steps', 0) <= 0 or
+            end.get('result') != ('loss' if outcome['won'] else 'win') or
+            abs(end.get('frames', -999) - outcome['frame']) > 120):
+        raise ValueError('Pluto game/settings do not match completed result')
+    logs = {name: (received / name).read_text(errors='replace')
+            for name in ('pluto.log', 'pluto_infer.log')}
+    if ('inference server up' not in logs['pluto.log'] or 'onEnd' not in logs['pluto.log'] or
+            '[pluto_infer] ready:' not in logs['pluto_infer.log'] or
+            any(token in text.lower() for text in logs.values()
+                for token in ('quitting in', 'fatal', 'engine died', 'cannot start'))):
+        raise ValueError('Pluto engine did not finish healthy')
+    return dict(opening=start['bo'], start=start, end=end, events=events,
+                evidence_sha256={name: sha256(received / name)
+                                 for name in (record.name, 'pluto.log', 'pluto_infer.log')})
+
+
 def review(run, build_record):
     run = Path(run).resolve()
     verified = verify(run)
@@ -81,14 +144,15 @@ def review(run, build_record):
         performance = next(row for row in rows if row[0] == 'PERF_SUMMARY')
         hybrid = {k: int(v) for k, v in fields(next(row for row in rows
                       if row[0] == 'HYBRID_SUMMARY')).items()}
-        opponent = run / f'server/replays/bot-write/game-{gid}/BananaBrain/received/Results_Protodd.txt'
-        with opponent.open(newline='') as stream:
-            enemy_opening = list(csv.reader(stream))[-1][5]
-        if enemy_opening != 'PvP_3gaterobo':
-            raise ValueError('opponent changed its frozen opening')
+        if outcome['opponent'] == 'BananaBrain':
+            opponent_evidence = banana_evidence(run, gid, outcome, schedule[gid]['map'])
+        elif outcome['opponent'] == 'Pluto':
+            opponent_evidence = pluto_evidence(run, gid, outcome, schedule[gid]['map'])
+        else:
+            raise ValueError('opponent requires a dedicated health evidence parser')
         games.append(dict(**outcome, was_host=own['wasHost'],
             match=fields(next(row for row in rows if row[0] == 'MATCH')),
-            opponent_opening=enemy_opening, phases=phases,
+            opponent_opening=opponent_evidence['opening'], opponent_evidence=opponent_evidence, phases=phases,
             hybrid=hybrid,
             **opening_observations(received / 'WholeGame-observations.jsonl'),
             max_callback_ms=float(performance[3]),

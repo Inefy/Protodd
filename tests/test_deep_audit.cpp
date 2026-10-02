@@ -98,6 +98,43 @@ void threatAndRoutes() {
     check(harassmentRouteSafe(state, raider, {1100, 512}, false), "hallucinated weapon cannot block harassment route");
     state.enemy.units[0].hallucination = false; state.enemy.units[0].loaded = true;
     check(harassmentRouteSafe(state, raider, {1100, 512}, false), "loaded cargo cannot block harassment route");
+    state.enemy.units[0].loaded = false;
+    raider.kind = UnitKind::darkTemplar; raider.cloaked = true;
+    check(harassmentRouteSafe(state, raider, {1100, 512}, false),
+          "covert DT may pass ordinary defenders without observed detection");
+    raider.underAttack = true;
+    check(!harassmentRouteSafe(state, raider, {1100, 512}, false),
+          "real incoming attacks revoke the DT covert route assumption");
+    raider.underAttack = false;
+    state.enemy.units.push_back(unit(23, UnitKind::observer, {600, 512}, false));
+    state.enemy.units.back().sightRange = 352;
+    check(!harassmentRouteSafe(state, raider, {1100, 512}, false),
+          "observed Observer blocks a covert DT route even without a role annotation");
+    state.enemy.units.back().hallucination = true;
+    check(harassmentRouteSafe(state, raider, {1100, 512}, false),
+          "hallucinated Observer cannot detect a DT");
+    state.enemy.units.clear(); state.enemy.id = 2;
+    state.mapWidthPixels = 960; state.mapHeightPixels = 640;
+    std::vector<std::uint8_t> cells(30 * 20, 1);
+    for (int y = 0; y < 20; ++y) {
+        if (y != 2) cells[y * 30 + 8] = cells[y * 30 + 20] = 0;
+        if (y != 17) cells[y * 30 + 14] = 0;
+    }
+    const NavigationGrid winding{30, 20, 32, cells};
+    raider.position = {80, 320}; raider.groundWeapon = dt.groundWeapon;
+    BaseSnapshot economy; economy.ownerId = 2; economy.center = {860, 320};
+    economy.mineralLine = {850, 320}; economy.mineralsRemaining = 5000; economy.lastScouted = 1;
+    state.bases = {economy};
+    const auto routed = harassmentOpportunity(state, raider, false, &winding);
+    check(routed.target == economy.mineralLine && routed.waypoint.valid() && routed.probing,
+          "covert DT routes through multiple terrain bends to a remembered economy");
+    state.enemy.units.push_back(unit(25, UnitKind::probe, {100, 320}, false));
+    check(harassmentOpportunity(state, raider, false, &winding).target == economy.mineralLine,
+          "a lone enemy scout at home cannot bait the DT away from its economic raid");
+    state.enemy.units.push_back(unit(24, UnitKind::observer, {270, 80}, false));
+    state.enemy.units.back().sightRange = 352;
+    check(!harassmentOpportunity(state, raider, false, &winding).target.valid(),
+          "terrain path must still reject known detector coverage anywhere along its route");
 }
 void stormSafety() {
     auto templar = unit(30, UnitKind::highTemplar);

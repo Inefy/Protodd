@@ -17,6 +17,17 @@ void goal(StrategicPlan& plan, GoalKind kind, UnitKind target, int desired, int 
     plan.goals.push_back({kind, target, desired, priority, blocking, "ladder opening commitment"});
 }
 struct Profile { int workers; int gates; int ready; Frame window; Frame deadline; };
+void protectObservedDtBreach(StrategicPlan& plan, const GameState& state) {
+    const auto breached = std::ranges::any_of(state.enemy.units, [&state](const UnitSnapshot& enemy) {
+        return enemy.kind == UnitKind::darkTemplar && enemy.visible && enemy.position.valid() &&
+            std::ranges::any_of(state.self.units, [&enemy](const UnitSnapshot& own) {
+                return own.kind == UnitKind::nexus && own.position.valid() &&
+                       distanceSquared(own.position, enemy.position) <= 1200 * 1200;
+            });
+    });
+    if (breached) plan.goals.push_back({GoalKind::build, UnitKind::photonCannon, 1, 130, true,
+        "immediate detection anchor for observed DT at economy"});
+}
 Position recoveryExpansion(const GameState& state) {
     const BaseSnapshot* best = nullptr;
     for (const auto& base : state.bases) {
@@ -36,7 +47,7 @@ Profile profile(const AllInBuild build) {
         case AllInBuild::twoGateZealot: return {14, 2, 4, 120 * 24, 9000};
         case AllInBuild::threeGateDragoon: return {20, 3, 4, 120 * 24, 12000};
         case AllInBuild::fourGateDragoon: return {20, 4, 6, 150 * 24, 13200};
-        case AllInBuild::darkTemplar: return {21, 3, 2, 60 * 24, 12000};
+        case AllInBuild::darkTemplar: return {18, 2, 1, 90 * 24, 10800};
         case AllInBuild::standard: break;
     }
     return {};
@@ -99,6 +110,7 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
     const bool emergency = threat.workerRush > .30 || threat.combatEnemiesNearMain >= 2 ||
         (threat.immediateGround > .60 && threat.enemiesNearMain > 0);
     if (phase_ == AllInPhase::transition) {
+        protectObservedDtBreach(plan, state);
         // Native counters resume, with an explicit two-base recovery floor.
         plan.maximumBases = std::max(plan.maximumBases, 2);
         if (!emergency && plan.posture != Posture::recover) {
@@ -106,6 +118,9 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
             plan.desiredBases = std::max(plan.desiredBases, 2);
             plan.desiredWorkers = std::max(plan.desiredWorkers, 32);
             plan.sustainEconomy = true;
+            // Preserve the funded Nexus checkpoint instead of demoting it
+            // behind an unbounded reinforcement queue during recovery.
+            if (plan.expansionTarget.valid()) plan.prioritizeReinforcements = false;
             goal(plan, GoalKind::expand, UnitKind::nexus, plan.desiredBases, 128);
             goal(plan, GoalKind::train, UnitKind::probe, plan.desiredWorkers, 106);
             if (army >= 4) { plan.posture = Posture::attack; plan.minimumAttackSize = 4; }
@@ -125,16 +140,19 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
     plan.desiredGasWorkers = zealot ? 0 : 3;
     plan.harassmentDrops = 0;
     plan.sustainEconomy = false;
-    plan.prioritizeReinforcements = true;
-    plan.minimumAttackSize = dt ? 4 : p.ready;
+    // This mode demotes optional tech and injects endless defensive units.
+    // The opening already provides its own production priorities and caps.
+    plan.prioritizeReinforcements = emergency;
+    plan.minimumAttackSize = dt ? 2 : p.ready;
     plan.attackThreshold = 1.10;
     plan.posture = emergency ? Posture::defend : phase_ == AllInPhase::pressure ? Posture::attack : Posture::hold;
     const auto workers = count(state, UnitKind::probe);
     const auto gates = count(state, UnitKind::gateway);
     const auto core = count(state, UnitKind::cyberneticsCore, true);
-    plan.composition = {{UnitKind::zealot, zealot ? 1.0 : .15},
-                        {UnitKind::dragoon, zealot ? 0.0 : dt ? .45 : .85},
-                        {UnitKind::darkTemplar, dt ? .4 : 0.0}};
+    const auto dtChainFunded = count(state, UnitKind::templarArchives) > 0;
+    plan.composition = {{UnitKind::zealot, zealot ? 1.0 : dt ? 0.0 : .15},
+                        {UnitKind::dragoon, zealot || dt ? 0.0 : .85},
+                        {UnitKind::darkTemplar, dt && dtChainFunded ? 1.0 : 0.0}};
     goal(plan, GoalKind::train, UnitKind::probe, p.workers, 105, false);
     if (workers >= 8) goal(plan, GoalKind::build, UnitKind::pylon, 1, 130);
     if (workers >= 10) goal(plan, GoalKind::build, UnitKind::gateway, 1, 126);
@@ -162,13 +180,15 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
         if (count(state, UnitKind::assimilator) >= 1 && gates >= 1)
             goal(plan, GoalKind::build, UnitKind::cyberneticsCore, 1, 123);
         if (core) {
-            goal(plan, GoalKind::train, UnitKind::dragoon, count(state, UnitKind::dragoon) + 2, 120);
-            if (workers >= 16) goal(plan, GoalKind::build, UnitKind::gateway, 2, 121);
-            if (workers >= 18 && gates >= 2 && count(state, UnitKind::dragoon) >= 2)
+            goal(plan, GoalKind::train, UnitKind::dragoon,
+                 dt ? 2 : count(state, UnitKind::dragoon) + 2, 120);
+            if (workers >= 16 && (!dt || dtChainFunded))
+                goal(plan, GoalKind::build, UnitKind::gateway, 2, 121);
+            if (!dt && workers >= 18 && gates >= 2 && count(state, UnitKind::dragoon) >= 2)
                 goal(plan, GoalKind::build, UnitKind::gateway, p.gates, 119);
             if (!dt) plan.goals.push_back({GoalKind::upgrade, UnitKind::unknown, 1, 118, false,
                 "range for ladder Dragoon pressure", TechnologyKind::singularityCharge});
-            if (dt && count(state, UnitKind::dragoon) >= 2) {
+            if (dt && (count(state, UnitKind::dragoon) >= 2 || count(state, UnitKind::citadelOfAdun))) {
                 goal(plan, GoalKind::build, UnitKind::citadelOfAdun, 1, 122);
                 if (count(state, UnitKind::citadelOfAdun, true))
                     goal(plan, GoalKind::build, UnitKind::templarArchives, 1, 122);
@@ -179,7 +199,8 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
     }
     // Only observed cloak threats justify interrupting the opening for detection.
     const auto observedCloak = std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& unit) {
-        return unit.cloaked || unit.burrowed || unit.kind == UnitKind::darkTemplar ||
+        return ((unit.cloaked || unit.burrowed) &&
+                (unit.groundWeapon.damage > 0 || unit.airWeapon.damage > 0)) || unit.kind == UnitKind::darkTemplar ||
                unit.kind == UnitKind::lurker || unit.kind == UnitKind::spiderMine;
     });
     plan.requireMobileDetection = observedCloak;
@@ -187,6 +208,7 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
         plan.desiredGasWorkers = 3;
         goal(plan, GoalKind::detect, UnitKind::observer, 1, 128);
     }
+    protectObservedDtBreach(plan, state);
     if (emergency) {
         for (const auto& prior : original)
             if (prior.target == UnitKind::photonCannon || prior.target == UnitKind::forge ||

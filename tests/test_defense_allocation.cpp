@@ -91,6 +91,23 @@ int main() {
           "unknown-health correction remains active in default allocation");
     check(hidden.front().durability() == 0 && !hidden.front().detected,
           "allocation preserves legal health and detection observations");
+    auto remoteDt = fighter(300, UnitKind::darkTemplar, true, {1800, 1800});
+    remoteDt.cloaked = true;
+    auto localDt = remoteDt; localDt.id = 301; localDt.position = base.center;
+    const std::vector covertArmy{remoteDt, localDt};
+    const auto defending = [&](const auto& squads, int id) {
+        return std::ranges::any_of(squads, [id](const Squad& squad) {
+            return squad.role == SquadRole::baseDefense &&
+                   std::ranges::any_of(squad.units, [id](const UnitSnapshot& member) { return member.id == id; });
+        });
+    };
+    const auto unseenBreach = allocate(covertArmy, darkTemplars);
+    check(!defending(unseenBreach, remoteDt.id) && defending(unseenBreach, localDt.id),
+          "undetected breach retains nearby DTs without recalling a distant covert raider");
+    auto revealedBreach = darkTemplars;
+    for (auto& enemy : revealedBreach) enemy.detected = true;
+    check(defending(allocate(covertArmy, revealedBreach), remoteDt.id),
+          "a detected breach can still recall the DT raid for real defense");
     for (auto& enemy : hidden) enemy.hitPoints = 1;
     check(mobileDefenders(allocate(army, hidden)) == 2,
           "known wounded enemies retain the lower defensive demand");

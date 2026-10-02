@@ -19,8 +19,14 @@ bool safeRaidRoute(const GameState& state, const UnitSnapshot& raider,
             (unitStats(enemy.kind).requiresPsi && !enemy.powered) ||
             isWorker(enemy.kind) || !enemy.position.valid() ||
             (!isBuilding(enemy.kind) && !recent(state, enemy))) continue;
-        const auto detector = raider.cloaked && (enemy.role == UnitRole::detector || enemy.kind == UnitKind::photonCannon ||
-            enemy.kind == UnitKind::missileTurret || enemy.kind == UnitKind::sporeColony || enemy.kind == UnitKind::overlord);
+        const auto detector = raider.cloaked && (enemy.role == UnitRole::detector ||
+            enemy.kind == UnitKind::observer || enemy.kind == UnitKind::scienceVessel ||
+            enemy.kind == UnitKind::photonCannon || enemy.kind == UnitKind::missileTurret ||
+            enemy.kind == UnitKind::sporeColony || enemy.kind == UnitKind::overlord);
+        // Own-unit detected is not the enemy's detection access. A covert DT
+        // can pass ordinary defenders, but never known detection or real hits.
+        if (raider.kind == UnitKind::darkTemplar && raider.cloaked && !raider.underAttack && !detector)
+            continue;
         const auto& weapon = raider.flying ? enemy.airWeapon : enemy.groundWeapon;
         const auto targetClearance = detector ? std::max(352, enemy.sightRange + 32) :
             std::max(160, weapon.maxRange + 96);
@@ -45,7 +51,7 @@ bool safeRaidRoute(const GameState& state, const UnitSnapshot& raider,
 
 Position raidWaypoint(const GameState& state, const UnitSnapshot& raider,
                       const Position target, const bool flyingRoute,
-                      const NavigationGrid* navigation) {
+                      const NavigationGrid* navigation, const bool terrainDetour = false) {
     const auto legSafe = [&](const UnitSnapshot& from, const Position to) {
         return safeRaidRoute(state, from, to, flyingRoute) &&
             (flyingRoute || raider.flying || navigation == nullptr || navigation->empty() ||
@@ -65,6 +71,19 @@ Position raidWaypoint(const GameState& state, const UnitSnapshot& raider,
         auto secondLeg = raider;
         secondLeg.position = via;
         if (legSafe(raider, via) && legSafe(secondLeg, target)) return via;
+    }
+    // A mineral line can require several bends, not just one geometric bypass.
+    // Limit the search to remembered economies to avoid one A* per worker.
+    if (terrainDetour && !flyingRoute && raider.kind == UnitKind::darkTemplar && raider.cloaked) {
+        const auto path = navigation->findPath(raider.position, target);
+        if (path.empty()) return {-1, -1};
+        auto from = raider;
+        for (const auto step : path) {
+            if (!safeRaidRoute(state, from, step, false)) return {-1, -1};
+            from.position = step;
+        }
+        if (!safeRaidRoute(state, from, target, false)) return {-1, -1};
+        return path[std::min<std::size_t>(7, path.size() - 1)];
     }
     return {-1, -1};
 }
@@ -92,6 +111,11 @@ HarassmentOpportunity harassmentOpportunity(const GameState& state, const UnitSn
             if (recent(state, nearby) && raider.canAttack(nearby) &&
                 (isWorker(nearby.kind) || nearby.kind == UnitKind::overlord) &&
                 distanceSquared(nearby.position, enemy.position) <= 224 * 224) ++targets;
+        if (raider.kind == UnitKind::darkTemplar && isWorker(enemy.kind) && targets < 2 &&
+            std::ranges::none_of(state.bases, [&state, &enemy](const BaseSnapshot& base) {
+                return state.enemy.id >= 0 && base.ownerId == state.enemy.id &&
+                       distanceSquared(base.center, enemy.position) <= 640 * 640;
+            })) continue;
         const auto score = 4.0 * std::min(targets, 8) + (enemy.visible ? 3.0 : 0.0) -
             distance(raider.position, enemy.position) / 600.0;
         if (score > best.score || (score == best.score && enemy.position.x < best.target.x))
@@ -104,7 +128,7 @@ HarassmentOpportunity harassmentOpportunity(const GameState& state, const UnitSn
             if (state.enemy.id < 0 || base.ownerId != state.enemy.id || (base.island && !flyingRoute) ||
                 base.mineralsRemaining < 500 || !base.mineralLine.valid() ||
                 (base.lastConfirmedEmpty >= 0 && base.lastConfirmedEmpty >= base.lastScouted)) continue;
-            const auto waypoint = raidWaypoint(state, raider, base.mineralLine, flyingRoute, navigation);
+            const auto waypoint = raidWaypoint(state, raider, base.mineralLine, flyingRoute, navigation, true);
             if (!waypoint.valid()) continue;
             const auto score = 6.0 - distance(raider.position, base.mineralLine) / 1200.0;
             if (score > best.score) best = {base.mineralLine, score, 0, waypoint, true};

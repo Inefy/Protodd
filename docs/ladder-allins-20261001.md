@@ -61,7 +61,7 @@ the openings are replay-derived native rules, not newly trained neural weights.
 | `two-gate-zealot` | 14 | 2 | Four Zealots | 120 seconds | 9,000 frames |
 | `three-gate-dragoon` | 20 | 3 | Four Dragoons | 120 seconds | 12,000 |
 | `four-gate-dragoon` | 20 | 4 | Six Dragoons | 150 seconds | 13,200 |
-| `dt-pressure` | 21 | 3 | Two DTs | 60 seconds | 12,000 |
+| `dt-pressure` | 18 | 2 | One DT | 90 seconds | 10,800 |
 
 Launch is sticky. A pressure timeout, hard deadline or severe post-launch army
 loss ends the one-base commitment permanently. Workers and at least two bases
@@ -77,6 +77,20 @@ Recovery restores a safe neutral expansion site if native rules left it unset,
 and prioritizes the Nexus over optional splash tech. `auto` chooses two-Gate only
 in PvP; other matchups remain standard pending prospective evidence. Each profile
 can be forced for frozen development evaluation.
+
+The subsequent Pluto/BananaBrain investigation tightened DT funding: two
+Dragoons are the escort cap, the second Gateway waits for Archives funding,
+and generic reinforcement filling no longer demotes the opening's tech outside
+an emergency. DT raids ignore an isolated scouting Probe, can follow a
+multi-bend terrain route to a remembered enemy economy, and are not recalled
+across the map to attack an undetected breach they cannot target. Observed
+detectors and actual hits still block covert routes. A visible enemy DT near a
+Nexus requests one immediate detection Cannon; ordinary ground pressure and
+harmless Observers do not trigger that opening detection anchor.
+
+These execution fixes do not establish a winning build. The separate local
+opponent investigation records the tested DLLs and results in
+`docs/pluto-banana-allins-20261001.md`; the initial pilot below remains historical.
 
 ## Reproduction
 

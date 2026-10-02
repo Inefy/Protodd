@@ -181,6 +181,13 @@ std::vector<Squad> SquadPlanner::form(
                                         });
                 if (useful) staticSupport.push_back(unit);
             } else if (isCombatUnit(unit.kind)) {
+                // A distant covert raid cannot intercept an undetected breach.
+                // Keep local reserves, but do not recall DTs across the map to
+                // stand idle beside targets they cannot legally attack.
+                if (unit.kind == UnitKind::darkTemplar && unit.cloaked && !unit.underAttack &&
+                    distanceSquared(unit.position, threatenedBase->center) > 960 * 960 &&
+                    std::ranges::all_of(baseThreats, [](const UnitSnapshot& threat) { return !threat.detected; }))
+                    continue;
                 candidates.push_back(unit);
             }
         }
