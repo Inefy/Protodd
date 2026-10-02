@@ -778,8 +778,54 @@ std::vector<Command> TacticalController::control(
         const auto protectedStep = [&defense](const Position proposed) {
             return defense.front.valid() && !defense.contains(proposed) ? defense.center : proposed;
         };
-        const auto reachableStep = [&unit, navigation](const Position candidate) {
+        const auto reachableStep = [&unit, navigation, obstacles](const Position candidate) {
             if (!candidate.valid()) return false;
+            // The navigation grid describes terrain, not live buildings. A
+            // short retreat into a Robotics footprint is accepted by BWAPI but
+            // cannot move the Reaver there. Check the whole segment with the
+            // moving unit's dimensions, so a clear endpoint cannot cross a wall.
+            if (!unit.flying) {
+                for (const auto& obstacle : obstacles) {
+                    if (obstacle.id == unit.id || !isBuilding(obstacle.kind) ||
+                        obstacle.flying || !obstacle.position.valid()) continue;
+                    const auto left = obstacle.position.x - obstacle.dimensionLeft - unit.dimensionRight + 1;
+                    const auto right = obstacle.position.x + obstacle.dimensionRight + unit.dimensionLeft - 1;
+                    const auto top = obstacle.position.y - obstacle.dimensionUp - unit.dimensionDown + 1;
+                    const auto bottom = obstacle.position.y + obstacle.dimensionDown + unit.dimensionUp - 1;
+                    if (left > right || top > bottom) continue;
+                    const auto inside = [&](const Position point) {
+                        return point.x >= left && point.x <= right &&
+                               point.y >= top && point.y <= bottom;
+                    };
+                    // Admit an escape from an overlapping observed origin, but
+                    // never deepen the overlap or traverse through its center.
+                    if (inside(unit.position)) {
+                        const auto outward = static_cast<long long>(candidate.x - unit.position.x) *
+                            (unit.position.x - obstacle.position.x) +
+                            static_cast<long long>(candidate.y - unit.position.y) *
+                            (unit.position.y - obstacle.position.y);
+                        if (inside(candidate) || outward < 0 ||
+                            distanceSquared(candidate, obstacle.position) <=
+                            distanceSquared(unit.position, obstacle.position)) return false;
+                        continue;
+                    }
+                    auto entry = 0.0;
+                    auto exit = 1.0;
+                    const auto intersectsAxis = [&](const int origin, const int destination,
+                                                    const int minimum, const int maximum) {
+                        const auto delta = destination - origin;
+                        if (delta == 0) return origin >= minimum && origin <= maximum;
+                        auto first = static_cast<double>(minimum - origin) / delta;
+                        auto last = static_cast<double>(maximum - origin) / delta;
+                        if (first > last) std::swap(first, last);
+                        entry = std::max(entry, first);
+                        exit = std::min(exit, last);
+                        return entry <= exit;
+                    };
+                    if (intersectsAxis(unit.position.x, candidate.x, left, right) &&
+                        intersectsAxis(unit.position.y, candidate.y, top, bottom)) return false;
+                }
+            }
             if (navigation == nullptr || navigation->empty()) return true;
             if (candidate.x >= navigation->width() * navigation->cellSize() ||
                 candidate.y >= navigation->height() * navigation->cellSize()) return false;
