@@ -21,6 +21,95 @@ int main() {
             return action.target == kind && action.reserved && action.executable;
         });
     };
+    // A Lurker Egg is already a confirmed cloak signal at the BWAPI boundary.
+    // It must fund the first detector before any Lurker becomes visible.
+    {
+        GameState pvz; pvz.frame = 7000;
+        pvz.self.race = Race::protoss; pvz.enemy.race = Race::zerg;
+        pvz.self.units = {unit(1, UnitKind::nexus), unit(2, UnitKind::pylon),
+            unit(3, UnitKind::gateway), unit(4, UnitKind::cyberneticsCore)};
+        for (int i = 0; i < 12; ++i) pvz.self.units.push_back(unit(20 + i, UnitKind::probe));
+        auto egg = unit(100, UnitKind::lurkerEgg, false); egg.lastSeen = pvz.frame;
+        pvz.enemy.units = {egg};
+        const auto lurkerPlan = StrategyEngine{}.plan(pvz, {});
+        check(lurkerPlan.requireMobileDetection && lurkerPlan.desiredGasWorkers >= 3,
+              "a confirmed Lurker Egg did not request mobile detection and three gas workers");
+        check(std::ranges::any_of(lurkerPlan.goals, [](const ProductionGoal& goal) {
+            return goal.goal == GoalKind::train && goal.target == UnitKind::observer &&
+                goal.desiredCount == 1 && goal.blocking;
+        }), "a confirmed Lurker Egg did not request one blocking first Observer");
+        ResourceLedger pvzBank{1000, 1000};
+        auto chain = MacroPlanner{}.reconcile(pvz, lurkerPlan, pvzBank);
+        check(funded(chain, UnitKind::roboticsFacility) && !funded(chain, UnitKind::gateway),
+              "Lurker detection did not reserve the first Robotics prerequisite");
+        ResourceLedger emptyBank{100, 0};
+        chain = MacroPlanner{}.reconcile(pvz, lurkerPlan, emptyBank);
+        check(std::ranges::any_of(chain, [](const MacroAction& action) {
+            return action.target == UnitKind::roboticsFacility && action.blocksLowerPriority;
+        }) && emptyBank.reservedMinerals > 0,
+              "unfunded detection prerequisite failed to protect its future resource bank");
+
+        pvz.self.units.push_back(unit(5, UnitKind::roboticsFacility));
+        pvzBank = {1000, 1000};
+        chain = MacroPlanner{}.reconcile(pvz, StrategyEngine{}.plan(pvz, {}), pvzBank);
+        check(funded(chain, UnitKind::observatory), "Lurker detection skipped the Observatory prerequisite");
+        pvz.self.units.push_back(unit(6, UnitKind::observatory));
+        pvzBank = {1000, 1000};
+        chain = MacroPlanner{}.reconcile(pvz, StrategyEngine{}.plan(pvz, {}), pvzBank);
+        check(funded(chain, UnitKind::observer), "Lurker detection did not produce after its prerequisites");
+
+        pvz.self.units.push_back(unit(7, UnitKind::observer));
+        const auto completedPlan = StrategyEngine{}.plan(pvz, {});
+        pvzBank = {1000, 1000};
+        chain = MacroPlanner{}.reconcile(pvz, completedPlan, pvzBank);
+        check(completedPlan.requireMobileDetection && !funded(chain, UnitKind::observer),
+              "an existing completed Observer caused duplicate detector production");
+
+        auto lurker = unit(101, UnitKind::lurker); lurker.lastSeen = pvz.frame;
+        pvz.enemy.units = {lurker};
+        const auto visibleLurkerPlan = StrategyEngine{}.plan(pvz, {});
+        check(visibleLurkerPlan.requireMobileDetection &&
+              std::ranges::any_of(visibleLurkerPlan.goals, [](const ProductionGoal& goal) {
+                  return goal.goal == GoalKind::train && goal.target == UnitKind::observer &&
+                      goal.desiredCount == 2 && goal.blocking;
+              }),
+              "a visible Lurker changed the existing mission detector demand");
+        lurker.visible = false; lurker.burrowed = true; lurker.lastSeen = pvz.frame;
+        pvz.enemy.units = {lurker};
+        const auto burrowedLurkerPlan = StrategyEngine{}.plan(pvz, {});
+        check(burrowedLurkerPlan.requireMobileDetection &&
+              std::ranges::any_of(burrowedLurkerPlan.goals, [](const ProductionGoal& goal) {
+                  return goal.goal == GoalKind::train && goal.target == UnitKind::observer &&
+                      goal.desiredCount == 2 && goal.blocking;
+              }),
+              "a recently observed burrowed Lurker changed the mission detector demand");
+
+        pvz.enemy.units = {egg};
+        ThreatAssessment independentCloak; independentCloak.cloak = 0.5;
+        const auto combinedPlan = StrategyEngine{}.plan(pvz, independentCloak);
+        check(std::ranges::any_of(combinedPlan.goals, [](const ProductionGoal& goal) {
+            return goal.goal == GoalKind::train && goal.target == UnitKind::observer &&
+                goal.desiredCount == 2 && goal.blocking;
+        }), "the Egg minimum lowered an independent cloak detector demand");
+
+        // The adapter maps generic BWAPI Egg observations to unknown.
+        pvz.enemy.units = {unit(102, UnitKind::unknown)};
+        check(!StrategyEngine{}.plan(pvz, {}).requireMobileDetection,
+              "a generic Egg incorrectly triggered confirmed-cloak detection");
+        pvz.enemy.units = {unit(103, UnitKind::hydralisk)};
+        check(!StrategyEngine{}.plan(pvz, {}).requireMobileDetection,
+              "a lone Hydra incorrectly triggered confirmed-cloak detection");
+        auto unseenEgg = egg; unseenEgg.visible = false; unseenEgg.lastSeen = -1;
+        pvz.enemy.units = {unseenEgg};
+        check(!StrategyEngine{}.plan(pvz, {}).requireMobileDetection,
+              "an Egg with no seen timestamp incorrectly triggered detection");
+        pvz.enemy.race = Race::protoss; pvz.enemy.units = {egg};
+        check(!StrategyEngine{}.plan(pvz, {}).requireMobileDetection,
+              "the Lurker Egg trigger changed PvP behavior");
+        pvz.enemy.race = Race::terran;
+        check(!StrategyEngine{}.plan(pvz, {}).requireMobileDetection,
+              "the Lurker Egg trigger changed PvT behavior");
+    }
     GameState state; state.frame = 5100;
     state.self.id = 1; state.enemy.id = 2;
     state.self.race = state.enemy.race = Race::protoss;

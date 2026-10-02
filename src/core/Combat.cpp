@@ -113,8 +113,14 @@ const UnitSnapshot* nearestLivingTarget(
             (!defender.unit->canAttack(*attacker.unit) ||
              opposingWeapon.maxRange >= weapon.maxRange ||
              isBuilding(defender.unit->kind))) continue;
+        // An out-of-range building can only acquire a target admitted above
+        // because that shorter-range opponent approaches it. Its first shot
+        // uses the opponent's full approach speed; discounting that speed to
+        // 20% can let melee units strike before the building ever fires.
+        // Keep the conservative mutual-approach estimate for mobile units.
+        const auto defenderApproach = isBuilding(attacker.unit->kind) ? 1.0 : 0.20;
         const auto closingSpeed = std::max(0.1, attacker.unit->topSpeed +
-                                                   defender.unit->topSpeed * 0.20);
+                                                   defender.unit->topSpeed * defenderApproach);
         const auto contactFrame = static_cast<int>(std::ceil(gap / closingSpeed));
         if (frame < contactFrame) {
             nextContactFrame = std::min(nextContactFrame, contactFrame);

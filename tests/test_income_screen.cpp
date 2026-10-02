@@ -106,8 +106,24 @@ int main() {
     production.kind = second.kind = UnitKind::gateway;
     state.enemy.units = {production, second};
     warning = StrategyEngine{}.plan(state, {});
+    check(warning.name.find("[scouted two-gate screen]") != std::string::npos,
+          "pure two-Gateway melee rush lost its compact static screen");
     check(paid(run(warning, 150), UnitKind::forge),
           "two escorts still waited for four before funding the melee anchor");
+
+    auto enemyZealot = unit(96, UnitKind::zealot);
+    enemyZealot.visible = true; enemyZealot.lastSeen = state.frame;
+    auto enemyDragoon = unit(97, UnitKind::dragoon);
+    enemyDragoon.visible = true; enemyDragoon.lastSeen = state.frame;
+    state.enemy.units = {production, second, enemyZealot, enemyDragoon};
+    warning = StrategyEngine{}.plan(state, {});
+    check(warning.name.find("[scouted two-gate screen]") == std::string::npos,
+          "mixed Zealot and Dragoon pressure activated the melee-only two-Gateway screen");
+    check(std::ranges::any_of(warning.composition, [](const CompositionTarget& target) {
+        return target.kind == UnitKind::dragoon && target.weight >= 0.8;
+    }), "mixed ranged pressure failed to retain the ranged defensive response");
+
+    state.enemy.units = {production, second};
     const auto completedMirror = state;
     state.frame = 3000;
     state.self.units.pop_back(); state.self.units.back().completed = false;
@@ -171,5 +187,13 @@ int main() {
     plan = strategy.plan(state, threat);
     check(!plan.sustainEconomy && plan.desiredBases <= 1,
           "a real main breach failed to cancel expansion funding");
+    StrategicDirector director;
+    auto clearState = state;
+    clearState.enemy.units.clear();
+    const ThreatAssessment clearThreat;
+    (void)director.stabilize(strategy.plan(clearState, clearThreat), clearState, clearThreat);
+    plan = director.stabilize(plan, state, threat);
+    check(plan.posture == Posture::defend,
+          "an immediate main breach did not activate emergency defense");
     return errors ? 1 : 0;
 }

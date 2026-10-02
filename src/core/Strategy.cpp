@@ -874,6 +874,17 @@ StrategicPlan StrategyEngine::plan(
             count(state, UnitKind::dragoon, true) +
             count(state, UnitKind::reaver, true) >= 6 &&
         !hardBreachAtMain(state);
+    // BWAPI reports a Lurker Egg as an incomplete unit, so the completed-unit
+    // counter used by recentEnemyCount intentionally cannot represent it.
+    // Treat only this explicit Zerg kind as evidence, and only while visible
+    // or within the normal enemy-memory window.
+    const auto confirmedLurkerEgg = std::ranges::any_of(
+        state.enemy.units, [&state](const UnitSnapshot& enemy) {
+            return enemy.kind == UnitKind::lurkerEgg &&
+                (enemy.visible || (enemy.lastSeen >= 0 &&
+                    state.frame - enemy.lastSeen <= 90 * 24));
+        });
+    const auto confirmedZergLurkerEgg = state.enemy.race == Race::zerg && confirmedLurkerEgg;
     result.requireMobileDetection = threat.cloak > 0.28 ||
         recentEnemyCount(state, UnitKind::spiderMine) > 0 ||
         recentEnemyCount(state, UnitKind::lurker) > 0 ||
@@ -883,16 +894,20 @@ StrategicPlan StrategyEngine::plan(
            !activeApproach(state, threat) && threat.immediateGround <= 0.45) ||
           recentEnemyCount(state, UnitKind::factory) >= 2 ||
           recentEnemyCount(state, UnitKind::starport) > 0));
-    const auto insuranceDetectorOnly =
-        (mirrorTechGap || singleGatewayTechGap || twoGatewayFogCloakRisk) && !result.requireMobileDetection;
+    const auto independentDetectionRisk = mirrorTechGap || singleGatewayTechGap ||
+        twoGatewayFogCloakRisk;
+    const auto insuranceDetectorOnly = independentDetectionRisk && !result.requireMobileDetection;
+    const auto lurkerEggOnlyDetection = confirmedZergLurkerEgg &&
+        !result.requireMobileDetection && !independentDetectionRisk;
     result.requireMobileDetection = result.requireMobileDetection ||
-        mirrorTechGap || singleGatewayTechGap || twoGatewayFogCloakRisk;
+        independentDetectionRisk || confirmedZergLurkerEgg;
     if (result.requireMobileDetection) {
         result.desiredGasWorkers = std::max(3, result.desiredGasWorkers);
         goal(result, GoalKind::build, UnitKind::assimilator, 1, 123,
              "fund required mobile detection", true);
         goal(result, GoalKind::train, UnitKind::observer,
-             insuranceDetectorOnly ? 1 : (count(state, UnitKind::nexus) >= 2 ? 3 : 2), 124,
+             (insuranceDetectorOnly || lurkerEggOnlyDetection) ? 1 :
+                 (count(state, UnitKind::nexus) >= 2 ? 3 : 2), 124,
              insuranceDetectorOnly ? "first Observer against an unscouted mirror tech path"
                                    : "replace and maintain mission detectors", true);
     }
@@ -1851,7 +1866,8 @@ StrategicPlan StrategyEngine::planPvP(
     // response does not strand a surviving army with an unusable bank.
     const auto coreLost = count(state, UnitKind::cyberneticsCore) == 0 &&
                           count(state, UnitKind::dragoon) > 0;
-    const auto twoGateOpening = minute(state) < 8 && currentMeleeRush;
+    // The scouted two-Gateway screen is for a melee opening without ranged tech.
+    const auto twoGateOpening = minute(state) < 8 && currentMeleeRush && !rangedOpening;
     const auto earlyMeleeAnchor = minute(state) >= 3 && minute(state) < 5 &&
                                   currentMeleeRush && zealotsReady >= 2 &&
                                   (threat.combatEnemiesNearMain > 0 ||

@@ -113,6 +113,10 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
         return;
     }
     const auto original = plan.goals;
+    const bool committedObserver = std::ranges::any_of(original, [](const ProductionGoal& demand) {
+        return demand.target == UnitKind::observer && demand.blocking && demand.desiredCount > 0 &&
+               (demand.goal == GoalKind::train || demand.goal == GoalKind::detect);
+    });
     plan.goals.clear();
     // Explicit fulfilled demands retire remembered optional tech/cannon goals.
     for (const auto& prior : original) {
@@ -177,13 +181,14 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
             }
         }
     }
-    // Only observed cloak threats justify interrupting the opening for detection.
+    // Preserve an explicit native Observer commitment alongside observed cloak evidence.
     const auto observedCloak = std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& unit) {
         return unit.cloaked || unit.burrowed || unit.kind == UnitKind::darkTemplar ||
                unit.kind == UnitKind::lurker || unit.kind == UnitKind::spiderMine;
     });
-    plan.requireMobileDetection = observedCloak;
-    if (observedCloak) {
+    const auto requireDetection = observedCloak || committedObserver;
+    plan.requireMobileDetection = requireDetection;
+    if (requireDetection) {
         plan.desiredGasWorkers = 3;
         goal(plan, GoalKind::detect, UnitKind::observer, 1, 128);
     }

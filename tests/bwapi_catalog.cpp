@@ -3,6 +3,7 @@
 #include "../src/bwapi/ProductionCount.hpp"
 #include "../src/bwapi/TerranDetection.hpp"
 #include "../src/bwapi/SupplyPlanning.hpp"
+#include "../src/bwapi/BwapiBridge.hpp"
 
 #include <BWAPI/UnitType.h>
 #include <BWAPI/UnitCommand.h>
@@ -50,6 +51,13 @@ int main() {
         std::pair{UnitKind::arbiter, Protoss_Arbiter},
     };
     auto failures = 0;
+    if (protodd::bwapi::BwapiBridge::toKind(BWAPI::UnitTypes::Zerg_Lurker_Egg) !=
+            UnitKind::lurkerEgg ||
+        protodd::bwapi::BwapiBridge::toKind(BWAPI::UnitTypes::Zerg_Egg) !=
+            UnitKind::unknown) {
+        std::cerr << "Lurker Egg/generic Egg mapping mismatch\n";
+        ++failures;
+    }
     using protodd::bwapi::supplyPlanningBuffer;
     if (supplyPlanningBuffer(true, 8) != 12 ||
         supplyPlanningBuffer(true, 30) != 12 ||

@@ -78,7 +78,7 @@ private:
     [[nodiscard]] static UnitKind nextMissingPrerequisite(
         const GameState& state,
         UnitKind kind);
-    [[nodiscard]] static MacroActionKind actionKind(GoalKind goal) noexcept;
+    [[nodiscard]] static MacroActionKind actionKind(GoalKind goal, UnitKind target) noexcept;
 };
 
 }  // namespace protodd

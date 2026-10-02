@@ -397,7 +397,13 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                 // unfinished Cannon ahead of every available Gateway.
                 demand.desiredCount = 1;
             }
-            else if (demand.goal != GoalKind::train)
+            // An explicitly urgent first Core unlocks ranged reinforcements.
+            // Keep it above injected Zealot cycles, which otherwise consume
+            // every deposit before the matching hard-save rule can run.
+            else if (demand.goal != GoalKind::train &&
+                     !(state.enemy.race == Race::protoss && state.frame < 8 * 60 * 24 &&
+                       demand.target == UnitKind::cyberneticsCore && demand.blocking &&
+                       demand.priority >= 119 && countExisting(state, demand.target) == 0))
                 demand.priority = std::min(111, demand.priority);
         }
     }
@@ -578,7 +584,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                 // before the structure finishes.
                 const auto& target = unitStats(goal.target);
                 MacroAction waiting{
-                    actionKind(goal.goal), goal.target, goal.priority,
+                    actionKind(goal.goal, goal.target), goal.target, goal.priority,
                     target.minerals, target.gas, false, goal.reason,
                     TechnologyKind::none, true,
                 };
@@ -602,7 +608,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             continue;
         }
         MacroAction action{
-            actionKind(goal.goal), goal.target, goal.priority,
+            actionKind(goal.goal, goal.target), goal.target, goal.priority,
             stats.minerals, stats.gas, false, goal.reason,
             TechnologyKind::none, goal.blocking,
         };
@@ -830,12 +836,12 @@ UnitKind MacroPlanner::nextMissingPrerequisite(
     return UnitKind::unknown;
 }
 
-MacroActionKind MacroPlanner::actionKind(const GoalKind goal) noexcept {
+MacroActionKind MacroPlanner::actionKind(const GoalKind goal, const UnitKind target) noexcept {
     switch (goal) {
         case GoalKind::build: return MacroActionKind::build;
         case GoalKind::train: return MacroActionKind::train;
         case GoalKind::expand: return MacroActionKind::expand;
-        case GoalKind::detect: return MacroActionKind::build;
+        case GoalKind::detect: return isBuilding(target) ? MacroActionKind::build : MacroActionKind::train;
         case GoalKind::research: return MacroActionKind::research;
         case GoalKind::upgrade: return MacroActionKind::upgrade;
     }
