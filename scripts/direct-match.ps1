@@ -339,7 +339,7 @@ log_path = bwapi-data/logs
 $script:gameLaunchers = @()
 $script:ownedStarCraft = @()
 $script:processOwnershipWarnings = @()
-$proxyLaunched = @()
+$script:proxyLaunched = @()
 function Get-MatchOwnedStarCraftIdentities {
     param([object[]]$Processes, [object[]]$Launchers)
     $owned = @()
@@ -372,16 +372,38 @@ function Get-MatchOwnedStarCraftIdentities {
     }
     @($owned | Sort-Object id -Unique)
 }
+function Get-MatchProcessSnapshot {
+    $processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | ForEach-Object {
+        if (-not $_.ExecutablePath -or -not $_.CreationDate) { return }
+        [pscustomobject]@{
+            id=[int]$_.ProcessId; parent_id=[int]$_.ParentProcessId
+            path=[IO.Path]::GetFullPath([string]$_.ExecutablePath)
+            started_utc=[System.Management.ManagementDateTimeConverter]::ToDateTime($_.CreationDate).ToUniversalTime()
+        }
+    })
+    if ($processes.Count -eq 0) { throw 'Win32_Process returned no usable process identities' }
+    $processes
+}
+function Assert-MatchProcessIdentityCapability {
+    try {
+        $processes = @(Get-MatchProcessSnapshot)
+        $self = @($processes | Where-Object id -eq $PID | Select-Object -First 1)
+        if ($self.Count -eq 0 -or -not $self[0].path -or
+            $null -eq $self[0].started_utc -or $self[0].parent_id -lt 0) {
+            throw 'The current runner process identity is not readable'
+        }
+    } catch {
+        throw "Cannot start a match safely: required Win32_Process identity read is unavailable: $($_.Exception.Message)"
+    }
+}
+function Invoke-MatchLaunchPlan {
+    param([Parameter(Mandatory)][scriptblock]$LaunchPlan)
+    Assert-MatchProcessIdentityCapability
+    & $LaunchPlan
+}
 function Update-MatchOwnedStarCraft {
     try {
-        $processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | ForEach-Object {
-            if (-not $_.ExecutablePath -or -not $_.CreationDate) { return }
-            [pscustomobject]@{
-                id=[int]$_.ProcessId; parent_id=[int]$_.ParentProcessId
-                path=[IO.Path]::GetFullPath([string]$_.ExecutablePath)
-                started_utc=[System.Management.ManagementDateTimeConverter]::ToDateTime($_.CreationDate).ToUniversalTime()
-            }
-        })
+        $processes = @(Get-MatchProcessSnapshot)
         $found = @(Get-MatchOwnedStarCraftIdentities -Processes $processes -Launchers $script:gameLaunchers)
         foreach ($identity in $found) {
             if (@($script:ownedStarCraft | Where-Object { $_.id -eq $identity.id -and $_.started_utc -eq $identity.started_utc }).Count -eq 0) {
@@ -597,38 +619,40 @@ $runtimeCrashReportStatus = 'complete'
 $script:crashReportObservations = @{}
 $script:startedAtUtc = [DateTime]::UtcNow
 $startedUtc = $script:startedAtUtc.ToString('o')
-$observerProcess = $null
+$script:observerProcess = $null
 try {
-    if (-not $NoObserver) {
-        # Read-only observer on an ephemeral loopback port. Each match owns
-        # its helper and authoritative manifest; no stale cross-match result.
-        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
-        $listener.Start()
-        $observerPort = $listener.LocalEndpoint.Port
-        $listener.Stop()
-        $observerArguments = @(
-            ('"{0}"' -f (Join-Path $repoPath 'tools/decision_report.py')),
-            ('"{0}"' -f $logPath), '--serve', [string]$observerPort, '--manifest',
-            ('"{0}"' -f (Join-Path $archiveRoot "$Label.json"))
-        )
-        $observerProcess = Start-Process -FilePath (Get-Command python).Source `
-            -ArgumentList $observerArguments -WorkingDirectory $repoPath -WindowStyle Hidden -PassThru `
-            -RedirectStandardOutput (Join-Path $archiveRoot "$Label.observer.out") `
-            -RedirectStandardError (Join-Path $archiveRoot "$Label.observer.err")
-        "LIVE_OBSERVER=http://127.0.0.1:$observerPort"
-    }
-    Start-MatchGameRunner -RuntimePath $runtimeA
-    if ($resolvedOpponentType -eq "Proxy") {
-        $proxy = Start-Process -FilePath $env:ComSpec `
-            -ArgumentList @('/c', 'call', 'bwapi-data\AI\run_proxy.bat') `
-            -WorkingDirectory $runtimeB -WindowStyle Hidden -PassThru
-        $proxyLaunched += [pscustomobject]@{
-            id=$proxy.Id; path=[IO.Path]::GetFullPath([string]$env:ComSpec)
-            started_utc=$proxy.StartTime.ToUniversalTime()
+    Invoke-MatchLaunchPlan -LaunchPlan {
+        if (-not $NoObserver) {
+            # Read-only observer on an ephemeral loopback port. Each match owns
+            # its helper and authoritative manifest; no stale cross-match result.
+            $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+            $listener.Start()
+            $observerPort = $listener.LocalEndpoint.Port
+            $listener.Stop()
+            $observerArguments = @(
+                ('"{0}"' -f (Join-Path $repoPath 'tools/decision_report.py')),
+                ('"{0}"' -f $logPath), '--serve', [string]$observerPort, '--manifest',
+                ('"{0}"' -f (Join-Path $archiveRoot "$Label.json"))
+            )
+            $script:observerProcess = Start-Process -FilePath (Get-Command python).Source `
+                -ArgumentList $observerArguments -WorkingDirectory $repoPath -WindowStyle Hidden -PassThru `
+                -RedirectStandardOutput (Join-Path $archiveRoot "$Label.observer.out") `
+                -RedirectStandardError (Join-Path $archiveRoot "$Label.observer.err")
+            "LIVE_OBSERVER=http://127.0.0.1:$observerPort"
         }
-        Start-Sleep -Seconds 2
+        Start-MatchGameRunner -RuntimePath $runtimeA
+        if ($resolvedOpponentType -eq "Proxy") {
+            $proxy = Start-Process -FilePath $env:ComSpec `
+                -ArgumentList @('/c', 'call', 'bwapi-data\AI\run_proxy.bat') `
+                -WorkingDirectory $runtimeB -WindowStyle Hidden -PassThru
+            $script:proxyLaunched += [pscustomobject]@{
+                id=$proxy.Id; path=[IO.Path]::GetFullPath([string]$env:ComSpec)
+                started_utc=$proxy.StartTime.ToUniversalTime()
+            }
+            Start-Sleep -Seconds 2
+        }
+        Start-MatchGameRunner -RuntimePath $runtimeB
     }
-    Start-MatchGameRunner -RuntimePath $runtimeB
 
     $deadline = if ($TimeoutSeconds -gt 0) {
         [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -778,8 +802,8 @@ try {
             $record.cleanup_result_ignored = [string]$cleanupTerminal[0]
         }
     }
-    if ($null -ne $observerProcess) {
-        Stop-Process -Id $observerProcess.Id -ErrorAction SilentlyContinue
+    if ($null -ne $script:observerProcess) {
+        Stop-Process -InputObject $script:observerProcess -ErrorAction SilentlyContinue
     }
     if ($OpponentName -eq 'BananaBrain') {
         # This is opponent-side diagnostic evidence only. Never replace the

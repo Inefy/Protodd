@@ -4,7 +4,9 @@ $scriptPath = Join-Path $repo 'scripts/direct-match.ps1'
 $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$parseErrors)
 if ($parseErrors.Count) { throw 'Direct-match script has syntax errors' }
-foreach ($name in @('Get-MatchOwnedStarCraftIdentities', 'Get-MatchCrashReports', 'Wait-ForMatchCrashReports', 'Save-MatchCrashReportBytes')) {
+foreach ($name in @('Get-MatchOwnedStarCraftIdentities', 'Get-MatchProcessSnapshot',
+        'Assert-MatchProcessIdentityCapability', 'Invoke-MatchLaunchPlan',
+        'Get-MatchCrashReports', 'Wait-ForMatchCrashReports', 'Save-MatchCrashReportBytes')) {
     $function = $ast.Find({param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
     }, $true)
@@ -22,6 +24,23 @@ $runtimeB = Join-Path $fixtureRoot 'opponent'
 $script:startedAtUtc = [DateTime]::UtcNow.AddMinutes(-1)
 $script:crashReportObservations = @{}
 try {
+    function Get-CimInstance {
+        param([string]$ClassName)
+        throw "mock access denied for $ClassName"
+    }
+    $script:launchInvocations = 0
+    $launchPlan = { $script:launchInvocations++ }
+    $preflightError = $null
+    try { Invoke-MatchLaunchPlan -LaunchPlan $launchPlan }
+    catch { $preflightError = $_.Exception.Message }
+    Remove-Item Function:\Get-CimInstance -ErrorAction SilentlyContinue
+    if ($preflightError -notmatch 'required Win32_Process identity read is unavailable') {
+        throw 'Denied process-identity preflight did not fail clearly before launch'
+    }
+    if ($script:launchInvocations -ne 0) {
+        throw 'Launch plan ran despite denied process-identity preflight'
+    }
+
     $launchTime = [DateTime]::UtcNow
     $runnerPath = Join-Path $fixtureRoot 'host/injectory_x86.exe'
     $gamePath = Join-Path $fixtureRoot 'host/StarCraft.exe'
