@@ -44,9 +44,8 @@ foreach ($path in @($runtimeA, $runtimeB, $archiveRoot)) {
         throw "Direct-match paths must stay inside $buildPrefix"
     }
 }
-$baselineStarCraftIds = @(Get-Process -Name StarCraft -ErrorAction SilentlyContinue |
-    Select-Object -ExpandProperty Id)
-if ($baselineStarCraftIds.Count -gt 0) {
+$existingStarCraft = @(Get-Process -Name StarCraft -ErrorAction SilentlyContinue)
+if ($existingStarCraft.Count -gt 0) {
     throw "Refusing to start: a StarCraft process is already running"
 }
 if ($Label -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
@@ -337,71 +336,251 @@ log_path = bwapi-data/logs
 [System.IO.File]::WriteAllText((Join-Path $runtimeA "bwapi-data/bwapi.ini"), $hostIni)
 [System.IO.File]::WriteAllText((Join-Path $runtimeB "bwapi-data/bwapi.ini"), $joinIni)
 
-$launched = @()
+$script:gameLaunchers = @()
+$script:ownedStarCraft = @()
+$script:processOwnershipWarnings = @()
 $proxyLaunched = @()
-function Get-TrackedStarCraftIds {
-    $ids = @($script:launched)
-    # StarCraft can fork a child after the injection wrapper was sampled. Only
-    # include processes created after this match started and never touch a
-    # pre-existing game owned by the user.
-    $ids += @(Get-Process -Name StarCraft -ErrorAction SilentlyContinue |
-        Where-Object {
-            $fresh = $false
-            try {
-                $startTime = $_.StartTime
-                $fresh = $null -ne $startTime -and
-                         $startTime.ToUniversalTime() -ge $script:startedAtUtc
-            } catch {
-                $fresh = $false
+function Get-MatchOwnedStarCraftIdentities {
+    param([object[]]$Processes, [object[]]$Launchers)
+    $owned = @()
+    foreach ($launcher in $Launchers) {
+        $root = @($Processes | Where-Object {
+            $_.id -eq $launcher.id -and
+            [string]::Equals($_.path, $launcher.path, [StringComparison]::OrdinalIgnoreCase) -and
+            [Math]::Abs(($_.started_utc - $launcher.started_utc).TotalSeconds) -le 0.5
+        }) | Select-Object -First 1
+        if (-not $root) { continue }
+        $descendants = @([int]$launcher.id)
+        $changed = $true
+        while ($changed) {
+            $changed = $false
+            foreach ($process in $Processes) {
+                if ($descendants -contains [int]$process.id -or $descendants -notcontains [int]$process.parent_id) { continue }
+                $descendants += [int]$process.id
+                $changed = $true
             }
-            $script:baselineStarCraftIds -notcontains $_.Id -and $fresh
-        } |
-        Select-Object -ExpandProperty Id)
-    @($ids | Sort-Object -Unique)
+        }
+        foreach ($process in $Processes) {
+            if ($descendants -notcontains [int]$process.id -or
+                -not [string]::Equals($process.path, $launcher.expected_game_path, [StringComparison]::OrdinalIgnoreCase) -or
+                $process.started_utc -lt $launcher.started_utc) { continue }
+            $owned += [pscustomobject]@{
+                id=[int]$process.id; path=$process.path; started_utc=$process.started_utc
+                launcher_id=[int]$launcher.id
+            }
+        }
+    }
+    @($owned | Sort-Object id -Unique)
+}
+function Update-MatchOwnedStarCraft {
+    try {
+        $processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | ForEach-Object {
+            if (-not $_.ExecutablePath -or -not $_.CreationDate) { return }
+            [pscustomobject]@{
+                id=[int]$_.ProcessId; parent_id=[int]$_.ParentProcessId
+                path=[IO.Path]::GetFullPath([string]$_.ExecutablePath)
+                started_utc=[System.Management.ManagementDateTimeConverter]::ToDateTime($_.CreationDate).ToUniversalTime()
+            }
+        })
+        $found = @(Get-MatchOwnedStarCraftIdentities -Processes $processes -Launchers $script:gameLaunchers)
+        foreach ($identity in $found) {
+            if (@($script:ownedStarCraft | Where-Object { $_.id -eq $identity.id -and $_.started_utc -eq $identity.started_utc }).Count -eq 0) {
+                $script:ownedStarCraft += $identity
+            }
+        }
+    } catch {
+        $warning = "Could not verify StarCraft process ancestry; no unverified process will be terminated: $($_.Exception.Message)"
+        if ($script:processOwnershipWarnings -notcontains $warning) { $script:processOwnershipWarnings += $warning }
+    }
+}
+function Test-MatchOwnedProcessInstance {
+    param([object]$Identity)
+    try {
+        $process = Get-Process -Id $Identity.id -ErrorAction Stop
+        if ($process.ProcessName -ne 'StarCraft') { return $null }
+        $path = [IO.Path]::GetFullPath([string]$process.Path)
+        if (-not [string]::Equals($path, $Identity.path, [StringComparison]::OrdinalIgnoreCase)) { return $null }
+        $started = $process.StartTime.ToUniversalTime()
+        if ([Math]::Abs(($started - $Identity.started_utc).TotalSeconds) -gt 0.5) { return $null }
+        return $process
+    } catch { return $null }
+}
+function Get-CurrentOwnedStarCraft {
+    Update-MatchOwnedStarCraft
+    foreach ($identity in $script:ownedStarCraft) {
+        $process = Test-MatchOwnedProcessInstance -Identity $identity
+        if ($process) { $process }
+    }
 }
 function Close-LaunchedStarCraft {
-    # Never use AppActivate or SendKeys here: focus can change while a game
-    # exits, sending Alt+F4/Enter to an unrelated application or Windows.
-    foreach ($id in @(Get-TrackedStarCraftIds)) {
-        $process = Get-Process -Id $id -ErrorAction SilentlyContinue
-        if (-not $process -or $process.ProcessName -ne 'StarCraft') { continue }
+    # Only close process instances previously proven to descend from one of
+    # this run's exact injector processes and to match the expected runtime path.
+    foreach ($identity in $script:ownedStarCraft) {
+        $present = Get-Process -Id $identity.id -ErrorAction SilentlyContinue
+        if (-not $present) { continue }
+        $process = Test-MatchOwnedProcessInstance -Identity $identity
+        if (-not $process) {
+            $warning = "Could not revalidate owned StarCraft PID $($identity.id); left it untouched."
+            if ($script:processOwnershipWarnings -notcontains $warning) { $script:processOwnershipWarnings += $warning }
+            continue
+        }
         [void]$process.CloseMainWindow()
     }
 
     $gracePeriod = [DateTime]::UtcNow.AddSeconds(3)
     while ([DateTime]::UtcNow -lt $gracePeriod) {
-        $remaining = @(
-            foreach ($id in @(Get-TrackedStarCraftIds)) {
-                $process = Get-Process -Id $id -ErrorAction SilentlyContinue
-                if ($process -and $process.ProcessName -eq 'StarCraft') { $process }
-            }
-        )
+        $remaining = @(Get-CurrentOwnedStarCraft)
         if ($remaining.Count -eq 0) { return }
         Start-Sleep -Milliseconds 200
     }
 
-    foreach ($id in @(Get-TrackedStarCraftIds)) {
-        $process = Get-Process -Id $id -ErrorAction SilentlyContinue
-        if (-not $process -or $process.ProcessName -ne 'StarCraft') { continue }
-        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+    foreach ($identity in $script:ownedStarCraft) {
+        $process = Test-MatchOwnedProcessInstance -Identity $identity
+        if (-not $process) { continue }
+        Stop-Process -InputObject $process -Force -ErrorAction SilentlyContinue
     }
 }
 function Close-LaunchedProxy {
-    foreach ($id in @($script:proxyLaunched)) {
-        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+    foreach ($identity in @($script:proxyLaunched)) {
+        try {
+            $process = Get-Process -Id $identity.id -ErrorAction Stop
+            $path = [IO.Path]::GetFullPath([string]$process.Path)
+            $started = $process.StartTime.ToUniversalTime()
+            if ([string]::Equals($path, $identity.path, [StringComparison]::OrdinalIgnoreCase) -and
+                [Math]::Abs(($started - $identity.started_utc).TotalSeconds) -le 2) {
+                Stop-Process -InputObject $process -Force -ErrorAction SilentlyContinue
+            }
+        } catch { }
     }
 }
+function Start-MatchGameRunner {
+    param([string]$RuntimePath)
+    $runnerPath = Join-Path $RuntimePath 'injectory_x86.exe'
+    $expectedGamePath = [IO.Path]::GetFullPath((Join-Path $RuntimePath 'StarCraft.exe'))
+    $runner = Start-Process -FilePath $runnerPath `
+        -ArgumentList '--launch','StarCraft.exe','--inject','bwapi-data\BWAPI.dll','wmode.dll' `
+        -WorkingDirectory $RuntimePath -WindowStyle Hidden -PassThru
+    try { $runnerStartedUtc = $runner.StartTime.ToUniversalTime() }
+    catch {
+        $warning = "Could not verify injector PID $($runner.Id) start identity under '$RuntimePath'; left any game process untouched."
+        $script:processOwnershipWarnings += $warning
+        throw $warning
+    }
+    $script:gameLaunchers += [pscustomobject]@{
+        id=$runner.Id; path=[IO.Path]::GetFullPath($runnerPath)
+        started_utc=$runnerStartedUtc; expected_game_path=$expectedGamePath
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds(6)
+    do {
+        Update-MatchOwnedStarCraft
+        if (@($script:ownedStarCraft | Where-Object { $_.launcher_id -eq $runner.Id }).Count -gt 0) { return }
+        if ([DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+    } while ([DateTime]::UtcNow -lt $deadline)
+    $warning = "Could not prove StarCraft ownership for launcher PID $($runner.Id) under '$RuntimePath'; left any unverified game process untouched."
+    $script:processOwnershipWarnings += $warning
+    throw $warning
+}
 function Get-MatchCrashReports {
+    param([int]$StabilityMilliseconds = 300)
+    if (-not $script:crashReportObservations) {
+        $script:crashReportObservations = @{}
+    }
     foreach ($side in @(@('protodd', $runtimeA), @('opponent', $runtimeB))) {
         $errorRoot = Join-Path $side[1] 'Errors'
         foreach ($file in @(Get-ChildItem -LiteralPath $errorRoot -Filter '*.txt' -File -ErrorAction SilentlyContinue)) {
             if ($file.LastWriteTimeUtc -lt $script:startedAtUtc) { continue }
-            try { $report = [IO.File]::ReadAllText($file.FullName) }
-            catch { continue } # The exception handler may still be writing.
-            if ($report -match '(?m)^EXCEPTION:') {
-                [pscustomobject]@{side=$side[0]; file=$file}
+            $key = [IO.Path]::GetFullPath($file.FullName)
+            try {
+                # Exclusive access proves the exception handler is not writing
+                # while this snapshot is read. A lock or read error stays pending.
+                $stream = [IO.File]::Open($key, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+                try {
+                    $memory = [IO.MemoryStream]::new()
+                    try {
+                        $stream.CopyTo($memory)
+                        $bytes = $memory.ToArray()
+                    } finally { $memory.Dispose() }
+                } finally { $stream.Dispose() }
+                $hasher = [Security.Cryptography.SHA256]::Create()
+                try { $sha = [BitConverter]::ToString($hasher.ComputeHash($bytes)).Replace('-', '') }
+                finally { $hasher.Dispose() }
+                $now = [DateTime]::UtcNow
+                $previous = $script:crashReportObservations[$key]
+                if (-not $previous -or $previous.sha256 -ne $sha -or $previous.length -ne $bytes.Length -or
+                    $previous.last_write_utc -ne $file.LastWriteTimeUtc -or $previous.locked) {
+                    $script:crashReportObservations[$key] = [pscustomobject]@{
+                        sha256=$sha; length=$bytes.Length; last_write_utc=$file.LastWriteTimeUtc
+                        observed_utc=$now; bytes=$bytes; locked=$false
+                    }
+                    continue
+                }
+                $previous.bytes = $bytes
+                if (($now - $previous.observed_utc).TotalMilliseconds -lt $StabilityMilliseconds) { continue }
+                $report = [Text.Encoding]::UTF8.GetString($bytes)
+                if ($report -match '(?m)^EXCEPTION:') {
+                    [pscustomobject]@{
+                        side=$side[0]; file=$file; bytes=$bytes; sha256=$sha
+                        last_write_utc=$file.LastWriteTimeUtc
+                    }
+                }
+            } catch {
+                $key = [IO.Path]::GetFullPath($file.FullName)
+                if (-not $script:crashReportObservations.ContainsKey($key)) {
+                    $script:crashReportObservations[$key] = [pscustomobject]@{
+                        sha256=$null; length=$file.Length; last_write_utc=$file.LastWriteTimeUtc
+                        observed_utc=[DateTime]::UtcNow; bytes=$null; locked=$true
+                    }
+                } else {
+                    $script:crashReportObservations[$key].locked = $true
+                    $script:crashReportObservations[$key].observed_utc = [DateTime]::UtcNow
+                }
             }
         }
+    }
+}
+
+function Wait-ForMatchCrashReports {
+    param([int]$TimeoutMilliseconds = 5000, [int]$StabilityMilliseconds = 300)
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    $crashes = @()
+    $pending = @()
+    do {
+        $crashes = @(Get-MatchCrashReports -StabilityMilliseconds $StabilityMilliseconds)
+        $pending = @()
+        foreach ($side in @(@('protodd', $runtimeA), @('opponent', $runtimeB))) {
+            $errorRoot = Join-Path $side[1] 'Errors'
+            foreach ($file in @(Get-ChildItem -LiteralPath $errorRoot -Filter '*.txt' -File -ErrorAction SilentlyContinue)) {
+                if ($file.LastWriteTimeUtc -lt $script:startedAtUtc) { continue }
+                $key = [IO.Path]::GetFullPath($file.FullName)
+                $observation = $script:crashReportObservations[$key]
+                $stable = $observation -and -not $observation.locked -and
+                    $observation.sha256 -and
+                    (([DateTime]::UtcNow - $observation.observed_utc).TotalMilliseconds -ge $StabilityMilliseconds)
+                if (-not $stable) {
+                    $pending += [pscustomobject]@{
+                        side=$side[0]; file=$file; bytes=$(if ($observation) { $observation.bytes } else { $null })
+                        sha256=$(if ($observation) { $observation.sha256 } else { $null })
+                        locked=[bool](-not $observation -or $observation.locked)
+                        length=$file.Length; last_write_utc=$file.LastWriteTimeUtc
+                    }
+                }
+            }
+        }
+        if ($pending.Count -eq 0) { break }
+        if ([DateTime]::UtcNow -ge $deadline) { break }
+        Start-Sleep -Milliseconds 50
+    } while ($true)
+    [pscustomobject]@{ complete=($pending.Count -eq 0); crashes=$crashes; pending=$pending }
+}
+
+function Save-MatchCrashReportBytes {
+    param([string]$Path, [byte[]]$Bytes)
+    $temporary = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllBytes($temporary, $Bytes)
+        [IO.File]::Move($temporary, $Path)
+    } finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
     }
 }
 
@@ -413,6 +592,9 @@ $gameProcessExited = $false
 $lastObservedFrame = -1
 $traceBeforeCleanup = ""
 $runtimeCrashes = @()
+$runtimeCrashReports = @()
+$runtimeCrashReportStatus = 'complete'
+$script:crashReportObservations = @{}
 $script:startedAtUtc = [DateTime]::UtcNow
 $startedUtc = $script:startedAtUtc.ToString('o')
 $observerProcess = $null
@@ -435,24 +617,18 @@ try {
             -RedirectStandardError (Join-Path $archiveRoot "$Label.observer.err")
         "LIVE_OBSERVER=http://127.0.0.1:$observerPort"
     }
-    Start-Process -FilePath (Join-Path $runtimeA "injectory_x86.exe") `
-        -ArgumentList '--launch','StarCraft.exe','--inject','bwapi-data\BWAPI.dll','wmode.dll' `
-        -WorkingDirectory $runtimeA -WindowStyle Hidden
+    Start-MatchGameRunner -RuntimePath $runtimeA
     if ($resolvedOpponentType -eq "Proxy") {
         $proxy = Start-Process -FilePath $env:ComSpec `
             -ArgumentList @('/c', 'call', 'bwapi-data\AI\run_proxy.bat') `
             -WorkingDirectory $runtimeB -WindowStyle Hidden -PassThru
-        $proxyLaunched += $proxy.Id
+        $proxyLaunched += [pscustomobject]@{
+            id=$proxy.Id; path=[IO.Path]::GetFullPath([string]$env:ComSpec)
+            started_utc=$proxy.StartTime.ToUniversalTime()
+        }
         Start-Sleep -Seconds 2
     }
-    Start-Sleep -Seconds 3
-    $launched += @(Get-Process -Name StarCraft -ErrorAction Stop | Select-Object -ExpandProperty Id)
-    Start-Process -FilePath (Join-Path $runtimeB "injectory_x86.exe") `
-        -ArgumentList '--launch','StarCraft.exe','--inject','bwapi-data\BWAPI.dll','wmode.dll' `
-        -WorkingDirectory $runtimeB -WindowStyle Hidden
-    Start-Sleep -Seconds 3
-    $launched += @(Get-Process -Name StarCraft -ErrorAction Stop | Select-Object -ExpandProperty Id)
-    $launched = @($launched | Sort-Object -Unique)
+    Start-MatchGameRunner -RuntimePath $runtimeB
 
     $deadline = if ($TimeoutSeconds -gt 0) {
         [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -486,10 +662,8 @@ try {
             $wallClockTimedOut = $true
             break
         }
-        $activeGameIds = @(Get-Process -Id $launched -ErrorAction SilentlyContinue |
-            Where-Object { $_.ProcessName -eq 'StarCraft' } |
-            Select-Object -ExpandProperty Id)
-        if ($activeGameIds.Count -lt $launched.Count) {
+        $activeGameIds = @(Get-CurrentOwnedStarCraft | Select-Object -ExpandProperty Id)
+        if ($activeGameIds.Count -lt $script:ownedStarCraft.Count) {
             $gameProcessExited = $true
             break
         }
@@ -506,15 +680,37 @@ try {
     if ($traceBeforeCleanup -match '(?m)^MATCH,seed=(\d+),') {
         $observedSeed = [long]$Matches[1]
     }
-    foreach ($crash in @(Get-MatchCrashReports)) {
-        $saved = Join-Path $archiveRoot "$Label-$($crash.side)-crash-$($crash.file.Name)"
-        Copy-Item -LiteralPath $crash.file.FullName -Destination $saved -Force
-        $runtimeCrashes += [ordered]@{side=$crash.side; report=$saved; sha256=(Get-FileHash -LiteralPath $saved).Hash}
-    }
     $observedTerminalResult = $result
-    if ($runtimeCrashes.Count -gt 0) { $result = $null }
-    $terminationReason = if ($runtimeCrashes.Count -gt 0) {
+    # Close every launched writer before waiting for stable report snapshots.
+    Close-LaunchedStarCraft
+    Close-LaunchedProxy
+    $crashAudit = Wait-ForMatchCrashReports -TimeoutMilliseconds 5000 -StabilityMilliseconds 300
+    foreach ($crash in @($crashAudit.crashes)) {
+        $saved = Join-Path $archiveRoot "$Label-$($crash.side)-crash-$($crash.file.Name)"
+        Save-MatchCrashReportBytes -Path $saved -Bytes $crash.bytes
+        $runtimeCrashes += [ordered]@{side=$crash.side; report=$saved; sha256=$crash.sha256}
+        $runtimeCrashReports += [ordered]@{side=$crash.side; status='complete'; report=$saved; sha256=$crash.sha256; bytes=$crash.bytes.Length}
+    }
+    foreach ($pending in @($crashAudit.pending)) {
+        $saved = $null
+        if ($null -ne $pending.bytes) {
+            $saved = Join-Path $archiveRoot "$Label-$($pending.side)-incomplete-$($pending.file.Name)"
+            Save-MatchCrashReportBytes -Path $saved -Bytes $pending.bytes
+        }
+        $runtimeCrashReports += [ordered]@{
+            side=$pending.side; status='incomplete'; source=$pending.file.FullName; report=$saved
+            sha256=$pending.sha256; bytes=$pending.length; locked=$pending.locked
+            last_write_utc=$pending.last_write_utc.ToString('o')
+        }
+    }
+    if (-not $crashAudit.complete) { $runtimeCrashReportStatus = 'incomplete' }
+    if ($runtimeCrashes.Count -gt 0 -or $runtimeCrashReportStatus -eq 'incomplete') { $result = $null }
+    $terminationReason = if ($runtimeCrashReportStatus -eq 'incomplete') {
+        'runtime-crash-report-incomplete'
+    } elseif ($runtimeCrashes.Count -gt 0) {
         'runtime-crash'
+    } elseif ($script:processOwnershipWarnings.Count -gt 0 -and $script:ownedStarCraft.Count -eq 0) {
+        'process-ownership-unverified'
     } elseif ($result) {
         'completed'
     } elseif ($frameLimitReached) {
@@ -536,6 +732,9 @@ try {
         result = $result
         observed_terminal_result = $observedTerminalResult
         runtime_crashes = $runtimeCrashes
+        runtime_crash_reports = $runtimeCrashReports
+        runtime_crash_report_status = $runtimeCrashReportStatus
+        process_cleanup_warnings = @($script:processOwnershipWarnings)
         host_bwapi_sha256 = (Get-FileHash -LiteralPath (Join-Path $runtimeA 'bwapi-data/BWAPI.dll')).Hash
         opponent_bwapi_sha256 = (Get-FileHash -LiteralPath (Join-Path $runtimeB 'bwapi-data/BWAPI.dll')).Hash
         termination_reason = $terminationReason
@@ -571,8 +770,6 @@ try {
         seed_observed = $observedSeed
         learning_preserved = [bool]$PreserveLearning
     }
-    Close-LaunchedStarCraft
-    Close-LaunchedProxy
     if (-not $result -and (Test-Path -LiteralPath $logPath)) {
         $cleanupTerminal = @(Get-Content -LiteralPath $logPath -Tail 24 -ErrorAction SilentlyContinue |
             Where-Object { $_ -match '^END,(win|loss),(\d+)$' } |
@@ -608,8 +805,14 @@ if (Test-Path -LiteralPath $logPath) {
     else { Write-Warning "Decision report generation failed; the archived match trace is intact" }
 }
 if (-not $result) {
+    if ($script:processOwnershipWarnings.Count -gt 0) {
+        throw "Could not verify safe game-process ownership; unverified processes were left untouched. See the match record for '$Label'"
+    }
     if ($runtimeCrashes.Count -gt 0) {
         throw "Match aborted after a runtime crash; see the archived crash reports for '$Label'"
+    }
+    if ($runtimeCrashReportStatus -eq 'incomplete') {
+        throw "Match report writer did not finish cleanly; see the archived incomplete report evidence for '$Label'"
     }
     if ($frameLimitReached) {
         throw "Match reached the in-game frame limit of $FrameLimit without a terminal result"

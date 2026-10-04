@@ -450,6 +450,9 @@ if(PROTODD_BUILD_TESTS)
             add_test(NAME protodd_direct_match_runner_tests
                 COMMAND "${PROTODD_POWERSHELL_EXECUTABLE}" -NoProfile -File
                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_direct_match.ps1")
+            add_test(NAME protodd_bwapi_runtime_deploy_tests
+                COMMAND "${PROTODD_POWERSHELL_EXECUTABLE}" -NoProfile -File
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bwapi_runtime_deploy.ps1")
         endif()
     endif()
     if(Python3_Interpreter_FOUND)

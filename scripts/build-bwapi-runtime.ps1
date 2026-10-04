@@ -1,6 +1,143 @@
 param([string]$BwapiRoot = 'build/_deps/bwapi-src', [switch]$Deploy)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+
+function Get-ZipEntrySha256 {
+    param([string]$ArchivePath, [string]$EntryName)
+    $archive = [IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        $entry = $archive.GetEntry($EntryName)
+        if (-not $entry) { throw "BWAPI package does not contain the expected runtime entry '$EntryName'" }
+        $stream = $entry.Open()
+        try {
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try { return ([BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '')) }
+            finally { $sha.Dispose() }
+        } finally { $stream.Dispose() }
+    } finally { $archive.Dispose() }
+}
+
+function Deploy-BwapiRuntimeArtifacts {
+    param(
+        [Parameter(Mandatory)][string]$DllPath,
+        [Parameter(Mandatory)][string[]]$RuntimeTargets,
+        [Parameter(Mandatory)][string]$PackagePath,
+        [Parameter(Mandatory)][string]$BackupRoot,
+        [scriptblock]$BeforeReplace,
+        [scriptblock]$AfterReplace,
+        [scriptblock]$BeforeRollback
+    )
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    if (-not (Test-Path -LiteralPath $DllPath -PathType Leaf)) { throw "BWAPI DLL not found: $DllPath" }
+    if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) { throw "Required BWAPI package not found: $PackagePath" }
+    $sourceHash = (Get-FileHash -LiteralPath $DllPath -Algorithm SHA256).Hash
+    # Validate the canonical archive and its expected entry before creating or
+    # replacing any runtime destination.
+    [void](Get-ZipEntrySha256 -ArchivePath $PackagePath -EntryName 'bwapi-data/BWAPI.dll')
+    $packageOriginalHash = (Get-FileHash -LiteralPath $PackagePath -Algorithm SHA256).Hash
+    foreach ($target in $RuntimeTargets) {
+        New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+    }
+    New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
+
+    $items = @()
+    foreach ($target in $RuntimeTargets) {
+        $items += [pscustomobject]@{ Target=$target; Kind='dll'; Original=(Test-Path -LiteralPath $target -PathType Leaf) }
+    }
+    $items += [pscustomobject]@{ Target=$PackagePath; Kind='zip'; Original=$true }
+    $id = [guid]::NewGuid().ToString('N')
+    $committed = [Collections.Generic.List[object]]::new()
+    $keepTemporary = $false
+    try {
+        foreach ($item in $items) {
+            $item | Add-Member -NotePropertyName Stage -NotePropertyValue (Join-Path (Split-Path -Parent $item.Target) ".protodd-$id.stage")
+            $item | Add-Member -NotePropertyName Rollback -NotePropertyValue (Join-Path (Split-Path -Parent $item.Target) ".protodd-$id.rollback")
+            $item | Add-Member -NotePropertyName ReplaceBackup -NotePropertyValue (Join-Path (Split-Path -Parent $item.Target) ".protodd-$id.replaced")
+            $item | Add-Member -NotePropertyName RollbackRecovery -NotePropertyValue (Join-Path (Split-Path -Parent $item.Target) ".protodd-$id.rollback-recovery")
+            if ($item.Original) {
+                $currentHash = (Get-FileHash -LiteralPath $item.Target -Algorithm SHA256).Hash
+                $saved = Join-Path $BackupRoot "$currentHash.$(if ($item.Kind -eq 'zip') { 'zip' } else { 'dll' })"
+                if (-not (Test-Path -LiteralPath $saved -PathType Leaf)) { Copy-Item -LiteralPath $item.Target -Destination $saved }
+                if ((Get-FileHash -LiteralPath $saved -Algorithm SHA256).Hash -ne $currentHash) {
+                    throw "Backup verification failed for $($item.Target)"
+                }
+                $item | Add-Member -NotePropertyName Backup -NotePropertyValue $saved
+                Copy-Item -LiteralPath $item.Target -Destination $item.Rollback
+                if ((Get-FileHash -LiteralPath $item.Rollback -Algorithm SHA256).Hash -ne $currentHash) {
+                    throw "Rollback copy verification failed for $($item.Target)"
+                }
+            }
+            if ($item.Kind -eq 'dll') {
+                Copy-Item -LiteralPath $DllPath -Destination $item.Stage
+            } else {
+                Copy-Item -LiteralPath $PackagePath -Destination $item.Stage
+                $archive = [IO.Compression.ZipFile]::Open($item.Stage, [IO.Compression.ZipArchiveMode]::Update)
+                try {
+                    $entry = $archive.GetEntry('bwapi-data/BWAPI.dll')
+                    if (-not $entry) { throw 'Staged BWAPI package lost its expected runtime entry' }
+                    $entry.Delete()
+                    [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $DllPath, 'bwapi-data/BWAPI.dll') | Out-Null
+                } finally { $archive.Dispose() }
+            }
+            $stageHash = if ($item.Kind -eq 'dll') {
+                (Get-FileHash -LiteralPath $item.Stage -Algorithm SHA256).Hash
+            } else {
+                Get-ZipEntrySha256 -ArchivePath $item.Stage -EntryName 'bwapi-data/BWAPI.dll'
+            }
+            if ($stageHash -ne $sourceHash) { throw "Staged BWAPI artifact hash mismatch for $($item.Target)" }
+        }
+        # Recheck the package after staging to catch concurrent edits.
+        if ((Get-FileHash -LiteralPath $PackagePath -Algorithm SHA256).Hash -ne $packageOriginalHash) {
+            throw 'Required BWAPI package changed during deployment staging'
+        }
+        for ($i = 0; $i -lt $items.Count; $i++) {
+            $item = $items[$i]
+            if ($BeforeReplace) { & $BeforeReplace $i $item.Target }
+            if ($item.Original) { [IO.File]::Replace($item.Stage, $item.Target, $item.ReplaceBackup) }
+            else { [IO.File]::Move($item.Stage, $item.Target) }
+            $committed.Add($item)
+            if ($AfterReplace) { & $AfterReplace $i $item.Target }
+            $actualHash = if ($item.Kind -eq 'dll') {
+                (Get-FileHash -LiteralPath $item.Target -Algorithm SHA256).Hash
+            } else {
+                Get-ZipEntrySha256 -ArchivePath $item.Target -EntryName 'bwapi-data/BWAPI.dll'
+            }
+            if ($actualHash -ne $sourceHash) { throw "Post-replacement hash verification failed for $($item.Target)" }
+            if (Test-Path -LiteralPath $item.ReplaceBackup) { Remove-Item -LiteralPath $item.ReplaceBackup -Force }
+        }
+    } catch {
+        $failure = $_
+        $rollbackErrors = [Collections.Generic.List[string]]::new()
+        for ($i = $committed.Count - 1; $i -ge 0; $i--) {
+            $item = $committed[$i]
+            try {
+                if ($BeforeRollback) { & $BeforeRollback $i $item.Target }
+                if ($item.Original) { [IO.File]::Replace($item.Rollback, $item.Target, $item.RollbackRecovery) }
+                elseif (Test-Path -LiteralPath $item.Target) { Remove-Item -LiteralPath $item.Target -Force }
+                if ($item.Original) {
+                    $restoredHash = (Get-FileHash -LiteralPath $item.Target -Algorithm SHA256).Hash
+                    $backupHash = (Get-FileHash -LiteralPath $item.Backup -Algorithm SHA256).Hash
+                    if ($restoredHash -ne $backupHash) { throw "restored hash $restoredHash differs from backup $backupHash" }
+                    if (Test-Path -LiteralPath $item.RollbackRecovery) { Remove-Item -LiteralPath $item.RollbackRecovery -Force }
+                }
+            } catch { $rollbackErrors.Add("$($item.Target): $($_.Exception.Message)") }
+        }
+        if ($rollbackErrors.Count -gt 0) {
+            $keepTemporary = $true
+            throw "Deployment failed: $($failure.Exception.Message). Rollback also failed; recovery files preserved. $($rollbackErrors -join '; ')"
+        }
+        throw $failure
+    } finally {
+        if (-not $keepTemporary) {
+            foreach ($item in $items) {
+                foreach ($path in @($item.Stage, $item.Rollback, $item.ReplaceBackup, $item.RollbackRecovery)) {
+                    if ($path -and (Test-Path -LiteralPath $path)) { Remove-Item -LiteralPath $path -Force }
+                }
+            }
+        }
+    }
+}
+
 if ($Deploy -and (Get-Process StarCraft -ErrorAction SilentlyContinue)) {
     throw 'Cannot deploy BWAPI while StarCraft is running'
 }
@@ -104,35 +241,12 @@ if ($Deploy) {
     if (Get-Process StarCraft -ErrorAction SilentlyContinue) {
         throw 'StarCraft started during the build; stop it before deploying'
     }
-    $backup = Join-Path $repo 'build/bwapi-runtime-backup'
-    New-Item -ItemType Directory -Path $backup -Force | Out-Null
-    foreach ($runtime in @('direct-template', 'match-runtime-a', 'match-runtime-b')) {
-        $target = Join-Path $repo "build/$runtime/bwapi-data/BWAPI.dll"
-        if (Test-Path -LiteralPath $target) {
-            $digest = (Get-FileHash -LiteralPath $target).Hash
-            $saved = Join-Path $backup "$digest.dll"
-            if (-not (Test-Path -LiteralPath $saved)) { Copy-Item -LiteralPath $target -Destination $saved }
-        }
-        New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
-        Copy-Item -LiteralPath $dll -Destination $target -Force
-    }
-    # Future Tournament Manager campaigns stage their engine from this archive.
-    # Keep historical campaign archives intact and retain the original package.
+    # All targets and the canonical package are staged and checked before the
+    # transaction replaces anything. Historical backups remain immutable.
     $required = Join-Path $repo 'ladder/manager/server/required/Required_BWAPI_440.zip'
-    if (Test-Path -LiteralPath $required) {
-        $digest = (Get-FileHash -LiteralPath $required).Hash
-        $saved = Join-Path $backup "$digest.zip"
-        if (-not (Test-Path -LiteralPath $saved)) { Copy-Item -LiteralPath $required -Destination $saved }
-        $staged = Join-Path $backup 'Required_BWAPI_440.staged.zip'
-        Copy-Item -LiteralPath $required -Destination $staged -Force
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        $archive = [IO.Compression.ZipFile]::Open($staged, [IO.Compression.ZipArchiveMode]::Update)
-        try {
-            $entry = $archive.GetEntry('bwapi-data/BWAPI.dll')
-            if (-not $entry) { throw 'BWAPI package does not contain the expected runtime entry' }
-            $entry.Delete()
-            [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $dll, 'bwapi-data/BWAPI.dll') | Out-Null
-        } finally { $archive.Dispose() }
-        Move-Item -LiteralPath $staged -Destination $required -Force
+    $targets = @('direct-template', 'match-runtime-a', 'match-runtime-b') | ForEach-Object {
+        Join-Path $repo "build/$_/bwapi-data/BWAPI.dll"
     }
+    Deploy-BwapiRuntimeArtifacts -DllPath $dll -RuntimeTargets $targets -PackagePath $required `
+        -BackupRoot (Join-Path $repo 'build/bwapi-runtime-backup')
 }
