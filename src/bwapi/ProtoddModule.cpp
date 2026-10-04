@@ -3,6 +3,11 @@
 #include "protodd/Technology.hpp"
 #include "protodd/UnitCatalog.hpp"
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -10,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -30,6 +36,106 @@ std::string readFile(const std::filesystem::path& path) {
     return input ? std::string(std::istreambuf_iterator<char>(input),
                                std::istreambuf_iterator<char>())
                  : std::string{};
+}
+
+protodd::HybridCommandAdapterInput hybridCommandAdapterInput(
+    const BWAPI::UnitCommand& command, const protodd::Frame frame) {
+    using namespace protodd;
+    const auto type = command.getType();
+    const auto actor = command.getUnit();
+    const auto target = command.getTarget();
+    const auto targetExists = target && target->exists();
+    const auto selfPlayer = BWAPI::Broodwar->self();
+    const auto enemyPlayer = BWAPI::Broodwar->enemy();
+    auto input = HybridCommandAdapterInput{};
+    input.command = classifyHybridDiagnosticCommand(
+        type == BWAPI::UnitCommandTypes::Attack_Unit,
+        type == BWAPI::UnitCommandTypes::Right_Click_Unit,
+        type == BWAPI::UnitCommandTypes::Right_Click_Position);
+    input.commandTypeId = type.getID();
+    input.frame = frame;
+    input.actorPresent = actor != nullptr;
+    input.actorExists = actor && actor->exists();
+    input.actorOwned = actor && selfPlayer && actor->getPlayer() == selfPlayer;
+    input.actorCompleted = actor && actor->isCompleted();
+    if (actor) {
+        input.actorId = actor->getID();
+        input.actorTypeId = actor->getType().getID();
+        const auto actorType = actor->getType();
+        input.actorKind = actorType == BWAPI::UnitTypes::Protoss_Zealot ? UnitKind::zealot :
+            actorType == BWAPI::UnitTypes::Protoss_Dragoon ? UnitKind::dragoon :
+            actorType == BWAPI::UnitTypes::Protoss_Archon ? UnitKind::archon :
+            actorType == BWAPI::UnitTypes::Protoss_Dark_Templar ? UnitKind::darkTemplar : UnitKind::unknown;
+    }
+    input.targetPresent = target != nullptr;
+    input.targetExists = targetExists;
+    if (target) input.targetId = target->getID();
+    input.targetEnemy = targetExists && enemyPlayer && target->getPlayer() == enemyPlayer;
+    input.targetVisible = targetExists && target->isVisible();
+    input.targetDetected = targetExists && target->isDetected();
+    input.targetRelation = classifyHybridDiagnosticTarget(
+        targetExists, command.getTargetPosition().isValid(),
+        targetExists && enemyPlayer && target->getPlayer() == enemyPlayer,
+        targetExists && selfPlayer && target->getPlayer() == selfPlayer,
+        targetExists && target->getPlayer() && target->getPlayer() != enemyPlayer &&
+            target->getPlayer() != selfPlayer);
+    return input;
+}
+
+std::optional<std::string> readBoundedFile(
+    const std::filesystem::path& path, const std::size_t maximumBytes,
+    const std::size_t maximumLineBytes = protodd::pvtPortfolioMaximumLineBytes) {
+    std::error_code error;
+    const auto bytes = std::filesystem::file_size(path, error);
+    if (error) {
+        if (!std::filesystem::exists(path)) return std::string{};
+        return std::nullopt;
+    }
+    if (bytes > maximumBytes) return std::nullopt;
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return std::nullopt;
+    std::string result;
+    result.reserve(static_cast<std::size_t>(bytes));
+    std::size_t lineBytes = 0;
+    char character{};
+    while (input.get(character)) {
+        if (character == '\n') lineBytes = 0;
+        else if (++lineBytes > maximumLineBytes) return std::nullopt;
+        result.push_back(character);
+    }
+    if (!input.eof() || result.size() != bytes) return std::nullopt;
+    return result;
+}
+
+bool validMatchId(const std::string_view value) noexcept {
+    if (value.empty() || value.size() > 128) return false;
+    return std::ranges::all_of(value, [](const unsigned char ch) {
+        return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+               (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.' || ch == ':';
+    });
+}
+
+bool atomicReplaceFile(
+    const std::filesystem::path& destination, const std::string_view contents) {
+    auto temporary = destination;
+    temporary += L".tmp";
+    {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) return false;
+        output.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+        output.flush();
+        if (!output) {
+            output.close();
+            std::error_code ignored;
+            std::filesystem::remove(temporary, ignored);
+            return false;
+        }
+    }
+    if (MoveFileExW(temporary.c_str(), destination.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+    return false;
 }
 
 int countUnits(
@@ -122,7 +228,10 @@ void ProtoddModule::onStart() {
     BWAPI::Broodwar->enableFlag(BWAPI::Flag::UserInput);
     bridge_.onStart();
     wholeGame_.start();
+    forecastAudit_.reset(
+        readFile("bwapi-data/read/Combat-forecast-audit.txt").starts_with("on"));
     hybridProposals_.clear();
+    hybridDiagnostics_.reset();
     hybridReceived_ = hybridTargets_ = hybridSubmitted_ = hybridAccepted_ = 0;
     hybridControl_ = false;
 #ifdef PROTODD_WHOLE_GAME_HYBRID
@@ -130,6 +239,100 @@ void ProtoddModule::onStart() {
         !readFile("bwapi-data/read/WholeGame-hybrid-mode.txt").starts_with("shadow");
 #endif
     state_ = bridge_.observe();
+    const auto matchSeed = static_cast<std::uint32_t>(BWAPI::Broodwar->getRandomSeed());
+    const auto matchClock = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto auditMapHash = static_cast<std::uint32_t>(stableSeed(BWAPI::Broodwar->mapHash()));
+    const auto pvtMode = readFile("bwapi-data/read/PvT-strategy.txt");
+    const auto pvtModeLine = std::string_view(pvtMode).substr(
+        0, pvtMode.find_first_of("\r\n"));
+    auto pvtStrategy = PvTStrategyId::standard;
+    pvtPortfolioActive_ = false;
+    pvtMatchId_.clear();
+    auto pvtModeSource = pvtMode.empty() ? "default" : "invalid";
+    if (pvtModeLine == pvtStrategyName(PvTStrategyId::safeTwoGatewayRangeObserver)) {
+        pvtStrategy = PvTStrategyId::safeTwoGatewayRangeObserver;
+        pvtModeSource = "read-file";
+    } else if (pvtModeLine == pvtStrategyName(PvTStrategyId::economicOneGatewayObserver)) {
+        pvtStrategy = PvTStrategyId::economicOneGatewayObserver;
+        pvtModeSource = "read-file";
+    } else if (pvtModeLine == pvtStrategyName(PvTStrategyId::standard)) {
+        pvtModeSource = "read-file";
+    }
+    selectedPvTStrategy_ = pvtStrategy;
+#ifdef PROTODD_PVT_STRATEGY_PORTFOLIO
+    const auto configuredMatchId = readBoundedFile("bwapi-data/read/PvT-match-id.txt", 256);
+    if (configuredMatchId) {
+        const auto line = std::string_view(*configuredMatchId).substr(
+            0, configuredMatchId->find_first_of("\r\n"));
+        if (validMatchId(line)) pvtMatchId_ = line;
+    }
+    const auto pvtPortfolioMode = readBoundedFile("bwapi-data/read/PvT-portfolio-mode.txt", 128);
+    const auto pvtPortfolioModeLine = pvtPortfolioMode
+        ? std::string_view(*pvtPortfolioMode).substr(
+              0, pvtPortfolioMode->find_first_of("\r\n"))
+        : std::string_view{};
+    const auto pvtLearningModeOption = readBoundedFile(
+        "bwapi-data/read/Protodd-learning-mode.txt", 128);
+    const auto frozenPortfolioRun = !pvtLearningModeOption ||
+                                    pvtLearningModeOption->starts_with("frozen");
+    const auto gate = pvtStrategyRuntimeGate(
+        true, !pvtMode.empty(), pvtPortfolioModeLine == "adaptive",
+        frozenPortfolioRun, state_.enemy.race == Race::terran, !pvtMatchId_.empty());
+    if (gate.adaptive) {
+        PvTStrategyContext context{csvSafe(opponentName_), "terran", csvSafe(mapName_),
+                                   std::string(pvtStrategyPortfolioVersion)};
+        const auto validatedHistory = readBoundedFile(
+            "bwapi-data/read/PvT-strategy-portfolio.csv", pvtPortfolioMaximumBytes);
+        const auto localHistory = readBoundedFile(
+            "bwapi-data/write/PvT-strategy-portfolio.csv", pvtPortfolioMaximumBytes);
+        auto historyValid = validatedHistory.has_value() && localHistory.has_value();
+        if (historyValid && !pvtStrategyPortfolio_.parse(*validatedHistory)) historyValid = false;
+        if (historyValid && !pvtStrategyPortfolio_.merge(*localHistory)) historyValid = false;
+        if (historyValid) {
+            selectedPvTStrategy_ = pvtStrategyPortfolio_.choose(
+                context, stableSeed(opponentName_ + "|" + mapName_ + "|" + pvtMatchId_ + "|" +
+                                    std::string(pvtStrategyPortfolioVersion)));
+            pvtPortfolioActive_ = true;
+            pvtStrategy = selectedPvTStrategy_;
+            pvtModeSource = "adaptive-portfolio";
+            // Only validator-exported cumulative snapshots enter this file.
+            // Frozen runs cannot reach this branch or write its local copy.
+            if (gate.mayWriteHistory) {
+                std::error_code portfolioError;
+                std::filesystem::create_directories("bwapi-data/write", portfolioError);
+                const auto serialized = pvtStrategyPortfolio_.serialize();
+                if (!atomicReplaceFile("bwapi-data/write/PvT-strategy-portfolio.csv", serialized) && log_)
+                    log_ << "PVT_PORTFOLIO_HISTORY,write=failed-atomic-replace\n";
+            }
+        } else if (log_) {
+            log_ << "PVT_PORTFOLIO_HISTORY,rejected=unavailable-or-invalid\n";
+        }
+    }
+#endif
+    strategy_.setPvTStrategy(pvtStrategy);
+    const auto auditOpponentId = stableSeed(opponentName_);
+    const auto auditGameId = CombatForecastAudit::makeGameId(matchSeed, auditMapHash,
+        auditOpponentId, static_cast<std::uint64_t>(matchClock));
+    forecastAudit_.setMatchContext(matchSeed, auditMapHash,
+        static_cast<int>(state_.enemy.race), auditGameId, auditOpponentId,
+        static_cast<int>(pvtStrategy));
+    if (log_ && pvtPortfolioActive_) {
+        log_ << "PVT_STRATEGY_SELECTION,id=" << pvtStrategyName(pvtStrategy)
+             << ",match_id=" << pvtMatchId_
+             << ",opponent=" << csvSafe(opponentName_)
+             << ",opponent_race="
+             << (state_.enemy.race == Race::terran ? "terran" : "unresolved")
+             << ",map=" << csvSafe(mapName_)
+             << ",strategy_version=" << pvtStrategyPortfolioVersion
+             << ",source=" << pvtModeSource << '\n';
+    }
+    else if (log_) {
+        log_ << "PVT_STRATEGY_SELECTION,id=" << pvtStrategyName(pvtStrategy)
+             << ",opponent=" << csvSafe(opponentName_)
+             << ",opponent_race="
+             << (state_.enemy.race == Race::terran ? "terran" : "unresolved")
+             << ",source=" << pvtModeSource << '\n';
+    }
     if (log_) {
         log_ << "CONTROLLER,whole-game,weights=" << wholeGame_.modelLoaded()
              << ",control=" << wholeGame_.controlling()
@@ -321,8 +524,22 @@ void ProtoddModule::onEnd(const bool winner) {
     if (log_) log_ << "HYBRID_SUMMARY,received=" << hybridReceived_
                    << ",targets=" << hybridTargets_ << ",submitted=" << hybridSubmitted_
                    << ",accepted=" << hybridAccepted_ << '\n';
+    if (log_) writeHybridDiagnosticTrace(log_, hybridDiagnostics_);
     policy_.end(winner);
+    if (log_ && pvtPortfolioActive_) log_ << "PVT_STRATEGY_MATCH_RESULT,match_id="
+                   << pvtMatchId_ << ",arm="
+                   << pvtStrategyName(selectedPvTStrategy_)
+                   << ",match_seed=" << BWAPI::Broodwar->getRandomSeed()
+                   << ",opponent=" << csvSafe(opponentName_)
+                   << ",opponent_race="
+                   << (state_.enemy.race == Race::terran ? "terran" : "unresolved")
+                   << ",map=" << csvSafe(mapName_)
+                   << ",strategy_version=" << pvtStrategyPortfolioVersion << ",outcome="
+                   << (winner ? "win" : "loss")
+                   << ",externally_validated=0\n";
     state_.frame = BWAPI::Broodwar->getFrameCount();
+    forecastAudit_.finish(state_.frame);
+    forecastAudit_.write(log_);
     sampleTelemetry();
     logDiagnostics();
     if (!validatedLearning_) {
@@ -448,19 +665,25 @@ void ProtoddModule::runFrame() {
     if (wholeGame_.controlling()) {
         hybridReceived_ += learnedCommands.size();
         for (const auto& candidate : learnedCommands) {
-            const auto& command = candidate.command;
-            if (command.getType() != BWAPI::UnitCommandTypes::Attack_Unit ||
-                !command.getUnit() || !command.getTarget()) continue;
+            const auto adapted = adaptHybridCommand(
+                hybridCommandAdapterInput(candidate.command, state_.frame),
+#ifdef PROTODD_HYBRID_RIGHTCLICK_ENEMY_ATTACK
+                true);
+#else
+                false);
+#endif
+            hybridDiagnostics_.recordIntake(adapted.diagnostic);
+            if (!adapted.proposal) continue;
             ++hybridTargets_;
             if (!hybridControl_) continue;
-            Command proposal;
-            proposal.actor = command.getUnit()->getID();
-            proposal.type = CommandType::attackUnit;
-            proposal.targetUnit = command.getTarget()->getID();
-            std::erase_if(hybridProposals_, [&proposal](const HybridProposal& pending) {
-                return pending.command.actor == proposal.actor;
+            std::erase_if(hybridProposals_, [this, &adapted](const HybridProposal& pending) {
+                const auto replaced = pending.command.actor == adapted.proposal->actor;
+                if (replaced) hybridDiagnostics_.recordProposal(
+                    pending.diagnostic, HybridDiagnosticReason::replacedByNewerProposal,
+                    state_.frame);
+                return replaced;
             });
-            hybridProposals_.push_back({std::move(proposal), state_.frame});
+            hybridProposals_.push_back({*adapted.proposal, state_.frame, adapted.diagnostic});
         }
     }
 #elif defined(PROTODD_WHOLE_GAME_CONTROL)
@@ -553,6 +776,9 @@ void ProtoddModule::onUnitShow(const BWAPI::Unit unit) {
 void ProtoddModule::onUnitCreate(const BWAPI::Unit unit) { logLifecycle(unit, "create"); }
 void ProtoddModule::onUnitComplete(const BWAPI::Unit unit) { logLifecycle(unit, "complete"); }
 void ProtoddModule::onUnitDestroy(const BWAPI::Unit unit) {
+    if (unit != nullptr && (unit->getPlayer() == BWAPI::Broodwar->self() ||
+        (unit->getPlayer() == BWAPI::Broodwar->enemy() && unit->isVisible())))
+        forecastAudit_.observedDestroy(unit->getID());
     if (log_ && unit != nullptr &&
         (unit->getPlayer() == BWAPI::Broodwar->self() ||
          (unit->getPlayer() == BWAPI::Broodwar->enemy() && unit->isVisible()))) {
@@ -609,6 +835,28 @@ void ProtoddModule::updateStrategy() {
         action == PolicyAction::pressure ? OpeningStyle::aggressive :
         action == PolicyAction::economy ? OpeningStyle::economic : OpeningStyle::standard;
     auto candidate = strategy_.plan(state_, opponent_.assessment(), style);
+    if (state_.enemy.race == Race::terran) {
+        const auto observedRecently = [this](const UnitKind kind) {
+            return static_cast<int>(std::ranges::count_if(
+                state_.enemy.units, [this, kind](const UnitSnapshot& enemy) {
+                    return enemy.kind == kind && !enemy.hallucination &&
+                        (enemy.visible || state_.frame - enemy.lastSeen <= 90 * 24);
+                }));
+        };
+        const auto cues = "PVT_STRATEGY,id=" +
+            std::string(pvtStrategyName(candidate.pvtStrategy)) +
+            ",opponent=" + csvSafe(opponentName_) +
+            ",opponent_race=terran,factory=" +
+                std::to_string(observedRecently(UnitKind::factory)) +
+            ",command_center=" +
+                std::to_string(observedRecently(UnitKind::commandCenter)) +
+            ",vulture=" + std::to_string(observedRecently(UnitKind::vulture)) +
+            ",tank=" + std::to_string(observedRecently(UnitKind::siegeTank)) +
+            ",mine=" + std::to_string(observedRecently(UnitKind::spiderMine)) +
+            ",observer=" + std::to_string(countUnits(state_.self.units,
+                UnitKind::observer, true));
+        trace("pvt-strategy", cues, 240);
+    }
     const auto strategyPosture = candidate.posture;
     auto coveredPressureReleased = false;
     auto containBreak = false;
@@ -809,6 +1057,7 @@ void ProtoddModule::updateCombat(
     const bool runSimulation,
     const int navigationInterval,
     const std::size_t commandLimit) {
+    forecastAudit_.beginTick(state_.frame);
     influence_.updateStorms(state_.storms);
     const auto transportOrders = transports_.control(
         state_, plan_.attackTarget, retreatPoint(), influence_,
@@ -832,6 +1081,37 @@ void ProtoddModule::updateCombat(
 #endif
     const auto formed = squads_.form(state_, friendly, enemy, plan_, retreatPoint(),
                                      &navigation_, emergencyConsolidation, limitStaticCoverage);
+#ifdef PROTODD_SAFE_OBSERVER_COVERAGE
+#ifdef PROTODD_PVZ_DETECTOR_SURGE
+    const auto mobilizeDetectorReserve = state_.enemy.race == Race::zerg;
+#else
+    const auto mobilizeDetectorReserve = false;
+#endif
+#if defined(PROTODD_FORWARD_DETECTOR_ESCORT) || defined(PROTODD_DIRECT_DETECTOR_RENDEZVOUS)
+    const auto centerBlockedMainEscort = true;
+#else
+    const auto centerBlockedMainEscort = false;
+#endif
+#ifdef PROTODD_CONTESTED_DETECTOR_RESERVE
+    const auto mobilizeContestedReserve = true;
+#else
+    const auto mobilizeContestedReserve = false;
+#endif
+#ifdef PROTODD_DIRECT_DETECTOR_RENDEZVOUS
+    constexpr auto directSafeRendezvous = true;
+#else
+    constexpr auto directSafeRendezvous = false;
+#endif
+    std::vector<UnitId> unavailableObservers;
+    for (const auto& unit : state_.self.units) {
+        if (unit.kind == UnitKind::observer && scouts_.observerEvading(unit.id, state_.frame))
+            unavailableObservers.push_back(unit.id);
+    }
+    const auto detectorAssignments = squads_.detectorEscortAssignments(
+        state_, formed, influence_, mobilizeDetectorReserve,
+        centerBlockedMainEscort, mobilizeContestedReserve,
+        directSafeRendezvous, unavailableObservers, true);
+#endif
     if (std::ranges::any_of(formed, [](const Squad& squad) {
             return squad.emergencyDefense;
         })) {
@@ -1038,10 +1318,21 @@ void ProtoddModule::updateCombat(
             estimate.decision = FightDecision::retreat;
         if (squad.withdrawing) estimate.decision = FightDecision::retreat;
         estimate.holdScreen = SquadPlanner::mustHoldDefensiveScreen(squad);
-        estimate.advanceBlocked = squad.role != SquadRole::baseDefense &&
-            !SquadPlanner::mobileDetectionReady(state_, squad);
+#ifdef PROTODD_SAFE_OBSERVER_COVERAGE
+        const auto detectorAssignment = std::ranges::find(
+            detectorAssignments, squad.id, &DetectorEscortAssignment::squadId);
+        const auto assignedObserver = detectorAssignment == detectorAssignments.end()
+            ? UnitId{-1} : detectorAssignment->order.actor;
+        estimate.advanceBlocked = SquadPlanner::mobileDetectionBlocksAdvance(
+            state_, squad, &influence_, assignedObserver);
+        if (squad.role == SquadRole::baseDefense &&
+            SquadPlanner::mobileDetectionReady(
+                state_, squad, &influence_, assignedObserver)) {
+#else
+        estimate.advanceBlocked = SquadPlanner::mobileDetectionBlocksAdvance(state_, squad);
         if (squad.role == SquadRole::baseDefense &&
             SquadPlanner::mobileDetectionReady(state_, squad)) {
+#endif
             const auto perimeter = SquadPlanner::defensiveEngagementArea(squad, estimate);
             if (perimeter.pursuitRadius > defense.pursuitRadius) {
                 defense = perimeter;
@@ -1058,6 +1349,13 @@ void ProtoddModule::updateCombat(
             travelReason = "counterattack";
             if (firstCounterattackFrame_ < 0) firstCounterattackFrame_ = state_.frame;
         }
+        forecastAudit_.observe(state_.frame, engagementKey, supportedArmy, squad.enemies,
+            std::max(0.0, estimate.simulatedFriendlyInitial - estimate.simulatedFriendlyRemaining),
+            estimate.simulatedFriendlyInitial > 0.0
+                ? std::clamp(estimate.simulatedFriendlyRemaining / estimate.simulatedFriendlyInitial, 0.0, 1.0)
+                : 0.0,
+            static_cast<int>(proposedDecision), static_cast<int>(estimate.decision), runSimulation,
+            squad.withdrawing || estimate.decision == FightDecision::retreat);
         if (squad.role == SquadRole::mainArmy && vanguard == &squad &&
             (plan_.posture == Posture::hold || plan_.posture == Posture::pressure ||
              plan_.posture == Posture::defend)) {
@@ -1138,8 +1436,13 @@ void ProtoddModule::updateCombat(
         for (const auto& pending : hybridProposals_) {
             if (auto proposal = hybridCombatProposal(pending.command, pending.frame,
                     state_.frame, squad, estimate, targets, defense)) {
+                hybridDiagnostics_.recordProposal(pending.diagnostic,
+                    HybridDiagnosticReason::passedSafetyGates, state_.frame);
                 submit(std::move(*proposal));
                 ++hybridSubmitted_;
+            } else {
+                hybridDiagnostics_.recordProposal(pending.diagnostic,
+                    HybridDiagnosticReason::safetyGateRejected, state_.frame);
             }
         }
 #endif
@@ -1159,6 +1462,12 @@ void ProtoddModule::updateCombat(
     }
 
     detectorEscorts_.clear();
+#ifdef PROTODD_SAFE_OBSERVER_COVERAGE
+    for (const auto& assignment : detectorAssignments) {
+        detectorEscorts_.push_back(assignment.order.actor);
+        submit(assignment.order);
+    }
+#else
 #ifdef PROTODD_PVZ_DETECTOR_SURGE
     const auto mobilizeDetectorReserve = state_.enemy.race == Race::zerg;
 #else
@@ -1187,6 +1496,7 @@ void ProtoddModule::updateCombat(
         detectorEscorts_.push_back(order.actor);
         submit(order);
     }
+#endif
 #ifdef PROTODD_CONTESTED_DETECTOR_RESERVE
     const auto blockedMainGroups = std::ranges::count_if(formed, [](const Squad& squad) {
         return squad.role == SquadRole::mainArmy && squad.needsDetection &&
@@ -1235,6 +1545,7 @@ void ProtoddModule::updateCombat(
             command.source + '/' + std::to_string(accepted);
         trace("order/" + std::to_string(command.actor), entry.str(), 120, comparison);
     }
+    forecastAudit_.endTick(state_.frame);
 }
 
 std::vector<UnitSnapshot> ProtoddModule::combatUnits(const bool ours) const {

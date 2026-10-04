@@ -14,6 +14,9 @@ option(PROTODD_PVP_COVERED_RANGED_NATURAL "Evaluate economic growth behind a cov
 option(PROTODD_THREATENED_NATURAL_RALLY "Evaluate reinforcement rally for a threatened outer base" OFF)
 option(PROTODD_COVERED_PRESSURE_RELEASE "Evaluate releasing a large covered PvT army from an empty policy defend override" OFF)
 option(PROTODD_PVT_CONTAIN_BREAK "Evaluate detector-covered PvT breakout against a reachable enemy economy" OFF)
+option(PROTODD_PVT_SCOUT_TRANSITIONS "Evaluate confidence-gated observed PvT mech transitions" OFF)
+option(PROTODD_PVT_STRATEGY_PORTFOLIO "Enable opt-in validated PvT strategy portfolio selection" OFF)
+option(PROTODD_SAFE_OBSERVER_COVERAGE "Evaluate safety-checked, squad-assigned Observer coverage" OFF)
 option(PROTODD_FORWARD_DETECTOR_ESCORT "Evaluate centering blocked main-army Observers for immediate detection coverage" OFF)
 option(PROTODD_DIRECT_DETECTOR_RENDEZVOUS "Evaluate direct Observer rendezvous through a safe air corridor" OFF)
 option(PROTODD_CONTESTED_DETECTOR_RESERVE "Evaluate using the scout Observer when multiple main squads need detection" OFF)
@@ -39,6 +42,7 @@ set(BWAPI_LIBRARY "" CACHE FILEPATH "Path to a 32-bit BWAPILIB.lib")
 set(PROTODD_WHOLE_GAME_WEIGHTS "" CACHE FILEPATH "Whole-game model weights to embed in Protodd.dll")
 option(PROTODD_WHOLE_GAME_CONTROL "Allow the embedded whole-game policy to issue BWAPI commands" OFF)
 option(PROTODD_WHOLE_GAME_HYBRID "Retain native systems and arbitrate learned combat targets in local evaluation" OFF)
+option(PROTODD_HYBRID_RIGHTCLICK_ENEMY_ATTACK "Opt in to screened enemy-unit right-click combat proposals" OFF)
 option(PROTODD_ALLIN_LOCAL_EVALUATION "Evaluate replay-derived aggressive openings with bounded transitions" OFF)
 option(PROTODD_WHOLE_GAME_EVALUATION_BUILD
     "Build a six-slot controller for local evaluation before it has a promotion receipt" OFF)
@@ -65,6 +69,7 @@ add_library(protodd_core OBJECT
     src/core/Workers.cpp
     src/core/Scouting.cpp
     src/core/Learning.cpp
+    src/core/PvTStrategyPortfolio.cpp
     src/core/PolicyLearning.cpp
     src/core/ObservationEncoder.cpp
     src/core/LearnedPolicy.cpp
@@ -76,6 +81,13 @@ add_library(protodd_core OBJECT
     src/core/Harassment.cpp
 )
 add_library(Protodd::Core ALIAS protodd_core)
+
+if(PROTODD_PVT_SCOUT_TRANSITIONS)
+    target_compile_definitions(protodd_core PUBLIC PROTODD_PVT_SCOUT_TRANSITIONS=1)
+endif()
+if(PROTODD_SAFE_OBSERVER_COVERAGE)
+    target_compile_definitions(protodd_core PRIVATE PROTODD_SAFE_OBSERVER_COVERAGE=1)
+endif()
 
 target_include_directories(protodd_core
     PUBLIC
@@ -133,6 +145,9 @@ if(PROTODD_BUILD_BWAPI_MODULE)
     if(PROTODD_WHOLE_GAME_HYBRID AND
        (NOT PROTODD_WHOLE_GAME_CONTROL OR NOT PROTODD_WHOLE_GAME_EVALUATION_BUILD))
         message(FATAL_ERROR "Hybrid control requires a weighted local evaluation controller")
+    endif()
+    if(PROTODD_HYBRID_RIGHTCLICK_ENEMY_ATTACK AND NOT PROTODD_WHOLE_GAME_HYBRID)
+        message(FATAL_ERROR "Enemy right-click bridge requires hybrid control")
     endif()
     if(PROTODD_ALLIN_LOCAL_EVALUATION AND NOT PROTODD_WHOLE_GAME_HYBRID)
         message(FATAL_ERROR "All-in evaluation requires the weighted hybrid controller")
@@ -227,11 +242,17 @@ if(PROTODD_BUILD_BWAPI_MODULE)
     if(PROTODD_PVT_CONTAIN_BREAK)
         target_compile_definitions(protodd_bwapi PRIVATE PROTODD_PVT_CONTAIN_BREAK=1)
     endif()
+    if(PROTODD_PVT_STRATEGY_PORTFOLIO)
+        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_PVT_STRATEGY_PORTFOLIO=1)
+    endif()
     if(PROTODD_FORWARD_DETECTOR_ESCORT)
         target_compile_definitions(protodd_bwapi PRIVATE PROTODD_FORWARD_DETECTOR_ESCORT=1)
     endif()
     if(PROTODD_DIRECT_DETECTOR_RENDEZVOUS)
         target_compile_definitions(protodd_bwapi PRIVATE PROTODD_DIRECT_DETECTOR_RENDEZVOUS=1)
+    endif()
+    if(PROTODD_SAFE_OBSERVER_COVERAGE)
+        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_SAFE_OBSERVER_COVERAGE=1)
     endif()
     if(PROTODD_CONTESTED_DETECTOR_RESERVE)
         target_compile_definitions(protodd_bwapi PRIVATE PROTODD_CONTESTED_DETECTOR_RESERVE=1)
@@ -333,6 +354,9 @@ if(PROTODD_BUILD_BWAPI_MODULE)
         target_compile_definitions(protodd_bwapi PRIVATE PROTODD_WHOLE_GAME_CONTROL=1)
         if(PROTODD_WHOLE_GAME_HYBRID)
             target_compile_definitions(protodd_bwapi PRIVATE PROTODD_WHOLE_GAME_HYBRID=1)
+            if(PROTODD_HYBRID_RIGHTCLICK_ENEMY_ATTACK)
+                target_compile_definitions(protodd_bwapi PRIVATE PROTODD_HYBRID_RIGHTCLICK_ENEMY_ATTACK=1)
+            endif()
         endif()
         if(PROTODD_ALLIN_LOCAL_EVALUATION)
             target_compile_definitions(protodd_bwapi PRIVATE PROTODD_ALLIN_LOCAL_EVALUATION=1)
@@ -421,6 +445,11 @@ if(PROTODD_BUILD_TESTS)
     endif()
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME protodd_pvt_portfolio_validator_tests
+            COMMAND "${Python3_EXECUTABLE}" -m unittest -v
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pvt_portfolio_validate.py")
+        set_tests_properties(protodd_pvt_portfolio_validator_tests PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
         foreach(PROTODD_NEW_TEST IN ITEMS data_release dataset_analysis ladder arena whole_game_pilot whole_game_labels whole_game_parity whole_game_model whole_game_sequences)
             add_test(NAME "protodd_${PROTODD_NEW_TEST}_tests"
                 COMMAND "${Python3_EXECUTABLE}" -m unittest discover

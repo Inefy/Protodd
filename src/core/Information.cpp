@@ -105,6 +105,10 @@ void OpponentModel::reset(const Race enemyRace) {
     normalize();
     assessment_ = {};
     lastUpdate_ = -1;
+#ifdef PROTODD_PVT_SCOUT_TRANSITIONS
+    lastMechanizedEvidenceFrame_ = -1;
+    mechanizedPlanActive_ = false;
+#endif
 }
 
 void OpponentModel::update(const GameState& state) {
@@ -131,6 +135,70 @@ void OpponentModel::update(const GameState& state) {
                             count(state, UnitKind::hatchery) + count(state, UnitKind::lair) +
                             count(state, UnitKind::hive) + count(state, UnitKind::nexus);
     const auto anchor = homeAnchor(state);
+#ifdef PROTODD_PVT_SCOUT_TRANSITIONS
+    const auto recentMechCount = [&state, &recentlySeen](const UnitKind kind) {
+        return static_cast<int>(std::ranges::count_if(
+            state.enemy.units, [kind, &recentlySeen](const UnitSnapshot& unit) {
+                return unit.kind == kind && !unit.hallucination &&
+                       recentlySeen(unit, 90 * 24);
+            }));
+    };
+    const auto factories = recentMechCount(UnitKind::factory);
+    const auto tanks = recentMechCount(UnitKind::siegeTank);
+    const auto mines = recentMechCount(UnitKind::spiderMine);
+    const auto vultures = recentMechCount(UnitKind::vulture);
+    const auto goliaths = recentMechCount(UnitKind::goliath);
+    const auto proxiedFactories = std::ranges::count_if(
+        state.enemy.units, [&state, &anchor](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::factory && !unit.hallucination &&
+                   (unit.visible || state.frame - unit.lastSeen <= 90 * 24) &&
+                   anchor.valid() && unit.position.valid() &&
+                   distanceSquared(unit.position, anchor) <= 1248 * 1248;
+        });
+    // These authored cue weights are a transparent heuristic, not a learned
+    // probability or a claim of certainty. Keep a single ordinary Factory or
+    // Vulture below entry; an observed Tank/Mine or proxied Factory is stronger.
+    const auto mechCueConfidence = enemyRace_ == Race::terran
+        ? std::clamp(static_cast<double>(factories) * 0.22 +
+                         static_cast<double>(proxiedFactories) * 0.20 +
+                         static_cast<double>(tanks) * 0.62 +
+                         static_cast<double>(mines) * 0.56 +
+                         static_cast<double>(vultures) * 0.28 +
+                         static_cast<double>(goliaths) * 0.28,
+                     0.0, 0.96)
+        : 0.0;
+    auto latestMechCue = Frame{-1};
+    for (const auto& unit : state.enemy.units) {
+        if ((unit.kind != UnitKind::factory && unit.kind != UnitKind::siegeTank &&
+             unit.kind != UnitKind::spiderMine && unit.kind != UnitKind::vulture &&
+             unit.kind != UnitKind::goliath) || unit.hallucination ||
+            (!unit.visible && state.frame - unit.lastSeen > 90 * 24)) continue;
+        latestMechCue = std::max(latestMechCue,
+                                 unit.visible ? state.frame : unit.lastSeen);
+    }
+    if (mechCueConfidence >= 0.42) {
+        mechanizedPlanActive_ = true;
+    }
+    if (latestMechCue >= 0 && (mechCueConfidence > 0.0 || mechanizedPlanActive_)) {
+        lastMechanizedEvidenceFrame_ = std::max(lastMechanizedEvidenceFrame_, latestMechCue);
+    }
+    // Entry is based on strong legal cues; exit waits longer than cue
+    // freshness so one missed scout frame cannot make the plan oscillate.
+    if (mechanizedPlanActive_ && lastMechanizedEvidenceFrame_ >= 0 &&
+        state.frame - lastMechanizedEvidenceFrame_ > 150 * 24) {
+        mechanizedPlanActive_ = false;
+    }
+    const auto mechEvidenceAge = lastMechanizedEvidenceFrame_ < 0
+        ? Frame{-1} : std::max(0, state.frame - lastMechanizedEvidenceFrame_);
+    const auto decayedMechConfidence = mechanizedPlanActive_ && mechEvidenceAge >= 0
+        ? 0.42 * std::exp(-static_cast<double>(mechEvidenceAge) / (90.0 * 24.0))
+        : 0.0;
+    const auto effectiveMechConfidence = std::max(mechCueConfidence,
+                                                   decayedMechConfidence);
+    if (mechCueConfidence >= 0.42) {
+        evidence[index(EnemyPlan::mechanized)] += mechCueConfidence * 8.0;
+    }
+#endif
     const auto nearMain = [&anchor](const UnitSnapshot& unit, const int radius) {
         return anchor.valid() && unit.position.valid() &&
                distanceSquared(unit.position, anchor) < radius * radius;
@@ -297,7 +365,15 @@ void OpponentModel::update(const GameState& state) {
         }
     }
 
+#ifdef PROTODD_PVT_SCOUT_TRANSITIONS
+    assessment_.mostLikely = mechanizedPlanActive_ ? EnemyPlan::mechanized : mostLikelyPlan();
+    assessment_.mechanizedConfidence = effectiveMechConfidence;
+    assessment_.mechanizedEvidenceAge = mechEvidenceAge;
+    assessment_.mechanizedEvidenceFresh = mechEvidenceAge >= 0 && mechEvidenceAge <= 90 * 24;
+    assessment_.mechanizedPlanActive = mechanizedPlanActive_;
+#else
     assessment_.mostLikely = mostLikelyPlan();
+#endif
     assessment_.workerRush = probability(EnemyPlan::workerRush);
     assessment_.proxy = probability(EnemyPlan::proxyRush);
     assessment_.staticContain = probability(EnemyPlan::staticContain);
@@ -361,6 +437,9 @@ const ThreatAssessment& OpponentModel::assessment() const noexcept {
 }
 
 EnemyPlan OpponentModel::mostLikelyPlan() const noexcept {
+#ifdef PROTODD_PVT_SCOUT_TRANSITIONS
+    if (mechanizedPlanActive_) return EnemyPlan::mechanized;
+#endif
     // Preserve the explicit unknown prior until observations make another
     // hypothesis more likely. Excluding it mislabeled a completely unscouted
     // opponent as WorkerRush simply because that was the first enum entry.
@@ -391,6 +470,9 @@ std::string_view enemyPlanName(const EnemyPlan plan) noexcept {
         case EnemyPlan::fastTech: return "FastTech";
         case EnemyPlan::airTech: return "AirTech";
         case EnemyPlan::cloakedTech: return "CloakedTech";
+#ifdef PROTODD_PVT_SCOUT_TRANSITIONS
+        case EnemyPlan::mechanized: return "Mechanized";
+#endif
         case EnemyPlan::count: break;
     }
     return "Invalid";

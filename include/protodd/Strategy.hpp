@@ -12,6 +12,14 @@ enum class Posture : std::uint8_t { hold, defend, pressure, attack, harass, reco
 
 enum class OpeningStyle : std::uint8_t { standard, aggressive, economic, deceptive, count };
 
+// PvT strategy variants are explicit evaluation arms. Selection is fixed for
+// a match; scouting changes the chosen plan's transitions, not its identity.
+enum class PvTStrategyId : std::uint8_t {
+    standard,
+    safeTwoGatewayRangeObserver,
+    economicOneGatewayObserver,
+};
+
 enum class GoalKind : std::uint8_t { build, train, expand, detect, research, upgrade };
 
 struct ProductionGoal {
@@ -33,6 +41,7 @@ struct CompositionTarget {
 
 struct StrategicPlan {
     std::string name;
+    PvTStrategyId pvtStrategy{PvTStrategyId::standard};
     Posture posture{Posture::hold};
     int desiredBases{1};
     int desiredWorkers{8};
@@ -73,7 +82,8 @@ public:
                             bool pvzProactiveReaver = false,
                             bool pvzArmyFloor = false,
                             bool pvpScoutedTwoGateAnchor = false,
-                            bool pvpCoveredRangedNatural = false) noexcept
+                            bool pvpCoveredRangedNatural = false,
+                            PvTStrategyId pvtStrategy = PvTStrategyId::standard) noexcept
         : pvzGatewayOpening_(pvzGatewayOpening), pvzEarlySplash_(pvzEarlySplash),
           pvpFogDetection_(pvpFogDetection), pvzReplayOpening_(pvzReplayOpening),
           pvzArchivesFirst_(pvzArchivesFirst),
@@ -82,7 +92,10 @@ public:
           pvzProactiveReaver_(pvzProactiveReaver),
           pvzArmyFloor_(pvzArmyFloor),
           pvpScoutedTwoGateAnchor_(pvpScoutedTwoGateAnchor),
-          pvpCoveredRangedNatural_(pvpCoveredRangedNatural) {}
+          pvpCoveredRangedNatural_(pvpCoveredRangedNatural),
+          pvtStrategy_(pvtStrategy) {}
+
+    void setPvTStrategy(PvTStrategyId strategy) noexcept { pvtStrategy_ = strategy; }
 
     [[nodiscard]] StrategicPlan plan(
         const GameState& state,
@@ -101,6 +114,7 @@ private:
     bool pvzArmyFloor_{};
     bool pvpScoutedTwoGateAnchor_{};
     bool pvpCoveredRangedNatural_{};
+    PvTStrategyId pvtStrategy_{PvTStrategyId::standard};
     [[nodiscard]] StrategicPlan planPvT(
         const GameState& state,
         const ThreatAssessment& threat) const;
@@ -150,5 +164,6 @@ private:
 
 [[nodiscard]] std::string_view postureName(Posture posture) noexcept;
 [[nodiscard]] std::string_view openingStyleName(OpeningStyle style) noexcept;
+[[nodiscard]] std::string_view pvtStrategyName(PvTStrategyId strategy) noexcept;
 
 }  // namespace protodd

@@ -7,8 +7,11 @@
 #include "WholeGameRuntime.hpp"
 
 #include "protodd/Combat.hpp"
+#include "protodd/CombatForecastAudit.hpp"
 #include "protodd/AllInOpening.hpp"
 #include "protodd/HybridPolicy.hpp"
+#include "protodd/HybridDiagnostics.hpp"
+#include "protodd/HybridRightClickBridge.hpp"
 #include "protodd/Diagnostics.hpp"
 #include "protodd/Operations.hpp"
 #include "protodd/CommandBus.hpp"
@@ -19,6 +22,7 @@
 #include "protodd/Navigation.hpp"
 #include "protodd/Scouting.hpp"
 #include "protodd/Runtime.hpp"
+#include "protodd/PvTStrategyPortfolio.hpp"
 #include "protodd/Squads.hpp"
 #include "protodd/Strategy.hpp"
 #include "protodd/Transport.hpp"
@@ -103,6 +107,7 @@ private:
     WorkerManager workers_;
     ScoutManager scouts_;
     CombatEvaluator combat_;
+    CombatForecastAudit forecastAudit_;
     EngagementTracker engagements_;
     TacticalController tactics_;
     TacticalTargetModel tacticalTarget_;
@@ -117,6 +122,7 @@ private:
     GameState state_;
     DebugOverlay debug_;
     OpponentHistory history_;
+    PvTStrategyPortfolio pvtStrategyPortfolio_;
     PolicyRuntime policy_;
     ModelRuntime model_;
     ProductionRuntime production_;
@@ -125,8 +131,9 @@ private:
     std::vector<std::int64_t> callbackTimes_;
     bool callbackAudit_{};
     WholeGameRuntime wholeGame_;
-    struct HybridProposal { Command command; Frame frame{}; };
+    struct HybridProposal { Command command; Frame frame{}; HybridDiagnosticSample diagnostic; };
     std::vector<HybridProposal> hybridProposals_;
+    HybridDiagnosticCounters hybridDiagnostics_;
     bool hybridControl_{};
     std::uint64_t hybridReceived_{};
     std::uint64_t hybridTargets_{};
@@ -134,8 +141,11 @@ private:
     std::uint64_t hybridAccepted_{};
     bool validatedLearning_{false};
     OpeningStyle openingStyle_{OpeningStyle::standard};
+    PvTStrategyId selectedPvTStrategy_{PvTStrategyId::standard};
+    bool pvtPortfolioActive_{};
     std::string opponentName_;
     std::string mapName_;
+    std::string pvtMatchId_;
     std::vector<UnitId> detectorEscorts_;
     std::vector<UnitId> leasedScouts_;
     std::vector<Position> advanceWaypoints_;

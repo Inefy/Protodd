@@ -358,6 +358,8 @@ CombatEstimate CombatEvaluator::evaluate(
         simulation.friendlyRemaining = rawFriendlyPower;
         simulation.enemyRemaining = rawEnemyPower;
     }
+    result.simulatedFriendlyInitial = simulation.friendlyInitial;
+    result.simulatedEnemyInitial = simulation.enemyInitial;
     result.simulatedFriendlyRemaining = simulation.friendlyRemaining;
     result.simulatedEnemyRemaining = simulation.enemyRemaining;
 
@@ -1240,6 +1242,125 @@ std::vector<Command> TacticalController::control(
                     influence.safestStep(unit.position, retreatPoint, unit.flying, true),
                     UnitKind::unknown, 94, 0, "cloak-preservation",
                 });
+                continue;
+            }
+
+            // Do not let an otherwise favorable squad estimate order a ranged
+            // unit to walk into a supported, observed Siege Mode firing zone.
+            // This is a pursuit gate, not a blanket Tank ban: a lone Tank may
+            // be attacked, an ally already in the Tank's minimum range can
+            // keep fighting, and a nearby surround can finish the position.
+            // Base defense keeps its counter-battery path because a Tank that
+            // can shell the protected economy must remain attackable.
+            const auto observedSiegeMode = !unit.flying &&
+                target->kind == UnitKind::siegeTank && target->visible && target->detected &&
+                target->groundWeapon.damage > 0 && target->groundWeapon.maxRange >= 320 &&
+                target->topSpeed <= 0.1;
+            const auto siegeSupport = observedSiegeMode &&
+                std::ranges::any_of(enemy, [&unit, target](const UnitSnapshot& candidate) {
+                    if (candidate.id == target->id || !candidate.visible || !candidate.detected ||
+                        !combatReady(candidate) || candidate.invincible ||
+                        !candidate.canAttack(unit)) {
+                        return false;
+                    }
+                    const auto& response = unit.flying ? candidate.airWeapon : candidate.groundWeapon;
+                    const auto separation = weaponDistance(unit, candidate);
+                    return separation >= response.minRange &&
+                           separation <= response.maxRange + 64;
+                });
+            const auto surrounded = observedSiegeMode && std::ranges::count_if(
+                nearbyArmy, [unit, target](const UnitSnapshot& ally) {
+                    return ally.id != unit.id && !ally.flying && !ally.loaded &&
+                        combatReady(ally) && ally.canAttack(*target) &&
+                        distance(ally.position, target->position) <=
+                            target->groundWeapon.minRange + 32;
+                }) >= 3;
+            if (!defense.active() && siegeSupport && !surrounded &&
+                range >= target->groundWeapon.minRange &&
+                range > weapon.maxRange + 12 &&
+                range <= target->groundWeapon.maxRange + 64) {
+                std::vector<const UnitSnapshot*> siegeThreats;
+                for (const auto& candidate : enemy) {
+                    if (candidate.kind != UnitKind::siegeTank || !candidate.visible ||
+                        !candidate.detected || !combatReady(candidate) || candidate.invincible ||
+                        candidate.topSpeed > 0.1 || candidate.groundWeapon.damage <= 0 ||
+                        candidate.groundWeapon.maxRange < 320 || !candidate.canAttack(unit)) continue;
+                    const auto separation = weaponDistance(unit, candidate);
+                    // Include Tanks whose minimum-range dead zone currently contains
+                    // the unit, plus any Tank a single standoff step could bring
+                    // into the firing buffer. A move may not escape one Tank's
+                    // dead zone into its live firing range while evading another.
+                    if (separation < candidate.groundWeapon.minRange ||
+                        separation <= candidate.groundWeapon.maxRange + 128)
+                        siegeThreats.push_back(&candidate);
+                }
+
+                const auto minimumSiegeClearance = [&unit, &siegeThreats](const Position position) {
+                    auto probe = unit;
+                    probe.position = position;
+                    auto clearance = std::numeric_limits<double>::infinity();
+                    for (const auto* threat : siegeThreats) {
+                        clearance = std::min(clearance,
+                            weaponDistance(probe, *threat) - threat->groundWeapon.maxRange);
+                    }
+                    return clearance;
+                };
+                const auto currentClearance = minimumSiegeClearance(unit.position);
+                auto standoff = Position{-1, -1};
+                auto bestGain = 0.0;
+                auto bestCost = std::numeric_limits<double>::infinity();
+                constexpr std::array<Position, 8> standoffSteps{{
+                    {-64, 0}, {64, 0}, {0, -64}, {0, 64},
+                    {-45, -45}, {-45, 45}, {45, -45}, {45, 45}}};
+                for (const auto step : standoffSteps) {
+                    const Position candidate{unit.position.x + step.x, unit.position.y + step.y};
+                    if (!reachableStep(candidate)) continue;
+                    auto probe = unit;
+                    probe.position = candidate;
+                    auto safeAgainstEveryTank = true;
+                    for (const auto* threat : siegeThreats) {
+                        const auto currentSeparation = weaponDistance(unit, *threat);
+                        const auto candidateSeparation = weaponDistance(probe, *threat);
+                        if (currentSeparation < threat->groundWeapon.minRange) {
+                            // Preserve the safe melee/dead-zone exception. Do not
+                            // step out of this Tank's minimum range into its fire.
+                            if (candidateSeparation >= threat->groundWeapon.minRange) {
+                                safeAgainstEveryTank = false;
+                                break;
+                            }
+                        } else if (candidateSeparation + 1.0 < currentSeparation) {
+                            // Never improve clearance from one Tank by stepping
+                            // closer to another relevant Siege Mode Tank.
+                            safeAgainstEveryTank = false;
+                            break;
+                        }
+                    }
+                    if (!safeAgainstEveryTank) continue;
+                    const auto gain = minimumSiegeClearance(candidate) - currentClearance;
+                    if (gain <= 1.0) continue;
+                    const auto threat = unit.flying ? influence.at(candidate).airThreat :
+                                                      influence.at(candidate).groundThreat;
+                    const auto retreatCost = retreatPoint.valid()
+                        ? (distance(candidate, retreatPoint) - distance(unit.position, retreatPoint)) / 96.0
+                        : 0.0;
+                    const auto cost = threat * 5.0 + retreatCost;
+                    if (!standoff.valid() || gain > bestGain + 1.0 ||
+                        (std::abs(gain - bestGain) <= 1.0 && cost < bestCost)) {
+                        bestGain = gain;
+                        bestCost = cost;
+                        standoff = candidate;
+                    }
+                }
+                if (standoff.valid()) {
+                    commands.push_back({unit.id, CommandType::move, -1, standoff,
+                        UnitKind::unknown, 90, 0, "siege-line-standoff"});
+                } else {
+                    // A blocked unit must stop pursuing rather than receive a
+                    // repeated move-to-self or continue its old attack order.
+                    // CommandBus suppresses identical persistent Hold orders.
+                    commands.push_back({unit.id, CommandType::hold, -1, {-1, -1},
+                        UnitKind::unknown, 90, 0, "siege-line-standoff-hold"});
+                }
                 continue;
             }
 

@@ -42,7 +42,11 @@ double routeRisk(
 }
 
 bool unsafeObserverRoute(const InfluenceMap& influence,
-                         const Position from, const Position to) {
+                         const Position from, const Position to,
+                         const bool cloaked) {
+#ifndef PROTODD_SAFE_OBSERVER_COVERAGE
+    (void)cloaked;
+#endif
     const auto samples = std::max(1, static_cast<int>(std::ceil(
         distance(from, to) / 64.0)));
     for (auto step = 0; step <= samples; ++step) {
@@ -52,8 +56,13 @@ bool unsafeObserverRoute(const InfluenceMap& influence,
             from.y + static_cast<int>(std::lround((to.y - from.y) * ratio)),
         };
         const auto cell = influence.at(point);
+#ifdef PROTODD_SAFE_OBSERVER_COVERAGE
+        if ((cell.airThreat > 0.08F && (!cloaked || cell.detection > 0.08F)) ||
+            influence.stormDanger(point) > 0.08F) return true;
+#else
         if (cell.airThreat > 0.08F || cell.detection > 0.08F ||
             influence.stormDanger(point) > 0.08F) return true;
+#endif
     }
     return false;
 }
@@ -298,6 +307,30 @@ bool ScoutManager::observerInDanger(
     const InfluenceMap& influence) noexcept {
     if (observer.kind != UnitKind::observer || !observer.position.valid() ||
         !observer.completed || observer.loaded || observer.disabled) return false;
+#ifdef PROTODD_SAFE_OBSERVER_COVERAGE
+    if (observer.underAttack || observer.underStorm ||
+        influence.stormDanger(observer.position) > 0.08F) return true;
+    if (state.enemy.race == Race::protoss && observer.cloaked)
+        return observerExposure(state, observer, influence, observer.position) > 0.08;
+    const auto cell = influence.at(observer.position);
+    auto detectedByEnemy = cell.detection > 0.08F;
+    auto antiAirCanReach = cell.airThreat > 0.08F;
+    for (const auto& enemy : state.enemy.units) {
+        if (!enemy.position.valid() || !enemy.completed || enemy.disabled ||
+            (!enemy.visible && !isBuilding(enemy.kind) &&
+             state.frame - enemy.lastSeen > 8 * 24)) continue;
+        const auto separation = distance(observer.position, enemy.position);
+        const auto detector = enemy.role == UnitRole::detector ||
+            enemy.kind == UnitKind::scienceVessel ||
+            enemy.kind == UnitKind::missileTurret;
+        if (detector && separation <= std::max(224, enemy.sightRange) + 128)
+            detectedByEnemy = true;
+        const auto attackRadius = enemy.airWeapon.damage > 0
+            ? enemy.airWeapon.maxRange + (enemy.kind == UnitKind::wraith ? 256 : 160) : 0;
+        if (attackRadius > 0 && separation <= attackRadius) antiAirCanReach = true;
+    }
+    return antiAirCanReach && (!observer.cloaked || detectedByEnemy);
+#else
     if (observer.underAttack || observer.underStorm ||
         observer.hitPoints < observer.maxHitPoints / 2 ||
         observer.shields < observer.maxShields / 2) return true;
@@ -321,6 +354,7 @@ bool ScoutManager::observerInDanger(
                 reach * reach) return true;
     }
     return false;
+#endif
 }
 
 double ScoutManager::observerExposure(
@@ -329,8 +363,17 @@ double ScoutManager::observerExposure(
     if (!position.valid()) return std::numeric_limits<double>::infinity();
     const auto cell = influence.at(position);
     const auto storm = influence.stormDanger(position) * 16.0;
+#ifdef PROTODD_SAFE_OBSERVER_COVERAGE
+    if (state.enemy.race != Race::protoss || !observer.cloaked) {
+        const auto detectedAndThreatened = cell.detection > 0.08F && cell.airThreat > 0.08F;
+        const auto attackRisk = observer.cloaked ?
+            (detectedAndThreatened ? cell.airThreat * 8.0 : 0.0) : cell.airThreat * 8.0;
+        return attackRisk + storm;
+    }
+#else
     if (state.enemy.race != Race::protoss || !observer.cloaked)
         return cell.airThreat * 8.0 + cell.detection * 2.0 + storm;
+#endif
     auto detectable = cell.detection > 0.08F;
     auto armed = 0.0;
     for (const auto& enemy : state.enemy.units) {
@@ -359,7 +402,7 @@ bool ScoutManager::observerRouteSafe(
     const InfluenceMap& influence, const Position target) noexcept {
     if (!observer.position.valid() || !target.valid()) return false;
     if (state.enemy.race != Race::protoss || !observer.cloaked)
-        return !unsafeObserverRoute(influence, observer.position, target);
+        return !unsafeObserverRoute(influence, observer.position, target, observer.cloaked);
     const auto samples = std::max(1, static_cast<int>(std::ceil(distance(observer.position, target) / 32.0)));
     for (auto step = 0; step <= samples; ++step) {
         const auto fraction = static_cast<double>(step) / samples;

@@ -19,6 +19,9 @@ enum class EnemyPlan : std::uint8_t {
     fastTech,
     airTech,
     cloakedTech,
+#ifdef PROTODD_PVT_SCOUT_TRANSITIONS
+    mechanized,
+#endif
     count,
 };
 
@@ -40,6 +43,14 @@ struct ThreatAssessment {
     int approachingCombatEnemies{};
     EnemyPlan mostLikely{EnemyPlan::unknown};
     bool enemyNaturalCheckedEmpty{};
+#ifdef PROTODD_PVT_SCOUT_TRANSITIONS
+    // Legal, age-bounded mech observations. A stale clue is unknown, not proof
+    // that the opponent has no mech production or units.
+    double mechanizedConfidence{};
+    Frame mechanizedEvidenceAge{-1};
+    bool mechanizedEvidenceFresh{};
+    bool mechanizedPlanActive{};
+#endif
 };
 
 class OpponentModel {
@@ -60,6 +71,10 @@ private:
     Beliefs beliefs_{};
     ThreatAssessment assessment_{};
     Frame lastUpdate_{-1};
+#ifdef PROTODD_PVT_SCOUT_TRANSITIONS
+    Frame lastMechanizedEvidenceFrame_{-1};
+    bool mechanizedPlanActive_{};
+#endif
 
     void normalize() noexcept;
 };

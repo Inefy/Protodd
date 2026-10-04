@@ -37,6 +37,11 @@ struct Squad {
     std::string missionReason;
 };
 
+struct DetectorEscortAssignment {
+    int squadId{-1};
+    Command order;
+};
+
 enum class MainArmyTravelMode : std::uint8_t {
     assemble,
     joinVanguard,
@@ -65,6 +70,16 @@ public:
         bool centerBlockedMainEscort = false,
         bool mobilizeContestedReserve = false,
         bool directSafeRendezvous = false) const;
+    [[nodiscard]] std::vector<DetectorEscortAssignment> detectorEscortAssignments(
+        const GameState& state,
+        std::span<const Squad> squads,
+        const InfluenceMap& influence,
+        bool mobilizeReserveAgainstLurkers = false,
+        bool centerBlockedMainEscort = false,
+        bool mobilizeContestedReserve = false,
+        bool directSafeRendezvous = false,
+        std::span<const UnitId> unavailableObservers = {},
+        bool blockedSquadsOnly = true) const;
 
     [[nodiscard]] static const Squad* selectVanguard(
         std::span<const Squad> squads,
@@ -81,7 +96,13 @@ public:
     [[nodiscard]] static bool mustHoldDefensiveScreen(
         const Squad& squad) noexcept;
     [[nodiscard]] static bool mobileDetectionReady(
-        const GameState& state, const Squad& squad) noexcept;
+        const GameState& state, const Squad& squad,
+        const InfluenceMap* influence = nullptr,
+        UnitId assignedObserver = -1) noexcept;
+    [[nodiscard]] static bool mobileDetectionBlocksAdvance(
+        const GameState& state, const Squad& squad,
+        const InfluenceMap* influence = nullptr,
+        UnitId assignedObserver = -1) noexcept;
 
     [[nodiscard]] static DefenseArea defensiveArea(
         const GameState& state, Position rally);

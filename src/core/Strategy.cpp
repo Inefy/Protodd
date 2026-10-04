@@ -1087,6 +1087,31 @@ StrategicPlan StrategyEngine::plan(
         normalizeComposition(result);
     }
     addHarassmentProduction(result, state, pvzArchivesFirst_);
+    if (state.enemy.race == Race::terran &&
+        result.pvtStrategy == PvTStrategyId::safeTwoGatewayRangeObserver) {
+        const auto safeScreenComplete = count(state, UnitKind::gateway, true) >= 2 &&
+            count(state, UnitKind::cyberneticsCore, true) > 0 &&
+            count(state, UnitKind::dragoon, true) >= 2 &&
+            technologyLevel(state.self, TechnologyKind::singularityCharge) > 0 &&
+            count(state, UnitKind::observer, true) > 0 && supplyAtLeast(state, 28);
+        if (!safeScreenComplete) {
+            // Generic late-game economy can request a third Nexus after it
+            // sees a fortification lead. Keep the selected safe arm's
+            // checkpoint active, while preserving any Nexus underway.
+            const auto committedBases = std::max(1, count(state, UnitKind::nexus));
+            result.desiredBases = committedBases;
+            result.maximumBases = committedBases;
+            if (committedBases == count(state, UnitKind::nexus, true))
+                result.expansionTarget = {-1, -1};
+            for (auto& objective : result.goals) {
+                if (objective.goal != GoalKind::expand ||
+                    objective.target != UnitKind::nexus) continue;
+                objective.desiredCount = committedBases;
+                objective.blocking = false;
+                objective.reason = "finish the two-Gateway range/Observer screen first";
+            }
+        }
+    }
     std::ranges::stable_sort(result.goals, std::greater{}, &ProductionGoal::priority);
     return result;
 }
@@ -1095,12 +1120,43 @@ StrategicPlan StrategyEngine::planPvT(
     const GameState& state,
     const ThreatAssessment& threat) const {
     StrategicPlan result;
-    result.name = "PvT 28 Nexus";
+    result.pvtStrategy = pvtStrategy_;
+    const auto safeTwoGateway =
+        pvtStrategy_ == PvTStrategyId::safeTwoGatewayRangeObserver;
+    const auto economicOneGateway =
+        pvtStrategy_ == PvTStrategyId::economicOneGatewayObserver;
+    const auto observedEnemyCommandCenters = std::ranges::count_if(
+        state.enemy.units, [&state](const UnitSnapshot& enemy) {
+            return enemy.kind == UnitKind::commandCenter && !enemy.hallucination &&
+                (enemy.visible || state.frame - enemy.lastSeen <= 90 * 24);
+        });
+    const auto lowImmediatePressure = threat.workerRush <= 0.30 &&
+        threat.combatEnemiesNearMain == 0 && !activeApproach(state, threat) &&
+        threat.immediateGround <= 0.45 && !hardBreachAtMain(state) &&
+        threat.proxy + threat.staticContain <= 0.34 && threat.aggression <= 0.62;
+    // The economic arm activates only on positive legal evidence of a second
+    // Terran Command Center. An unscouted natural is unknown, never empty.
+    const auto economicOpeningConfirmed = economicOneGateway &&
+        observedEnemyCommandCenters >= 2 && lowImmediatePressure;
+    result.name = safeTwoGateway ? "PvT safe 2-Gateway range Observer" :
+                  economicOneGateway ? "PvT economic 1-Gateway Observer" :
+                  "PvT 28 Nexus";
     result.desiredWorkers = std::min(72, 22 + minute(state) * 4);
-    const auto expansionReady = count(state, UnitKind::dragoon, true) >= 3 &&
-                                supplyAtLeast(state, 28);
-    result.desiredBases = expansionReady || count(state, UnitKind::nexus) >= 2 ?
-                              (minute(state) < 11 ? 2 : 3) : 1;
+    const auto safeLineReady = count(state, UnitKind::gateway, true) >= 2 &&
+        count(state, UnitKind::cyberneticsCore, true) > 0 &&
+        count(state, UnitKind::dragoon, true) >= 2 &&
+        technologyLevel(state.self, TechnologyKind::singularityCharge) > 0 &&
+        count(state, UnitKind::observer, true) > 0 && supplyAtLeast(state, 28);
+    const auto expansionReady = safeTwoGateway ? safeLineReady :
+        count(state, UnitKind::dragoon, true) >= 3 && supplyAtLeast(state, 28);
+    result.desiredBases = safeTwoGateway && !safeLineReady
+        ? std::max(1, count(state, UnitKind::nexus))
+        : (expansionReady || count(state, UnitKind::nexus) >= 2 ?
+               (minute(state) < 11 ? 2 : 3) : 1);
+    if (economicOpeningConfirmed) {
+        result.desiredBases = 2;
+        result.desiredWorkers = std::min(72, result.desiredWorkers + 4);
+    }
     result.maximumBases = count(state, UnitKind::nexus) < 2 ? result.desiredBases : 8;
     result.desiredGasWorkers = !supplyAtLeast(state, 11) ? 0 :
                                (minute(state) < 7 ? 3 :
@@ -1108,8 +1164,8 @@ StrategicPlan StrategyEngine::planPvT(
     result.posture = minute(state) < 6 || openingPressureExpected(state, threat)
                          ? Posture::hold
                          : Posture::pressure;
-    result.attackThreshold = 1.32;
-    result.minimumAttackSize = 14;
+    result.attackThreshold = safeTwoGateway ? 1.45 : 1.32;
+    result.minimumAttackSize = safeTwoGateway ? 18 : 14;
     result.composition = {{UnitKind::dragoon, 0.55}, {UnitKind::zealot, 0.22},
                           {UnitKind::highTemplar, 0.13}, {UnitKind::arbiter, 0.10}};
 
@@ -1154,7 +1210,10 @@ StrategicPlan StrategyEngine::planPvT(
     }
 
     if (supplyAtLeast(state, 10) || (rushEvidence && supplyAtLeast(state, 8))) {
-        goal(result, GoalKind::build, UnitKind::gateway, minute(state) < 6 ? 1 : 3, 88,
+        const auto gatewayTarget = safeTwoGateway ? 2 :
+            (economicOpeningConfirmed && count(state, UnitKind::nexus) < 2 ? 1 :
+             (minute(state) < 6 ? 1 : 3));
+        goal(result, GoalKind::build, UnitKind::gateway, gatewayTarget, 88,
              "Gateway opening before gas and Core", count(state, UnitKind::gateway) == 0);
     }
     if (count(state, UnitKind::gateway) > 0 || supplyAtLeast(state, 10)) {
@@ -1187,7 +1246,8 @@ StrategicPlan StrategyEngine::planPvT(
         // our perimeter. Spend on the intercept while they cross the map.
         if (state.self.gas >= 100) result.desiredGasWorkers = 0;
     }
-    if (count(state, UnitKind::nexus) >= 2 || rushEvidence || threat.cloak > 0.28) {
+    if (safeTwoGateway || (economicOpeningConfirmed && count(state, UnitKind::nexus) >= 2) ||
+        count(state, UnitKind::nexus) >= 2 || rushEvidence || threat.cloak > 0.28) {
         goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 78,
              "observers against mines and tech scouting");
         goal(result, GoalKind::build, UnitKind::observatory, 1, 77, "observer access");
@@ -1219,6 +1279,30 @@ StrategicPlan StrategyEngine::planPvT(
         const auto weaponLevel = minute(state) >= 18 ? 3 : (minute(state) >= 12 ? 2 : 1);
         technologyGoal(result, TechnologyKind::protossGroundWeapons, weaponLevel, 63,
                        "scale the core ground army");
+    }
+    const auto factories = std::ranges::count_if(
+        state.enemy.units, [&state](const UnitSnapshot& enemy) {
+            return enemy.kind == UnitKind::factory && !enemy.hallucination &&
+                (enemy.visible || state.frame - enemy.lastSeen <= 90 * 24);
+        });
+    const auto observedTanks = recentEnemyCount(state, UnitKind::siegeTank);
+    const auto observedMines = recentEnemyCount(state, UnitKind::spiderMine);
+    const auto observedMech = factories > 0 || observedTanks > 0 || observedMines > 0 ||
+        recentEnemyCount(state, UnitKind::vulture) > 0;
+    if (safeTwoGateway && observedMech) {
+        result.name += " [scouted mech safety]";
+        result.requireMobileDetection = true;
+        result.attackThreshold = std::max(result.attackThreshold, 1.55);
+        result.minimumAttackSize = std::max(result.minimumAttackSize, 20);
+        if (count(state, UnitKind::observer, true) == 0) {
+            // Preserve the local-defense posture until the mine/tank line is
+            // visible. Immediate danger is still handled by the shared safety pass.
+            if (result.posture == Posture::pressure || result.posture == Posture::attack)
+                result.posture = Posture::hold;
+        }
+    }
+    if (economicOpeningConfirmed) {
+        result.name += " [confirmed Terran expansion]";
     }
     if (minute(state) >= 13) {
         technologyGoal(result, TechnologyKind::khaydarinAmulet, 1, 54,
@@ -1312,6 +1396,64 @@ StrategicPlan StrategyEngine::planPvT(
              "transition to ranged defense after its prerequisite completes",
              rangedReservationSafe);
     }
+#ifdef PROTODD_PVT_SCOUT_TRANSITIONS
+    if (state.enemy.race == Race::terran && threat.mechanizedPlanActive) {
+        const auto observerReady = count(state, UnitKind::observer, true) > 0;
+        const auto emergency = hardBreachAtMain(state) ||
+                               threat.combatEnemiesNearMain > 0 ||
+                               activeApproach(state, threat) ||
+                               threat.immediateGround > 0.55;
+        result.name += " [scout-confirmed mech transition]";
+        result.requireMobileDetection = true;
+        result.attackThreshold = std::max(result.attackThreshold,
+                                          observerReady ? 1.40 : 1.55);
+        result.minimumAttackSize = std::max(result.minimumAttackSize,
+                                            observerReady ? 16 : 20);
+        if (!observerReady && !emergency &&
+            (result.posture == Posture::pressure || result.posture == Posture::attack)) {
+            result.posture = Posture::hold;
+        }
+        if (emergency) result.posture = Posture::defend;
+
+        // Desired counts include unfinished buildings, so these priorities
+        // supplement the opening's existing commitments instead of resetting
+        // or duplicating its build order.
+        goal(result, GoalKind::build, UnitKind::roboticsFacility, 1, 104,
+             "detector production for observed mines and siege units", true);
+        goal(result, GoalKind::build, UnitKind::observatory, 1, 103,
+             "mobile detection for a scouted mech line", true);
+        goal(result, GoalKind::train, UnitKind::observer, minute(state) < 12 ? 2 : 3,
+             105, "keep an Observer with the army against mines", true);
+        technologyGoal(result, TechnologyKind::legEnhancements, 1, 96,
+                       "give Zealots mobility against observed mech");
+        const auto mechCount = recentEnemyCount(state, UnitKind::siegeTank) +
+                               recentEnemyCount(state, UnitKind::spiderMine) +
+                               recentEnemyCount(state, UnitKind::vulture) +
+                               recentEnemyCount(state, UnitKind::goliath);
+        const auto zealotTarget = std::clamp(std::max(8, mechCount * 2), 8, 16);
+        goal(result, GoalKind::train, UnitKind::zealot, zealotTarget, 94,
+             "screen mines and surround observed mech");
+        setCompositionWeight(result, UnitKind::zealot, 0.34);
+
+        // Growth is released only after our own economy and detection screen
+        // are demonstrably stable. Unknown enemy bases remain unknown.
+        const auto workers = countRole(state, UnitRole::worker);
+        const auto mobileScreen = count(state, UnitKind::zealot, true) +
+                                  count(state, UnitKind::dragoon, true);
+        const auto economyRelease = state.frame >= 8 * 60 * 24 && workers >= 18 &&
+            mobileScreen >= 8 && observerReady && !emergency &&
+            expansionReady &&
+            threat.combatEnemiesNearMain == 0 && !activeApproach(state, threat) &&
+            threat.immediateGround <= 0.30;
+        if (economyRelease) {
+            result.desiredBases = std::max(result.desiredBases, 2);
+            result.maximumBases = std::max(result.maximumBases, 2);
+            goal(result, GoalKind::expand, UnitKind::nexus, 2, 90,
+                 "release the natural behind a stable detected mech defense");
+            result.name += " [defended economic release]";
+        }
+    }
+#endif
     return result;
 }
 
@@ -4028,6 +4170,17 @@ std::string_view openingStyleName(const OpeningStyle style) noexcept {
         case OpeningStyle::economic: return "economic";
         case OpeningStyle::deceptive: return "deceptive";
         case OpeningStyle::count: break;
+    }
+    return "invalid";
+}
+
+std::string_view pvtStrategyName(const PvTStrategyId strategy) noexcept {
+    switch (strategy) {
+        case PvTStrategyId::standard: return "standard";
+        case PvTStrategyId::safeTwoGatewayRangeObserver:
+            return "safe-2gateway-range-observer";
+        case PvTStrategyId::economicOneGatewayObserver:
+            return "economic-1gateway-observer";
     }
     return "invalid";
 }

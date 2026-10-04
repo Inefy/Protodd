@@ -498,9 +498,25 @@ std::optional<Position> SquadPlanner::threatenedNaturalRally(
     return moveToward(threatened->center, home->center, 128.0);
 }
 
-bool SquadPlanner::mobileDetectionReady(const GameState& state, const Squad& squad) noexcept {
+bool SquadPlanner::mobileDetectionReady(
+    const GameState& state, const Squad& squad,
+    const InfluenceMap* influence, const UnitId assignedObserver) noexcept {
     if (!squad.needsDetection) return true;
     const auto ahead = squad.objective.valid() ? moveToward(squad.center, squad.objective, 128.0) : squad.center;
+#ifdef PROTODD_SAFE_OBSERVER_COVERAGE
+    if (assignedObserver < 0 || influence == nullptr) return false;
+    return std::ranges::any_of(state.self.units, [&state, &squad, ahead, influence, assignedObserver](const UnitSnapshot& observer) {
+        if (observer.id != assignedObserver || observer.kind != UnitKind::observer ||
+            !observer.completed || observer.disabled || observer.loaded ||
+            observer.hallucination || !observer.position.valid() ||
+            ScoutManager::observerInDanger(state, observer, *influence)) return false;
+        const auto radius = std::max(0, (observer.sightRange > 0 ? observer.sightRange : 288) - 32);
+        return distanceSquared(observer.position, squad.center) <= radius * radius &&
+               distanceSquared(observer.position, ahead) <= radius * radius;
+    });
+#else
+    (void)influence;
+    (void)assignedObserver;
     return std::ranges::any_of(state.self.units, [&squad, ahead](const UnitSnapshot& observer) {
         if (observer.kind != UnitKind::observer || !observer.completed || observer.disabled ||
             observer.loaded || observer.hallucination || observer.healthFraction() < 0.25 ||
@@ -509,6 +525,14 @@ bool SquadPlanner::mobileDetectionReady(const GameState& state, const Squad& squ
         return distanceSquared(observer.position, squad.center) <= radius * radius &&
                distanceSquared(observer.position, ahead) <= radius * radius;
     });
+#endif
+}
+
+bool SquadPlanner::mobileDetectionBlocksAdvance(
+    const GameState& state, const Squad& squad,
+    const InfluenceMap* influence, const UnitId assignedObserver) noexcept {
+    return squad.role != SquadRole::baseDefense &&
+        !mobileDetectionReady(state, squad, influence, assignedObserver);
 }
 
 std::vector<Command> SquadPlanner::detectorEscorts(
@@ -519,10 +543,31 @@ std::vector<Command> SquadPlanner::detectorEscorts(
     const bool centerBlockedMainEscort,
     const bool mobilizeContestedReserve,
     const bool directSafeRendezvous) const {
+    const auto assignments = detectorEscortAssignments(
+        state, squads, influence, mobilizeReserveAgainstLurkers,
+        centerBlockedMainEscort, mobilizeContestedReserve,
+        directSafeRendezvous, {}, false);
+    std::vector<Command> commands;
+    commands.reserve(assignments.size());
+    for (const auto& assignment : assignments) commands.push_back(assignment.order);
+    return commands;
+}
+
+std::vector<DetectorEscortAssignment> SquadPlanner::detectorEscortAssignments(
+    const GameState& state,
+    const std::span<const Squad> squads,
+    const InfluenceMap& influence,
+    const bool mobilizeReserveAgainstLurkers,
+    const bool centerBlockedMainEscort,
+    const bool mobilizeContestedReserve,
+    const bool directSafeRendezvous,
+    const std::span<const UnitId> unavailableObservers,
+    const bool blockedSquadsOnly) const {
     std::vector<const UnitSnapshot*> observers;
     for (const auto& unit : state.self.units) {
         if (unit.kind == UnitKind::observer && unit.completed && !unit.loaded &&
             !unit.disabled && !unit.hallucination && unit.position.valid() &&
+            std::ranges::find(unavailableObservers, unit.id) == unavailableObservers.end() &&
             !ScoutManager::observerInDanger(state, unit, influence))
             observers.push_back(&unit);
     }
@@ -542,6 +587,7 @@ std::vector<Command> SquadPlanner::detectorEscorts(
 
     std::vector<const Squad*> priorities;
     for (const auto& squad : squads) {
+        if (blockedSquadsOnly && !squad.needsDetection) continue;
         if (squad.role == SquadRole::baseDefense && squad.enemies.empty() &&
             !squad.needsDetection) continue;
         if (!squad.units.empty()) priorities.push_back(&squad);
@@ -560,7 +606,7 @@ std::vector<Command> SquadPlanner::detectorEscorts(
         return left->units.size() > right->units.size();
     });
 
-    std::vector<Command> result;
+    std::vector<DetectorEscortAssignment> result;
     // Once a second Observer exists, keep one available for strategic
     // scouting. Fragmented armies can otherwise lease every Observer as an
     // escort, leaving no unit to watch a siege push before it reaches a base.
@@ -577,7 +623,9 @@ std::vector<Command> SquadPlanner::detectorEscorts(
     const auto escortCapacity = lurkerAtHome || contestedReserve
         ? std::min(observers.size(), detectionDemand)
         : (observers.size() > 1 ? observers.size() - 1 : observers.size());
-    const auto count = std::min(escortCapacity, priorities.size());
+    const auto count = blockedSquadsOnly
+        ? std::min(escortCapacity, detectionDemand)
+        : std::min(escortCapacity, priorities.size());
     result.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
         const auto* squad = priorities[i];
@@ -587,14 +635,23 @@ std::vector<Command> SquadPlanner::detectorEscorts(
         const auto anchor = centerBlockedMainEscort &&
                             squad->role == SquadRole::mainArmy && squad->needsDetection
             ? squad->center : moveToward(squad->center, squad->retreat, 96.0);
+#ifndef PROTODD_SAFE_OBSERVER_COVERAGE
         auto atAnchor = *observers.front();
         atAnchor.position = anchor;
         if (!anchor.valid() ||
             ScoutManager::observerInDanger(state, atAnchor, influence)) continue;
+#else
+        if (!anchor.valid()) continue;
+#endif
         const auto closest = std::min_element(observers.begin() + static_cast<std::ptrdiff_t>(i),
             observers.end(), [anchor](const UnitSnapshot* left, const UnitSnapshot* right) {
+#ifdef PROTODD_SAFE_OBSERVER_COVERAGE
+                const auto leftReady = left->healthFraction() >= 0.50;
+                const auto rightReady = right->healthFraction() >= 0.50;
+#else
                 const auto leftReady = left->healthFraction() >= 0.25;
                 const auto rightReady = right->healthFraction() >= 0.25;
+#endif
                 if (leftReady != rightReady) return leftReady;
                 const auto a = distanceSquared(left->position, anchor);
                 const auto b = distanceSquared(right->position, anchor);
@@ -602,6 +659,11 @@ std::vector<Command> SquadPlanner::detectorEscorts(
             });
         std::iter_swap(observers.begin() + static_cast<std::ptrdiff_t>(i), closest);
         const auto* observer = observers[i];
+#ifdef PROTODD_SAFE_OBSERVER_COVERAGE
+        auto atAnchor = *observer;
+        atAnchor.position = anchor;
+        if (ScoutManager::observerInDanger(state, atAnchor, influence)) continue;
+#endif
         auto destination = influence.safestStep(
             observer->position, anchor, true, directSafeRendezvous);
         // A local gradient can keep a cloaked Observer circling just outside
@@ -622,17 +684,23 @@ std::vector<Command> SquadPlanner::detectorEscorts(
                         (anchor.y - observer->position.y) * fraction)),
                 };
                 const auto cell = influence.at(point);
+#ifdef PROTODD_SAFE_OBSERVER_COVERAGE
+                if ((cell.airThreat > 0.05F &&
+                     (!observer->cloaked || cell.detection > 0.05F)) ||
+                    influence.stormDanger(point) > 0.05F) {
+#else
                 if (cell.airThreat > 0.05F || cell.detection > 0.05F ||
                     influence.stormDanger(point) > 0.05F) {
+#endif
                     clearCorridor = false;
                     break;
                 }
             }
             if (clearCorridor) destination = anchor;
         }
-        result.push_back({observer->id, CommandType::move, -1, destination,
+        result.push_back({squad->id, {observer->id, CommandType::move, -1, destination,
                           UnitKind::unknown, squad->needsDetection ? 96 : 72, 0,
-                          "detector-escort"});
+                          "detector-escort"}});
     }
     return result;
 }

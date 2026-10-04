@@ -61,6 +61,11 @@ std::optional<Intent> decodeIntent(const Output& prediction,
                 result.kind = candidate;
                 result.targetMode = mode;
             }
+    // Preserve argmax semantics, then abstain if the winning replay merge
+    // cannot be represented without its paired actor.
+    if (kindNames[result.kind] == "merge_archon" ||
+        kindNames[result.kind] == "merge_dark_archon")
+        return std::nullopt;
     result.kindProbability = topProbability(kind, result.kind);
     result.eventProbability = event;
     result.domain = top(head(prediction, "domain", domainNames.size()));

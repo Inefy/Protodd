@@ -1,4 +1,5 @@
 #include "WholeGameAction.hpp"
+#include "WholeGameTraining.hpp"
 
 #include <algorithm>
 #include <optional>
@@ -62,10 +63,18 @@ std::optional<BWAPI::UnitCommand> makeCommand(
         }
         case 13: // train
         case 29: { // train_fighter
-            const BWAPI::UnitType type(intent.unitType);
-            if (intent.targetMode != 0 || type.getRace() != BWAPI::Races::Protoss || type.isBuilding())
+            if (intent.targetMode != 0) return std::nullopt;
+            std::optional<BWAPI::UnitType> requestedType;
+            if (intent.kind == 13) requestedType.emplace(intent.unitType);
+            const auto type = wholeGameTrainingType(
+                intent.kind, requestedType, actor->getType(),
+                BWAPI::UnitTypes::Protoss_Reaver, BWAPI::UnitTypes::Protoss_Scarab,
+                BWAPI::UnitTypes::Protoss_Carrier, BWAPI::UnitTypes::Protoss_Interceptor);
+            if (!type) return std::nullopt;
+            if (intent.kind == 13 &&
+                (type->getRace() != BWAPI::Races::Protoss || type->isBuilding()))
                 return std::nullopt;
-            return UnitCommand::train(actor, type);
+            return UnitCommand::train(actor, *type);
         }
         case 15: { // research
             const BWAPI::TechType technology(intent.technology);
@@ -152,7 +161,7 @@ std::vector<LegalWholeGameCommand> legalWholeGameCommands(
             !actor->isCompleted() || actor->isLoaded() || actor->isLockedDown() ||
             actor->isMaelstrommed() || actor->isStasised()) continue;
         const auto command = makeCommand(intent, actor, target, position);
-        if (command && actor->canIssueCommand(*command))
+        if (command && wholeGameCommandIssueable(actor, *command))
             accepted.push_back({token, *command});
     }
     return accepted;

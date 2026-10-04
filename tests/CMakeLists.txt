@@ -3,6 +3,9 @@ add_executable(protodd_tests
 )
 target_link_libraries(protodd_tests PRIVATE Protodd::Core)
 target_compile_features(protodd_tests PRIVATE cxx_std_20)
+if(PROTODD_SAFE_OBSERVER_COVERAGE)
+    target_compile_definitions(protodd_tests PRIVATE PROTODD_SAFE_OBSERVER_COVERAGE=1)
+endif()
 protodd_enable_warnings(protodd_tests)
 
 add_test(NAME protodd_core_tests COMMAND protodd_tests)
@@ -12,6 +15,18 @@ target_link_libraries(protodd_hybrid_policy_tests PRIVATE Protodd::Core)
 target_compile_features(protodd_hybrid_policy_tests PRIVATE cxx_std_20)
 protodd_enable_warnings(protodd_hybrid_policy_tests)
 add_test(NAME protodd_hybrid_policy_tests COMMAND protodd_hybrid_policy_tests)
+
+add_executable(protodd_hybrid_right_click_bridge_tests test_hybrid_right_click_bridge.cpp)
+target_link_libraries(protodd_hybrid_right_click_bridge_tests PRIVATE Protodd::Core)
+target_compile_features(protodd_hybrid_right_click_bridge_tests PRIVATE cxx_std_20)
+protodd_enable_warnings(protodd_hybrid_right_click_bridge_tests)
+add_test(NAME protodd_hybrid_right_click_bridge_tests COMMAND protodd_hybrid_right_click_bridge_tests)
+
+add_executable(protodd_hybrid_diagnostics_tests test_hybrid_diagnostics.cpp)
+target_include_directories(protodd_hybrid_diagnostics_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_compile_features(protodd_hybrid_diagnostics_tests PRIVATE cxx_std_20)
+protodd_enable_warnings(protodd_hybrid_diagnostics_tests)
+add_test(NAME protodd_hybrid_diagnostics_tests COMMAND protodd_hybrid_diagnostics_tests)
 
 add_executable(protodd_allin_opening_tests test_allin_opening.cpp)
 target_link_libraries(protodd_allin_opening_tests PRIVATE Protodd::Core)
@@ -79,6 +94,12 @@ target_compile_features(protodd_policy_tests PRIVATE cxx_std_20)
 protodd_enable_warnings(protodd_policy_tests)
 add_test(NAME protodd_policy_tests COMMAND protodd_policy_tests)
 
+add_executable(protodd_pvt_strategy_portfolio_tests test_pvt_strategy_portfolio.cpp)
+target_link_libraries(protodd_pvt_strategy_portfolio_tests PRIVATE Protodd::Core)
+target_compile_features(protodd_pvt_strategy_portfolio_tests PRIVATE cxx_std_20)
+protodd_enable_warnings(protodd_pvt_strategy_portfolio_tests)
+add_test(NAME protodd_pvt_strategy_portfolio_tests COMMAND protodd_pvt_strategy_portfolio_tests)
+
 add_executable(protodd_learned_model_tests test_learned_model.cpp)
 target_link_libraries(protodd_learned_model_tests PRIVATE Protodd::Core)
 target_compile_features(protodd_learned_model_tests PRIVATE cxx_std_20)
@@ -140,8 +161,36 @@ target_compile_features(protodd_ranged_natural_tests PRIVATE cxx_std_20)
 protodd_enable_warnings(protodd_ranged_natural_tests)
 add_test(NAME protodd_ranged_natural_tests COMMAND protodd_ranged_natural_tests)
 
+if(PROTODD_PVT_SCOUT_TRANSITIONS)
+    add_executable(protodd_pvt_scout_transition_tests test_pvt_scout_transitions.cpp)
+    target_link_libraries(protodd_pvt_scout_transition_tests PRIVATE Protodd::Core)
+    target_compile_features(protodd_pvt_scout_transition_tests PRIVATE cxx_std_20)
+    protodd_enable_warnings(protodd_pvt_scout_transition_tests)
+    add_test(NAME protodd_pvt_scout_transition_tests COMMAND protodd_pvt_scout_transition_tests)
+else()
+    add_executable(protodd_pvt_scout_transitions_off_tests test_pvt_scout_transitions_off.cpp)
+    target_link_libraries(protodd_pvt_scout_transitions_off_tests PRIVATE Protodd::Core)
+    target_compile_features(protodd_pvt_scout_transitions_off_tests PRIVATE cxx_std_20)
+    protodd_enable_warnings(protodd_pvt_scout_transitions_off_tests)
+    add_test(NAME protodd_pvt_scout_transitions_off_tests COMMAND protodd_pvt_scout_transitions_off_tests)
+endif()
+
 add_executable(protodd_combat_building_clearance_tests test_combat_building_clearance.cpp)
 target_link_libraries(protodd_combat_building_clearance_tests PRIVATE Protodd::Core)
 target_compile_features(protodd_combat_building_clearance_tests PRIVATE cxx_std_20)
 protodd_enable_warnings(protodd_combat_building_clearance_tests)
 add_test(NAME protodd_combat_building_clearance_tests COMMAND protodd_combat_building_clearance_tests)
+
+add_executable(protodd_whole_game_runtime_contract_tests
+    test_whole_game_runtime_contract.cpp
+    ../src/cpu/WholeGameIntent.cpp
+)
+target_include_directories(protodd_whole_game_runtime_contract_tests PRIVATE
+    ../src/cpu
+    ../src/bwapi
+    ../include
+)
+target_compile_features(protodd_whole_game_runtime_contract_tests PRIVATE cxx_std_20)
+protodd_enable_warnings(protodd_whole_game_runtime_contract_tests)
+add_test(NAME protodd_whole_game_runtime_contract_tests
+    COMMAND protodd_whole_game_runtime_contract_tests)
