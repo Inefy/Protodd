@@ -58,14 +58,17 @@ $resolvedDll = if ([System.IO.Path]::IsPathRooted($BotDll)) {
 } else {
     [System.IO.Path]::GetFullPath((Join-Path $repoPath $BotDll))
 }
+if (-not (Test-Path -LiteralPath $resolvedDll -PathType Leaf)) {
+    throw "Bot DLL not found: $resolvedDll"
+}
+foreach ($runtime in @($runtimeA, $runtimeB)) {
+    & (Join-Path $PSScriptRoot 'restore-match-runtime.ps1') -Runtime $runtime
+}
 $mapPath = [System.IO.Path]::GetFullPath((Join-Path $runtimeA $Map))
 $runtimePrefix = $runtimeA.TrimEnd('\') + '\'
 if (-not $mapPath.StartsWith($runtimePrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
     -not (Test-Path -LiteralPath $mapPath -PathType Leaf)) {
     throw "Map must exist inside the host runtime: $mapPath"
-}
-if (-not (Test-Path -LiteralPath $resolvedDll -PathType Leaf)) {
-    throw "Bot DLL not found: $resolvedDll"
 }
 
 if ([string]::IsNullOrWhiteSpace($OpponentName)) { $OpponentName = "UAB$OpponentRace" }
@@ -388,6 +391,19 @@ function Close-LaunchedProxy {
         Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
     }
 }
+function Get-MatchCrashReports {
+    foreach ($side in @(@('protodd', $runtimeA), @('opponent', $runtimeB))) {
+        $errorRoot = Join-Path $side[1] 'Errors'
+        foreach ($file in @(Get-ChildItem -LiteralPath $errorRoot -Filter '*.txt' -File -ErrorAction SilentlyContinue)) {
+            if ($file.LastWriteTimeUtc -lt $script:startedAtUtc) { continue }
+            try { $report = [IO.File]::ReadAllText($file.FullName) }
+            catch { continue } # The exception handler may still be writing.
+            if ($report -match '(?m)^EXCEPTION:') {
+                [pscustomobject]@{side=$side[0]; file=$file}
+            }
+        }
+    }
+}
 
 $logPath = Join-Path $writeRoot "Protodd.log"
 $result = $null
@@ -396,6 +412,7 @@ $wallClockTimedOut = $false
 $gameProcessExited = $false
 $lastObservedFrame = -1
 $traceBeforeCleanup = ""
+$runtimeCrashes = @()
 $script:startedAtUtc = [DateTime]::UtcNow
 $startedUtc = $script:startedAtUtc.ToString('o')
 $observerProcess = $null
@@ -441,6 +458,7 @@ try {
         [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     } else { $null }
     while ($true) {
+        if (@(Get-MatchCrashReports).Count -gt 0) { break }
         if (Test-Path -LiteralPath $logPath) {
             try {
                 $recentLines = @(Get-Content -LiteralPath $logPath -Tail 24 -ErrorAction Stop)
@@ -488,7 +506,16 @@ try {
     if ($traceBeforeCleanup -match '(?m)^MATCH,seed=(\d+),') {
         $observedSeed = [long]$Matches[1]
     }
-    $terminationReason = if ($result) {
+    foreach ($crash in @(Get-MatchCrashReports)) {
+        $saved = Join-Path $archiveRoot "$Label-$($crash.side)-crash-$($crash.file.Name)"
+        Copy-Item -LiteralPath $crash.file.FullName -Destination $saved -Force
+        $runtimeCrashes += [ordered]@{side=$crash.side; report=$saved; sha256=(Get-FileHash -LiteralPath $saved).Hash}
+    }
+    $observedTerminalResult = $result
+    if ($runtimeCrashes.Count -gt 0) { $result = $null }
+    $terminationReason = if ($runtimeCrashes.Count -gt 0) {
+        'runtime-crash'
+    } elseif ($result) {
         'completed'
     } elseif ($frameLimitReached) {
         'frame-limit'
@@ -507,6 +534,10 @@ try {
         label = $Label
         status = $(if ($result) { 'completed' } else { 'incomplete' })
         result = $result
+        observed_terminal_result = $observedTerminalResult
+        runtime_crashes = $runtimeCrashes
+        host_bwapi_sha256 = (Get-FileHash -LiteralPath (Join-Path $runtimeA 'bwapi-data/BWAPI.dll')).Hash
+        opponent_bwapi_sha256 = (Get-FileHash -LiteralPath (Join-Path $runtimeB 'bwapi-data/BWAPI.dll')).Hash
         termination_reason = $terminationReason
         started_utc = $startedUtc
         finished_utc = [DateTime]::UtcNow.ToString('o')
@@ -563,7 +594,7 @@ try {
             if ($fields.Length -eq 13) { $record.opponent_opening_observed = $fields[5] }
         }
     }
-    $record | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $archiveRoot "$Label.json") -Encoding utf8
+    $record | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $archiveRoot "$Label.json") -Encoding utf8
 }
 
 if (Test-Path -LiteralPath $logPath) {
@@ -577,10 +608,13 @@ if (Test-Path -LiteralPath $logPath) {
     else { Write-Warning "Decision report generation failed; the archived match trace is intact" }
 }
 if (-not $result) {
+    if ($runtimeCrashes.Count -gt 0) {
+        throw "Match aborted after a runtime crash; see the archived crash reports for '$Label'"
+    }
     if ($frameLimitReached) {
         throw "Match reached the in-game frame limit of $FrameLimit without a terminal result"
     }
-    if ($TimeoutSeconds -gt 0) {
+    if ($wallClockTimedOut) {
         throw "Match did not produce a terminal result within $TimeoutSeconds seconds"
     }
     throw "Match did not produce a terminal result before the game process exited"

@@ -49,3 +49,49 @@ For large local round robins, use the official
 `davechurchill/StarcraftAITournamentManager` with two configured clients. It
 records normal results separately from crashes, non-starts, and frame-limit
 timeouts; feed the collected `Protodd.log` files to `tools/log_analyzer.py`.
+
+## Direct matches after a tournament campaign
+
+Tournament Manager deletes `bwapi-data`, `characters`, and `maps` from its
+StarCraft runtimes during cleanup. `scripts/direct-match.ps1` restores missing
+files from the local `build/direct-template` and `ladder/maps/maps.zip` before
+checking the map and staging the bots. Existing configuration, logs, and
+learning files survive restoration; the match's usual learning-reset option
+still applies afterwards. Restoration requires StarCraft to be stopped.
+
+For example, after building the tournament DLL:
+
+```powershell
+./scripts/direct-match.ps1 -OpponentRace Protoss -Map 'maps/aiide/(4)Python.scx' -Label uab-protoss-check
+```
+
+Use `-OpponentRace Terran` or `Zerg` for the other race-fixed UAlbertaBot
+packages. Match records and decision reports are saved under
+`build/direct-logs`. `scripts/restore-match-runtime.ps1 -Runtime <absolute-path>`
+also restores an idle runtime before launching it manually.
+
+## Local BWAPI latency crash repair
+
+The bundled BWAPI 4.4 runtime can return negative remaining latency after a
+stale network turn. Its latency-compensation buffer converts `remaining + 15`
+to an unsigned vector size; values below zero cause `std::length_error` and
+terminate StarCraft. This occurred in the UAlbertaBot Terran process on
+Destination during the 4 October 2026 test.
+
+```powershell
+./scripts/build-bwapi-runtime.ps1 -Deploy
+```
+
+The repair clamps remaining latency to zero, compiles and checks the actual
+patched vendor method against normal and delayed turn data, and rebuilds the
+Win32 engine. The script also adapts the legacy source to C++17 filesystem and
+loads Windows headers at their required packing when building the old packed
+StarCraft projects with the current SDK.
+
+`-Deploy` requires StarCraft to be stopped. It updates both direct-match
+runtimes, the restoration template, and BWAPI.dll inside the canonical
+Tournament Manager `Required_BWAPI_440.zip`. Original DLLs and the required
+archive are retained by hash in `build/bwapi-runtime-backup`; existing frozen
+campaign packages are not rewritten. Bot opponent packages are unchanged.
+Direct matches archive fresh crash reports from either side and exclude those
+games from completed win/loss results.

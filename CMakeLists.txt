@@ -444,13 +444,21 @@ if(PROTODD_BUILD_TESTS)
         add_test(NAME protodd_bwapi_catalog_tests COMMAND protodd_bwapi_catalog_tests)
     endif()
     find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(WIN32)
+        find_program(PROTODD_POWERSHELL_EXECUTABLE NAMES pwsh powershell)
+        if(PROTODD_POWERSHELL_EXECUTABLE)
+            add_test(NAME protodd_direct_match_runner_tests
+                COMMAND "${PROTODD_POWERSHELL_EXECUTABLE}" -NoProfile -File
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_direct_match.ps1")
+        endif()
+    endif()
     if(Python3_Interpreter_FOUND)
         add_test(NAME protodd_pvt_portfolio_validator_tests
             COMMAND "${Python3_EXECUTABLE}" -m unittest -v
                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pvt_portfolio_validate.py")
         set_tests_properties(protodd_pvt_portfolio_validator_tests PROPERTIES
             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
-        foreach(PROTODD_NEW_TEST IN ITEMS data_release dataset_analysis ladder arena whole_game_pilot whole_game_labels whole_game_parity whole_game_model whole_game_sequences)
+        foreach(PROTODD_NEW_TEST IN ITEMS data_release dataset_analysis ladder arena whole_game_pilot whole_game_labels whole_game_parity whole_game_sequences)
             add_test(NAME "protodd_${PROTODD_NEW_TEST}_tests"
                 COMMAND "${Python3_EXECUTABLE}" -m unittest discover
                     -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p "test_${PROTODD_NEW_TEST}.py")
@@ -483,7 +491,7 @@ if(PROTODD_BUILD_TESTS)
         execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import torch, numpy"
             RESULT_VARIABLE PROTODD_MODEL_TRAINING_AVAILABLE OUTPUT_QUIET ERROR_QUIET)
         if(PROTODD_MODEL_TRAINING_AVAILABLE EQUAL 0)
-            foreach(PROTODD_PILOT_TEST IN ITEMS mine_allins hybrid_campaign_review allin_campaign_review)
+            foreach(PROTODD_PILOT_TEST IN ITEMS whole_game_model mine_allins hybrid_campaign_review allin_campaign_review)
                 add_test(NAME "protodd_${PROTODD_PILOT_TEST}_tests"
                     COMMAND "${Python3_EXECUTABLE}" -m unittest discover
                         -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p "test_${PROTODD_PILOT_TEST}.py")
