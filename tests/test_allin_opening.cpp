@@ -69,7 +69,7 @@ int main() {
     const auto transitionActions = transitionMacro.reconcile(state, plan, transitionLedger);
     check(std::ranges::any_of(transitionActions, [](const MacroAction& action) {
         return action.action == MacroActionKind::expand && action.target == UnitKind::nexus &&
-               action.priority == 128 && action.status == MacroActionStatus::ready;
+               action.priority == 128 && action.reserved && action.executable;
     }), "safe transition reserves the full bank for its second Nexus");
     threat.combatEnemiesNearMain = 3;
     plan = baseline(); plan.prioritizeReinforcements = true;

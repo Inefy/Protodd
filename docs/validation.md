@@ -267,3 +267,46 @@ claim of statistical dominance across every map, spawn, race, or bot.
 `scripts/verify.ps1` passes the C++ core scenarios, ladder-tool tests, log
 analyzer tests, and privacy audit. `scripts/build-tournament.ps1` then builds
 and tests the actual 32-bit Release/BWAPI configuration used for the DLL.
+
+## Runtime recovery and crash repair — 4 October 2026
+
+Tournament Manager cleanup had removed `bwapi-data`, `maps`, and `characters`
+from both shared match runtimes. Direct matches now restore missing files from
+the saved local template and map archive before staging the bots. A stale
+all-in regression referenced the nonexistent `MacroActionStatus`; it now checks
+the planner's actual reserved/executable fields. CMake also registers the
+PyTorch model test only when its dependencies are available.
+
+The first Terran game then failed in the opponent's BWAPI process near frame
+18,480. The exception stack identified a `std::length_error` during latency
+compensation. The original `getRemainingLatencyFrames()` can return a negative
+value after a stale network turn; adding 15 and converting it to the unsigned
+command-buffer size requests an enormous allocation. A standalone Win32
+counterexample reproduced the same exception. The local engine repair casts
+the turn counter to its signed frame type and clamps remaining latency to zero.
+The actual patched vendor method passes normal and stale-turn regression cases.
+
+The rebuilt native Protodd DLL and the exact tested BWAPI DLL are deployed to
+the default direct/ladder bot locations, both match runtimes, the restoration
+template, and the canonical Tournament Manager BWAPI 4.4 package. Original
+binaries and packages are preserved locally. Direct matches detect and archive
+fresh crashes from either side; crash games cannot contribute completed wins.
+
+All 62 Release CTest suites pass with the existing model Python environment,
+including the new runtime crash-report detector. The three post-repair games
+used native Protodd, fresh learning, and seed 43:
+
+| UAlbertaBot race | Map | Result | Terminal frame |
+| --- | --- | --- | ---: |
+| Terran | Destination | Win | 23,624 |
+| Zerg | Benzene | Win | 24,368 |
+| Protoss | Python | Loss | 8,775 |
+
+All three games completed normally, without fresh crash reports or caught bot
+exceptions. The failed original Terran run is excluded. This validates the
+reported crash path and these three cases, not a general strength improvement.
+Native DLL SHA256: `4F63A889C148BCB73D0DAB12B21977AAE4299ADC45DB2CB3AE1B264A70DFB16C`.
+Tested BWAPI SHA256: `3896192B9214898615D5067B6B376EDFE672C813DB048B8EF6118C887145A0BD`.
+Local manifests, traces, decision reports, aggregated results and the repair
+receipt are under `build/direct-logs/repair-20261004-*` and
+`build/runtime-repair-20261004/`.
