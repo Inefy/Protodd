@@ -1,4 +1,5 @@
 #include "ModelRuntime.hpp"
+#include "BoundedFile.hpp"
 
 #include <chrono>
 #include <fstream>
@@ -9,10 +10,7 @@ namespace protodd::bwapi {
 
 void ModelRuntime::start(std::ostream& log) {
     policy_.clear(); observations_.reset();
-    std::ifstream modeFile("bwapi-data/read/LearnedMacro-mode.txt");
-    std::string mode;
-    std::getline(modeFile, mode);
-    if (!mode.empty() && mode.back() == '\r') mode.pop_back();
+    const auto mode = readBoundedFirstLine("bwapi-data/read/LearnedMacro-mode.txt");
     if (mode.empty() || mode == "off") return;
     if (mode != "shadow") { log << "MODEL,status=disabled,reason=unsupported-mode\n"; return; }
     std::ifstream input("bwapi-data/read/LearnedMacro.bin", std::ios::binary);
@@ -64,5 +62,15 @@ void ModelRuntime::infer(Frame frame, const FrameBudget& budget, std::ostream& l
         log << "MODEL,status=disabled,reason=inference-budget\n";
         policy_.clear();
     }
+}
+
+void ModelRuntime::disable(std::ostream& log, const std::string_view reason) noexcept {
+    try {
+        log << "MODEL,status=disabled,reason=phase-failure:" << reason << '\n';
+        log.flush();
+    } catch (...) {
+    }
+    policy_.clear();
+    observations_.reset();
 }
 }  // namespace protodd::bwapi

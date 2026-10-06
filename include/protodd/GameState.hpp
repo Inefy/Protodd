@@ -280,6 +280,20 @@ struct TechnologySnapshot {
     bool inProgress{};
 };
 
+struct ProducerSlotSnapshot {
+    UnitId id{-1};
+    UnitKind kind{UnitKind::unknown};
+    bool activeTraining{};
+    int trainingQueueSize{};
+    int remainingTrainFrames{};
+    int latencyFrames{};
+    bool recentTrainCommand{};
+    bool researching{};
+    bool upgrading{};
+    // Waiting items only; an active item is already reflected in supplyUsed.
+    std::vector<UnitKind> queuedUnits;
+};
+
 struct PlayerSnapshot {
     int id{-1};
     Race race{Race::unknown};
@@ -295,12 +309,19 @@ struct PlayerSnapshot {
     // getTrainingQueue(). Record those occupied producers separately so macro
     // does not treat latency-window production as idle.
     std::vector<UnitKind> busyProducers;
+    // Per-building state avoids treating another Gateway as occupied merely
+    // because one Gateway has both an active unit and queued work.
+    std::vector<ProducerSlotSnapshot> producerSlots;
     std::vector<TechnologySnapshot> technologies;
 };
 
 struct GameState {
     Frame frame{};
     int latencyFrames{};
+    // Estimated frames for an available Probe to reach the home construction
+    // anchor. BWAPI supplies a route-aware estimate; portable callers use the
+    // conservative default.
+    int pylonBuilderTravelFrames{144};
     int mapWidthPixels{};
     int mapHeightPixels{};
     std::string mapName;

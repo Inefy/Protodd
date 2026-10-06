@@ -1,4 +1,5 @@
 #include "ProductionRuntime.hpp"
+#include "BoundedFile.hpp"
 #include <algorithm>
 #include <chrono>
 #include "protodd/MacroPlanner.hpp"
@@ -30,9 +31,7 @@ void ProductionRuntime::start(std::ostream& log) {
     feedback_=ProductionFeedback{};
     control_=false;quota_=ProductionQuota{};
     if(inputs_.is_open()) inputs_.close();
-    std::ifstream modeFile("bwapi-data/read/ProductionDemand-mode.txt");
-    std::string mode; std::getline(modeFile,mode);
-    if(!mode.empty()&&mode.back()=='\r')mode.pop_back();
+    const auto mode = readBoundedFirstLine("bwapi-data/read/ProductionDemand-mode.txt");
     if(mode.empty()||mode=="off")return;
     if(mode=="local-train-units") {
 #ifdef PROTODD_PRODUCTION_LOCAL_EVALUATION

@@ -22,11 +22,18 @@ public:
     [[nodiscard]] AllInBuild build() const noexcept { return build_; }
     [[nodiscard]] AllInPhase phase() const noexcept { return phase_; }
     [[nodiscard]] Frame launchFrame() const noexcept { return launch_; }
+    [[nodiscard]] Frame departureFrame() const noexcept { return departure_; }
+    [[nodiscard]] Frame arrivalFrame() const noexcept { return arrival_; }
+    [[nodiscard]] Frame contactFrame() const noexcept { return contact_; }
     [[nodiscard]] std::string_view transitionReason() const noexcept { return reason_; }
 private:
     AllInBuild build_{AllInBuild::standard};
     AllInPhase phase_{AllInPhase::assemble};
     Frame launch_{-1};
+    Frame departure_{-1};
+    Frame arrival_{-1};
+    Frame contact_{-1};
+    Frame pressureStart_{-1};
     int peakArmy_{};
     std::string_view reason_{"none"};
 };

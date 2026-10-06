@@ -48,13 +48,21 @@ int main() {
     add(state, UnitKind::zealot, 4, false);
     state.frame = 4000; plan = baseline(); opening.apply(plan, state, threat);
     check(opening.phase() == AllInPhase::assemble, "unfinished army cannot launch");
-    for (auto& unit : state.self.units) unit.completed = true;
+    for (auto& unit : state.self.units) {
+        unit.completed = true;
+    }
     state.frame = 4656; plan = baseline(); opening.apply(plan, state, threat);
     check(opening.launchFrame() == 4656 && plan.posture == Posture::attack, "four Zealots launch sticky attack");
     threat.combatEnemiesNearMain = 3;
+    for (auto& unit : state.self.units) {
+        if (unit.kind == UnitKind::zealot || unit.kind == UnitKind::dragoon ||
+            unit.kind == UnitKind::darkTemplar) unit.position = {3000, 3000};
+    }
     state.frame += 24; plan = baseline(); opening.apply(plan, state, threat);
-    check(plan.posture == Posture::defend && opening.launchFrame() == 4656, "real breach interrupts without reroll");
-    threat = {}; state.frame = 4656 + 120 * 24;
+    check(plan.posture == Posture::defend && opening.launchFrame() == 4656 &&
+          opening.departureFrame() == state.frame && opening.arrivalFrame() == state.frame,
+          "departure and arrival are recorded separately from assembly");
+    threat = {}; state.frame = opening.arrivalFrame() + 120 * 24;
     plan = baseline(); opening.apply(plan, state, threat);
     check(opening.phase() == AllInPhase::transition && opening.transitionReason() == "pressure-window",
           "bounded pressure window ends commitment");
@@ -125,6 +133,13 @@ int main() {
     state.enemy.units.clear(); enemy = {}; enemy.kind = UnitKind::observer; enemy.cloaked = true;
     state.enemy.units.push_back(enemy); plan = baseline(); opening.apply(plan, state, threat);
     check(!plan.requireMobileDetection, "harmless cloaked Observer cannot impose a detection tech tax");
+    plan = baseline();
+    plan.requireMobileDetection = true;
+    plan.goals.push_back({GoalKind::detect, UnitKind::observer, 1, 120, true,
+                          "native safety obligation"});
+    opening.apply(plan, state, threat);
+    check(plan.requireMobileDetection && requested(plan, UnitKind::observer) == 1,
+          "an all-in retains a pre-existing native detection obligation");
     opening.reset(AllInBuild::darkTemplar); state = {}; state.frame = 5000;
     add(state, UnitKind::probe, 18); add(state, UnitKind::gateway, 1);
     add(state, UnitKind::cyberneticsCore, 1); add(state, UnitKind::assimilator, 1);
@@ -158,10 +173,20 @@ int main() {
     plan = baseline(); opening.apply(plan, state, threat);
     check(requested(plan, UnitKind::photonCannon) == 1,
           "an observed DT at the economy funds one immediate detection anchor");
+    UnitSnapshot naturalNexus; naturalNexus.kind = UnitKind::nexus;
+    naturalNexus.id = 40; naturalNexus.position = {1800, 128};
+    UnitSnapshot mainCannon; mainCannon.kind = UnitKind::photonCannon;
+    mainCannon.id = 41; mainCannon.position = {256, 128};
+    state.self.units.push_back(naturalNexus);
+    state.self.units.push_back(mainCannon);
+    state.enemy.units[0].position = {1850, 128};
+    plan = baseline(); opening.apply(plan, state, threat);
+    check(requested(plan, UnitKind::photonCannon) == 2,
+          "a main Cannon does not satisfy the natural-base DT detection emergency");
     state.enemy.units[0].visible = false;
     plan = baseline(); opening.apply(plan, state, threat);
-    check(requested(plan, UnitKind::photonCannon) == 0,
-          "stale DT memory alone cannot request a new emergency anchor");
+    check(requested(plan, UnitKind::photonCannon) == 1,
+          "stale DT memory cannot request another anchor beyond the completed main Cannon");
     opening.reset(AllInBuild::standard); plan = baseline(); opening.apply(plan, state, threat);
     check(plan.desiredBases == 3 && plan.goals.size() == 2, "standard profile unchanged");
     return failures ? 1 : 0;

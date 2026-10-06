@@ -6,6 +6,87 @@
 #include <cmath>
 
 namespace protodd {
+namespace {
+
+constexpr Frame kExpansionRetryFrames = 12 * 24;
+constexpr Frame kSurvivalRunwayFrames = 9 * 60 * 24;
+
+Position safeAlternativeSite(const GameState& state, const Position blockedSite,
+                             const Position recentlyFailedSite,
+                             const Frame retryAfter) {
+    const BaseSnapshot* best = nullptr;
+    for (const auto& base : state.bases) {
+        if (base.ownerId != -1 || base.island || !base.center.valid() ||
+            !base.mineralLine.valid() || base.mineralPatches < 4 ||
+            base.mineralsRemaining < 4000 || base.groundDistanceFromMain < 0 ||
+            distanceSquared(base.center, blockedSite) <= 96 * 96 ||
+            (state.frame < retryAfter &&
+             distanceSquared(base.center, recentlyFailedSite) <= 96 * 96)) {
+            continue;
+        }
+        const auto occupied = std::ranges::any_of(state.self.units,
+            [&base](const UnitSnapshot& unit) {
+                return unit.kind == UnitKind::nexus && unit.position.valid() &&
+                       distanceSquared(unit.position, base.center) < 320 * 320;
+            });
+        if (occupied) continue;
+        const auto threatened = std::ranges::any_of(state.enemy.units,
+            [&state, &base](const UnitSnapshot& enemy) {
+                if (!enemy.completed || enemy.disabled || enemy.loaded ||
+                    enemy.hallucination || enemy.invincible ||
+                    !enemy.position.valid() || enemy.groundWeapon.damage <= 0 ||
+                    (!enemy.visible && (enemy.lastSeen <= 0 ||
+                     state.frame - enemy.lastSeen > 5 * 24))) return false;
+                const auto radius = std::max(480, enemy.groundWeapon.maxRange + 128);
+                return distanceSquared(base.center, enemy.position) <= radius * radius;
+            });
+        if (threatened) continue;
+        if (best == nullptr || base.groundDistanceFromMain < best->groundDistanceFromMain ||
+            (base.groundDistanceFromMain == best->groundDistanceFromMain &&
+             base.id < best->id)) best = &base;
+    }
+    return best != nullptr ? best->center : Position{-1, -1};
+}
+
+void addWorkerSurvivalPlan(StrategicPlan& plan, const GameState& state) {
+    const auto completedNexuses = static_cast<int>(std::ranges::count_if(
+        state.self.units, [](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::nexus && unit.completed;
+        }));
+    const auto activeBases = static_cast<int>(std::ranges::count_if(
+        state.bases, [&state](const BaseSnapshot& base) {
+            return base.ownerId == state.self.id && base.mineralPatches > 0 &&
+                   base.mineralsRemaining > 0;
+        }));
+    if (completedNexuses == 0 || activeBases == 0 ||
+        plan.estimatedMiningRunwayFrames < 0 ||
+        plan.estimatedMiningRunwayFrames > kSurvivalRunwayFrames) return;
+
+    const auto targetWorkers = std::min(16, activeBases * 12);
+    plan.name += " [survival: expansion blocked]";
+    if (plan.posture != Posture::defend) plan.posture = Posture::recover;
+    plan.desiredBases = completedNexuses;
+    plan.desiredWorkers = std::max(plan.desiredWorkers, targetWorkers);
+    plan.desiredGasWorkers = 0;
+    plan.sustainEconomy = true;
+    plan.prioritizeReinforcements = false;
+    auto probeGoal = std::ranges::find_if(plan.goals,
+        [](const ProductionGoal& goal) {
+            return goal.goal == GoalKind::train && goal.target == UnitKind::probe;
+        });
+    if (probeGoal == plan.goals.end()) {
+        plan.goals.push_back({GoalKind::train, UnitKind::probe, targetWorkers,
+                              118, true,
+                              "preserve mining income while scouting an expansion alternative"});
+    } else {
+        probeGoal->desiredCount = std::max(probeGoal->desiredCount, targetWorkers);
+        probeGoal->priority = std::max(probeGoal->priority, 118);
+        probeGoal->blocking = true;
+        probeGoal->reason = "preserve mining income while scouting an expansion alternative";
+    }
+}
+
+}  // namespace
 
 void ExpansionCoordinator::reset() noexcept {
     retryAfter_ = 0;
@@ -17,9 +98,12 @@ void ExpansionCoordinator::reset() noexcept {
 void ExpansionCoordinator::update(StrategicPlan& plan, const GameState& state,
                                   const ExpansionFeedback& feedback) {
     releaseBuilder_ = false;
-    plan.deferExpansion = false;
+    const auto preservingWorkers =
+        plan.name.find("[survival: no ready replacement base]") != std::string::npos;
+    plan.deferExpansion = preservingWorkers;
     if (!plan.expansionTarget.valid()) {
-        reason_ = "No expansion mission";
+        reason_ = preservingWorkers ? "No ready replacement base; preserve remaining mining" :
+                                     "No expansion mission";
         return;
     }
     const auto constructing = std::ranges::any_of(state.self.units, [&plan](const UnitSnapshot& unit) {
@@ -40,6 +124,8 @@ void ExpansionCoordinator::update(StrategicPlan& plan, const GameState& state,
             distanceSquared(enemy.position, plan.expansionTarget) <= radius * radius)
             siteEnemies.push_back(enemy);
     }
+    auto expansionBlocked = false;
+    auto blockedReason = std::string_view{};
     if (!siteEnemies.empty()) {
         std::vector<UnitSnapshot> cover;
         for (const auto& unit : state.self.units) {
@@ -56,27 +142,53 @@ void ExpansionCoordinator::update(StrategicPlan& plan, const GameState& state,
         // its assembly mission, but spend only after a local screen can fight.
         const auto estimate = CombatEvaluator{}.evaluate(cover, siteEnemies, 1.25, 0.15, false);
         if (cover.empty() || estimate.ratio < 1.25) {
-            plan.deferExpansion = true;
-            releaseBuilder_ = feedback.pending;
-            reason_ = "Clear expansion threats before committing Nexus";
-            return;
+            expansionBlocked = true;
+            blockedReason = "Clear expansion threats before committing Nexus";
         }
     }
+    const auto builderStalled = feedback.pending && feedback.stalledFrames >= 8 * 24;
     // A worker still travelling does not trigger this circuit breaker. Stop
     // the stale order before releasing the bank; otherwise it can spend later.
-    if (feedback.pending && feedback.stalledFrames >= 8 * 24) {
+    if (builderStalled) {
         failedSite_ = feedback.site;
-        retryAfter_ = state.frame + 12 * 24;
+        retryAfter_ = state.frame + kExpansionRetryFrames;
         releaseBuilder_ = true;
     }
-    if (state.frame < retryAfter_ &&
-        distanceSquared(plan.expansionTarget, failedSite_) <= 96 * 96) {
-        plan.deferExpansion = true;
-        reason_ = "Builder stalled: reinforce and clear site before retry";
-    } else {
-        reason_ = feedback.pending ? "Escort builder; keep Nexus footprint clear" :
-                                    "Assemble beside expansion; fund construction";
+    const auto waitingToRetry = state.frame < retryAfter_ &&
+        distanceSquared(plan.expansionTarget, failedSite_) <= 96 * 96;
+    if (waitingToRetry && !expansionBlocked) {
+        expansionBlocked = true;
+        blockedReason = "Builder stalled: reinforce and clear site before retry";
     }
+
+    if (expansionBlocked) {
+        if (builderStalled) failedSite_ = plan.expansionTarget;
+        const auto alternative = safeAlternativeSite(
+            state, plan.expansionTarget, failedSite_, retryAfter_);
+        if (alternative.valid()) {
+            const auto prior = plan.expansionTarget;
+            plan.expansionTarget = alternative;
+            if (distanceSquared(plan.rallyPoint, prior) <= 96 * 96)
+                plan.rallyPoint = alternative;
+            plan.deferExpansion = false;
+            plan.name += " [alternate safe expansion]";
+            releaseBuilder_ = releaseBuilder_ || feedback.pending;
+            reason_ = "Switch to reachable, mineral-rich alternative expansion";
+            return;
+        }
+
+        plan.deferExpansion = true;
+        addWorkerSurvivalPlan(plan, state);
+        releaseBuilder_ = releaseBuilder_ || feedback.pending;
+        reason_ = plan.name.find("survival: expansion blocked") != std::string::npos
+            ? "No safe alternative; preserve the remaining worker income"
+            : blockedReason.empty() ? "Expansion blocked; hold current mining lines and retry"
+                                    : blockedReason;
+        return;
+    }
+
+    reason_ = feedback.pending ? "Escort builder; keep Nexus footprint clear" :
+                                "Assemble beside expansion; fund construction";
 }
 
 Position expansionAssemblyPoint(const GameState& state, const Position site,

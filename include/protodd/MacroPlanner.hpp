@@ -3,6 +3,9 @@
 #include "protodd/GameState.hpp"
 #include "protodd/Strategy.hpp"
 
+#include <algorithm>
+#include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -13,6 +16,26 @@ namespace protodd {
 [[nodiscard]] bool trainingSlotAvailable(bool active, int queueSize,
                                         int remainingFrames, int latencyFrames,
                                         bool recentTrainCommand) noexcept;
+
+struct TrainingProducerCandidate {
+    UnitId id{-1};
+    bool completed{};
+    bool powered{};
+    bool disabled{};
+    bool loaded{};
+    bool hallucination{};
+    bool legalForTarget{};
+    bool activeTraining{};
+    int trainingQueueSize{};
+    int remainingTrainFrames{};
+    int latencyFrames{};
+    bool recentTrainCommand{};
+    bool researching{};
+    bool upgrading{};
+};
+
+[[nodiscard]] std::optional<UnitId> selectTrainingProducer(
+    std::span<const TrainingProducerCandidate> candidates) noexcept;
 
 enum class MacroActionKind : std::uint8_t { build, train, expand, research, upgrade };
 
@@ -27,6 +50,22 @@ struct MacroAction {
     TechnologyKind technology{TechnologyKind::none};
     bool blocksLowerPriority{};
     bool executable{true};
+    ConstructionTaskSite constructionSite{};
+};
+
+enum class BuildBlockerReason : std::uint8_t {
+    noBuilder,
+    missingPrerequisite,
+    noPlacement,
+    noPower,
+    rejectedFootprint,
+};
+
+struct BuildBlockerFeedback {
+    UnitKind target{UnitKind::unknown};
+    ConstructionTaskSite constructionSite{};
+    BuildBlockerReason reason{BuildBlockerReason::noPlacement};
+    Frame retryAt{};
 };
 
 struct ResourceLedger {
@@ -34,12 +73,23 @@ struct ResourceLedger {
     int gas{};
     int reservedMinerals{};
     int reservedGas{};
+    int committedMinerals{};
+    int committedGas{};
+    int protectedMinerals{};
+    int protectedGas{};
 
-    [[nodiscard]] int freeMinerals() const noexcept { return minerals - reservedMinerals; }
-    [[nodiscard]] int freeGas() const noexcept { return gas - reservedGas; }
+    [[nodiscard]] int freeMinerals() const noexcept {
+        return std::max(0, minerals - reservedMinerals);
+    }
+    [[nodiscard]] int freeGas() const noexcept { return std::max(0, gas - reservedGas); }
+    void beginFrame(int observedMinerals, int observedGas) noexcept;
     [[nodiscard]] bool canReserve(int mineralCost, int gasCost) const noexcept;
     bool reserve(int mineralCost, int gasCost) noexcept;
     void protect(int mineralCost, int gasCost) noexcept;
+    [[nodiscard]] bool canSpendCommitted(int mineralCost, int gasCost) const noexcept;
+    bool spendCommitted(int mineralCost, int gasCost) noexcept;
+    bool releaseCommitted(int mineralCost, int gasCost) noexcept;
+    bool spendAvailable(int mineralCost, int gasCost) noexcept;
 };
 
 class MacroPlanner {
@@ -51,7 +101,8 @@ public:
     [[nodiscard]] std::vector<MacroAction> reconcile(
         const GameState& state,
         const StrategicPlan& plan,
-        ResourceLedger& ledger) const;
+        ResourceLedger& ledger,
+        std::span<const BuildBlockerFeedback> buildBlockers = {}) const;
 
 private:
     bool pvzMineralFallback_{};
@@ -63,6 +114,7 @@ private:
         int priority{};
         std::string reason;
         Frame lastRequested{-1};
+        ConstructionTaskSite constructionSite{};
     };
 
     // A blocking structure is a strategic checkpoint, not a one-frame scout

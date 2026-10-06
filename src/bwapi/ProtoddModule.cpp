@@ -1,5 +1,9 @@
 #include "ProtoddModule.hpp"
 
+#include "protodd/FrameSchedule.hpp"
+#include "AtomicFile.hpp"
+#include "BoundedFile.hpp"
+
 #include "protodd/Technology.hpp"
 #include "protodd/UnitCatalog.hpp"
 
@@ -9,10 +13,11 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
-#include <iterator>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 
 namespace {
 
@@ -26,10 +31,9 @@ std::uint64_t stableSeed(const std::string_view value) {
 }
 
 std::string readFile(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
-    return input ? std::string(std::istreambuf_iterator<char>(input),
-                               std::istreambuf_iterator<char>())
-                 : std::string{};
+    constexpr auto maximumControlFileBytes = 64 * 1024;
+    const auto result = protodd::bwapi::readBoundedFile(path, maximumControlFileBytes);
+    return result.withinLimit ? result.contents : std::string{};
 }
 
 int countUnits(
@@ -104,30 +108,145 @@ std::string goalSummary(const std::vector<protodd::ProductionGoal>& goals) {
 
 namespace protodd::bwapi {
 
+#ifdef PROTODD_ENGINE_FAULT_INJECTION
+void ProtoddModule::configureAuditFaultInjection(std::string kind, std::string target,
+                                                 const std::uint32_t count) {
+    if (kind == "phase" && target == "production-observe")
+        production_.enableAuditProbe();
+    if (kind == "phase" && target == "whole-game-observe")
+        wholeGame_.enableAuditProbe();
+    auditFaultKind_ = std::move(kind);
+    auditFaultTarget_ = std::move(target);
+    auditFaultRemaining_ = count;
+}
+
+void ProtoddModule::configureAuditSlowObservation(
+    const std::uint32_t count, const std::uint32_t delayUs) {
+    auditSlowObservationRemaining_ = count;
+    auditSlowObservationDelayUs_ = delayUs;
+}
+
+void ProtoddModule::maybeInjectAuditFault(const std::string_view kind,
+                                          const std::string_view target) {
+    if (auditFaultRemaining_ == 0 || kind != auditFaultKind_ ||
+        target != auditFaultTarget_) return;
+    --auditFaultRemaining_;
+    throw std::runtime_error("audit-injected-" + auditFaultKind_ + "-" + auditFaultTarget_);
+}
+#endif
+
+void ProtoddModule::recordCallbackFailure(const std::string_view callbackName,
+                                          const std::string_view message) noexcept {
+    ++caughtErrors_;
+
+    try {
+        const std::string key(callbackName);
+        auto [lastError, inserted] = lastCallbackErrorFrames_.try_emplace(key, -1000);
+        if (!inserted && state_.frame - lastError->second < 24) return;
+        const auto record = "CALLBACK_ERROR,frame=" + std::to_string(state_.frame) +
+            ",callback=" + csvSafe(callbackName) + ",phase=" +
+            csvSafe(activePhase_ ? activePhase_ : "unknown") + ",error=" +
+            csvSafe(message) + ",total=" + std::to_string(caughtErrors_) + "\n";
+        if (log_) {
+            log_ << record;
+            log_.flush();
+            if (log_) {
+                lastError->second = state_.frame;
+                return;
+            }
+        }
+
+        std::error_code error;
+        std::filesystem::create_directories("bwapi-data/write", error);
+        std::ofstream fallback("bwapi-data/write/Protodd.log", std::ios::app);
+        if (fallback) {
+            fallback << record;
+            fallback.flush();
+            if (fallback) {
+                lastError->second = state_.frame;
+                return;
+            }
+        }
+    } catch (...) {
+    }
+    ++loggingErrors_;
+}
+
+void ProtoddModule::onPhaseDisabled(const std::string_view phase,
+                                   const std::uint32_t consecutiveFailures) noexcept {
+    const char* fallback = "skip-repeatedly-failing-phase";
+    if (phase == "observe") {
+        fallback = "suspend-frame-work-without-fresh-observation";
+    } else if (phase.starts_with("whole-game-")) {
+        fallback = "disable-whole-game-and-resume-native-controller";
+        hybridControl_ = false;
+        try { wholeGame_.end(); } catch (...) { ++loggingErrors_; }
+    } else if (phase.starts_with("production-")) {
+        fallback = "disable-production-adapter";
+        try { production_.disable(log_); } catch (...) { ++loggingErrors_; }
+    } else if (phase.starts_with("model-")) {
+        fallback = "disable-learned-shadow-model";
+        model_.disable(log_, phase);
+    }
+
+    try {
+        if (log_) {
+            log_ << "PHASE_DISABLED,frame=" << state_.frame
+                 << ",phase=" << csvSafe(phase)
+                 << ",consecutive_failures=" << consecutiveFailures
+                 << ",fallback=" << fallback << '\n';
+            log_.flush();
+        }
+    } catch (...) {
+        ++loggingErrors_;
+    }
+}
+
 void ProtoddModule::onStart() {
+    callbackBoundary("onStart", [this] { onStartImpl(); });
+}
+
+void ProtoddModule::onStartImpl() {
+    caughtErrors_ = loggingErrors_ = 0;
+    lastCallbackErrorFrames_.clear();
     BWAPI::Broodwar->setCommandOptimizationLevel(2);
     BWAPI::Broodwar->setLatCom(true);
     std::error_code error;
     std::filesystem::create_directories("bwapi-data/write", error);
     opponentName_ = BWAPI::Broodwar->enemy() ? BWAPI::Broodwar->enemy()->getName() : "unknown";
     mapName_ = BWAPI::Broodwar->mapName();
+    historyMapIdentity_ = mapName_ + "#" + BWAPI::Broodwar->mapHash();
+    gameOutcomeId_ = protodd::bwapi::uniqueToken();
     log_.open("bwapi-data/write/Protodd.log", std::ios::app);
     if (log_) {
         log_ << "BOOT," << csvSafe(mapName_) << ',' << csvSafe(opponentName_) << '\n';
         log_.flush();
     }
-    // BWAPI only delivers onSendText and selected-unit information with this
-    // flag enabled. Tournament hosts may deny it; the passive overlay still
-    // works and reports that its interactive controls are unavailable.
+#ifdef PROTODD_DEVELOPER_PROFILE
+    // Interactive commands and overlays are only present in a developer build.
     BWAPI::Broodwar->enableFlag(BWAPI::Flag::UserInput);
+#endif
     bridge_.onStart();
     wholeGame_.start();
     hybridProposals_.clear();
+    urgentEvents_.clear();
+    previousStorms_.clear();
+    previousStorms_.reserve(16);
+    previousWorkerLineThreats_.clear();
+    currentWorkerLineThreats_.clear();
+    previousWorkerLineThreats_.reserve(16);
+    currentWorkerLineThreats_.reserve(16);
+    previousCloakedThreats_.clear();
+    currentCloakedThreats_.clear();
+    previousCloakedThreats_.reserve(8);
+    currentCloakedThreats_.reserve(8);
     hybridReceived_ = hybridTargets_ = hybridSubmitted_ = hybridAccepted_ = 0;
     hybridControl_ = false;
 #ifdef PROTODD_WHOLE_GAME_HYBRID
-    hybridControl_ = wholeGame_.controlling() &&
-        !readFile("bwapi-data/read/WholeGame-hybrid-mode.txt").starts_with("shadow");
+    const auto hybridMode = protodd::bwapi::readBoundedFile(
+        "bwapi-data/read/WholeGame-hybrid-mode.txt", 64 * 1024);
+    hybridControl_ = wholeGame_.controlling() && hybridMode.withinLimit &&
+        !hybridMode.contents.starts_with("shadow");
 #endif
     state_ = bridge_.observe();
     if (log_) {
@@ -137,6 +256,34 @@ void ProtoddModule::onStart() {
              << ",mode=hybrid,hybridControl=" << hybridControl_
 #else
              << ",mode=exclusive-or-shadow"
+#endif
+             << '\n';
+    }
+    if (log_) {
+        log_ << "FEATURE_MANIFEST,profile="
+#ifdef PROTODD_TOURNAMENT_PROFILE
+             << "tournament"
+#elif defined(PROTODD_DEVELOPER_PROFILE)
+             << "developer"
+#else
+             << "unprofiled"
+#endif
+#ifdef PROTODD_DEVELOPER_PROFILE
+             << ",debug_overlay=1,user_input="
+#else
+             << ",debug_overlay=0,user_input="
+#endif
+             << BWAPI::Broodwar->isFlagEnabled(BWAPI::Flag::UserInput)
+#ifdef PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY
+             << ",learned_research_authority=1"
+#else
+             << ",learned_research_authority=0"
+#endif
+             << ",whole_game_control=" << wholeGame_.controlling()
+#ifdef PROTODD_WHOLE_GAME_HYBRID
+             << ",whole_game_hybrid_control=" << hybridControl_
+#else
+             << ",whole_game_hybrid_control=0"
 #endif
              << '\n';
     }
@@ -154,26 +301,28 @@ void ProtoddModule::onStart() {
     workers_ = {};
     plan_ = {};
     phases_.clear();
+    phaseFailurePolicy_.reset();
     traceMemory_.clear();
     actionTotals_.clear();
     lastActions_.clear();
     damageSamples_.clear();
     incidents_.clear();
     motionSamples_.clear();
-    caughtErrors_ = loggingErrors_ = 0;
-    lastErrorFrame_ = -1000;
     bridge_.actionDiagnostic = [this](const ActionDiagnostic& action) { logAction(action); };
     bridge_.buildLeaseDiagnostic = [this](const BuildLeaseDiagnostic& lease) { logBuildLease(lease); };
     bridge_.buildSelectionDiagnostic = [this](const BuildSelectionDiagnostic& selection) {
         logBuildSelection(selection);
     };
-    supplyBlockedFrames_.reset();
+    supplyTightFrames_.reset();
+    supplyHardBlockedFrames_.reset();
+    supplyUnintendedBlockedFrames_.reset();
+    supplyDeliberateOpeningPauseFrames_.reset();
     idleGatewayFrames_.reset();
     idleWorkerFrames_.reset();
     commandsAttempted_ = commandsAccepted_ = macroAttempted_ = macroAccepted_ = 0;
     commandsProposed_ = commandsSuperseded_ = commandsRedundant_ = commandsDeferred_ = 0;
     lastMacroFrame_ = lastSquadLogFrame_ = -1;
-    lastLedger_ = {};
+    spendingLedger_ = {};
     influence_ = InfluenceMap(64);
     commands_.clear();
     scoutCommands_.clear();
@@ -219,8 +368,6 @@ void ProtoddModule::onStart() {
     postureChanges_ = 0;
     lastPlanName_.clear();
     lastPosture_ = Posture::hold;
-    maintenanceMineralReserve_ = 0;
-    maintenanceGasReserve_ = 0;
     slowWindowStart_ = slowWindowPeakFrame_ = -1;
     slowWindowPeakUs_ = 0;
     slowWindowLoad_ = RuntimeLoad::normal;
@@ -262,9 +409,8 @@ void ProtoddModule::onStart() {
 #endif
     }
     callbackTimes_.clear();
-    std::ifstream callbackModeFile("bwapi-data/read/CallbackAudit-mode.txt");
-    std::string callbackMode;
-    callbackModeFile >> callbackMode;
+    deferredOptionalPhases_.clear();
+    const auto callbackMode = readFile("bwapi-data/read/CallbackAudit-mode.txt");
     callbackAudit_=production_.enabled() || callbackMode == "on";
     if (callbackAudit_) callbackTimes_.reserve(100000);
     bridge_.productionDiagnostic = [this](const BWAPI::UnitCommand& command, bool before, bool accepted) {
@@ -276,16 +422,34 @@ void ProtoddModule::onStart() {
     };
     // Controlled training imports only externally validated results. onEnd
     // alone cannot distinguish a strategic win from an opponent crash.
-    const auto learningMode = readFile("bwapi-data/read/Protodd-learning-mode.txt");
-    const bool frozenLearning = learningMode.starts_with("frozen");
+    const auto learningModeRead = protodd::bwapi::readBoundedFile(
+        "bwapi-data/read/Protodd-learning-mode.txt", 64 * 1024);
+    const auto& learningMode = learningModeRead.contents;
+    const bool frozenLearning = !learningModeRead.withinLimit || learningMode.starts_with("frozen");
     validatedLearning_ = frozenLearning || learningMode.starts_with("validated-train") || policy_.enabled();
-    history_.parse(readFile(std::filesystem::path("bwapi-data/read") / historyFile));
-    if (!validatedLearning_)
-        history_.merge(readFile(std::filesystem::path("bwapi-data/write") / historyFile));
-    openingStyle_ = history_.choose(opponentName_, mapName_,
-                                    stableSeed(opponentName_ + "|" + mapName_), !frozenLearning);
+    historyPersistenceEnabled_ = learningModeRead.withinLimit && !historyFile.empty();
+    if (historyPersistenceEnabled_) {
+        const auto readHistory = protodd::bwapi::readBoundedFile(
+            std::filesystem::path("bwapi-data/read") / historyFile,
+            OpponentHistory::maximumSerializedBytes);
+        historyPersistenceEnabled_ = readHistory.withinLimit;
+        history_.parse(readHistory.withinLimit ? readHistory.contents : std::string{});
+    } else {
+        history_.parse({});
+    }
+    if (!validatedLearning_) {
+        if (historyPersistenceEnabled_) {
+            const auto writeHistory = protodd::bwapi::readBoundedFile(
+                std::filesystem::path("bwapi-data/write") / historyFile,
+                OpponentHistory::maximumSerializedBytes);
+            historyPersistenceEnabled_ = writeHistory.withinLimit;
+            if (writeHistory.withinLimit) history_.merge(writeHistory.contents);
+        }
+    }
+    openingStyle_ = history_.choose(opponentName_, historyMapIdentity_,
+        stableSeed(opponentName_ + "|" + historyMapIdentity_), !frozenLearning);
     allIn_.reset(AllInBuild::standard);
-#ifdef PROTODD_ALLIN_LOCAL_EVALUATION
+#ifdef PROTODD_NATIVE_ALLIN_OPENING
     auto opening = readFile("bwapi-data/read/AllIn-opening.txt");
     if (opening.empty() || opening.starts_with("auto")) {
         // PvP has the strongest comparative evidence. Other matchups remain
@@ -308,9 +472,16 @@ void ProtoddModule::onStart() {
                 "damageFrames=1,actionHeartbeatFrames=120,information=legal-observations\n";
         log_.flush();
     }
+#ifdef PROTODD_ENGINE_FAULT_INJECTION
+    maybeInjectAuditFault("stage", "startup");
+#endif
 }
 
 void ProtoddModule::onEnd(const bool winner) {
+    callbackBoundary("onEnd", [this, winner] { onEndImpl(winner); });
+}
+
+void ProtoddModule::onEndImpl(const bool winner) {
     production_.end(log_);
     if (!callbackTimes_.empty()) {
         std::ofstream timing("bwapi-data/write/production-callback-us.bin", std::ios::binary | std::ios::trunc);
@@ -325,14 +496,24 @@ void ProtoddModule::onEnd(const bool winner) {
     state_.frame = BWAPI::Broodwar->getFrameCount();
     sampleTelemetry();
     logDiagnostics();
-    if (!validatedLearning_) {
-        history_.record(opponentName_, mapName_, openingStyle_, winner);
-        std::ofstream historyOutput(std::filesystem::path("bwapi-data/write") /
-                                    OpponentHistory::filename(opponentName_),
-                                std::ios::binary | std::ios::trunc);
-        if (historyOutput) historyOutput << history_.serialize();
+    if (!validatedLearning_ && historyPersistenceEnabled_) {
+#ifdef PROTODD_ENGINE_FAULT_INJECTION
+        maybeInjectAuditFault("stage", "history-output");
+#endif
+        history_.record(opponentName_, historyMapIdentity_, openingStyle_, winner,
+                        gameOutcomeId_);
+        const auto historyPath = std::filesystem::path("bwapi-data/write") /
+                                 OpponentHistory::filename(opponentName_);
+        if (!protodd::bwapi::writeAtomicFile(historyPath, history_.serialize()) && log_)
+            log_ << "LEARNING_PERSISTENCE,write=failed,path="
+                 << csvSafe(historyPath.filename().string()) << '\n';
+    } else if (!validatedLearning_ && log_) {
+        log_ << "LEARNING_PERSISTENCE,disabled=invalid-or-oversized-input\n";
     }
     if (log_) {
+#ifdef PROTODD_ENGINE_FAULT_INJECTION
+        maybeInjectAuditFault("stage", "reporting");
+#endif
         flushPerformanceRecord();
         log_ << "TACTICAL_TARGET_SUMMARY,control=" << tacticalTargetControl_
              << ",candidateScores=" << tacticalTarget_.scoreCount()
@@ -367,6 +548,9 @@ void ProtoddModule::onEnd(const bool winner) {
              << ",firstArmyZero=" << firstArmyZeroFrame_
              << ",firstNexusLoss=" << firstNexusLossFrame_
              << ",supplyBlockSamples=" << supplyBlockSamples_
+             << ",supplyHardBlockedFrames=" << supplyHardBlockedFrames_.total()
+             << ",supplyUnintendedBlockedFrames=" << supplyUnintendedBlockedFrames_.total()
+             << ",supplyDeliberateOpeningPauseFrames=" << supplyDeliberateOpeningPauseFrames_.total()
              << ",highBankSamples=" << highBankSamples_
              << ",planChanges=" << planChanges_
              << ",postureChanges=" << postureChanges_
@@ -378,73 +562,169 @@ void ProtoddModule::onEnd(const bool winner) {
 }
 
 void ProtoddModule::onFrame() {
-    const auto started = std::chrono::steady_clock::now();
-    try {
-        runFrame();
-    } catch (const std::exception& error) {
-        ++caughtErrors_;
-        const auto frame = BWAPI::Broodwar->getFrameCount();
-        if (log_ && frame - lastErrorFrame_ >= 24) {
-            log_ << "ERROR," << frame << ',' << csvSafe(error.what())
-                 << ",phase=" << activePhase_ << ",total=" << caughtErrors_ << '\n';
-            log_.flush();
-            lastErrorFrame_ = frame;
-        }
-    } catch (...) {
-        ++caughtErrors_;
-        const auto frame = BWAPI::Broodwar->getFrameCount();
-        if (log_ && frame - lastErrorFrame_ >= 24) {
-            log_ << "ERROR," << frame << ",unknown,phase=" << activePhase_
-                 << ",total=" << caughtErrors_ << '\n';
-            log_.flush();
-            lastErrorFrame_ = frame;
-        }
-    }
-    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - started).count();
-    const auto frame = BWAPI::Broodwar->getFrameCount();
-    frameBudget_.record(frame, elapsed);
-    recordPerformance(frame, elapsed);
-    // Includes observation, model, execution, diagnostics, budget accounting and
-    // performance logging. Only this instrumentation's own final append is outside.
-    if (callbackAudit_ && callbackTimes_.size() < 100000)
-        callbackTimes_.push_back(std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - started).count());
+    callbackBoundary("onFrame", [this] {
+        const auto started = std::chrono::steady_clock::now();
+        CallbackBudget callbackBudget;
+        callbackBoundary("onFrame.runFrame", [this, started, &callbackBudget] {
+            runFrame(callbackBudget, started);
+        });
+
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        auto frame = state_.frame;
+        callbackBoundary("onFrame.frameRead", [&frame] {
+            frame = BWAPI::Broodwar->getFrameCount();
+        });
+        // Keep budget and performance accounting independent from strategy
+        // execution. One instrumentation failure must not skip the others.
+        callbackBoundary("onFrame.budget", [this, frame, elapsed] {
+            frameBudget_.record(frame, elapsed);
+        });
+        callbackBoundary("onFrame.performance", [this, frame, elapsed] {
+            recordPerformance(frame, elapsed);
+        });
+        callbackBoundary("onFrame.audit", [this, started] {
+            if (callbackAudit_ && callbackTimes_.size() < 100000) {
+                callbackTimes_.push_back(std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - started).count());
+            }
+        });
+    });
 }
 
 void ProtoddModule::onSendText(std::string text) {
-    if (text == "/debug") debug_.level = (debug_.level + 1) % 3;
-    else if (text == "/debug 0") debug_.level = 0;
-    else if (text == "/debug 1") debug_.level = 1;
-    else if (text == "/debug 2") debug_.level = 2;
+    callbackBoundary("onSendText", [this, text = std::move(text)] {
+#ifdef PROTODD_DEVELOPER_PROFILE
+        if (text == "/debug") debug_.level = (debug_.level + 1) % 3;
+        else if (text == "/debug 0") debug_.level = 0;
+        else if (text == "/debug 1") debug_.level = 1;
+        else if (text == "/debug 2") debug_.level = 2;
+#else
+        static_cast<void>(text);
+#endif
+    });
 }
 
-void ProtoddModule::runFrame() {
+void ProtoddModule::runFrame(
+    CallbackBudget& callbackBudget,
+    const CallbackBudget::Clock::time_point callbackStarted) {
     if (BWAPI::Broodwar->isReplay() || BWAPI::Broodwar->isPaused() ||
         BWAPI::Broodwar->self() == nullptr || BWAPI::Broodwar->enemy() == nullptr) {
         return;
     }
-    const auto measure = [this](const char* phase, auto&& operation) {
+    const auto firstRunEstimateUs = [](const std::string_view phase) {
+        if (phase == "strategy" || phase == "whole-game-observe") return std::int64_t{8'000};
+        if (phase == "inference" || phase == "production-shadow" ||
+            phase == "model-shadow" || phase == "scouting") return std::int64_t{6'000};
+        if (phase == "diagnostics" || phase == "state-log" || phase == "damage-log")
+            return std::int64_t{4'000};
+        return std::int64_t{2'000};
+    };
+    const auto measure = [this, &callbackBudget, callbackStarted, &firstRunEstimateUs](
+        const char* phase, auto&& operation, const bool optional = false) {
+        if (phaseFailurePolicy_.disabled(phase)) {
+            deferredOptionalPhases_.erase(phase);
+            return false;
+        }
+        auto& timing = phases_[phase];
+        if (optional) {
+            const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                CallbackBudget::Clock::now() - callbackStarted).count();
+            if (!callbackBudget.allowsOptionalWork(
+                    elapsedUs, timing.estimatedUs(firstRunEstimateUs(phase)))) {
+                timing.deferForBudget();
+                deferredOptionalPhases_.insert_or_assign(phase, state_.frame);
+                return false;
+            }
+        }
         activePhase_ = phase;
         const auto start = std::chrono::steady_clock::now();
-        try { operation(); }
+        try {
+#ifdef PROTODD_ENGINE_FAULT_INJECTION
+            maybeInjectAuditFault("phase", phase);
+#endif
+            operation();
+        }
         catch (...) {
-            phases_[phase].record(std::chrono::duration_cast<std::chrono::microseconds>(
+            timing.record(std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - start).count());
+            const auto update = phaseFailurePolicy_.recordFailure(phase);
+            if (update.newlyDisabled) {
+                onPhaseDisabled(phase, update.consecutiveFailures);
+                return false;
+            }
             throw;
         }
-        phases_[phase].record(std::chrono::duration_cast<std::chrono::microseconds>(
+        timing.record(std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - start).count());
+        phaseFailurePolicy_.recordSuccess(phase);
+        if (optional) deferredOptionalPhases_.erase(phase);
+        return true;
     };
-    measure("observe", [this] { state_ = bridge_.observe(); });
+    const auto optional = [&measure](const char* phase, auto&& operation) {
+        return measure(phase, std::forward<decltype(operation)>(operation), true);
+    };
+    const auto optionalDue = [this](const char* phase, const bool scheduled) {
+        return scheduled || deferredOptionalPhases_.contains(phase);
+    };
+    if (!measure("observe", [this] {
+#ifdef PROTODD_ENGINE_FAULT_INJECTION
+        const auto slowObservationInjected = auditSlowObservationRemaining_ > 0 &&
+            auditSlowObservationDelayUs_ > 0;
+        if (slowObservationInjected) {
+            auditSlowObservationCombatCallsBefore_ = phases_["combat"].calls;
+            --auditSlowObservationRemaining_;
+            std::this_thread::sleep_for(std::chrono::microseconds(
+                static_cast<std::int64_t>(auditSlowObservationDelayUs_)));
+        }
+#endif
+        state_ = bridge_.observe();
+#ifdef PROTODD_ENGINE_FAULT_INJECTION
+        if (slowObservationInjected) auditSlowObservationFrame_ = state_.frame;
+#endif
+    })) return;
+    if (protodd::hasNewAreaDamageNearFriendlies(
+            state_.storms, previousStorms_, state_.self.units)) {
+        urgentEvents_.enqueue(protodd::UrgentEvent::areaDamage);
+    }
+    previousStorms_.assign(state_.storms.begin(), state_.storms.end());
+    currentWorkerLineThreats_.clear();
+    currentCloakedThreats_.clear();
+    for (const auto& enemy : state_.enemy.units) {
+        if (!enemy.visible) continue;
+        if (protodd::isWorkerLineThreat(enemy, state_.self.units))
+            currentWorkerLineThreats_.push_back(enemy.id);
+        if (enemy.cloaked || enemy.burrowed) currentCloakedThreats_.push_back(enemy.id);
+    }
+    std::ranges::sort(currentWorkerLineThreats_);
+    std::ranges::sort(currentCloakedThreats_);
+    if (protodd::hasNewUrgentUnitIds(currentWorkerLineThreats_, previousWorkerLineThreats_))
+        urgentEvents_.enqueue(protodd::UrgentEvent::workerLineBreach);
+    if (protodd::hasNewUrgentUnitIds(currentCloakedThreats_, previousCloakedThreats_))
+        urgentEvents_.enqueue(protodd::UrgentEvent::cloakedThreat);
+    previousWorkerLineThreats_.swap(currentWorkerLineThreats_);
+    previousCloakedThreats_.swap(currentCloakedThreats_);
+    const auto urgentEventMask = urgentEvents_.consume();
+    const auto urgentWork = protodd::urgentWorkFor(urgentEventMask);
+    if (urgentEventMask != 0 && log_) {
+        log_ << "URGENT_EVENT," << state_.frame << ",mask="
+             << static_cast<unsigned>(urgentEventMask)
+             << ",macro=" << urgentWork.updateMacro
+             << ",workers=" << urgentWork.updateWorkers
+             << ",combat=" << urgentWork.updateCombat << '\n';
+    }
+    spendingLedger_.beginFrame(state_.self.minerals, state_.self.gas);
+    bridge_.setSpendingLedger(&spendingLedger_);
     std::vector<LegalWholeGameCommand> learnedCommands;
-    if (wholeGame_.enabled()) measure("whole-game-observe", [this, &learnedCommands] {
+    [[maybe_unused]] auto wholeGameObserved = !wholeGame_.enabled();
+    if (wholeGame_.enabled()) wholeGameObserved = optional("whole-game-observe", [this, &learnedCommands] {
         learnedCommands = wholeGame_.observe();
     });
 #ifdef PROTODD_WHOLE_GAME_HYBRID
     std::erase_if(hybridProposals_, [this](const HybridProposal& proposal) {
         return !hybridControl_ || !wholeGame_.controlling() || state_.frame - proposal.frame >= 24;
     });
+    if (urgentWork.updateCombat) hybridProposals_.clear();
     if (wholeGame_.controlling()) {
         hybridReceived_ += learnedCommands.size();
         for (const auto& candidate : learnedCommands) {
@@ -452,7 +732,7 @@ void ProtoddModule::runFrame() {
             if (command.getType() != BWAPI::UnitCommandTypes::Attack_Unit ||
                 !command.getUnit() || !command.getTarget()) continue;
             ++hybridTargets_;
-            if (!hybridControl_) continue;
+            if (!hybridControl_ || urgentWork.updateCombat) continue;
             Command proposal;
             proposal.actor = command.getUnit()->getID();
             proposal.type = CommandType::attackUnit;
@@ -464,66 +744,96 @@ void ProtoddModule::runFrame() {
         }
     }
 #elif defined(PROTODD_WHOLE_GAME_CONTROL)
-    if (state_.self.race == Race::protoss && wholeGame_.controlling()) {
+    if (state_.self.race == Race::protoss && wholeGame_.controlling() && wholeGameObserved &&
+        urgentEventMask == 0) {
         if (!learnedCommands.empty()) measure("whole-game-control", [this, &learnedCommands] {
             for (const auto& candidate : learnedCommands) {
                 ++commandsAttempted_;
                 if (bridge_.executeWholeGame(candidate.command)) ++commandsAccepted_;
             }
         });
-        measure("damage-log", [this] { logDamage(); });
-        if (state_.frame % 24 == 0) measure("diagnostics", [this] {
+        if (optionalDue("damage-log", true)) optional("damage-log", [this] { logDamage(); });
+        if (optionalDue("diagnostics", protodd::frame_schedule::diagnosticsDue(state_.frame))) optional("diagnostics", [this] {
             sampleTelemetry();
             logDiagnostics();
         });
-        if (log_ && state_.frame % 120 == 0) {
+        if (log_ && optionalDue("state-log", protodd::frame_schedule::stateLogDue(state_.frame))) optional("state-log", [this] {
             log_ << "LEARNED_STATE," << state_.frame << ",controller=whole-game"
                  << ",weights=" << wholeGame_.modelLoaded()
                  << ",control=" << wholeGame_.controlling()
                  << ",minerals=" << state_.self.minerals << ",gas=" << state_.self.gas
                  << ",composition=" << composition(state_.self.units, false) << '\n';
             log_.flush();
-        }
+        });
         return;
     }
 #endif
-    measure("damage-log", [this] { logDamage(); });
+    if (optionalDue("damage-log", true)) optional("damage-log", [this] { logDamage(); });
     if (state_.self.race != Race::protoss) {
+#ifdef PROTODD_DEVELOPER_PROFILE
         BWAPI::Broodwar->drawTextScreen(8, 8, "Protodd requires Protoss");
+#endif
         return;
     }
 
     const auto cadence = frameBudget_.expensiveCadenceMultiplier(state_.frame);
     if (production_.enabled()) {
-        try {
-            measure("production-observe", [this] { production_.observe(state_, log_); });
-            measure("production-shadow", [this] { production_.infer(state_.frame, frameBudget_, log_); });
-            measure("production-control", [this] {
-                production_.act(state_.frame,[this](const BWAPI::UnitCommand& command){return bridge_.executeProduction(command);},log_);
-            });
-        } catch (...) { production_.disable(log_); }
+        const auto productionObserved = optional("production-observe", [this] {
+            production_.observe(state_, log_);
+        });
+        if (productionObserved) optional("production-shadow", [this] {
+            production_.infer(state_.frame, frameBudget_, log_);
+        });
     }
     if (model_.enabled()) {
-        measure("model-observe", [this] { model_.observe(state_); });
-        measure("model-shadow", [this] { model_.infer(state_.frame, frameBudget_, log_); });
+        const auto modelObserved = optional("model-observe", [this] { model_.observe(state_); });
+        if (modelObserved) optional("model-shadow", [this] {
+            model_.infer(state_.frame, frameBudget_, log_);
+        });
     }
     // Work is staggered to keep frame time predictable under tournament load.
-    if (state_.frame % (8 * cadence) == 0) measure("influence", [this] { influence_.update(state_); });
-    if (state_.frame % (12 * cadence) == 0) measure("inference", [this] { opponent_.update(state_); });
-    if (state_.frame % 24 == 0 || plan_.goals.empty()) measure("strategy", [this] { updateStrategy(); });
+    if (optionalDue("influence", protodd::frame_schedule::influenceDue(state_.frame, cadence)))
+        optional("influence", [this] { influence_.update(state_); });
+    if (optionalDue("inference", protodd::frame_schedule::inferenceDue(state_.frame, cadence)))
+        optional("inference", [this] { opponent_.update(state_); });
+    const auto strategyDue = protodd::frame_schedule::strategyDue(state_.frame, plan_.goals.empty());
+    const auto strategyUpdated = optionalDue("strategy", strategyDue) &&
+        optional("strategy", [this] { updateStrategy(); });
     // Macro is cheap and producer idleness is time-sensitive: a Nexus or
     // Gateway should receive its next queue item within a latency-sized
     // window, not after the old quarter-second cadence.  Reconcile every
     // three frames while keeping the more expensive strategy/scouting loops
     // staggered below.
-    if (state_.frame % 3 == 1) measure("macro", [this] { updateMacro(); });
-    if (state_.frame % 12 == 2) measure("workers", [this] { updateWorkers(); });
-    if (state_.frame % (24 * cadence) == 3) measure("scouting", [this] { updateScouting(); });
+    if (protodd::frame_schedule::macroCadenceDue(state_.frame) || strategyUpdated || urgentWork.updateMacro)
+        measure("macro", [this] { updateMacro(); });
+    // Model-controlled production runs after current macro obligations have
+    // been reconciled and spends from the same ledger as native commands.
+    if (production_.enabled()) {
+        optional("production-control", [this] {
+            production_.act(state_.frame, [this](const BWAPI::UnitCommand& command) {
+                return bridge_.executeProduction(command);
+            }, log_);
+        });
+    }
+    if (protodd::frame_schedule::workersDue(state_.frame) || urgentWork.updateWorkers)
+        measure("workers", [this] { updateWorkers(); });
+    if (optionalDue("scouting", protodd::frame_schedule::scoutingDue(state_.frame, cadence)))
+        optional("scouting", [this] { updateScouting(); });
     const auto combatCadence = std::max(1, state_.latencyFrames) *
                                (frameBudget_.load(state_.frame) == RuntimeLoad::emergency ? 2 : 1);
-    if (state_.frame % combatCadence == 0) {
+    if (state_.frame % combatCadence == 0 || urgentWork.updateCombat) {
         measure("scout-micro", [this] { updateScoutMicro(); });
-        measure("combat", [this] { updateCombat(frameBudget_.allowSimulation(state_.frame),
+        auto runSimulation = !urgentWork.updateCombat &&
+                             frameBudget_.allowSimulation(state_.frame);
+        if (runSimulation) {
+            auto& combatTiming = phases_["combat"];
+            const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                CallbackBudget::Clock::now() - callbackStarted).count();
+            runSimulation = callbackBudget.allowsOptionalWork(
+                elapsedUs, combatTiming.estimatedUs(8'000));
+            if (!runSimulation) combatTiming.deferForBudget();
+        }
+        measure("combat", [this, runSimulation] { updateCombat(runSimulation,
                      frameBudget_.navigationInterval(state_.frame),
                      frameBudget_.combatCommandLimit(state_.frame)); });
         measure("observer-safety", [this] {
@@ -533,26 +843,69 @@ void ProtoddModule::runFrame() {
             }
         });
     }
-    if (state_.frame % 24 == 5) {
-        measure("maintenance", [this] { bridge_.runMaintenance(maintenanceMineralReserve_, maintenanceGasReserve_); });
-    }
-    if (state_.frame % 24 == 0) measure("diagnostics", [this] { sampleTelemetry(); logDiagnostics(); });
-    if (state_.frame % (24 * 5) == 0) measure("state-log", [this] { logDecision(); });
+    if (optionalDue("maintenance", protodd::frame_schedule::maintenanceDue(state_.frame)))
+        optional("maintenance", [this] { bridge_.runMaintenance(); });
+    if (optionalDue("diagnostics", protodd::frame_schedule::diagnosticsDue(state_.frame)))
+        optional("diagnostics", [this] { sampleTelemetry(); logDiagnostics(); });
+    if (optionalDue("state-log", protodd::frame_schedule::stateLogDue(state_.frame)))
+        optional("state-log", [this] { logDecision(); });
 
-    if (frameBudget_.load(state_.frame) == RuntimeLoad::normal) {
-        measure("overlay", [this] { bridge_.drawDebug(state_, plan_, opponent_.assessment(), debug_); });
+#ifdef PROTODD_DEVELOPER_PROFILE
+    if (frameBudget_.load(state_.frame) == RuntimeLoad::normal &&
+        optionalDue("overlay", true)) {
+        optional("overlay", [this] {
+            bridge_.drawDebug(state_, plan_, opponent_.assessment(), debug_);
+        });
     }
+#endif
+#ifdef PROTODD_ENGINE_FAULT_INJECTION
+    if (auditSlowObservationFrame_ == state_.frame && log_) {
+        const auto combatRan = phases_["combat"].calls >
+            auditSlowObservationCombatCallsBefore_;
+        log_ << "AUDIT_SLOW_OBSERVATION," << state_.frame
+             << ",combatRan=" << combatRan
+             << ",influenceDeferred=" << deferredOptionalPhases_.contains("influence")
+             << ",inferenceDeferred=" << deferredOptionalPhases_.contains("inference")
+             << '\n';
+    }
+#endif
 }
 
 void ProtoddModule::onUnitDiscover(const BWAPI::Unit unit) {
-    bridge_.remember(unit); logLifecycle(unit, "discover");
+    callbackBoundary("onUnitDiscover", [this, unit] {
+        bridge_.remember(unit);
+        logLifecycle(unit, "discover");
+    });
 }
 void ProtoddModule::onUnitShow(const BWAPI::Unit unit) {
-    bridge_.remember(unit); logLifecycle(unit, "show");
+    callbackBoundary("onUnitShow", [this, unit] {
+        bridge_.remember(unit);
+        logLifecycle(unit, "show");
+    });
 }
-void ProtoddModule::onUnitCreate(const BWAPI::Unit unit) { logLifecycle(unit, "create"); }
-void ProtoddModule::onUnitComplete(const BWAPI::Unit unit) { logLifecycle(unit, "complete"); }
+void ProtoddModule::onUnitCreate(const BWAPI::Unit unit) {
+    callbackBoundary("onUnitCreate", [this, unit] {
+        if (unit != nullptr) {
+            invalidateActorState(unit->getID());
+            bridge_.forget(unit);
+        }
+        logLifecycle(unit, "create");
+    });
+}
+void ProtoddModule::onUnitComplete(const BWAPI::Unit unit) {
+    callbackBoundary("onUnitComplete", [this, unit] { logLifecycle(unit, "complete"); });
+}
 void ProtoddModule::onUnitDestroy(const BWAPI::Unit unit) {
+    callbackBoundary("onUnitDestroy", [this, unit] { onUnitDestroyImpl(unit); });
+}
+
+void ProtoddModule::onUnitDestroyImpl(const BWAPI::Unit unit) {
+    if (unit != nullptr && unit->getPlayer() == BWAPI::Broodwar->self()) {
+        const auto kind = unit->getType();
+        if (kind.isWorker()) urgentEvents_.enqueue(UrgentEvent::builderLost);
+        if (kind == BWAPI::UnitTypes::Protoss_Pylon)
+            urgentEvents_.enqueue(UrgentEvent::powerSourceLost);
+    }
     if (log_ && unit != nullptr &&
         (unit->getPlayer() == BWAPI::Broodwar->self() ||
          (unit->getPlayer() == BWAPI::Broodwar->enemy() && unit->isVisible()))) {
@@ -584,23 +937,54 @@ void ProtoddModule::onUnitDestroy(const BWAPI::Unit unit) {
         log_ << '\n';
         log_.flush();
     }
-    if (unit != nullptr) {
-        traceMemory_.erase("order/" + std::to_string(unit->getID()));
-        debug_.orders.erase(unit->getID());
-        lastActions_.erase(unit->getID());
-        damageSamples_.erase(unit->getID());
-        motionSamples_.erase(unit->getID());
-        traceMemory_.erase("action/" + std::to_string(unit->getID()));
-    }
+    if (unit != nullptr) invalidateActorState(unit->getID());
     bridge_.forget(unit);
 }
+
+void ProtoddModule::invalidateActorState(const UnitId id) {
+    if (id < 0) return;
+    commands_.forgetUnit(id);
+    scoutCommands_.forgetUnit(id);
+    scouts_.forgetUnit(id);
+    squads_.forgetUnit(id);
+    transports_.forgetUnit(id);
+    engagements_.forgetUnit(id);
+    std::erase(detectorEscorts_, id);
+    std::erase(leasedScouts_, id);
+    std::erase(previousWorkerLineThreats_, id);
+    std::erase(currentWorkerLineThreats_, id);
+    std::erase(previousCloakedThreats_, id);
+    std::erase(currentCloakedThreats_, id);
+    std::erase_if(hybridProposals_, [id](const HybridProposal& proposal) {
+        return proposal.command.actor == id || proposal.command.targetUnit == id;
+    });
+    debug_.orders.erase(id);
+    lastActions_.erase(id);
+    damageSamples_.erase(id);
+    motionSamples_.erase(id);
+    traceMemory_.erase("order/" + std::to_string(id));
+    traceMemory_.erase("action/" + std::to_string(id));
+    // Route points are indexed by the current squad ordering. Rebuild that
+    // derived cache after a membership change so a reused ID cannot match it.
+    advanceWaypoints_.clear();
+    navigationSignatures_.clear();
+    stalledAdvances_.clear();
+    navigationRefresh_ = -1;
+}
+
 void ProtoddModule::onUnitMorph(const BWAPI::Unit unit) {
-    bridge_.remember(unit); logLifecycle(unit, "morph");
+    callbackBoundary("onUnitMorph", [this, unit] {
+        bridge_.remember(unit);
+        logLifecycle(unit, "morph");
+    });
 }
 void ProtoddModule::onUnitRenegade(const BWAPI::Unit unit) {
-    logLifecycle(unit, "ownership-change");
-    bridge_.forget(unit);
-    bridge_.remember(unit);
+    callbackBoundary("onUnitRenegade", [this, unit] {
+        logLifecycle(unit, "ownership-change");
+        if (unit != nullptr) invalidateActorState(unit->getID());
+        bridge_.forget(unit);
+        bridge_.remember(unit);
+    });
 }
 
 void ProtoddModule::updateStrategy() {
@@ -650,7 +1034,10 @@ void ProtoddModule::updateStrategy() {
     }
 #endif
     expansion_.update(plan_, state_, bridge_.expansionFeedback());
-    if (expansion_.releaseBuilder() && !bridge_.cancelExpansion()) plan_.deferExpansion = false;
+    if (expansion_.releaseBuilder() && bridge_.cancelExpansion() &&
+        plan_.expansionTarget.valid() &&
+        plan_.name.find("[survival:") == std::string::npos)
+        plan_.deferExpansion = false;
     if (workerTrainingEnabled_) {
         const auto decision = applyWorkerTrainingIntervention(plan_, state_, workerTrainingProfile_);
         if (decision.applied) {
@@ -677,18 +1064,16 @@ void ProtoddModule::updateStrategy() {
 
 void ProtoddModule::updateMacro() {
     ResourceLedger ledger{state_.self.minerals, state_.self.gas};
-    const auto actions = macro_.reconcile(state_, plan_, ledger);
-    lastLedger_ = ledger;
+    const auto buildBlockers = bridge_.buildBlockerFeedback();
+    auto actions = macro_.reconcile(state_, plan_, ledger, buildBlockers);
+    for (auto& action : actions) {
+        if (!action.reserved || !bridge_.pendingBuildAlreadyPaid(action)) continue;
+        if (ledger.releaseCommitted(action.minerals, action.gas)) action.reserved = false;
+    }
+    spendingLedger_ = ledger;
+    bridge_.setSpendingLedger(&spendingLedger_);
     lastMacroFrame_ = state_.frame;
     debug_.macro = actions;
-    maintenanceMineralReserve_ = 0;
-    maintenanceGasReserve_ = 0;
-    for (const auto& action : actions) {
-        if (!action.blocksLowerPriority) continue;
-        maintenanceMineralReserve_ = std::max(maintenanceMineralReserve_, action.minerals);
-        maintenanceGasReserve_ = std::max(maintenanceGasReserve_, action.gas);
-        break;
-    }
     bridge_.executeMacro(actions, plan_, influence_, leasedScouts_);
     for (const auto& execution : bridge_.macroExecutions()) {
         const auto& action = execution.action;
@@ -720,16 +1105,17 @@ void ProtoddModule::updateWorkers() {
     constexpr auto evacuateAbandonedBase = false;
 #endif
 #ifdef PROTODD_SAFE_REMOTE_MINING
-    constexpr auto safeRemoteMining = true;
+    constexpr auto stageExpansionWorkers = true;
 #else
-    constexpr auto safeRemoteMining = false;
+    constexpr auto stageExpansionWorkers = false;
 #endif
     const auto assignments = workers_.assign(
-        state_, plan_, influence_, reserved, evacuateAbandonedBase, safeRemoteMining);
+        state_, plan_, influence_, reserved, evacuateAbandonedBase, stageExpansionWorkers,
+        &navigation_);
     if (std::ranges::any_of(assignments, [](const WorkerAssignment& assignment) {
             return assignment.job == WorkerJob::transfer && assignment.priority == 60;
         })) {
-        trace("safeRemoteMining", "EVENT,safe-remote-mining", 120);
+        trace("stagedExpansionWorkers", "EVENT,staged-expansion-workers", 120);
     }
     const auto gas = std::ranges::count(assignments, WorkerJob::gas, &WorkerAssignment::job);
     const auto minerals = std::ranges::count(assignments, WorkerJob::minerals, &WorkerAssignment::job);
@@ -1576,7 +1962,21 @@ void ProtoddModule::logDiagnostics() {
                  << ",active=0,reason=unit-unavailable\n";
         it = incidents_.erase(it);
     }
-    supplyBlockedFrames_.sample(state_.frame, blocked ? 1 : 0);
+    const auto hardBlocked = state_.self.supplyTotal > 0 && state_.self.supplyTotal < 400 &&
+                             state_.self.supplyUsed >= state_.self.supplyTotal;
+    // A cap reached while the opening Pylon is already under construction is
+    // an observable planned wait. All other hard-cap time is reported as
+    // unintended; the split never hides the total hard-blocked duration.
+    const auto deliberateOpeningPause = hardBlocked && state_.frame < 4 * 60 * 24 &&
+        std::ranges::any_of(state_.self.units, [](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::pylon && !unit.completed;
+        });
+    supplyTightFrames_.sample(state_.frame, blocked ? 1 : 0);
+    supplyHardBlockedFrames_.sample(state_.frame, hardBlocked ? 1 : 0);
+    supplyDeliberateOpeningPauseFrames_.sample(
+        state_.frame, deliberateOpeningPause ? 1 : 0);
+    supplyUnintendedBlockedFrames_.sample(
+        state_.frame, hardBlocked && !deliberateOpeningPause ? 1 : 0);
     idleGatewayFrames_.sample(state_.frame, idleGateways);
     idleWorkerFrames_.sample(state_.frame, idleWorkers);
     debug_.idleGateways = idleGateways;
@@ -1585,7 +1985,7 @@ void ProtoddModule::logDiagnostics() {
     debug_.unpoweredBuildings = unpowered;
     debug_.health = "Idle Gateways " + std::to_string(idleGateways) + "/" +
         std::to_string(usableGateways) + " | idle Probes " + std::to_string(idleWorkers) +
-        " | supply tight " + std::to_string(supplyBlockedFrames_.total() / 24) + "s";
+        " | supply tight " + std::to_string(supplyTightFrames_.total() / 24) + "s";
     if (!log_) return;
     const auto feedback = bridge_.expansionFeedback();
     incident("supply-blocked", -1, state_.self.supplyTotal > 0 && state_.self.supplyTotal < 400 &&
@@ -1599,7 +1999,11 @@ void ProtoddModule::logDiagnostics() {
         log_ << "ACTION_TOTAL," << state_.frame << ',' << key << ',' << total << '\n';
     log_ << "HEALTH," << state_.frame << ",idleGateways=" << idleGateways
          << ",gateways=" << usableGateways << ",idleWorkers=" << idleWorkers
-         << ",unpowered=" << unpowered << ",supplyTightFrames=" << supplyBlockedFrames_.total()
+         << ",unpowered=" << unpowered << ",supplyTightFrames=" << supplyTightFrames_.total()
+         << ",supplyHardBlockedFrames=" << supplyHardBlockedFrames_.total()
+         << ",supplyUnintendedBlockedFrames=" << supplyUnintendedBlockedFrames_.total()
+         << ",supplyDeliberateOpeningPauseFrames="
+         << supplyDeliberateOpeningPauseFrames_.total()
          << ",idleGatewayFrames=" << idleGatewayFrames_.total()
          << ",idleWorkerFrames=" << idleWorkerFrames_.total()
          << ",commandsAttempted=" << commandsAttempted_ << ",commandsAccepted=" << commandsAccepted_
@@ -1614,10 +2018,11 @@ void ProtoddModule::logDiagnostics() {
          << ",supply=" << state_.self.supplyUsed << ",supplyTotal=" << state_.self.supplyTotal
          << ",probes=" << countUnits(state_.self.units, UnitKind::probe, true)
          << ",bases=" << countUnits(state_.self.units, UnitKind::nexus, true) << '\n';
-    if (state_.frame % 240 == 0) {
+    if (protodd::frame_schedule::phaseSummaryDue(state_.frame)) {
         for (const auto& [name, timing] : phases_)
             log_ << "PHASE," << state_.frame << ',' << name << ',' << timing.calls << ','
-                 << timing.totalUs << ',' << timing.peakUs << '\n';
+                 << timing.totalUs << ',' << timing.peakUs << ','
+                 << timing.budgetDeferred << '\n';
         for (auto raw = 0; raw < static_cast<int>(EnemyPlan::count); ++raw) {
             const auto kind = static_cast<EnemyPlan>(raw);
             log_ << "BELIEF," << state_.frame << ',' << enemyPlanName(kind) << ','
@@ -1718,7 +2123,7 @@ void ProtoddModule::logDecision() {
             return unit.visible && unit.completed && isCombatUnit(unit.kind);
         });
     // Observability must never invoke the stateful planner a second time.
-    const auto& diagnosticLedger = lastLedger_;
+    const auto& diagnosticLedger = spendingLedger_;
     const auto& diagnosticActions = debug_.macro;
     const auto& threat = opponent_.assessment();
     const auto workerGas = std::ranges::count_if(

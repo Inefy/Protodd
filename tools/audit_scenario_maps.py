@@ -68,10 +68,14 @@ def mpq_write(path, chk, archive):
 def make_map(name):
     archive, tags, source = chk_source()
     units = []
-    def unit(kind, x, y, owner=0, flags=0):
-        units.append(struct.pack('<IHHHHHHBBBBIHHII',len(units)+1,x,y,kind,0,31,15,owner,100,100,100,0,0,flags,0,0))
-    unit(214, 512, 512); unit(214, 3500, 3500, 1)
-    unit(154, 512, 528); unit(131, 3504, 3504, 1)
+    def unit(kind, x, y, owner=0, flags=0, hp=100, shields=100, resources=0,
+             valid_state=31, valid_relation=15, energy=100):
+        units.append(struct.pack('<IHHHHHHBBBBIHHII',len(units)+1,x,y,kind,0,
+                                 valid_state,valid_relation,owner,hp,shields,energy,
+                                 resources,0,flags,0,0))
+    if not name.startswith('racebot-'):
+        unit(214, 512, 512); unit(214, 3500, 3500, 1)
+        unit(154, 512, 528); unit(131, 3504, 3504, 1)
     if name.startswith('storm'):
         unit(67,800,1000)
         for i in range(4): unit(43,1000+8*i,1000,1)
@@ -82,10 +86,106 @@ def make_map(name):
         unit(166,1008,1056) # powered; BWAPI assigns reverse discovery IDs here
         unit(166,400,1056)  # lower-ID, unpowered
         unit(156,1024,928)
+    elif name=='producer-pair':
+        # The second Gateway is discovered first and receives the lower unit
+        # ID. The live fixture starts it, then tests the finishing queue slot
+        # against the other idle Gateway.
+        unit(160,1008,1056)
+        unit(160,800,1056)
+        unit(156,1024,928)
+        unit(156,832,928)
+    elif name=='cannon-blocker':
+        # A compact powered home base with a legal Probe producer. Neutral
+        # mineral fields tessellate the entire powered Cannon search region so
+        # the stock engine and bridge must report a real placement failure.
+        unit(156,640,640)
+        unit(160,800,640)
+        unit(166,544,672)
+        unit(64,704,736)
+        footprints=[(16,16,4,3),(20,20,2,2),(25,20,4,3),(17,21,3,2),(22,23,1,1)]
+        for tile_y in range(10,31):
+            for tile_x in range(10,30,2):
+                overlaps=any(tile_x < left+width and left < tile_x+2 and
+                             tile_y < top+height and top < tile_y+1
+                             for left,top,width,height in footprints)
+                if not overlaps:
+                    unit(176,tile_x*32,tile_y*32,owner=11,resources=1500)
+    elif name=='resource-overlap':
+        # Independent powered producers let the audit overlap native macro,
+        # detector, model-path, upgrade and ammunition spending in one frame.
+        unit(156,640,640); unit(156,832,640)
+        unit(160,736,544); unit(160,736,704)
+        unit(164,640,736)
+        unit(155,864,544); unit(159,864,704)
+        unit(83,1008,800) # Reaver starts without Scarabs for maintenance.
+        unit(64,640,544) # Probe builder for the supply Pylon.
+    elif name=='build-cancel':
+        # A visible remote mineral site makes the first Nexus command an
+        # engine Build order while the Probe is still travelling. The audit
+        # rejects the first Stop through the adapter seam, then observes the
+        # stock engine accept a retry and clear the old order.
+        unit(64,640,544)
+        unit(84,2050,2000) # Reveal the remote Nexus footprint before issue.
+        for x,y in [(1984,1952),(2024,1952),(2064,1952),(2104,1952),
+                    (2004,2032),(2044,2032),(2084,2032)]:
+            unit(176,x,y,owner=11,resources=1500)
+    elif name=='worker-issuer':
+        # An idle Probe and visible nearby Zergling isolate worker defense.
+        unit(64,640,544)
+        unit(37,704,576,owner=1)
+    elif name=='worker-local-defense':
+        # Two simultaneous mineral-line attacks exercise per-base coverage in
+        # the stock engine. The main has a two-Zealot screen; the natural does
+        # not, so only its local Probes should receive accepted attack orders.
+        unit(65,560,512); unit(65,590,512)
+        unit(37,660,512,owner=1); unit(37,700,512,owner=1)
+        unit(154,2050,2000) # Protoss Nexus at the remote mineral cluster.
+        for x,y in [(1984,1952),(2024,1952),(2064,1952),(2104,1952),
+                    (2004,2032),(2044,2032),(2084,2032)]:
+            unit(176,x,y,owner=11,resources=1500)
+        unit(37,2160,2000,owner=1); unit(37,2200,2000,owner=1)
+        for i in range(16):
+            unit(64,480+(i%5)*20,640+(i//5)*32)
+            unit(64,1990+(i%5)*24,2200+(i//5)*30)
+    elif name=='worker-mining':
+        # Match the source UMS mineral field's validity and zero shield/energy
+        # fields so BWAPI preserves its initial resource count.
+        unit(64,640,544)
+        unit(176,704,576,owner=11,hp=100,shields=0,resources=1500,
+             valid_state=16,valid_relation=18,energy=0)
+    elif name in ('racebot-worker-defense','racebot-combat'):
+        # RaceBot fixtures select Terran for player 0 and place a visible
+        # Zergling close enough to the home CC to exercise defense issuers.
+        unit(106,512,512) # Terran Command Center
+        unit(7,640,544) # Terran SCV
+        unit(131,3504,3504,owner=1) # Zerg Hatchery
+        unit(37,704,576,owner=1) # Visible Zergling threat
+        if name=='racebot-combat':
+            for i in range(4): unit(0,800+16*i,544) # Terran Marines
+    elif name=='command-suppression':
+        unit(65,800,800) # Zealot pursues the visible low-health Marine.
+        unit(0,960,800,owner=1,hp=1)
+    elif name=='observer-safety':
+        unit(84,800,800) # BWAPI unit-type enum value for Protoss_Observer.
+        unit(8,864,800,owner=1) # Terran Wraith supplies real air-weapon pressure.
+    elif name=='pylon-loss':
+        unit(160,1008,1056)
+        unit(164,928,992)
+        unit(156,1024,928)
+        unit(156,512,640) # Home Pylon preserves enough supply for the seeded Zealot.
+        unit(64,640,640)
+        for i in range(8): unit(65,944+(i%4)*32,1056+(i//4)*32)
+        for i in range(12): unit(37,1200+(i%4)*16,928+(i//4)*16,1)
     elif name=='prerequisite':
         unit(166,1008,1056); unit(156,1024,928); unit(156,672,704)
         unit(160,784,800); unit(164,784,960); unit(163,1008,800)
         unit(64,640,640)
+    elif name=='power-recovery':
+        # The completed production and technology structures start without
+        # either covering Pylon. The stock engine must expose the lost power,
+        # and the bot must restore it through its ordinary macro path.
+        unit(166,1008,1056); unit(160,784,800); unit(164,784,960)
+        unit(163,1008,800); unit(64,640,640)
     elif name=='combat':
         unit(65,800,1000)
         unit(0,880,1000,1,16) # invincible close Marine
@@ -104,7 +204,9 @@ def make_map(name):
         for i in range(8): unit(43,1300+(i%4)*48,1300+(i//4)*48,1)
     tags[b'UNIT']=b''.join(units)
     tags[b'OWNR']=tags[b'IOWN']=bytes([6,5]+[0]*10)
-    tags[b'SIDE']=bytes([2,0]+[7]*10)
+    side=bytearray([2,0]+[7]*10)
+    if name.startswith('racebot-'): side[0]=1
+    tags[b'SIDE']=bytes(side)
     # Separate forces and disable the template's random player assignment,
     # shared vision, allied victory and alliance flags.
     tags[b'FORC']=bytes([0,1,2,2,2,2,2,2])+bytes(12)
@@ -142,6 +244,6 @@ def runtime():
 
 if __name__=='__main__':
     OUT.mkdir(parents=True,exist_ok=True)
-    receipt=[make_map(name) for name in ['storm-allies','storm-clear','producer','prerequisite','combat','load']]
+    receipt=[make_map(name) for name in ['storm-allies','storm-clear','producer','producer-pair','cannon-blocker','resource-overlap','build-cancel','worker-issuer','worker-local-defense','worker-mining','racebot-worker-defense','racebot-combat','command-suppression','observer-safety','pylon-loss','prerequisite','power-recovery','combat','load']]
     (OUT/'map-receipt.json').write_text(json.dumps(receipt,indent=2))
     print(runtime())

@@ -18,7 +18,7 @@ $bwapiPath = Resolve-RepoPath $BwapiRoot
 $pythonPath = Resolve-RepoPath $Python
 $manifestPath = Join-Path (Split-Path -Parent $weightsPath) "manifest.json"
 $hybrid = if ($Exclusive) { "OFF" } else { "ON" }
-$allin = if ($Exclusive -or $StandardOpenings) { "OFF" } else { "ON" }
+$allin = if ($StandardOpenings) { "OFF" } else { "ON" }
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $weightsHash = (Get-FileHash -LiteralPath $weightsPath -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($manifest.schema -ne "protodd-whole-game-multislot-weights-v2" -or
@@ -30,7 +30,7 @@ if ($manifest.schema -ne "protodd-whole-game-multislot-weights-v2" -or
     "-DBWAPI_ROOT=$bwapiPath" "-DPython3_EXECUTABLE=$pythonPath" `
     "-DPROTODD_WHOLE_GAME_WEIGHTS=$weightsPath" "-DPROTODD_WHOLE_GAME_CONTROL=ON" `
     "-DPROTODD_WHOLE_GAME_EVALUATION_BUILD=ON" "-DPROTODD_WHOLE_GAME_HYBRID=$hybrid" `
-    "-DPROTODD_ALLIN_LOCAL_EVALUATION=$allin"
+    "-DPROTODD_NATIVE_ALLIN_OPENING=$allin"
 if ($LASTEXITCODE -ne 0) { throw "Trained-controller configuration failed" }
 & cmake --build $buildPath --config Release --parallel 8
 if ($LASTEXITCODE -ne 0) { throw "Trained-controller build failed" }
@@ -42,6 +42,6 @@ if ((Get-FileHash -LiteralPath $weightsPath -Algorithm SHA256).Hash.ToLowerInvar
 $dllPath = Join-Path $buildPath "Release/ProtoddEvaluation.dll"
 Write-Output "Local evaluation controller: $dllPath"
 Write-Output "Hybrid control: $hybrid"
-Write-Output "Replay all-in repertoire: $allin"
+Write-Output "Native all-in opening: $allin"
 Write-Output "Embedded weights SHA256: $weightsHash"
 Write-Output "DLL SHA256: $((Get-FileHash -LiteralPath $dllPath -Algorithm SHA256).Hash)"

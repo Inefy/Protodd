@@ -22,6 +22,9 @@ public:
     void end();
     [[nodiscard]] bool enabled() const noexcept { return enabled_; }
     [[nodiscard]] bool modelLoaded() const noexcept { return model_ != nullptr; }
+#ifdef PROTODD_ENGINE_FAULT_INJECTION
+    void enableAuditProbe() noexcept { enabled_ = true; }
+#endif
     // Version-1 and synthetic execution probes remain diagnostic; only the
     // six-slot architecture can replace the established tournament controller.
     [[nodiscard]] bool controlling() const noexcept {

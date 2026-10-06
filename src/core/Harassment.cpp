@@ -242,4 +242,10 @@ void HarassmentPlanner::reset() {
     revisitAfter_ = 0;
 }
 
+void HarassmentPlanner::forgetUnit(const UnitId id) {
+    if (id < 0) return;
+    std::erase(mission_.members, id);
+    if (mission_.members.empty()) reset();
+}
+
 } // namespace protodd

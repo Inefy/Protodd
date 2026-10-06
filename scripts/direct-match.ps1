@@ -27,16 +27,28 @@ param(
     [int]$FrameMilliseconds = 0,
     [ValidateRange(-1, 2147483646)]
     [int]$Seed = -1,
+    [ValidateSet("Protoss", "Terran", "Zerg", "Random")]
+    [string]$HostRace = "Protoss",
     [string]$BotDll = "build/tournament/Release/Protodd.dll",
+    [ValidateSet("Protodd.log", "RaceBot.log")]
+    [string]$BotLogName = "Protodd.log",
+    [ValidateSet("patched-diagnostic", "stock-certification")]
+    [string]$RuntimeProfile = "patched-diagnostic",
+    [string]$RuntimeSet = "",
+    [switch]$AllowUnmanifestedDll,
     [switch]$PreserveLearning,
     [switch]$NoObserver
 )
 
 $ErrorActionPreference = "Stop"
 $repoPath = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
-$runtimeA = [System.IO.Path]::GetFullPath((Join-Path $repoPath "build/match-runtime-a"))
-$runtimeB = [System.IO.Path]::GetFullPath((Join-Path $repoPath "build/match-runtime-b"))
-$archiveRoot = [System.IO.Path]::GetFullPath((Join-Path $repoPath "build/direct-logs"))
+Import-Module (Join-Path $PSScriptRoot 'RuntimeProfiles.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'TournamentManifest.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MatchProvenance.psm1') -Force
+$runtimeRoot = Resolve-MatchRuntimeRoot -Profile $RuntimeProfile -RepositoryRoot $repoPath -RuntimeSet $RuntimeSet
+$runtimeA = [System.IO.Path]::GetFullPath((Join-Path $runtimeRoot "match-runtime-a"))
+$runtimeB = [System.IO.Path]::GetFullPath((Join-Path $runtimeRoot "match-runtime-b"))
+$archiveRoot = Resolve-MatchArchiveRoot -Profile $RuntimeProfile -RepositoryRoot $repoPath -RuntimeSet $RuntimeSet
 $buildPrefix = [System.IO.Path]::GetFullPath((Join-Path $repoPath "build")).TrimEnd('\') + '\'
 
 foreach ($path in @($runtimeA, $runtimeB, $archiveRoot)) {
@@ -61,8 +73,48 @@ $resolvedDll = if ([System.IO.Path]::IsPathRooted($BotDll)) {
 if (-not (Test-Path -LiteralPath $resolvedDll -PathType Leaf)) {
     throw "Bot DLL not found: $resolvedDll"
 }
+$buildManifestPath = Join-Path (Split-Path -Parent $resolvedDll) "Protodd.build-manifest.json"
+$buildManifest = $null
+if (Test-Path -LiteralPath $buildManifestPath -PathType Leaf) {
+    $buildManifest = Get-Content -LiteralPath $buildManifestPath -Raw | ConvertFrom-Json
+    if ($buildManifest.schema -ne "protodd-build-v1") {
+        throw "Unsupported DLL build manifest: $buildManifestPath"
+    }
+    $manifestDllHash = (Get-FileHash -LiteralPath $resolvedDll -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($manifestDllHash -ne ([string]$buildManifest.dll_sha256).ToLowerInvariant()) {
+        throw "DLL does not match its build manifest: $resolvedDll"
+    }
+    Assert-TournamentSourceMatchesManifest -Manifest $buildManifest -RepositoryRoot $repoPath
+    $cachePath = Join-Path (Split-Path -Parent (Split-Path -Parent $buildManifestPath)) 'CMakeCache.txt'
+    if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $cachePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+            ([string]$buildManifest.cmake_cache_sha256).ToLowerInvariant()) {
+        throw 'CMake configuration no longer matches the DLL build manifest'
+    }
+} elseif (-not $AllowUnmanifestedDll) {
+    throw "A verified build manifest is required beside the DLL. For a diagnostic-only binary, pass -AllowUnmanifestedDll explicitly."
+}
+$buildManifestSha256 = if ($buildManifest) {
+    (Get-FileHash -LiteralPath $buildManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+} else { $null }
+if ((-not [string]::IsNullOrWhiteSpace($RuntimeSet) -or $RuntimeProfile -eq "stock-certification") -and
+    (-not (Test-Path -LiteralPath $runtimeA -PathType Container) -or
+     -not (Test-Path -LiteralPath $runtimeB -PathType Container))) {
+    $prepareScript = if ($RuntimeProfile -eq 'stock-certification') {
+        './scripts/prepare-stock-runtime.ps1'
+    } else { './scripts/prepare-patched-runtime.ps1' }
+    throw "Prepare isolated $RuntimeProfile runtimes first with $prepareScript -RuntimeSet <name>"
+}
 foreach ($runtime in @($runtimeA, $runtimeB)) {
-    & (Join-Path $PSScriptRoot 'restore-match-runtime.ps1') -Runtime $runtime
+    & (Join-Path $PSScriptRoot 'restore-match-runtime.ps1') `
+        -Runtime $runtime -Profile $RuntimeProfile
+}
+$runtimeProfileInfo = Get-RuntimeProfileInfo -Profile $RuntimeProfile -RepositoryRoot $repoPath
+$hostEngineHash = (Get-FileHash -LiteralPath (Join-Path $runtimeA 'bwapi-data/BWAPI.dll') -Algorithm SHA256).Hash.ToLowerInvariant()
+$opponentEngineHash = (Get-FileHash -LiteralPath (Join-Path $runtimeB 'bwapi-data/BWAPI.dll') -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($hostEngineHash -ne $runtimeProfileInfo.dll_sha256 -or
+    $opponentEngineHash -ne $runtimeProfileInfo.dll_sha256) {
+    throw "Both match clients must use the verified $RuntimeProfile engine"
 }
 $mapPath = [System.IO.Path]::GetFullPath((Join-Path $runtimeA $Map))
 $runtimePrefix = $runtimeA.TrimEnd('\') + '\'
@@ -128,12 +180,39 @@ foreach ($file in $opponentFiles) {
     $opponentComponents[$relative] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
 }
 
+function Get-LearningStateInventory {
+    param([Parameter(Mandatory)][string]$RuntimePath)
+    $items = [Collections.Generic.List[object]]::new()
+    foreach ($kind in @('read', 'write')) {
+        $root = Join-Path $RuntimePath "bwapi-data/$kind"
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+        foreach ($file in Get-ChildItem -LiteralPath $root -File -Recurse | Sort-Object FullName) {
+            if ($file.Extension -ieq '.log') { continue }
+            $relative = $file.FullName.Substring($root.Length).TrimStart('\', '/')
+            $items.Add([ordered]@{
+                path = "$kind/$relative"
+                sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                size_bytes = $file.Length
+            })
+        }
+    }
+    return @($items.ToArray())
+}
+$hostLearningBefore = @(Get-LearningStateInventory -RuntimePath $runtimeA)
+$opponentLearningBefore = @(Get-LearningStateInventory -RuntimePath $runtimeB)
+
 New-Item -ItemType Directory -Path $archiveRoot -Force | Out-Null
 $writeRoot = Join-Path $runtimeA "bwapi-data/write"
 if (Test-Path -LiteralPath (Join-Path $archiveRoot "$Label.json")) {
     throw "A match record already exists for label '$Label'; choose a new label"
 }
-$archiveFiles = @(Join-Path $writeRoot "Protodd.log")
+if (Test-Path -LiteralPath (Join-Path $archiveRoot "$Label.preflight.json")) {
+    throw "A preflight manifest already exists for label '$Label'; choose a new label"
+}
+$archiveFiles = @(
+    (Join-Path $writeRoot "Protodd.log"),
+    (Join-Path $writeRoot "RaceBot.log")
+) | Sort-Object -Unique
 if (-not $PreserveLearning) {
     foreach ($dataDirectory in @($writeRoot, (Join-Path $runtimeA "bwapi-data/read"))) {
         $archiveFiles += @(Get-ChildItem -LiteralPath $dataDirectory -Filter 'Protodd*.csv' -File |
@@ -166,6 +245,8 @@ if (-not $PreserveLearning) {
         }
     }
 }
+$hostLearningInitial = @(Get-LearningStateInventory -RuntimePath $runtimeA)
+$opponentLearningInitial = @(Get-LearningStateInventory -RuntimePath $runtimeB)
 
 $sourceDllHash = (Get-FileHash -LiteralPath $resolvedDll -Algorithm SHA256).Hash
 $deployedDll = Join-Path $runtimeA "bwapi-data/AI/Protodd.dll"
@@ -255,7 +336,7 @@ auto_restart = OFF
 map = $Map
 game = ProtoddUAB
 mapiteration = SEQUENCE
-race = Protoss
+race = $HostRace
 enemy_count = 1
 enemy_race = $OpponentRace
 game_type = MELEE
@@ -334,8 +415,134 @@ drop_players = ON
 [paths]
 log_path = bwapi-data/logs
 "@
-[System.IO.File]::WriteAllText((Join-Path $runtimeA "bwapi-data/bwapi.ini"), $hostIni)
-[System.IO.File]::WriteAllText((Join-Path $runtimeB "bwapi-data/bwapi.ini"), $joinIni)
+$hostIniPath = Join-Path $runtimeA "bwapi-data/bwapi.ini"
+$opponentIniPath = Join-Path $runtimeB "bwapi-data/bwapi.ini"
+[System.IO.File]::WriteAllText($hostIniPath, $hostIni)
+[System.IO.File]::WriteAllText($opponentIniPath, $joinIni)
+$hostRuntimeIniHash = (Get-FileHash -LiteralPath $hostIniPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$opponentRuntimeIniHash = (Get-FileHash -LiteralPath $opponentIniPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
+$preflightFiles = [ordered]@{
+    protodd_source_dll = $resolvedDll
+    protodd_deployed_dll = $deployedDll
+    host_bwapi_dll = Join-Path $runtimeA 'bwapi-data/BWAPI.dll'
+    opponent_bwapi_dll = Join-Path $runtimeB 'bwapi-data/BWAPI.dll'
+    host_starcraft_exe = Join-Path $runtimeA 'StarCraft.exe'
+    opponent_starcraft_exe = Join-Path $runtimeB 'StarCraft.exe'
+    host_injectory = Join-Path $runtimeA 'injectory_x86.exe'
+    opponent_injectory = Join-Path $runtimeB 'injectory_x86.exe'
+    host_wmode = Join-Path $runtimeA 'wmode.dll'
+    opponent_wmode = Join-Path $runtimeB 'wmode.dll'
+    map = $mapPath
+    host_bwapi_ini = $hostIniPath
+    opponent_bwapi_ini = $opponentIniPath
+}
+if ($buildManifest) {
+    $preflightFiles['build_manifest'] = $buildManifestPath
+    $preflightFiles['cmake_cache'] = $cachePath
+    $cacheLines = Get-Content -LiteralPath $cachePath
+    $bwapiRootLine = $cacheLines | Where-Object { $_ -match '^BWAPI_ROOT:[^=]+=(.+)$' } | Select-Object -First 1
+    $bwapiLibraryLine = $cacheLines | Where-Object { $_ -match '^BWAPI_LIBRARY:[^=]+=(.+)$' } | Select-Object -First 1
+    if ($bwapiRootLine -and $bwapiRootLine -match '^BWAPI_ROOT:[^=]+=(.+)$') {
+        $bwapiHeader = Join-Path $Matches[1] 'bwapi/include/BWAPI.h'
+        if (Test-Path -LiteralPath $bwapiHeader -PathType Leaf) {
+            $preflightFiles['bwapi_interface_header'] = $bwapiHeader
+        }
+    }
+    if ($bwapiLibraryLine -and $bwapiLibraryLine -match '^BWAPI_LIBRARY:[^=]+=(.+)$' -and
+        (Test-Path -LiteralPath $Matches[1] -PathType Leaf)) {
+        $preflightFiles['bwapi_interface_library'] = $Matches[1]
+    }
+}
+if ($runtimeProfileInfo.path -and (Test-Path -LiteralPath $runtimeProfileInfo.path -PathType Leaf)) {
+    $profileArtifactRole = if ($RuntimeProfile -eq 'stock-certification') {
+        'stock_runtime_archive'
+    } else { 'patched_runtime_template' }
+    $preflightFiles[$profileArtifactRole] = $runtimeProfileInfo.path
+}
+foreach ($file in $opponentFiles) {
+    $relative = $file.FullName.Substring($opponentRoot.Length).TrimStart('\', '/')
+    $roleSuffix = $relative.Replace('\', '/')
+    $preflightFiles["opponent_source_$roleSuffix"] = $file.FullName
+    $deployedOpponentFile = Join-Path $runtimeB "bwapi-data/AI/$relative"
+    $preflightFiles["opponent_deployed_$roleSuffix"] = $deployedOpponentFile
+}
+foreach ($item in $hostLearningInitial) {
+    $preflightFiles["host_learning_$($item.path)"] = Join-Path $runtimeA "bwapi-data/$($item.path)"
+}
+foreach ($item in $opponentLearningInitial) {
+    $preflightFiles["opponent_learning_$($item.path)"] = Join-Path $runtimeB "bwapi-data/$($item.path)"
+}
+foreach ($character in @(@('AstraBot', $runtimeA), @($OpponentCharacterName, $runtimeB))) {
+    foreach ($extension in @('mpc', 'spc')) {
+        $characterPath = Join-Path $character[1] "characters/$($character[0]).$extension"
+        $preflightFiles["character_$($character[0])_$extension"] = $characterPath
+    }
+}
+$runtimeConfigurationPath = Join-Path $runtimeB 'bwapi-data/AI/Configuration.txt'
+if (Test-Path -LiteralPath $runtimeConfigurationPath -PathType Leaf) {
+    $preflightFiles['opponent_runtime_configuration'] = $runtimeConfigurationPath
+}
+$runtimeStrategyConfigurationPath = Join-Path $runtimeB 'bwapi-data/AI/UAlbertaBot_Config.txt'
+if (Test-Path -LiteralPath $runtimeStrategyConfigurationPath -PathType Leaf) {
+    $preflightFiles['opponent_runtime_strategy_configuration'] = $runtimeStrategyConfigurationPath
+}
+$runtimeOpponentMetadataPath = Join-Path $runtimeB 'bwapi-data/.astra-ladder.json'
+if (Test-Path -LiteralPath $runtimeOpponentMetadataPath -PathType Leaf) {
+    $preflightFiles['opponent_runtime_metadata'] = $runtimeOpponentMetadataPath
+}
+$preflightConfiguration = [ordered]@{
+    label = $Label
+    runtime_profile = $RuntimeProfile
+    runtime_set = $RuntimeSet
+    runtime_profile_info = $runtimeProfileInfo
+    source_dll = $resolvedDll
+    build_manifest_sha256 = $buildManifestSha256
+    source_commit = if ($buildManifest) { $buildManifest.source_commit } else { $null }
+    source_snapshot_sha256 = if ($buildManifest) { $buildManifest.source_snapshot_sha256 } else { $null }
+    source_diff_sha256 = if ($buildManifest) { $buildManifest.source_diff_sha256 } else { $null }
+    source_dirty = if ($buildManifest) { $buildManifest.source_dirty } else { $null }
+    cmake_cache_sha256 = if ($buildManifest) { $buildManifest.cmake_cache_sha256 } else { $null }
+    compiler_id = if ($buildManifest) { $buildManifest.compiler_id } else { $null }
+    compiler_version = if ($buildManifest) { $buildManifest.compiler_version } else { $null }
+    build_configuration = if ($buildManifest) { $buildManifest.configuration } else { $null }
+    cmake_options = if ($buildManifest) { $buildManifest.cmake_options } else { $null }
+    bwapi_source_commit = if ($buildManifest) { $buildManifest.bwapi_source_commit } else { $null }
+    bwapi_source_patch_sha256 = if ($buildManifest) { $buildManifest.bwapi_source_patch_sha256 } else { $null }
+    bwapi_library_sha256 = if ($buildManifest) { $buildManifest.bwapi_library_sha256 } else { $null }
+    host = [ordered]@{ race = $HostRace; runtime_ini_sha256 = $hostRuntimeIniHash }
+    opponent = [ordered]@{
+        name = $OpponentName
+        type = $resolvedOpponentType
+        character_name = $OpponentCharacterName
+        race = $OpponentRace
+        source_components_sha256 = $opponentComponents
+        runtime_configuration_sha256 = $runtimeConfigurationHash
+        runtime_strategy_configuration_sha256 = $runtimeStrategyConfigurationHash
+        opening = $OpponentOpening
+        strategy = $OpponentStrategy
+    }
+    game = [ordered]@{
+        map = $Map
+        map_sha256 = (Get-FileHash -LiteralPath $mapPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        frame_limit = $FrameLimit
+        frame_milliseconds = $FrameMilliseconds
+        timeout_seconds = if ($TimeoutSeconds -gt 0) { $TimeoutSeconds } else { $null }
+        seed_requested = if ($Seed -ge 0) { $Seed } else { $null }
+        bot_log_name = $BotLogName
+        observer_enabled = -not [bool]$NoObserver
+    }
+    learning = [ordered]@{
+        preserve = [bool]$PreserveLearning
+        host_before = $hostLearningBefore
+        host_initial = $hostLearningInitial
+        opponent_before = $opponentLearningBefore
+        opponent_initial = $opponentLearningInitial
+    }
+}
+$preflightManifest = New-MatchInputManifest -Files $preflightFiles -Configuration $preflightConfiguration
+$preflightPath = Join-Path $archiveRoot "$Label.preflight.json"
+$preflightInfo = Write-MatchInputManifest -Manifest $preflightManifest -Path $preflightPath
 
 $launched = @()
 $proxyLaunched = @()
@@ -404,8 +611,20 @@ function Get-MatchCrashReports {
         }
     }
 }
+function Get-MatchTerminalResult([string[]]$Lines, [string]$LogName) {
+    $terminal = $null
+    foreach ($line in $Lines) {
+        if ($LogName -eq 'RaceBot.log' -and $line -match '^END,(\d+),([01])$') {
+            $outcome = if ($Matches[2] -eq '1') { 'win' } else { 'loss' }
+            $terminal = "END,$outcome,$($Matches[1])"
+        } elseif ($LogName -eq 'Protodd.log' -and $line -match '^END,(win|loss),(\d+)$') {
+            $terminal = $line
+        }
+    }
+    return $terminal
+}
 
-$logPath = Join-Path $writeRoot "Protodd.log"
+$logPath = Join-Path $writeRoot $BotLogName
 $result = $null
 $frameLimitReached = $false
 $wallClockTimedOut = $false
@@ -417,6 +636,10 @@ $script:startedAtUtc = [DateTime]::UtcNow
 $startedUtc = $script:startedAtUtc.ToString('o')
 $observerProcess = $null
 try {
+    [void](Assert-MatchInputManifest -Manifest $preflightManifest)
+    if ($buildManifest) {
+        Assert-TournamentSourceMatchesManifest -Manifest $buildManifest -RepositoryRoot $repoPath
+    }
     if (-not $NoObserver) {
         # Read-only observer on an ephemeral loopback port. Each match owns
         # its helper and authoritative manifest; no stale cross-match result.
@@ -434,6 +657,10 @@ try {
             -RedirectStandardOutput (Join-Path $archiveRoot "$Label.observer.out") `
             -RedirectStandardError (Join-Path $archiveRoot "$Label.observer.err")
         "LIVE_OBSERVER=http://127.0.0.1:$observerPort"
+    }
+    [void](Assert-MatchInputManifest -Manifest $preflightManifest)
+    if ($buildManifest) {
+        Assert-TournamentSourceMatchesManifest -Manifest $buildManifest -RepositoryRoot $repoPath
     }
     Start-Process -FilePath (Join-Path $runtimeA "injectory_x86.exe") `
         -ArgumentList '--launch','StarCraft.exe','--inject','bwapi-data\BWAPI.dll','wmode.dll' `
@@ -462,15 +689,13 @@ try {
         if (Test-Path -LiteralPath $logPath) {
             try {
                 $recentLines = @(Get-Content -LiteralPath $logPath -Tail 24 -ErrorAction Stop)
-                $terminal = $recentLines |
-                    Where-Object { $_ -match '^END,(win|loss),(\d+)$' } |
-                    Select-Object -Last 1
+                $terminal = Get-MatchTerminalResult -Lines $recentLines -LogName $BotLogName
                 if ($terminal) {
                     $result = [string]$terminal
                     break
                 }
                 foreach ($line in $recentLines) {
-                    if ($line -match '^STATE,(\d+),') {
+                    if ($line -match '^(?:STATE|SNAPSHOT),(\d+),') {
                         $lastObservedFrame = [int]$Matches[1]
                     }
                 }
@@ -505,6 +730,9 @@ try {
     $observedSeed = $null
     if ($traceBeforeCleanup -match '(?m)^MATCH,seed=(\d+),') {
         $observedSeed = [long]$Matches[1]
+    } elseif ($BotLogName -eq 'RaceBot.log' -and
+              $traceBeforeCleanup -match '(?m)^START,[^,]+,(\d+),') {
+        $observedSeed = [long]$Matches[1]
     }
     foreach ($crash in @(Get-MatchCrashReports)) {
         $saved = Join-Path $archiveRoot "$Label-$($crash.side)-crash-$($crash.file.Name)"
@@ -536,8 +764,30 @@ try {
         result = $result
         observed_terminal_result = $observedTerminalResult
         runtime_crashes = $runtimeCrashes
-        host_bwapi_sha256 = (Get-FileHash -LiteralPath (Join-Path $runtimeA 'bwapi-data/BWAPI.dll')).Hash
-        opponent_bwapi_sha256 = (Get-FileHash -LiteralPath (Join-Path $runtimeB 'bwapi-data/BWAPI.dll')).Hash
+        runtime_profile = $RuntimeProfile
+        runtime_profile_source = $runtimeProfileInfo.source
+        runtime_profile_archive_sha256 = if ($runtimeProfileInfo.PSObject.Properties.Name -contains 'archive_sha256') {
+            $runtimeProfileInfo.archive_sha256
+        } else { $null }
+        host_bwapi_sha256 = $hostEngineHash
+        opponent_bwapi_sha256 = $opponentEngineHash
+        build_manifest_sha256 = $buildManifestSha256
+        preflight_manifest_path = $preflightInfo.path
+        preflight_manifest_sha256 = $preflightInfo.sha256
+        build_provenance_verified = [bool]$buildManifest
+        source_commit = if ($buildManifest) { $buildManifest.source_commit } else { $null }
+        source_snapshot_sha256 = if ($buildManifest) { $buildManifest.source_snapshot_sha256 } else { $null }
+        cmake_cache_sha256 = if ($buildManifest) { $buildManifest.cmake_cache_sha256 } else { $null }
+        compiler_id = if ($buildManifest) { $buildManifest.compiler_id } else { $null }
+        compiler_version = if ($buildManifest) { $buildManifest.compiler_version } else { $null }
+        build_configuration = if ($buildManifest) { $buildManifest.configuration } else { $null }
+        cmake_options = if ($buildManifest) { $buildManifest.cmake_options } else { $null }
+        bwapi_source_commit = if ($buildManifest) { $buildManifest.bwapi_source_commit } else { $null }
+        bwapi_source_patch_sha256 = if ($buildManifest) { $buildManifest.bwapi_source_patch_sha256 } else { $null }
+        bwapi_library_sha256 = if ($buildManifest) { $buildManifest.bwapi_library_sha256 } else { $null }
+        host_runtime_ini_sha256 = $hostRuntimeIniHash
+        opponent_runtime_ini_sha256 = $opponentRuntimeIniHash
+        host_race = $HostRace
         termination_reason = $terminationReason
         started_utc = $startedUtc
         finished_utc = [DateTime]::UtcNow.ToString('o')
@@ -556,6 +806,10 @@ try {
         opponent_runtime_configuration_sha256 = $runtimeConfigurationHash
         opponent_runtime_strategy_configuration_sha256 = $runtimeStrategyConfigurationHash
         opponent_runtime_learning_reset = -not [bool]$PreserveLearning
+        host_learning_before = $hostLearningBefore
+        host_learning_initial = $hostLearningInitial
+        opponent_learning_before = $opponentLearningBefore
+        opponent_learning_initial = $opponentLearningInitial
         map = $Map
         map_sha256 = (Get-FileHash -LiteralPath $mapPath).Hash
         timeout_seconds = $(if ($TimeoutSeconds -gt 0) { $TimeoutSeconds } else { $null })
@@ -574,12 +828,9 @@ try {
     Close-LaunchedStarCraft
     Close-LaunchedProxy
     if (-not $result -and (Test-Path -LiteralPath $logPath)) {
-        $cleanupTerminal = @(Get-Content -LiteralPath $logPath -Tail 24 -ErrorAction SilentlyContinue |
-            Where-Object { $_ -match '^END,(win|loss),(\d+)$' } |
-            Select-Object -Last 1)
-        if ($cleanupTerminal.Count -gt 0) {
-            $record.cleanup_result_ignored = [string]$cleanupTerminal[0]
-        }
+        $cleanupLines = @(Get-Content -LiteralPath $logPath -Tail 24 -ErrorAction SilentlyContinue)
+        $cleanupTerminal = Get-MatchTerminalResult -Lines $cleanupLines -LogName $BotLogName
+        if ($cleanupTerminal) { $record.cleanup_result_ignored = [string]$cleanupTerminal }
     }
     if ($null -ne $observerProcess) {
         Stop-Process -Id $observerProcess.Id -ErrorAction SilentlyContinue

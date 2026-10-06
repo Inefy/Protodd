@@ -27,16 +27,78 @@ bool closeTo(const Position left, const Position right, const int radius) noexce
     return left.valid() && right.valid() && distanceSquared(left, right) <= radius * radius;
 }
 
+struct ResourceCost {
+    int minerals{};
+    int gas{};
+};
+
+ResourceCost resourceCost(const BWAPI::UnitCommand& command,
+                          const BWAPI::Player self) noexcept {
+    using namespace BWAPI;
+    switch (command.getType()) {
+        case UnitCommandTypes::Build:
+        case UnitCommandTypes::Build_Addon:
+        case UnitCommandTypes::Train:
+        case UnitCommandTypes::Morph: {
+            const auto type = command.getUnitType();
+            if (type == UnitTypes::None) return {};
+            return {type.mineralPrice(), type.gasPrice()};
+        }
+        case UnitCommandTypes::Research: {
+            const auto type = command.getTechType();
+            if (type == TechTypes::None) return {};
+            return {type.mineralPrice(), type.gasPrice()};
+        }
+        case UnitCommandTypes::Upgrade: {
+            const auto type = command.getUpgradeType();
+            if (type == UpgradeTypes::None || self == nullptr) return {};
+            const auto level = self->getUpgradeLevel(type) + 1;
+            if (level > type.maxRepeats()) return {};
+            return {type.mineralPrice(level), type.gasPrice(level)};
+        }
+        default:
+            return {};
+    }
+}
+
+constexpr std::uint64_t automaticBuildTaskBit = std::uint64_t{1} << 63U;
+
+std::uint64_t buildTaskKey(const UnitKind kind,
+                           const ConstructionTaskSite& constructionSite) noexcept {
+    if (constructionSite.valid()) return constructionSite.id;
+    return automaticBuildTaskBit | static_cast<std::uint64_t>(kind);
+}
+
+std::string_view buildBlockerName(const BuildBlockerReason reason) noexcept {
+    switch (reason) {
+        case BuildBlockerReason::noBuilder: return "no-builder";
+        case BuildBlockerReason::missingPrerequisite: return "missing-prerequisite";
+        case BuildBlockerReason::noPlacement: return "no-placement";
+        case BuildBlockerReason::noPower: return "no-power";
+        case BuildBlockerReason::rejectedFootprint: return "rejected-footprint";
+    }
+    return "unknown";
+}
+
+template <class PendingBuilds>
+auto findPendingBuild(PendingBuilds& builds, const UnitKind kind) {
+    return std::ranges::find_if(builds, [kind](const auto& entry) {
+        return entry.second.kind == kind;
+    });
+}
+
 }  // namespace
 
 void BwapiBridge::onStart() {
     diagnosticErrors_ = 0;
+    spendingLedger_ = nullptr;
     lastIssueError_ = BWAPI::Errors::None;
     enemyMemory_.clear();
     mineralAllocator_.reset();
     baseLastScouted_.clear();
     baseLastConfirmedEmpty_.clear();
     pendingBuilds_.clear();
+    buildBlockers_.clear();
     failedBuildSites_.clear();
     placementSearches_.clear();
     unitCommandLocks_.clear();
@@ -56,6 +118,38 @@ GameState BwapiBridge::observe() {
     state.mapName = Broodwar->mapName();
     state.self = snapshotPlayer(Broodwar->self(), true);
     state.enemy = snapshotPlayer(Broodwar->enemy(), false);
+    if (const auto self = Broodwar->self()) {
+        const auto home = Broodwar->getClosestUnit(
+            BWAPI::Position(self->getStartLocation()),
+            BWAPI::Filter::IsOwned && BWAPI::Filter::IsCompleted &&
+                BWAPI::Filter::GetType == BWAPI::UnitTypes::Protoss_Nexus);
+        if (home != nullptr) {
+            auto bestTravel = std::numeric_limits<int>::max();
+            const auto unavailable = reservedBuilders();
+            for (const auto probe : self->getUnits()) {
+                if (probe == nullptr || !probe->exists() || !probe->isCompleted() ||
+                    probe->getType() != BWAPI::UnitTypes::Protoss_Probe ||
+                    probe->isConstructing() || probe->isTraining() || probe->isLoaded() ||
+                    !probe->isInterruptible() ||
+                    std::ranges::find(unavailable, probe->getID()) != unavailable.end() ||
+                    learnedCommandLeases_.contains(probe->getID()) ||
+                    std::ranges::any_of(pendingBuilds_, [probe](const auto& entry) {
+                        return entry.second.builder == probe->getID();
+                    })) {
+                    continue;
+                }
+                const auto destination = BWAPI::Position(home->getPosition());
+                if (!probe->hasPath(destination)) continue;
+                const auto speed = std::max(0.001, probe->getType().topSpeed());
+                const auto travel = static_cast<int>(std::ceil(
+                    probe->getDistance(destination) / speed)) +
+                    std::max(1, state.latencyFrames);
+                bestTravel = std::min(bestTravel, std::max(1, travel));
+            }
+            if (bestTravel != std::numeric_limits<int>::max())
+                state.pylonBuilderTravelFrames = std::clamp(bestTravel, 1, 2 * 60 * 24);
+        }
+    }
 
     if (const auto enemy = Broodwar->enemy()) {
         for (const auto unit : enemy->getUnits()) {
@@ -126,18 +220,75 @@ GameState BwapiBridge::observe() {
     std::erase_if(learnedCommandLeases_, [frame](const auto& entry) {
         return entry.second <= frame;
     });
-    for (auto& [kind, pending] : pendingBuilds_) {
+    for (auto& [taskId, pending] : pendingBuilds_) {
+        static_cast<void>(taskId);
         const auto builder = Broodwar->getUnit(pending.builder);
-        if (builder != nullptr && builder->exists() &&
-            (!pending.lastPosition.valid() ||
-             distanceSquared(pending.lastPosition, fromBwapi(builder->getPosition())) >= 16 * 16)) {
-            pending.lastPosition = fromBwapi(builder->getPosition());
-            pending.lastProgress = frame;
+        if (builder == nullptr || !builder->exists()) continue;
+        const auto type = toBwapi(pending.kind);
+        const BWAPI::TilePosition targetTile{pending.target.x / 32, pending.target.y / 32};
+        const BWAPI::Position center{
+            pending.target.x + type.tileWidth() * 16,
+            pending.target.y + type.tileHeight() * 16};
+        const auto builderPosition = fromBwapi(builder->getPosition());
+        const auto targetDistance = builder->getDistance(center);
+        if (!pending.lastPosition.valid() ||
+            distanceSquared(pending.lastPosition, builderPosition) >= 16 * 16) {
+            pending.lastPosition = builderPosition;
+            pending.lastRouteProgress = frame;
+        }
+        if (pending.commandIssued < 0) {
+            pending.phase = BuildTaskPhase::prepositioning;
+        } else {
+            const auto last = builder->getLastCommand();
+            const auto commandedBuild = last.getType() == BWAPI::UnitCommandTypes::Build &&
+                last.getUnitType() == type &&
+                fromBwapi(last.getTargetPosition()) == pending.target;
+            if (builder->getBuildType() == type || commandedBuild) {
+                pending.phase = BuildTaskPhase::acknowledged;
+                if (pending.commandAcknowledged < 0) pending.commandAcknowledged = frame;
+            } else if (targetDistance > 96) {
+                pending.phase = BuildTaskPhase::travelling;
+            } else {
+                pending.phase = BuildTaskPhase::commandPending;
+            }
+        }
+        if (pending.commandIssued < 0 && targetDistance <= 96) {
+            pending.footprintAccessible =
+                Broodwar->canBuildHere(targetTile, type, builder, true) ||
+                Broodwar->canBuildHere(targetTile, type, nullptr, true);
         }
     }
-    std::erase_if(pendingBuilds_, [this, frame](const auto& entry) {
-        const auto kind = entry.first;
-        const auto& pending = entry.second;
+    const auto requestCancellation = [this, frame](PendingBuild& pending, BWAPI::Unit builder,
+                                                    const UnitKind kind) {
+        if (builder == nullptr || !builder->exists()) return true;
+        const auto type = toBwapi(kind);
+        const auto last = builder->getLastCommand();
+        const auto commandedBuild = last.getType() == BWAPI::UnitCommandTypes::Build &&
+            last.getUnitType() == type && fromBwapi(last.getTargetPosition()) == pending.target;
+        const auto prepositionOrder = pending.prepositioned &&
+            last.getType() == BWAPI::UnitCommandTypes::Move &&
+            last.getTargetPosition() == BWAPI::Position(
+                pending.target.x + type.tileWidth() * 16,
+                pending.target.y + type.tileHeight() * 16);
+        const auto actionable = commandedBuild || builder->getBuildType() == type || prepositionOrder;
+        if (pending.cancellation.awaiting() && !actionable) {
+            static_cast<void>(pending.cancellation.acknowledged(false));
+            return true;
+        }
+        if (!actionable) return true;
+        if (pending.cancellation.awaiting()) {
+            if (pending.cancellation.retryDue(frame))
+                requestBuildCancellation(pending, builder, "builder-cancel-retry");
+            return false;
+        }
+        if (!pending.cancellation.requestDue(frame)) return false;
+        requestBuildCancellation(pending, builder, "builder-release");
+        return false;
+    };
+    const auto pendingBuildShouldExpire = [this, frame, &requestCancellation](
+        const std::uint64_t taskId, PendingBuild& pending) {
+        static_cast<void>(taskId);
+        const auto kind = pending.kind;
         const auto started = std::ranges::any_of(
             Broodwar->self()->getUnits(), [kind, &pending](const Unit unit) {
             if (unit == nullptr || !unit->exists() || toKind(unit->getType()) != kind) {
@@ -146,7 +297,10 @@ GameState BwapiBridge::observe() {
             // A nearby older Pylon/Gateway cannot fulfill this reservation.
             return fromBwapi(BWAPI::Position(unit->getTilePosition())) == pending.target;
         });
-        if (started) return true;
+        if (started) {
+            pending.phase = BuildTaskPhase::constructing;
+            return true;
+        }
 
         const auto rememberFailure = [this, kind, frame, &pending] {
             failedBuildSites_.push_back(
@@ -158,7 +312,8 @@ GameState BwapiBridge::observe() {
             rememberFailure();
             return true;
         }
-        const auto age = frame - pending.issued;
+        const auto commandAge = frame -
+            (pending.commandIssued >= 0 ? pending.commandIssued : pending.issued);
         const auto expectedType = toBwapi(kind);
         const auto lastCommand = builder->getLastCommand();
         const auto commandedBuild = lastCommand.getType() == BWAPI::UnitCommandTypes::Build &&
@@ -174,7 +329,7 @@ GameState BwapiBridge::observe() {
                     pending.target.y + expectedType.tileHeight() * 16};
                 buildLeaseDiagnostic({
                     kind, pending.builder, pending.target, fromBwapi(builder->getPosition()),
-                    pending.issued, frame, pending.lastProgress, std::string(reason),
+                    pending.issued, frame, pending.lastRouteProgress, std::string(reason),
                     builder->getOrder().toString(), commandedBuild,
                     builder->getBuildType() == expectedType,
                     Broodwar->canBuildHere(tile, expectedType, builder, true),
@@ -183,29 +338,35 @@ GameState BwapiBridge::observe() {
                 });
             } catch (...) { ++diagnosticErrors_; }
         };
-        if (kind != UnitKind::nexus && age > std::max(2 * 24, Broodwar->getLatencyFrames() + 12) &&
-            frame - pending.lastProgress > 2 * 24) {
-            // Keep travelling builders leased. A stalled order must be
-            // cancelled before its resources and worker can be reassigned,
-            // otherwise it may complete after a replacement is already sent.
-            reportLeaseEnd("stalled-position");
-            if (builder->getBuildType() == expectedType || commandedBuild) issue(UnitCommand::stop(builder), "builder-release");
+        if (pending.cancellation.awaiting()) {
+            if (!requestCancellation(pending, builder, kind)) return false;
             rememberFailure();
             return true;
         }
-        // The eight-second Pylon timeout is useful for emergency supply near
-        // home. A deliberately placed Pylon at a new natural can need more
-        // than that just for travel. Its moving builder already has the
-        // stalled-position escape above; do not cancel it mid-route.
-        const auto hardLeaseLimit = kind == UnitKind::pylon &&
-            !pending.plannedRemotePower ? 8 * 24 : 18 * 24;
-        if (kind != UnitKind::nexus && age >= hardLeaseLimit) {
-            // Movement alone is not construction progress. A Probe can orbit
-            // an obstructed footprint indefinitely, which previously held a
-            // Pylon reservation for 45 seconds at a time while the army sat at
-            // the hard supply cap. Re-place urgent supply after eight seconds.
-            reportLeaseEnd("hard-lease-limit");
-            if (builder->getBuildType() == expectedType || commandedBuild) issue(UnitCommand::stop(builder), "builder-release");
+        const BWAPI::Position targetCenter{
+            pending.target.x + expectedType.tileWidth() * 16,
+            pending.target.y + expectedType.tileHeight() * 16};
+        const auto distanceToTarget = builder->getDistance(targetCenter);
+        if (pending.commandIssued >= 0 && distanceToTarget > 96 &&
+            commandAge > std::max(2 * 24, Broodwar->getLatencyFrames() + 12) &&
+            pending.lastRouteProgress >= 0 && frame - pending.lastRouteProgress > 2 * 24) {
+            // Keep travelling builders leased. A stalled order must be
+            // cancelled before its resources and worker can be reassigned,
+            // otherwise it may complete after a replacement is already sent.
+            // Physical movement is route progress even around terrain. The
+            // fixed, distance-scaled deadline below still catches an orbiting
+            // worker whose order never reaches its exact footprint.
+            reportLeaseEnd("stalled-builder");
+            if (!requestCancellation(pending, builder, kind)) return false;
+            rememberFailure();
+            return true;
+        }
+        if (frame >= pending.travelDeadline) {
+            // Distance-scaled deadlines preserve long routes but cap orbiting,
+            // inaccessible footprints, and pre-positioned expansion orders.
+            reportLeaseEnd(pending.footprintAccessible
+                ? "travel-deadline" : "footprint-inaccessible-deadline");
+            if (!requestCancellation(pending, builder, kind)) return false;
             rememberFailure();
             return true;
         }
@@ -214,26 +375,28 @@ GameState BwapiBridge::observe() {
         // build type during that interval. Ordinary construction leases still
         // require the explicit build type to prevent a redirected Probe from
         // blocking another macro action.
-        const auto stillAssigned = pending.prepositioned || commandedBuild ||
+        const auto prepositionOrder = pending.prepositioned &&
+            lastCommand.getType() == BWAPI::UnitCommandTypes::Move &&
+            lastCommand.getTargetPosition() == targetCenter;
+        const auto stillAssigned = prepositionOrder || commandedBuild ||
                                    builder->getBuildType() == expectedType;
         // Give the command time to cross the latency boundary, then recover
         // quickly if another subsystem or the game rejected the order. Keep a
         // genuinely travelling builder reserved long enough for expansions.
-        if (age <= std::max(12, Broodwar->getLatencyFrames() + 6)) return false;
+        if (commandAge <= std::max(12, Broodwar->getLatencyFrames() + 6)) return false;
         if (!stillAssigned) {
             reportLeaseEnd("order-lost");
             rememberFailure();
             return true;
         }
-        if (age >= 45 * 24) {
-            reportLeaseEnd("fallback-lease-limit");
-            if (builder->getBuildType() == expectedType || commandedBuild || pending.prepositioned)
-                issue(UnitCommand::stop(builder), "builder-release");
-            rememberFailure();
-            return true;
-        }
         return false;
-    });
+    };
+    for (auto pending = pendingBuilds_.begin(); pending != pendingBuilds_.end();) {
+        if (pendingBuildShouldExpire(pending->first, pending->second))
+            pending = pendingBuilds_.erase(pending);
+        else
+            ++pending;
+    }
 
     // Defer expensive pathfinding until the game has entered its frame loop.
     // Doing this in onStart can leave StarCraft responsive but prevent the
@@ -321,15 +484,22 @@ void BwapiBridge::remember(const BWAPI::Unit unit) {
 
 void BwapiBridge::forget(const BWAPI::Unit unit) {
     if (unit != nullptr) {
-        enemyMemory_.erase(unit->getID());
+        const auto id = unit->getID();
+        enemyMemory_.erase(id);
+        unitCommandLocks_.erase(id);
+        learnedCommandLeases_.erase(id);
+        for (auto& [taskId, pending] : pendingBuilds_) {
+            static_cast<void>(taskId);
+            if (pending.builder == id) pending.builder = -1;
+        }
     }
 }
 
 std::vector<UnitId> BwapiBridge::reservedBuilders() const {
     std::vector<UnitId> result;
     result.reserve(pendingBuilds_.size() + learnedCommandLeases_.size());
-    for (const auto& [kind, pending] : pendingBuilds_) {
-        static_cast<void>(kind);
+    for (const auto& [taskId, pending] : pendingBuilds_) {
+        static_cast<void>(taskId);
         if (pending.builder >= 0) result.push_back(pending.builder);
     }
     for (const auto& [id, expiry] : learnedCommandLeases_) {
@@ -341,18 +511,159 @@ std::vector<UnitId> BwapiBridge::reservedBuilders() const {
     return result;
 }
 
-bool BwapiBridge::issue(const BWAPI::UnitCommand& command, const std::string_view source) {
+bool BwapiBridge::pendingBuildAlreadyPaid(const MacroAction& action) const {
+    if (action.action != MacroActionKind::build && action.action != MacroActionKind::expand)
+        return false;
+    if (action.constructionSite.valid()) {
+        const auto found = pendingBuilds_.find(buildTaskKey(action.target, action.constructionSite));
+        return found != pendingBuilds_.end() && found->second.resourcesPaid;
+    }
+    return std::ranges::any_of(pendingBuilds_, [&action](const auto& entry) {
+        return entry.second.kind == action.target && entry.second.resourcesPaid;
+    });
+}
+
+std::vector<BuildBlockerFeedback> BwapiBridge::buildBlockerFeedback() const {
+    std::vector<BuildBlockerFeedback> result;
+    result.reserve(buildBlockers_.size());
+    for (const auto& [taskId, feedback] : buildBlockers_) {
+        static_cast<void>(taskId);
+        result.push_back(feedback);
+    }
+    std::ranges::sort(result, [](const BuildBlockerFeedback& lhs,
+                                 const BuildBlockerFeedback& rhs) {
+        if (lhs.target != rhs.target) return lhs.target < rhs.target;
+        return lhs.constructionSite.id < rhs.constructionSite.id;
+    });
+    return result;
+}
+
+void BwapiBridge::recordBuildBlocker(const MacroAction& action,
+                                     const BuildBlockerReason reason,
+                                     const Frame retryFrames) {
+    const auto taskId = buildTaskKey(action.target, action.constructionSite);
+    buildBlockers_.insert_or_assign(taskId, BuildBlockerFeedback{
+        action.target, action.constructionSite, reason,
+        Broodwar->getFrameCount() + std::max<Frame>(1, retryFrames)});
+}
+
+void BwapiBridge::inspectUnfundedBuild(
+    const MacroAction& action,
+    const StrategicPlan& plan,
+    const InfluenceMap& influence,
+    const std::span<const UnitId> unavailableBuilders) {
+    if (action.action != MacroActionKind::build && action.action != MacroActionKind::expand)
+        return;
+    const auto type = toBwapi(action.target);
+    if (type == UnitTypes::None || !type.isBuilding()) return;
+    const auto constructionSite = action.constructionSite.valid()
+        ? action.constructionSite : ConstructionTaskSite{};
+    const auto taskId = buildTaskKey(action.target, constructionSite);
+    if (pendingBuilds_.contains(taskId)) {
+        buildBlockers_.erase(taskId);
+        return;
+    }
+    if (const auto feedback = buildBlockers_.find(taskId);
+        feedback != buildBlockers_.end() && feedback->second.retryAt > Broodwar->getFrameCount()) {
+        return;
+    }
+
+    auto home = BWAPI::Position(Broodwar->self()->getStartLocation());
+    if (usesHomeConstructionAnchor(action.target)) {
+        const auto homeNexus = Broodwar->getClosestUnit(
+            home, Filter::IsOwned && Filter::IsCompleted &&
+                      Filter::GetType == UnitTypes::Protoss_Nexus);
+        if (homeNexus != nullptr) home = homeNexus->getPosition();
+    }
+    const auto near = toBwapiPosition(constructionSite.valid()
+        ? constructionSite.anchor
+        : constructionBuilderAnchor(action.target, fromBwapi(home), plan.rallyPoint,
+                                     plan.expansionTarget));
+    // Feasibility inspection deliberately ignores affordability. It only
+    // asks whether an otherwise eligible worker and legal footprint exist,
+    // so an unaffordable blocked goal cannot protect the entire current bank.
+    const auto builder = findBuilder(type, near, influence, unavailableBuilders, false);
+    if (builder == nullptr) {
+        recordBuildBlocker(action, BuildBlockerReason::noBuilder, 15 * 24);
+        return;
+    }
+    const auto location = buildLocation(action.target, type, builder, plan,
+                                        constructionSite, taskId, action.reason);
+    if (!location.isValid()) {
+        if (!lastMacroStatus_.starts_with("placement-search-deferred-"))
+            recordBuildBlocker(action, BuildBlockerReason::noPlacement, 30 * 24);
+        return;
+    }
+    if (type.requiresPsi() && !Broodwar->hasPower(location, type)) {
+        recordBuildBlocker(action, BuildBlockerReason::noPower, 15 * 24);
+        return;
+    }
+    if (!Broodwar->canBuildHere(location, type, builder, true)) {
+        if (action.target == UnitKind::nexus &&
+            Broodwar->canBuildHere(location, type, builder, false)) {
+            buildBlockers_.erase(taskId);
+            return;
+        }
+        recordBuildBlocker(action, BuildBlockerReason::rejectedFootprint, 15 * 24);
+        return;
+    }
+    buildBlockers_.erase(taskId);
+}
+
+bool BwapiBridge::issue(const BWAPI::UnitCommand& command, const std::string_view source,
+                        const ResourceUse resourceUse, bool* resourcesPaid) {
+    if (resourcesPaid != nullptr) *resourcesPaid = false;
     if (productionPermission && !productionPermission(command, source)) {
         lastIssueError_ = BWAPI::Errors::Unit_Busy; return false;
     }
     if (!command.getUnit() ||
         (source != "whole-game" && learnedCommandLeases_.contains(command.getUnit()->getID())))
         return false;
+    const auto cost = resourceCost(command, Broodwar->self());
+    const auto resourceAction = cost.minerals > 0 || cost.gas > 0;
+    if (resourceAction && spendingLedger_ != nullptr) {
+        const auto affordable = resourceUse == ResourceUse::committed
+            ? spendingLedger_->canSpendCommitted(cost.minerals, cost.gas)
+            : spendingLedger_->canReserve(cost.minerals, cost.gas);
+        if (!affordable) {
+            const auto mineralShort = resourceUse == ResourceUse::committed
+                ? spendingLedger_->minerals < cost.minerals ||
+                    spendingLedger_->committedMinerals < cost.minerals
+                : spendingLedger_->freeMinerals() < cost.minerals;
+            const auto gasShort = resourceUse == ResourceUse::committed
+                ? spendingLedger_->gas < cost.gas || spendingLedger_->committedGas < cost.gas
+                : spendingLedger_->freeGas() < cost.gas;
+            lastIssueError_ = mineralShort ? BWAPI::Errors::Insufficient_Minerals
+                              : gasShort ? BWAPI::Errors::Insufficient_Gas
+                                         : BWAPI::Errors::Unit_Busy;
+            try { if (actionDiagnostic) {
+                const auto target = command.getTarget();
+                actionDiagnostic({command.getUnit()->getID(), target ? target->getID() : -1,
+                    fromBwapi(command.getTargetPosition()), command.getType().toString(),
+                    std::string(source), "resource-ledger-deferred", command.extra, false, false});
+            } } catch (...) { ++diagnosticErrors_; }
+            return false;
+        }
+    }
     if (productionDiagnostic && !productionDiagnostic(command, true, false)) return false;
+    const auto mineralsBefore = resourceAction ? Broodwar->self()->minerals() : 0;
+    const auto gasBefore = resourceAction ? Broodwar->self()->gas() : 0;
     const auto accepted = command.getUnit()->issueCommand(command);
+    if (accepted && resourceAction && resourcesPaid != nullptr) {
+        const auto mineralsAfter = Broodwar->self()->minerals();
+        const auto gasAfter = Broodwar->self()->gas();
+        *resourcesPaid = mineralsBefore - mineralsAfter >= cost.minerals &&
+                         gasBefore - gasAfter >= cost.gas;
+    }
     // Capture immediately: later BWAPI queries can replace the last error.
     lastIssueError_ = Broodwar->getLastError();
     if (productionDiagnostic) productionDiagnostic(command, false, accepted);
+    if (accepted && resourceAction && spendingLedger_ != nullptr) {
+        const auto charged = resourceUse == ResourceUse::committed
+            ? spendingLedger_->spendCommitted(cost.minerals, cost.gas)
+            : spendingLedger_->spendAvailable(cost.minerals, cost.gas);
+        if (!charged) ++diagnosticErrors_;
+    }
     try { if (actionDiagnostic) {
         const auto target = command.getTarget();
         actionDiagnostic({command.getUnit()->getID(), target ? target->getID() : -1,
@@ -361,6 +672,14 @@ bool BwapiBridge::issue(const BWAPI::UnitCommand& command, const std::string_vie
             command.extra, true, accepted});
     } } catch (...) { ++diagnosticErrors_; }
     return accepted;
+}
+
+bool BwapiBridge::requestBuildCancellation(PendingBuild& pending, const BWAPI::Unit builder,
+                                           const std::string_view source) {
+    if (builder == nullptr || !builder->exists()) return true;
+    const auto accepted = issue(UnitCommand::stop(builder), source);
+    return pending.cancellation.request(Broodwar->getFrameCount(),
+                                        Broodwar->getLatencyFrames(), accepted);
 }
 
 bool BwapiBridge::executeWholeGame(const BWAPI::UnitCommand& command,
@@ -502,20 +821,40 @@ bool BwapiBridge::execute(const Command& command) {
 }
 
 ExpansionFeedback BwapiBridge::expansionFeedback() const {
-    const auto found = pendingBuilds_.find(UnitKind::nexus);
+    const auto found = findPendingBuild(pendingBuilds_, UnitKind::nexus);
     if (found == pendingBuilds_.end()) return {};
     const auto& pending = found->second;
     return {{pending.target.x + 64, pending.target.y + 48}, true,
-        pending.lastProgress >= 0 ? Broodwar->getFrameCount() - pending.lastProgress : 0};
+        pending.lastRouteProgress >= 0
+            ? Broodwar->getFrameCount() - pending.lastRouteProgress : 0};
 }
 
 bool BwapiBridge::cancelExpansion() {
-    const auto found = pendingBuilds_.find(UnitKind::nexus);
+    const auto found = findPendingBuild(pendingBuilds_, UnitKind::nexus);
     if (found == pendingBuilds_.end()) return true;
     const auto worker = Broodwar->getUnit(found->second.builder);
-    if (worker != nullptr && worker->exists() && !issue(UnitCommand::stop(worker), "expansion-cancel")) return false;
-    pendingBuilds_.erase(found);
-    return true;
+    if (worker == nullptr || !worker->exists()) {
+        pendingBuilds_.erase(found);
+        return true;
+    }
+    const auto last = worker->getLastCommand();
+    const auto nexusType = toBwapi(UnitKind::nexus);
+    const auto actionable = worker->getBuildType() == nexusType ||
+        (last.getType() == BWAPI::UnitCommandTypes::Build &&
+         last.getUnitType() == nexusType &&
+         fromBwapi(last.getTargetPosition()) == found->second.target) ||
+        (found->second.prepositioned && last.getType() == BWAPI::UnitCommandTypes::Move);
+    if (!actionable) {
+        pendingBuilds_.erase(found);
+        return true;
+    }
+    if (found->second.cancellation.awaiting()) {
+        if (found->second.cancellation.retryDue(Broodwar->getFrameCount()))
+            requestBuildCancellation(found->second, worker, "expansion-cancel-retry");
+    } else if (found->second.cancellation.requestDue(Broodwar->getFrameCount())) {
+        requestBuildCancellation(found->second, worker, "expansion-cancel");
+    }
+    return false;
 }
 
 int BwapiBridge::executeMacro(
@@ -528,6 +867,10 @@ int BwapiBridge::executeMacro(
     macroExecutions_.clear();
     std::string firstFailure;
     lastMacroStatus_ = actions.empty() ? "idle" : "saving";
+    const auto frame = Broodwar->getFrameCount();
+    std::erase_if(buildBlockers_, [frame](const auto& entry) {
+        return entry.second.retryAt <= frame;
+    });
     for (const auto& action : actions) {
         if (issued >= maximumCommands) {
             macroExecutions_.push_back({action, "command-budget-deferred", false});
@@ -539,7 +882,22 @@ int BwapiBridge::executeMacro(
         // must not terminate the queue: lower-priority actions that already
         // have disjoint reservations still need to reach their producers.
         if (!action.reserved) {
-            macroExecutions_.push_back({action, "saving-resources", false});
+            if (action.blocksLowerPriority && action.executable &&
+                (action.action == MacroActionKind::build ||
+                 action.action == MacroActionKind::expand)) {
+                inspectUnfundedBuild(action, plan, influence, unavailableBuilders);
+            }
+            auto outcome = std::string("saving-resources");
+            if (action.action == MacroActionKind::build ||
+                action.action == MacroActionKind::expand) {
+                const auto taskId = buildTaskKey(action.target, action.constructionSite);
+                if (const auto blocker = buildBlockers_.find(taskId);
+                    blocker != buildBlockers_.end() && blocker->second.retryAt > frame) {
+                    outcome = "blocked-" + std::string(buildBlockerName(blocker->second.reason)) +
+                              "-retry-" + std::to_string(blocker->second.retryAt);
+                }
+            }
+            macroExecutions_.push_back({action, std::move(outcome), false});
             continue;
         }
         // A non-executable action is a deliberate reservation for a target
@@ -554,6 +912,7 @@ int BwapiBridge::executeMacro(
                            std::to_string(static_cast<int>(action.action)) + "-" +
                            std::string(unitStats(action.target).name);
         bool success = false;
+        std::string buildBlockerOutcome;
         switch (action.action) {
             case MacroActionKind::build:
             case MacroActionKind::expand:
@@ -563,13 +922,48 @@ int BwapiBridge::executeMacro(
             case MacroActionKind::research:
             case MacroActionKind::upgrade: success = executeTechnology(action); break;
         }
-        if (success) {
+        if (action.action == MacroActionKind::build ||
+            action.action == MacroActionKind::expand) {
+            const auto taskId = buildTaskKey(action.target, action.constructionSite);
+            auto reason = BuildBlockerReason::noPlacement;
+            auto blocked = false;
+            auto retryFrames = 15 * 24;
+            if (!success && lastMacroStatus_ == "build-no-builder") {
+                reason = BuildBlockerReason::noBuilder;
+                blocked = true;
+            } else if (!success && lastMacroStatus_ == "build-cannot-make") {
+                reason = BuildBlockerReason::missingPrerequisite;
+                blocked = true;
+            } else if (!success && lastMacroStatus_ == "build-unpowered-location") {
+                reason = BuildBlockerReason::noPower;
+                blocked = true;
+            } else if (!success && (lastMacroStatus_ == "build-location-rejected" ||
+                                    lastMacroStatus_ == "nexus-footprint-blocked")) {
+                reason = BuildBlockerReason::rejectedFootprint;
+                blocked = true;
+            } else if (!success && lastMacroStatus_.starts_with("build-no-location-") &&
+                       !lastMacroStatus_.starts_with(
+                           "build-no-location-placement-search-deferred")) {
+                reason = BuildBlockerReason::noPlacement;
+                retryFrames = 30 * 24;
+                blocked = true;
+            }
+            if (blocked) {
+                recordBuildBlocker(action, reason, retryFrames);
+                buildBlockerOutcome = "blocked-" + std::string(buildBlockerName(reason)) +
+                                      "-retry-" + std::to_string(frame + retryFrames);
+            } else if (success || lastMacroStatus_.starts_with("build-preposition-")) {
+                buildBlockers_.erase(taskId);
+            }
+        }
+    if (success) {
             ++issued;
             lastMacroStatus_ = "issued-" + std::string(unitStats(action.target).name);
         } else if (firstFailure.empty() || lastMacroStatus_.starts_with("build-")) {
             firstFailure = lastMacroStatus_;
         }
-        macroExecutions_.push_back({action, lastMacroStatus_, success});
+        macroExecutions_.push_back({action,
+            buildBlockerOutcome.empty() ? lastMacroStatus_ : std::move(buildBlockerOutcome), success});
         // Every emitted reserved action has a disjoint allocation in the
         // ledger. A rejected placement keeps its allocation, but must not
         // freeze unrelated producers funded from the remaining surplus.
@@ -603,8 +997,52 @@ void BwapiBridge::executeWorkers(const std::span<const WorkerAssignment> assignm
 
     for (const auto& assignment : assignments) {
         const auto worker = Broodwar->getUnit(assignment.worker);
-        if (worker == nullptr || !worker->exists() || !worker->isCompleted() ||
-            worker->isConstructing() || assignment.job == WorkerJob::build) {
+        if (worker == nullptr || !worker->exists() || !worker->isCompleted()) {
+            continue;
+        }
+        if (assignment.job == WorkerJob::evacuate) {
+            const auto pending = std::ranges::find_if(
+                pendingBuilds_, [&assignment](const auto& entry) {
+                    return entry.second.builder == assignment.worker;
+                });
+            if (pending != pendingBuilds_.end() &&
+                pending->second.phase != BuildTaskPhase::constructing) {
+                // Do not overwrite an en-route Build/Move with a retreat:
+                // request Stop through the T021 acknowledgment state machine
+                // and keep ownership until BWAPI reports the old order gone.
+                // A started Protoss structure is already detached from its
+                // Probe; it finishes while the worker takes the safe route.
+                auto& build = pending->second;
+                const auto frame = Broodwar->getFrameCount();
+                if (build.cancellation.awaiting()) {
+                    if (build.cancellation.retryDue(frame))
+                        requestBuildCancellation(build, worker, "worker-evacuation-retry");
+                } else if (build.cancellation.requestDue(frame)) {
+                    requestBuildCancellation(build, worker, "worker-evacuation");
+                }
+                continue;
+            }
+        }
+        if (worker->isConstructing() || assignment.job == WorkerJob::build) continue;
+        if (assignment.job == WorkerJob::rebuild) {
+            const auto frame = Broodwar->getFrameCount();
+            const auto retryFrame = worker->getLastCommandFrame() +
+                std::max(8, Broodwar->getLatencyFrames());
+            if (assignment.targetPosition.valid() &&
+                distanceSquared(fromBwapi(worker->getPosition()),
+                                assignment.targetPosition) > 96 * 96) {
+                const auto last = worker->getLastCommand();
+                if (last.getType() == UnitCommandTypes::Move &&
+                    distanceSquared(fromBwapi(last.getTargetPosition()),
+                                    assignment.targetPosition) <= 96 * 96) {
+                    continue;
+                }
+                if (retryFrame < frame)
+                    issue(UnitCommand::move(worker, toBwapiPosition(assignment.targetPosition)),
+                          "worker-rebuild-stage");
+            } else if (!worker->isIdle() && retryFrame < frame) {
+                issue(UnitCommand::stop(worker), "worker-rebuild-hold");
+            }
             continue;
         }
         if (assignment.job == WorkerJob::evacuate && assignment.targetPosition.valid()) {
@@ -652,7 +1090,7 @@ void BwapiBridge::executeWorkers(const std::span<const WorkerAssignment> assignm
                 }
                 continue;
             }
-            if (assignment.priority == 80) {
+            if (assignment.priority >= 80) {
                 const auto last = worker->getLastCommand();
                 if (last.getType() == UnitCommandTypes::Move &&
                     !worker->isIdle() &&
@@ -755,7 +1193,7 @@ void BwapiBridge::executeScouts(const std::span<const ScoutOrder> orders) {
     }
 }
 
-void BwapiBridge::runMaintenance(const int mineralReserve, const int gasReserve) {
+void BwapiBridge::runMaintenance() {
     const auto self = Broodwar->self();
     if (self == nullptr) {
         return;
@@ -765,9 +1203,6 @@ void BwapiBridge::runMaintenance(const int mineralReserve, const int gasReserve)
         return zone.expires <= frame;
     });
 
-    auto mineralBank = self->minerals();
-    auto freeMinerals = std::max(0, mineralBank - mineralReserve);
-    auto freeGas = std::max(0, self->gas() - gasReserve);
     std::unordered_set<UnitId> spellcastersCommitted;
     const auto reaverCapacity = self->getUpgradeLevel(UpgradeTypes::Reaver_Capacity) > 0
                                     ? 10
@@ -784,28 +1219,15 @@ void BwapiBridge::runMaintenance(const int mineralReserve, const int gasReserve)
         if (type == UnitTypes::Protoss_Reaver &&
             unit->getScarabCount() < reaverCapacity && unit->getTrainingQueue().empty()) {
             const auto ammo = UnitTypes::Protoss_Scarab;
-            // The first payload makes an expensive unit useful immediately.
-            // Repeated army reservations must not leave an empty Reaver unable
-            // to buy a fifteen-mineral Scarab during the fight it was built for.
-            const auto ammoBudget = unit->getScarabCount() < 2 ? mineralBank : freeMinerals;
-            if (ammoBudget >= ammo.mineralPrice() && freeGas >= ammo.gasPrice() &&
-                unit->canTrain(ammo) && issue(UnitCommand::train(unit, ammo), "maintenance-scarab")) {
-                mineralBank -= ammo.mineralPrice();
-                freeMinerals = std::max(0, mineralBank - mineralReserve);
-                freeGas -= ammo.gasPrice();
-            }
+            // Payload training shares the macro bank. Even the first Scarab
+            // cannot cross a held supply, detection, or technology obligation.
+            if (unit->canTrain(ammo))
+                issue(UnitCommand::train(unit, ammo), "maintenance-scarab");
         } else if (type == UnitTypes::Protoss_Carrier &&
                    unit->getInterceptorCount() < carrierCapacity &&
                    unit->getTrainingQueue().empty() &&
-                   (unit->getInterceptorCount() < 4 ? mineralBank : freeMinerals) >=
-                       UnitTypes::Protoss_Interceptor.mineralPrice() &&
-                   freeGas >= UnitTypes::Protoss_Interceptor.gasPrice() &&
-                   unit->canTrain(UnitTypes::Protoss_Interceptor) &&
-                   issue(UnitCommand::train(unit, UnitTypes::Protoss_Interceptor), "maintenance-interceptor")) {
-            mineralBank -= UnitTypes::Protoss_Interceptor.mineralPrice();
-            freeMinerals = std::max(0, mineralBank - mineralReserve);
-            freeGas -= UnitTypes::Protoss_Interceptor.gasPrice();
-        }
+                   unit->canTrain(UnitTypes::Protoss_Interceptor))
+            issue(UnitCommand::train(unit, UnitTypes::Protoss_Interceptor), "maintenance-interceptor");
     }
 
     if (self->hasResearched(TechTypes::Stasis_Field)) {
@@ -1047,7 +1469,7 @@ void BwapiBridge::drawDebug(
         return;
     }
 
-    const auto expansion = pendingBuilds_.find(UnitKind::nexus);
+    const auto expansion = findPendingBuild(pendingBuilds_, UnitKind::nexus);
     constexpr std::size_t macroLimit = 3;
     const auto rows = 11 + static_cast<int>(std::min<std::size_t>(macroLimit, debug.macro.size())) +
         (!debug.scout.empty() ? 1 : 0) +
@@ -1088,9 +1510,10 @@ void BwapiBridge::drawDebug(
         const auto remaining = builder != nullptr && builder->exists()
             ? static_cast<int>(distance(fromBwapi(builder->getPosition()),
                                        {pending.target.x + 64, pending.target.y + 48})) : -1;
-        row("NEXUS   Probe %d | %d px to site | waiting %ds | no movement %ds", pending.builder,
+        row("NEXUS   Probe %d | %d px to site | waiting %ds | no route progress %ds", pending.builder,
             remaining, (state.frame - pending.issued) / 24,
-            pending.lastProgress >= 0 ? (state.frame - pending.lastProgress) / 24 : 0);
+            pending.lastRouteProgress >= 0
+                ? (state.frame - pending.lastRouteProgress) / 24 : 0);
     }
     for (std::size_t i = 0; i < std::min<std::size_t>(macroLimit, debug.macro.size()); ++i) {
         const auto& action = debug.macro[i];
@@ -1378,6 +1801,13 @@ PlayerSnapshot BwapiBridge::snapshotPlayer(const BWAPI::Player player, const boo
                                                 (buildUnit != nullptr &&
                                                  buildUnit->exists() &&
                                                  !buildUnit->isCompleted());
+                    ProducerSlotSnapshot producerSlot{
+                        unit->getID(), toKind(unit->getType()), activeTraining,
+                        static_cast<int>(trainingQueue.size()),
+                        unit->getRemainingTrainTime(),
+                        Broodwar->getRemainingLatencyFrames(), recentTrainingCommand,
+                        unit->isResearching(), unit->isUpgrading(),
+                    };
                     auto skippedActiveQueueEntry = false;
                     for (const auto queuedType : trainingQueue) {
                         const auto queuedKind = toKind(queuedType);
@@ -1389,9 +1819,11 @@ PlayerSnapshot BwapiBridge::snapshotPlayer(const BWAPI::Player player, const boo
                                 skippedActiveQueueEntry = true;
                             } else {
                                 result.queuedUnits.push_back(queuedKind);
+                                producerSlot.queuedUnits.push_back(queuedKind);
                             }
                         }
                     }
+                    result.producerSlots.push_back(std::move(producerSlot));
                     // In live BWAPI 4.4 games a Protoss producer can report an
                     // active, non-empty transitional queue whose UnitType is
                     // not yet usable by the adapter. isTraining() can also
@@ -1622,14 +2054,15 @@ BWAPI::Unit BwapiBridge::findBuilder(
     const BWAPI::UnitType type,
     const BWAPI::Position near,
     const InfluenceMap& influence,
-    const std::span<const UnitId> unavailableBuilders) const {
+    const std::span<const UnitId> unavailableBuilders,
+    const bool requireCanBuild) const {
     BWAPI::Unit best = nullptr;
     auto bestScore = std::numeric_limits<long long>::max();
     const auto builderType = type.whatBuilds().first;
     for (const auto unit : Broodwar->self()->getUnits()) {
         if (unit == nullptr || !unit->exists() || !unit->isCompleted() ||
             unit->getType() != builderType || unit->isConstructing() || unit->isTraining() ||
-            !unit->isInterruptible() || !unit->canBuild(type)) {
+            !unit->isInterruptible() || (requireCanBuild && !unit->canBuild(type))) {
             continue;
         }
         if (std::ranges::find(unavailableBuilders, unit->getID()) !=
@@ -1680,7 +2113,10 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
     const UnitKind kind,
     const BWAPI::UnitType type,
     const BWAPI::Unit builder,
-    const StrategicPlan& plan) {
+    const StrategicPlan& plan,
+    const ConstructionTaskSite& constructionSite,
+    const std::uint64_t taskKey,
+    const std::string_view reason) {
     lastMacroStatus_ = "placement-search";
     if (kind == UnitKind::assimilator) {
         Unit bestGeyser = nullptr;
@@ -1709,7 +2145,9 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
                                      : TilePositions::None;
     }
     if (kind == UnitKind::nexus) {
-        if (!plan.expansionTarget.valid()) {
+        const auto desiredSite = constructionSite.valid()
+            ? constructionSite.anchor : plan.expansionTarget;
+        if (!desiredSite.valid()) {
             lastMacroStatus_ = "nexus-site-unidentified";
             return TilePositions::None;
         }
@@ -1720,8 +2158,7 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         auto freeSites = 0;
         for (const auto& site : resourceSites_) {
             if (!site.depotTile.isValid()) continue;
-            if (plan.expansionTarget.valid() &&
-                !closeTo(site.depotCenter, plan.expansionTarget, 64)) continue;
+            if (!closeTo(site.depotCenter, desiredSite, 64)) continue;
             ++validSites;
             const auto center = site.depotCenter;
             if (!Broodwar->hasPath(builder->getPosition(), toBwapiPosition(center))) continue;
@@ -1756,8 +2193,7 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
             const auto danger = std::max(0.0, 1200.0 - nearestEnemy) *
                                 (plan.posture == Posture::defend ? 1.8 : 0.8);
             const auto travel = distance(fromBwapi(builder->getPosition()), center);
-            const auto strategicSite = plan.expansionTarget.valid() &&
-                closeTo(center, plan.expansionTarget, 64);
+            const auto strategicSite = closeTo(center, desiredSite, 64);
             const auto score = travel + danger - static_cast<double>(resources) / 40.0 -
                 (strategicSite ? 100000.0 : 0.0);
             if (score < bestScore) {
@@ -2017,6 +2453,33 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         }
     }
 
+    if (homeAnchoredSupplyPylon(kind, reason, constructionSite.valid())) {
+        // Supply forecasts and builder selection measure a Probe's route to
+        // the home Nexus. Keep ordinary supply Pylons on that same anchor;
+        // choosing the least-powered expansion here adds an unforecast trip.
+        const auto start = BWAPI::Position(Broodwar->self()->getStartLocation());
+        const auto home = Broodwar->getClosestUnit(
+            start, Filter::IsOwned && Filter::IsCompleted &&
+                       Filter::GetType == UnitTypes::Protoss_Nexus);
+        anchorPosition = home != nullptr ? home->getPosition() : start;
+        useForwardLayout = true;
+        startLayoutAtCenter = true;
+        preserveBaseAnchor = true;
+        avoidEnemyFire = false;
+        defendedNexus = nullptr;
+    }
+
+    // A site-scoped task owns its anchor. Apply it after the legacy tactical
+    // layout selection so another base's defense count cannot redirect it.
+    if (constructionSite.valid()) {
+        anchorPosition = toBwapiPosition(constructionSite.anchor);
+        useForwardLayout = true;
+        startLayoutAtCenter = true;
+        preserveBaseAnchor = true;
+        avoidEnemyFire = false;
+        defendedNexus = nullptr;
+    }
+
     static const std::array standardLayout{
         TilePosition{4, 2}, TilePosition{-4, 2}, TilePosition{4, -3},
         TilePosition{-4, -3}, TilePosition{7, 1}, TilePosition{-7, 1},
@@ -2105,9 +2568,12 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
             const auto exitGap = type.canProduce() || otherType.canProduce() ? 32 : structureGap;
             if (!separatedByGap(footprint, occupied, exitGap)) return false;
         }
-        for (const auto& [pendingKind, pending] : pendingBuilds_) {
-            if (pendingKind == kind || pendingKind == UnitKind::nexus) continue;
+        for (const auto& [taskId, pending] : pendingBuilds_) {
+            static_cast<void>(taskId);
+            const auto pendingKind = pending.kind;
             const auto pendingType = toBwapi(pendingKind);
+            if (pending.target.x < 0 || pending.target.y < 0 ||
+                pendingType == UnitTypes::None) continue;
             if (!separatedByGap(footprint,
                     {pending.target, pendingType.tileWidth() * 32, pendingType.tileHeight() * 32},
                     type.canProduce() || pendingType.canProduce() ? 32 : structureGap)) return false;
@@ -2277,7 +2743,7 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
     // compact scored defense/production search above responsive every time,
     // but bound the expensive BWAPI checks in the broad sweep. Late-game
     // traces had more than 8,000 candidates per structure on every retry.
-    auto& continuation = placementSearches_[kind];
+    auto& continuation = placementSearches_[taskKey];
     PlacementSearchWindow search(continuation.offset);
     const auto considerFallback = [&](const TilePosition location) {
         return search.visit() ? consider(location) : TilePositions::None;
@@ -2315,6 +2781,11 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
         for (const auto unit : Broodwar->self()->getUnits()) {
             if (unit != nullptr && unit->exists() && unit->isCompleted() &&
                 unit->getType() == UnitTypes::Protoss_Pylon) {
+                if (constructionSite.valid() &&
+                    distanceSquared(fromBwapi(unit->getPosition()),
+                                    constructionSite.anchor) > 512 * 512) {
+                    continue;
+                }
                 pylons.push_back(unit);
             }
         }
@@ -2359,7 +2830,7 @@ BWAPI::TilePosition BwapiBridge::buildLocation(
     // never its validation. Recheck power, occupancy, paths and current enemy
     // fire before accepting it; these are only two additional tile checks.
     const std::array rememberedFallbacks{continuation.fireFallback, continuation.laneFallback};
-    placementSearches_.erase(kind);
+    placementSearches_.erase(taskKey);
     for (const auto location : rememberedFallbacks) {
         if (!location.isValid()) continue;
         const auto accepted = consider(location);
@@ -2433,8 +2904,54 @@ bool BwapiBridge::build(
         lastMacroStatus_ = "build-invalid-type";
         return false;
     }
-    const auto pending = pendingBuilds_.find(action.target);
+    const auto constructionSite = action.constructionSite.valid()
+        ? action.constructionSite : ConstructionTaskSite{};
+    const auto taskId = buildTaskKey(action.target, constructionSite);
+    const auto armBuildLease = [](PendingBuild& pending, const BWAPI::Unit builder,
+                                  const bool prepositioned) {
+        const auto type = toBwapi(pending.kind);
+        const BWAPI::Position center{
+            pending.target.x + type.tileWidth() * 16,
+            pending.target.y + type.tileHeight() * 16};
+        const auto now = Broodwar->getFrameCount();
+        pending.prepositioned = prepositioned;
+        pending.commandIssued = prepositioned ? -1 : now;
+        pending.commandAcknowledged = -1;
+        pending.phase = prepositioned ? BuildTaskPhase::prepositioning
+                                      : BuildTaskPhase::commandPending;
+        pending.lastPosition = fromBwapi(builder->getPosition());
+        pending.lastRouteProgress = now;
+        pending.footprintAccessible = !prepositioned;
+        const auto speedMilli = static_cast<int>(std::lround(
+            std::max(0.001, builder->getType().topSpeed()) * 1000.0));
+        const auto initialDistance = builder->getDistance(center);
+        pending.travelDeadline = now + buildTaskTravelDeadlineFrames(
+            pending.kind, initialDistance, speedMilli,
+            pending.plannedRemotePower);
+    };
+    const auto rememberPending = [this, &action, &constructionSite, &armBuildLease, taskId](
+                                    const BWAPI::Unit builder,
+                                    const BWAPI::TilePosition location,
+                                    const bool prepositioned,
+                                    const bool resourcesPaid) {
+        PendingBuild pending{};
+        pending.kind = action.target;
+        pending.constructionSite = constructionSite;
+        pending.resourcesPaid = resourcesPaid;
+        pending.builder = builder->getID();
+        pending.issued = Broodwar->getFrameCount();
+        pending.target = fromBwapi(BWAPI::Position(location));
+        pending.plannedRemotePower = action.target == UnitKind::pylon &&
+            action.reason == "power the new PvZ natural before pressure";
+        armBuildLease(pending, builder, prepositioned);
+        pendingBuilds_.insert_or_assign(taskId, std::move(pending));
+    };
+    const auto pending = pendingBuilds_.find(taskId);
     if (pending != pendingBuilds_.end()) {
+        if (pending->second.cancellation.awaiting()) {
+            lastMacroStatus_ = "build-cancel-awaiting-ack";
+            return false;
+        }
         const auto leasedBuilder = Broodwar->getUnit(pending->second.builder);
         if (leasedBuilder != nullptr && leasedBuilder->exists()) {
             const auto last = leasedBuilder->getLastCommand();
@@ -2455,11 +2972,9 @@ bool BwapiBridge::build(
         if (action.target == UnitKind::nexus && leasedBuilder != nullptr && leasedBuilder->exists() &&
             leasedBuilder->getDistance(toBwapiPosition(routeTarget)) > 256 &&
             influence.maximumGroundThreat(fromBwapi(leasedBuilder->getPosition()), routeTarget) > 0.25F) {
-            issue(UnitCommand::stop(leasedBuilder), "build-route-danger");
-            failedBuildSites_.push_back({action.target, pending->second.target,
-                                          Broodwar->getFrameCount() + 60 * 24});
-            pendingBuilds_.erase(pending);
-            lastMacroStatus_ = "build-route-danger";
+            requestBuildCancellation(pending->second, leasedBuilder, "build-route-danger");
+            lastMacroStatus_ = pending->second.cancellation.awaiting() ?
+                "build-route-danger-awaiting-ack" : "build-route-danger-cancel-rejected";
             return false;
         }
         // Expansions may be pre-positioned into unexplored fog before BWAPI
@@ -2497,7 +3012,9 @@ bool BwapiBridge::build(
             if (builder != nullptr && builder->exists() && builder->isCompleted() &&
                 builder->getDistance(center) <= 96 &&
                 Broodwar->canBuildHere(targetTile, type, builder, true) &&
-                issue(UnitCommand::build(builder, targetTile, type), action.reason)) {
+                issue(UnitCommand::build(builder, targetTile, type), action.reason,
+                      ResourceUse::committed, &pending->second.resourcesPaid)) {
+                armBuildLease(pending->second, builder, false);
                 lastMacroStatus_ = "issued-pending-Nexus";
                 return true;
             }
@@ -2520,7 +3037,9 @@ bool BwapiBridge::build(
             if (builder != nullptr && builder->exists() && builder->isCompleted() &&
                 builder->getDistance(center) <= 96 &&
                 Broodwar->canBuildHere(targetTile, type, builder, true) &&
-                issue(UnitCommand::build(builder, targetTile, type), action.reason)) {
+                issue(UnitCommand::build(builder, targetTile, type), action.reason,
+                      ResourceUse::committed, &pending->second.resourcesPaid)) {
+                armBuildLease(pending->second, builder, false);
                 lastMacroStatus_ = "issued-pending-" +
                                    std::string(unitStats(action.target).name);
                 return true;
@@ -2538,8 +3057,10 @@ bool BwapiBridge::build(
     }
     // Builder route checks must use the home placement anchor, not an unsafe
     // forward rally which the placement search will never use for this tech.
-    const auto near = toBwapiPosition(constructionBuilderAnchor(
-        action.target, fromBwapi(home), plan.rallyPoint, plan.expansionTarget));
+    const auto near = toBwapiPosition(constructionSite.valid()
+        ? constructionSite.anchor
+        : constructionBuilderAnchor(action.target, fromBwapi(home), plan.rallyPoint,
+                                    plan.expansionTarget));
     const auto builder = findBuilder(type, near, influence, unavailableBuilders);
     if (builder == nullptr) {
         lastMacroStatus_ = "build-no-builder";
@@ -2549,12 +3070,13 @@ bool BwapiBridge::build(
         lastMacroStatus_ = "build-cannot-make";
         return false;
     }
-    const auto location = buildLocation(action.target, type, builder, plan);
+    const auto location = buildLocation(action.target, type, builder, plan,
+                                        constructionSite, taskId, action.reason);
     if (!location.isValid()) {
         lastMacroStatus_ = "build-no-location-" + lastMacroStatus_;
         return false;
     }
-    placementSearches_.erase(action.target);
+    placementSearches_.erase(taskId);
     if (type.requiresPsi() && !Broodwar->hasPower(location, type)) {
         lastMacroStatus_ = "build-unpowered-location";
         return false;
@@ -2573,10 +3095,7 @@ bool BwapiBridge::build(
                 location.y * 32 + type.tileHeight() * 16,
             };
             if (issue(UnitCommand::move(builder, center), "build-preposition")) {
-                pendingBuilds_[action.target] = {
-                    builder->getID(), Broodwar->getFrameCount(),
-                    fromBwapi(BWAPI::Position(location)), true,
-                };
+                rememberPending(builder, location, true, false);
                 lastMacroStatus_ = "build-preposition-Nexus";
                 return false;
             }
@@ -2602,14 +3121,10 @@ bool BwapiBridge::build(
             });
         } catch (...) { ++diagnosticErrors_; }
     }
-    if (issue(UnitCommand::build(builder, location, type), action.reason)) {
-        pendingBuilds_[action.target] = {
-            builder->getID(), Broodwar->getFrameCount(),
-            fromBwapi(BWAPI::Position(location)), false,
-        };
-        pendingBuilds_[action.target].plannedRemotePower =
-            action.target == UnitKind::pylon &&
-            action.reason == "power the new PvZ natural before pressure";
+    auto resourcesPaid = false;
+    if (issue(UnitCommand::build(builder, location, type), action.reason,
+              ResourceUse::committed, &resourcesPaid)) {
+        rememberPending(builder, location, false, resourcesPaid);
         return true;
     }
     // Only placement failures invalidate terrain. A transient worker/resource
@@ -2635,42 +3150,61 @@ bool BwapiBridge::train(const MacroAction& action) {
         return false;
     }
     const auto producerType = type.whatBuilds().first;
-    Unit selected = nullptr;
+    std::vector<TrainingProducerCandidate> candidates;
     for (const auto producer : Broodwar->self()->getUnits()) {
+        if (producer == nullptr || !producer->exists() ||
+            producer->getType() != producerType) continue;
         const auto lastCommand = producer != nullptr ? producer->getLastCommand()
                                                      : BWAPI::UnitCommand{};
         const auto recentTrainingCommand =
-            producer != nullptr &&
             lastCommand.getType() == BWAPI::UnitCommandTypes::Train &&
             producer->getLastCommandFrame() +
                     std::max(1, Broodwar->getLatencyFrames()) >=
                 Broodwar->getFrameCount();
-        if (producer == nullptr || !producer->exists() || !producer->isCompleted() ||
-            producer->getType() != producerType ||
-            !trainingSlotAvailable(producer->isTraining() || producer->getRemainingTrainTime() > 0,
-                                   static_cast<int>(producer->getTrainingQueue().size()),
-                                   producer->getRemainingTrainTime(),
-                                   Broodwar->getRemainingLatencyFrames(), recentTrainingCommand) ||
-            !producer->isPowered() || !producer->canTrain(type)) {
+        const auto queue = producer->getTrainingQueue();
+        candidates.push_back({
+            producer->getID(), producer->isCompleted(), producer->isPowered(),
+            producer->isLockedDown() || producer->isMaelstrommed() ||
+                producer->isStasised(),
+            producer->isLoaded(), producer->isHallucination(), producer->canTrain(type),
+            producer->isTraining() || producer->getRemainingTrainTime() > 0,
+            static_cast<int>(queue.size()), producer->getRemainingTrainTime(),
+            Broodwar->getRemainingLatencyFrames(), recentTrainingCommand,
+            producer->isResearching(), producer->isUpgrading(),
+        });
+    }
+    auto foundCandidate = false;
+    auto failedCanMake = false;
+    std::string rejectedReason;
+    while (const auto selectedId = selectTrainingProducer(candidates)) {
+        foundCandidate = true;
+        std::erase_if(candidates, [&selectedId](const TrainingProducerCandidate& candidate) {
+            return candidate.id == *selectedId;
+        });
+        const auto selected = Broodwar->getUnit(*selectedId);
+        if (selected == nullptr || !selected->exists()) continue;
+        if (!Broodwar->canMake(type, selected)) {
+            failedCanMake = true;
             continue;
         }
-        if (selected == nullptr || producer->getID() < selected->getID()) {
-            selected = producer;
-        }
+        if (issue(UnitCommand::train(selected, type), action.reason,
+                  ResourceUse::committed)) return true;
+        rejectedReason = lastIssueError_.toString();
+        // BWAPI can observe a producer becoming busy between snapshot and
+        // command issue. The shared ledger is charged only on acceptance, so
+        // a busy/vanished actor can safely retry the next concrete producer.
+        if (lastIssueError_ != Errors::Unit_Busy &&
+            lastIssueError_ != Errors::Unit_Does_Not_Exist) break;
     }
-    if (selected == nullptr) {
-        lastMacroStatus_ = "train-no-idle-producer-" + std::string(unitStats(action.target).name);
-        return false;
-    }
-    if (!Broodwar->canMake(type, selected)) {
+    if (!rejectedReason.empty()) {
+        lastMacroStatus_ = "train-command-rejected-" + rejectedReason;
+    } else if (foundCandidate && failedCanMake) {
         lastMacroStatus_ = "train-cannot-make-" + std::string(unitStats(action.target).name);
-        return false;
+    } else {
+        lastMacroStatus_ = "train-no-idle-producer-" +
+                           std::string(unitStats(action.target).name);
     }
-    if (!issue(UnitCommand::train(selected, type), action.reason)) {
-        lastMacroStatus_ = "train-command-rejected-" + lastIssueError_.toString();
-        return false;
-    }
-    return true;
+    return false;
 }
 
 bool BwapiBridge::executeTechnology(const MacroAction& action) {
@@ -2683,7 +3217,8 @@ bool BwapiBridge::executeTechnology(const MacroAction& action) {
         const auto producer = technologyProducer(self->getUnits(), [tech](const Unit candidate) {
             return candidate->getType() == tech.whatResearches() && candidate->canResearch(tech);
         });
-        return producer != nullptr && issue(UnitCommand::research(producer, tech), action.reason);
+        return producer != nullptr && issue(UnitCommand::research(producer, tech), action.reason,
+                                             ResourceUse::committed);
     }
 
     const auto upgrade = toBwapiUpgrade(action.technology);
@@ -2694,7 +3229,8 @@ bool BwapiBridge::executeTechnology(const MacroAction& action) {
     const auto producer = technologyProducer(self->getUnits(), [upgrade](const Unit candidate) {
         return candidate->getType() == upgrade.whatUpgrades() && candidate->canUpgrade(upgrade);
     });
-    return producer != nullptr && issue(UnitCommand::upgrade(producer, upgrade), action.reason);
+    return producer != nullptr && issue(UnitCommand::upgrade(producer, upgrade), action.reason,
+                                         ResourceUse::committed);
 }
 
 BWAPI::Position BwapiBridge::toBwapiPosition(const Position position) noexcept {

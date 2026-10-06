@@ -166,7 +166,8 @@ std::span<const UnitKind> unitPrerequisites(const UnitKind kind) noexcept {
     static constexpr UnitKind core[]{UnitKind::cyberneticsCore};
     static constexpr UnitKind gatewayCore[]{UnitKind::gateway, UnitKind::cyberneticsCore};
     static constexpr UnitKind robotics[]{UnitKind::roboticsFacility};
-    static constexpr UnitKind observatory[]{UnitKind::roboticsFacility, UnitKind::observatory};
+    static constexpr UnitKind observer[]{UnitKind::roboticsFacility,
+                                         UnitKind::observatory};
     static constexpr UnitKind supportBay[]{UnitKind::roboticsFacility, UnitKind::roboticsSupportBay};
     static constexpr UnitKind stargate[]{UnitKind::stargate};
     static constexpr UnitKind citadel[]{UnitKind::citadelOfAdun};
@@ -197,7 +198,7 @@ std::span<const UnitKind> unitPrerequisites(const UnitKind kind) noexcept {
         case UnitKind::highTemplar:
         case UnitKind::darkTemplar: return archives;
         case UnitKind::reaver: return supportBay;
-        case UnitKind::observer: return observatory;
+        case UnitKind::observer: return observer;
         case UnitKind::shuttle: return robotics;
         case UnitKind::scout:
         case UnitKind::corsair: return stargate;

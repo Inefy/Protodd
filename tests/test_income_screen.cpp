@@ -141,9 +141,12 @@ int main() {
     for (int i = 0; i < 16; ++i) state.self.units.push_back(unit(10 + i, UnitKind::probe));
     for (int i = 0; i < 8; ++i) state.self.units.push_back(unit(30 + i, UnitKind::zealot));
     BaseSnapshot main; main.id = 0; main.ownerId = 1; main.center = {320, 320};
+    main.mineralLine = {360, 320}; main.mineralPatches = 8;
     main.mineralsRemaining = 3500;
     BaseSnapshot natural; natural.id = 1; natural.ownerId = -1;
-    natural.center = {960, 320}; natural.mineralsRemaining = 12000; natural.geysers = 1;
+    natural.center = {960, 320}; natural.mineralLine = {1000, 320};
+    natural.mineralsRemaining = 12000; natural.mineralPatches = 8;
+    natural.geysers = 1; natural.groundDistanceFromMain = 640;
     state.bases = {main, natural};
     StrategyEngine strategy;
     ThreatAssessment threat;
@@ -154,6 +157,42 @@ int main() {
     check(!paid(actions, UnitKind::zealot) && !paid(actions, UnitKind::probe),
           "routine production consumed the replacement Nexus bank");
     check(paid(run(plan, 400), UnitKind::nexus), "replacement mining never reached the spend threshold");
+    check(plan.estimatedMiningRunwayFrames > 0 &&
+          plan.estimatedMiningRunwayFrames <= 10 * 60 * 24,
+          "mining runway was not estimated from the owned mineral bank and worker count");
+
+    auto simultaneous = state;
+    simultaneous.bases[0].mineralsRemaining = 2200;
+    simultaneous.bases[1].ownerId = state.self.id;
+    simultaneous.bases[1].mineralsRemaining = 2600;
+    auto third = natural;
+    third.id = 2; third.ownerId = -1; third.center = {1600, 320};
+    third.mineralLine = {1640, 320}; third.mineralsRemaining = 14000;
+    third.groundDistanceFromMain = 1280;
+    simultaneous.bases.push_back(third);
+    auto secondNexus = unit(480, UnitKind::nexus);
+    secondNexus.position = simultaneous.bases[1].center;
+    simultaneous.self.units.push_back(secondNexus);
+    const auto multiBasePlan = strategy.plan(simultaneous, threat);
+    check(multiBasePlan.estimatedMiningRunwayFrames > 0 &&
+          multiBasePlan.estimatedMiningRunwayFrames <= 10 * 60 * 24 &&
+          multiBasePlan.desiredBases >= 3 &&
+          multiBasePlan.expansionTarget == third.center &&
+          std::ranges::any_of(multiBasePlan.goals, [](const ProductionGoal& goal) {
+              return goal.goal == GoalKind::expand && goal.target == UnitKind::nexus &&
+                     goal.priority == 114 && goal.blocking;
+          }), "simultaneous depleted bases did not start a ready third-base replacement");
+
+    auto noNextBase = state;
+    noNextBase.bases.resize(1);
+    noNextBase.bases[0].mineralsRemaining = 2600;
+    const auto survivalPlan = strategy.plan(noNextBase, threat);
+    check(survivalPlan.posture == Posture::recover && survivalPlan.deferExpansion &&
+          !survivalPlan.expansionTarget.valid() && survivalPlan.desiredBases == 1 &&
+          std::ranges::any_of(survivalPlan.goals, [](const ProductionGoal& goal) {
+              return goal.target == UnitKind::probe && goal.priority == 118 && goal.blocking;
+          }), "no ready next base did not produce an explicit worker-preservation plan");
+
     auto closing = state;
     closing.self.supplyTotal = 400; closing.self.supplyUsed = 392;
     const auto closeout = strategy.plan(closing, threat);

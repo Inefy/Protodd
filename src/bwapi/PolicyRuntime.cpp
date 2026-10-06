@@ -1,15 +1,15 @@
 #include "PolicyRuntime.hpp"
+#include "BoundedFile.hpp"
 #include <BWAPI.h>
 #include <algorithm>
 #include <filesystem>
-#include <iterator>
 #include <vector>
 
 namespace protodd::bwapi {
 namespace {
-std::string read(const char* path) {
-    std::ifstream f(path, std::ios::binary);
-    return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
+std::string read(const char* path, const std::size_t maximumBytes = 64 * 1024) {
+    const auto result = readBoundedFile(path, maximumBytes);
+    return result.withinLimit ? result.contents : std::string{"invalid-oversized-input"};
 }
 }
 void PolicyRuntime::start() {
@@ -19,7 +19,7 @@ void PolicyRuntime::start() {
     nextFrame_ = 0;
     action_ = PolicyAction::balanced;
     learner_ = PolicyLearner{};
-    const auto snapshot = read("bwapi-data/read/Policy.q");
+    const auto snapshot = read("bwapi-data/read/Policy.q", 64 * 1024 * 1024);
     const auto loaded = snapshot.empty() || learner_.parse(snapshot);
     weightsLoaded_ = !snapshot.empty() && loaded;
     if (!loaded) enabled_ = false; // fail closed, don't silently train a corrupt table

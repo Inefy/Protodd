@@ -35,6 +35,8 @@ struct SlotOutput {
 
 class WholeGameCpu {
 public:
+    static constexpr std::size_t maximumParameterCount = 16'000'000;
+
     explicit WholeGameCpu(const std::filesystem::path& weights);
     explicit WholeGameCpu(std::span<const std::uint8_t> weights);
     [[nodiscard]] Output infer(const Observation& observation,

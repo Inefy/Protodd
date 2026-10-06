@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+$provenanceModule = Join-Path $repo 'scripts/MatchProvenance.psm1'
+Import-Module $provenanceModule -Force
 $scriptPath = Join-Path $repo 'scripts/direct-match.ps1'
 $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$parseErrors)
@@ -9,6 +11,23 @@ $function = $ast.Find({param($node)
 }, $true)
 if (-not $function) { throw 'Missing runtime crash detector' }
 . ([ScriptBlock]::Create($function.Extent.Text))
+$terminalFunction = $ast.Find({param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-MatchTerminalResult'
+}, $true)
+if (-not $terminalFunction) { throw 'Missing match-result parser' }
+. ([ScriptBlock]::Create($terminalFunction.Extent.Text))
+if ((Get-MatchTerminalResult -Lines @('END,win,2400') -LogName 'Protodd.log') -ne 'END,win,2400') {
+    throw 'Protodd terminal result was not preserved'
+}
+if ((Get-MatchTerminalResult -Lines @('END,2400,1') -LogName 'RaceBot.log') -ne 'END,win,2400') {
+    throw 'RaceBot winner was not normalized to the match result format'
+}
+if ((Get-MatchTerminalResult -Lines @('END,2400,0') -LogName 'RaceBot.log') -ne 'END,loss,2400') {
+    throw 'RaceBot loss was not normalized to the match result format'
+}
+if (Get-MatchTerminalResult -Lines @('SNAPSHOT,1200,workers=8') -LogName 'RaceBot.log') {
+    throw 'A nonterminal snapshot was treated as a completed match'
+}
 
 $fixturePrefix = [IO.Path]::GetFullPath((Join-Path $repo 'build/direct-match-test-fixtures')).TrimEnd('\') + '\'
 $fixtureRoot = [IO.Path]::GetFullPath((Join-Path $fixturePrefix ([guid]::NewGuid().ToString())))
@@ -19,6 +38,52 @@ $runtimeA = Join-Path $fixtureRoot 'host'
 $runtimeB = Join-Path $fixtureRoot 'opponent'
 $script:startedAtUtc = [DateTime]::UtcNow.AddMinutes(-1)
 try {
+    $provenanceRoot = Join-Path $fixtureRoot 'provenance'
+    New-Item -ItemType Directory -Path $provenanceRoot -Force | Out-Null
+    $inputFiles = [ordered]@{}
+    foreach ($role in @('bot_dll', 'engine_dll', 'map', 'opponent_dll', 'host_ini')) {
+        $path = Join-Path $provenanceRoot $role
+        [IO.File]::WriteAllText($path, "frozen:$role")
+        $inputFiles[$role] = $path
+    }
+    $configuration = [ordered]@{
+        map = 'Python.scx'
+        seed_requested = 42
+        opponent = [ordered]@{name = 'Iron'; race = 'Terran'}
+    }
+    $manifest = New-MatchInputManifest -Files $inputFiles -Configuration $configuration
+    if (-not (Assert-MatchInputManifest -Manifest $manifest)) {
+        throw 'An unchanged match preflight manifest failed verification'
+    }
+    $preflightPath = Join-Path $provenanceRoot 'match.preflight.json'
+    $preflightInfo = Write-MatchInputManifest -Manifest $manifest -Path $preflightPath
+    if ((Get-FileHash -LiteralPath $preflightPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+        $preflightInfo.sha256) {
+        throw 'The recorded preflight file hash does not match its contents'
+    }
+    foreach ($role in $inputFiles.Keys) {
+        $original = [IO.File]::ReadAllBytes($inputFiles[$role])
+        try {
+            [IO.File]::WriteAllText($inputFiles[$role], "substituted:$role")
+            $rejected = $false
+            try { [void](Assert-MatchInputManifest -Manifest $manifest) }
+            catch { $rejected = $_.Exception.Message -match "changed before launch \($role\)" }
+            if (-not $rejected) { throw "Preflight did not reject substituted input $role" }
+        } finally {
+            [IO.File]::WriteAllBytes($inputFiles[$role], $original)
+        }
+    }
+    $mutatedConfiguration = New-MatchInputManifest -Files $inputFiles -Configuration $configuration
+    $mutatedConfiguration.configuration.seed_requested = 99
+    $configurationRejected = $false
+    try { [void](Assert-MatchInputManifest -Manifest $mutatedConfiguration) }
+    catch { $configurationRejected = $_.Exception.Message -match 'configuration changed' }
+    if (-not $configurationRejected) { throw 'Preflight did not reject a substituted seed/configuration' }
+    $duplicatePreflightRejected = $false
+    try { [void](Write-MatchInputManifest -Manifest $manifest -Path $preflightPath) }
+    catch { $duplicatePreflightRejected = $true }
+    if (-not $duplicatePreflightRejected) { throw 'An existing preflight manifest was overwritten' }
+
     foreach ($runtime in @($runtimeA, $runtimeB)) {
         New-Item -ItemType Directory -Path (Join-Path $runtime 'Errors') -Force | Out-Null
     }

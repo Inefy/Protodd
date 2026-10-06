@@ -83,6 +83,16 @@ void CommandBus::clear() {
     fairnessCursor_ = 0;
 }
 
+void CommandBus::forgetUnit(const UnitId id) {
+    if (id < 0) return;
+    std::erase_if(pending_, [id](const Command& command) {
+        return command.actor == id || command.targetUnit == id;
+    });
+    std::erase_if(lastIssued_, [id](const auto& entry) {
+        return entry.first == id || entry.second.command.targetUnit == id;
+    });
+}
+
 bool CommandBus::redundant(const Command& command) const {
     if (command.alreadyActive) return true;
     const auto found = lastIssued_.find(command.actor);

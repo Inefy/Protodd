@@ -2,11 +2,24 @@
 // adds no commands; it records the complete callback and ends the local fixture.
 #include <BWAPI.h>
 #include <windows.h>
+#include <psapi.h>
 #include <fstream>
 #include <chrono>
 class AuditLoad final : public BWAPI::AIModule {
     BWAPI::AIModule* bot{};
     std::ofstream timing,events;
+    void recordMemory(const int frame) {
+        PROCESS_MEMORY_COUNTERS_EX memory{};
+        memory.cb=sizeof(memory);
+        if(GetProcessMemoryInfo(GetCurrentProcess(),
+            reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),sizeof(memory))) {
+            events << "MEMORY," << frame << ',' << memory.WorkingSetSize << ','
+                   << memory.PeakWorkingSetSize << ',' << memory.PrivateUsage << ','
+                   << memory.PagefileUsage << '\n';
+        } else {
+            events << "MEMORY_FAILED," << frame << ',' << GetLastError() << '\n';
+        }
+    }
 public:
     void onStart() override {
         events.open("bwapi-data/write/load-scenario.csv");
@@ -17,13 +30,14 @@ public:
         init(BWAPI::BroodwarPtr);bot=create();bot->onStart();
         BWAPI::Broodwar->setLocalSpeed(0);BWAPI::Broodwar->setFrameSkip(256);
         timing.open("bwapi-data/write/full-callback-us.bin",std::ios::binary);
-        events << "START," << BWAPI::Broodwar->self()->getUnits().size() << ',' << BWAPI::Broodwar->enemy()->getUnits().size() << ',' << BWAPI::Broodwar->self()->supplyUsed() << '\n';events.flush();
+        events << "START," << BWAPI::Broodwar->self()->getUnits().size() << ',' << BWAPI::Broodwar->enemy()->getUnits().size() << ',' << BWAPI::Broodwar->self()->supplyUsed() << '\n';
+        recordMemory(-1);events.flush();
     }
     void onFrame() override {
         auto begin=std::chrono::steady_clock::now();bot->onFrame();
         auto us=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-begin).count();
         timing.write(reinterpret_cast<const char*>(&us),sizeof(us));
-        if(BWAPI::Broodwar->getFrameCount()%120==0){events << "FRAME," << BWAPI::Broodwar->getFrameCount() << ',' << BWAPI::Broodwar->self()->getUnits().size() << ',' << BWAPI::Broodwar->enemy()->getUnits().size() << '\n';events.flush();}
+        if(BWAPI::Broodwar->getFrameCount()%120==0){events << "FRAME," << BWAPI::Broodwar->getFrameCount() << ',' << BWAPI::Broodwar->self()->getUnits().size() << ',' << BWAPI::Broodwar->enemy()->getUnits().size() << '\n';recordMemory(BWAPI::Broodwar->getFrameCount());events.flush();}
         if(BWAPI::Broodwar->getFrameCount()>=1200) BWAPI::Broodwar->leaveGame();
     }
     void onEnd(bool won) override {bot->onEnd(won);timing.flush();events << "DONE," << BWAPI::Broodwar->getFrameCount() << '\n';events.flush();ExitProcess(0);}

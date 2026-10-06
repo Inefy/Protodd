@@ -32,11 +32,24 @@ struct PhaseTiming {
     std::uint64_t calls{};
     std::int64_t totalUs{};
     std::int64_t peakUs{};
+    std::int64_t movingAverageUs{};
+    std::uint64_t budgetDeferred{};
     void record(std::int64_t us) noexcept {
         us = std::max<std::int64_t>(0, us);
+        movingAverageUs = calls == 0 ? us : (movingAverageUs * 7 + us * 3) / 10;
         ++calls;
         totalUs += us;
         peakUs = std::max(peakUs, us);
+    }
+    void deferForBudget() noexcept { ++budgetDeferred; }
+    [[nodiscard]] std::int64_t estimatedUs(
+        const std::int64_t firstRunEstimateUs,
+        const std::int64_t maximumEstimateUs = 16'000) const noexcept {
+        const auto minimum = std::max<std::int64_t>(0, firstRunEstimateUs);
+        const auto maximum = std::max(minimum, maximumEstimateUs);
+        if (calls == 0) return minimum;
+        const auto margin = std::max<std::int64_t>(1'000, movingAverageUs / 2);
+        return std::clamp(movingAverageUs + margin, minimum, maximum);
     }
 };
 

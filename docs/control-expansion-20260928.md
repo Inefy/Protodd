@@ -131,6 +131,13 @@ ground threat was observed at that site. The focused same-seed game logged
 episode shows that late emergency remote mining cannot compensate for an army
 that never secures a new income site.
 
+T037 retires that neutral-site prepositioning behavior. The optional flag now
+prioritizes at most eight workers per update only after a planned expansion is
+owned by a completed Nexus; generic transfers use the same group bound.
+Assignments require an A* terrain route and reject known ground threat along
+the route, and mineral/gas destinations must still be active and protected.
+The rule remains disabled in the tournament profile.
+
 ## PvT contain and attack conversion
 
 The Destination side-1 trace shows a 16-unit main group at frame 24,000 with

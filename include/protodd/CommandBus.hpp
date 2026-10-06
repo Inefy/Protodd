@@ -58,6 +58,7 @@ public:
         std::size_t maximumCommands = std::numeric_limits<std::size_t>::max());
     void markIssued(const Command& command);
     void clear();
+    void forgetUnit(UnitId id);
     [[nodiscard]] const CommandStats& stats() const noexcept { return stats_; }
 
 private:

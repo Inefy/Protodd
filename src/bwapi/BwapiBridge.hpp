@@ -1,6 +1,8 @@
 #pragma once
 
 #include "protodd/Combat.hpp"
+#include "protodd/BuildCancellation.hpp"
+#include "protodd/BuildTaskProgress.hpp"
 #include "protodd/CommandBus.hpp"
 #include "protodd/GameState.hpp"
 #include "protodd/InfluenceMap.hpp"
@@ -108,11 +110,14 @@ public:
     [[nodiscard]] std::uint64_t diagnosticErrors() const noexcept { return diagnosticErrors_; }
 
     void onStart();
+    void setSpendingLedger(ResourceLedger* ledger) noexcept { spendingLedger_ = ledger; }
     [[nodiscard]] GameState observe();
     [[nodiscard]] NavigationGrid navigationGrid() const;
     void remember(BWAPI::Unit unit);
     void forget(BWAPI::Unit unit);
     [[nodiscard]] std::vector<UnitId> reservedBuilders() const;
+    [[nodiscard]] bool pendingBuildAlreadyPaid(const MacroAction& action) const;
+    [[nodiscard]] std::vector<BuildBlockerFeedback> buildBlockerFeedback() const;
     [[nodiscard]] std::string_view lastMacroStatus() const noexcept {
         return lastMacroStatus_;
     }
@@ -135,7 +140,7 @@ public:
         int maximumCommands = 8);
     void executeWorkers(std::span<const WorkerAssignment> assignments);
     void executeScouts(std::span<const ScoutOrder> orders);
-    void runMaintenance(int mineralReserve = 0, int gasReserve = 0);
+    void runMaintenance();
     void drawDebug(
         const GameState& state,
         const StrategicPlan& plan,
@@ -154,14 +159,23 @@ private:
     };
 
     struct PendingBuild {
+        UnitKind kind{UnitKind::unknown};
+        ConstructionTaskSite constructionSite{};
+        bool resourcesPaid{};
+        BuildTaskPhase phase{BuildTaskPhase::commandPending};
         UnitId builder{-1};
         Frame issued{};
+        Frame commandIssued{-1};
+        Frame travelDeadline{-1};
+        Frame commandAcknowledged{-1};
         // Pixel coordinates of the exact top-left build tile for every type.
         Position target{-1, -1};
         bool prepositioned{};
         Position lastPosition{-1, -1};
-        Frame lastProgress{-1};
+        Frame lastRouteProgress{-1};
+        bool footprintAccessible{};
         bool plannedRemotePower{};
+        BuildCancellation cancellation{};
     };
 
     struct FailedBuildSite {
@@ -189,9 +203,12 @@ private:
     MineralAllocator mineralAllocator_;
     std::unordered_map<int, Frame> baseLastScouted_;
     std::unordered_map<int, Frame> baseLastConfirmedEmpty_;
-    std::unordered_map<UnitKind, PendingBuild> pendingBuilds_;
+    // Stable task IDs allow same-kind structures at separate bases to retain
+    // independent builders, placements, retries, and completion feedback.
+    std::unordered_map<std::uint64_t, PendingBuild> pendingBuilds_;
+    std::unordered_map<std::uint64_t, BuildBlockerFeedback> buildBlockers_;
     std::vector<FailedBuildSite> failedBuildSites_;
-    std::unordered_map<UnitKind, PlacementSearchState> placementSearches_;
+    std::unordered_map<std::uint64_t, PlacementSearchState> placementSearches_;
     std::unordered_map<UnitId, Frame> unitCommandLocks_;
     std::unordered_map<UnitId, Frame> learnedCommandLeases_;
     std::vector<ResourceSite> resourceSites_;
@@ -199,10 +216,16 @@ private:
     std::vector<SpellZone> recentAreaSpells_;
     std::string lastMacroStatus_{"idle"};
     std::vector<MacroExecution> macroExecutions_;
+    ResourceLedger* spendingLedger_{};
     BWAPI::Error lastIssueError_{BWAPI::Errors::None};
     std::uint64_t diagnosticErrors_{};
 
-    bool issue(const BWAPI::UnitCommand& command, std::string_view source);
+    enum class ResourceUse : std::uint8_t { available, committed };
+    bool issue(const BWAPI::UnitCommand& command, std::string_view source,
+               ResourceUse resourceUse = ResourceUse::available,
+               bool* resourcesPaid = nullptr);
+    bool requestBuildCancellation(PendingBuild& pending, BWAPI::Unit builder,
+                                 std::string_view source);
     bool reject(const Command& command, std::string_view reason);
 
     [[nodiscard]] static Race toRace(BWAPI::Race race) noexcept;
@@ -219,12 +242,21 @@ private:
         BWAPI::UnitType type,
         BWAPI::Position near,
         const InfluenceMap& influence,
-        std::span<const UnitId> unavailableBuilders) const;
+        std::span<const UnitId> unavailableBuilders,
+        bool requireCanBuild = true) const;
+    void recordBuildBlocker(const MacroAction& action, BuildBlockerReason reason,
+                            Frame retryFrames);
+    void inspectUnfundedBuild(const MacroAction& action, const StrategicPlan& plan,
+                              const InfluenceMap& influence,
+                              std::span<const UnitId> unavailableBuilders);
     [[nodiscard]] BWAPI::TilePosition buildLocation(
         UnitKind kind,
         BWAPI::UnitType type,
         BWAPI::Unit builder,
-        const StrategicPlan& plan);
+        const StrategicPlan& plan,
+        const ConstructionTaskSite& constructionSite,
+        std::uint64_t taskKey,
+        std::string_view reason);
     [[nodiscard]] bool blocksMiningLane(
         BWAPI::TilePosition tile,
         BWAPI::UnitType type) const;

@@ -293,6 +293,21 @@ void ScoutManager::reset() noexcept {
     observerEscapeWaypoint_.clear();
 }
 
+void ScoutManager::forgetUnit(const UnitId id) noexcept {
+    if (id < 0) return;
+    previousOrders_.erase(id);
+    observerEvadeUntil_.erase(id);
+    observerEscapeWaypoint_.erase(id);
+    if (workerScout_ != id) return;
+    workerScout_ = -1;
+    workerMissionStarted_ = -1;
+    nextWorkerMission_ = 0;
+    openingMission_ = false;
+    returningMission_ = false;
+    harasser_.reset();
+    returnHarasser_.reset();
+}
+
 bool ScoutManager::observerInDanger(
     const GameState& state, const UnitSnapshot& observer,
     const InfluenceMap& influence) noexcept {

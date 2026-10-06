@@ -266,6 +266,14 @@ void TransportController::reset() {
     nextLaunch_.clear();
 }
 
+void TransportController::forgetUnit(const UnitId id) {
+    if (id < 0) return;
+    std::erase_if(missions_, [id](const auto& entry) {
+        return entry.first == id || entry.second.reaver == id;
+    });
+    nextLaunch_.erase(id);
+}
+
 bool TransportController::ownsReaver(const UnitId id) const {
     return std::ranges::any_of(missions_, [id](const auto& entry) { return entry.second.reaver == id; });
 }

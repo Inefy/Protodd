@@ -98,41 +98,34 @@ try {
 } finally { Pop-Location; $env:CL = $savedCl }
 $dll = Join-Path $root 'bwapi/BWAPI/Release/BWAPI.dll'
 if (-not (Test-Path -LiteralPath $dll)) { throw "Patched DLL not found: $dll" }
+$dllHash = (Get-FileHash -LiteralPath $dll).Hash.ToLowerInvariant()
 "BWAPI_RUNTIME=$dll"
-"SHA256=$((Get-FileHash -LiteralPath $dll).Hash)"
+"SHA256=$dllHash"
 if ($Deploy) {
     if (Get-Process StarCraft -ErrorAction SilentlyContinue) {
-        throw 'StarCraft started during the build; stop it before deploying'
+        throw 'StarCraft started during the build; stop it before publishing a diagnostic profile'
     }
-    $backup = Join-Path $repo 'build/bwapi-runtime-backup'
-    New-Item -ItemType Directory -Path $backup -Force | Out-Null
-    foreach ($runtime in @('direct-template', 'match-runtime-a', 'match-runtime-b')) {
-        $target = Join-Path $repo "build/$runtime/bwapi-data/BWAPI.dll"
-        if (Test-Path -LiteralPath $target) {
-            $digest = (Get-FileHash -LiteralPath $target).Hash
-            $saved = Join-Path $backup "$digest.dll"
-            if (-not (Test-Path -LiteralPath $saved)) { Copy-Item -LiteralPath $target -Destination $saved }
-        }
-        New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
-        Copy-Item -LiteralPath $dll -Destination $target -Force
+    $profileRoot = Join-Path $repo 'build/patched-diagnostic-template/bwapi-data'
+    New-Item -ItemType Directory -Path $profileRoot -Force | Out-Null
+    Copy-Item -LiteralPath $dll -Destination (Join-Path $profileRoot 'BWAPI.dll') -Force
+    $sourceCommit = (& git -C $root rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0) { $sourceCommit = 'source-archive' }
+    $sourcePatch = & git -C $root diff HEAD --binary 2>$null
+    $patchBytes = [Text.Encoding]::UTF8.GetBytes(($sourcePatch -join "`n"))
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $patchHash = [BitConverter]::ToString($sha.ComputeHash($patchBytes)).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    $profile = [ordered]@{
+        schema = 'protodd-patched-runtime-v1'
+        profile = 'patched-diagnostic'
+        source_commit = ([string]$sourceCommit).Trim()
+        source_dirty = @(& git -C $root status --porcelain 2>$null).Count -gt 0
+        patch_sha256 = $patchHash
+        dll_sha256 = $dllHash
+        published_utc = [DateTime]::UtcNow.ToString('o')
     }
-    # Future Tournament Manager campaigns stage their engine from this archive.
-    # Keep historical campaign archives intact and retain the original package.
-    $required = Join-Path $repo 'ladder/manager/server/required/Required_BWAPI_440.zip'
-    if (Test-Path -LiteralPath $required) {
-        $digest = (Get-FileHash -LiteralPath $required).Hash
-        $saved = Join-Path $backup "$digest.zip"
-        if (-not (Test-Path -LiteralPath $saved)) { Copy-Item -LiteralPath $required -Destination $saved }
-        $staged = Join-Path $backup 'Required_BWAPI_440.staged.zip'
-        Copy-Item -LiteralPath $required -Destination $staged -Force
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        $archive = [IO.Compression.ZipFile]::Open($staged, [IO.Compression.ZipArchiveMode]::Update)
-        try {
-            $entry = $archive.GetEntry('bwapi-data/BWAPI.dll')
-            if (-not $entry) { throw 'BWAPI package does not contain the expected runtime entry' }
-            $entry.Delete()
-            [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $dll, 'bwapi-data/BWAPI.dll') | Out-Null
-        } finally { $archive.Dispose() }
-        Move-Item -LiteralPath $staged -Destination $required -Force
-    }
+    $manifestPath = Join-Path $repo 'build/patched-runtime-profile.json'
+    [IO.File]::WriteAllText($manifestPath, ($profile | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
+    "PATCHED_DIAGNOSTIC_PROFILE=$profileRoot"
+    "PROFILE_MANIFEST=$manifestPath"
 }

@@ -2,6 +2,7 @@
 
 #include "protodd/GameState.hpp"
 #include "protodd/InfluenceMap.hpp"
+#include "protodd/Navigation.hpp"
 #include "protodd/Strategy.hpp"
 
 #include <vector>
@@ -18,6 +19,7 @@ enum class WorkerJob : std::uint8_t {
     defend,
     evacuate,
     idle,
+    rebuild,
 };
 
 struct WorkerAssignment {
@@ -77,10 +79,21 @@ public:
         const InfluenceMap& influence,
         std::span<const UnitId> reservedBuilders = {},
         bool evacuateAbandonedBase = false,
-        bool safeRemoteMining = false) const;
+        bool stageExpansionWorkers = false,
+        const NavigationGrid* navigation = nullptr) const;
 
 private:
+    struct EvacuationMemory {
+        Frame lastDangerFrame{-1};
+        Frame firstSeen{-1};
+        int baseId{-1};
+        UnitId threatId{-1};
+        Position refuge{-1, -1};
+    };
+
     mutable GasBankController gasBank_;
+    mutable Frame lastAssignedFrame_{-1};
+    mutable std::unordered_map<UnitId, EvacuationMemory> evacuationMemory_;
     [[nodiscard]] static const BaseSnapshot* safestOwnedBase(
         const GameState& state,
         const InfluenceMap& influence);

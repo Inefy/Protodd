@@ -40,6 +40,7 @@ public:
     [[nodiscard]] RaidMission update(const GameState& state,
         std::span<const UnitSnapshot> available, const StrategicPlan& plan,
         Position home, bool baseThreat, const NavigationGrid* navigation = nullptr);
+    void forgetUnit(UnitId id);
     void reset();
 private:
     RaidMission mission_;

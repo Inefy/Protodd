@@ -4,6 +4,9 @@ project(Protodd VERSION 0.1.0 LANGUAGES CXX)
 
 option(PROTODD_BUILD_TESTS "Build deterministic core tests" ON)
 option(PROTODD_BUILD_BWAPI_MODULE "Build the 32-bit BWAPI tournament DLL" OFF)
+option(PROTODD_TOURNAMENT_PROFILE "Disable interactive debug tools and learned research authority" ON)
+option(PROTODD_DEVELOPER_PROFILE "Enable interactive debug tools for local development" OFF)
+option(PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY "Allow learned policies to start/cancel research and upgrades" OFF)
 option(PROTODD_PRODUCTION_LOCAL_EVALUATION "Enable opt-in early train-unit control in isolated local evaluations" OFF)
 option(PROTODD_TACTICAL_LOCAL_EVALUATION "Enable opt-in replay-trained target selection in isolated local evaluations" OFF)
 option(PROTODD_PVZ_GATEWAY_OPENING "Evaluate a gateway-first PvZ opening in isolated local games" OFF)
@@ -20,7 +23,7 @@ option(PROTODD_CONTESTED_DETECTOR_RESERVE "Evaluate using the scout Observer whe
 option(PROTODD_FORWARD_THIRD_SCREEN "Evaluate escorting a forward PvT third Nexus with the field army" OFF)
 option(PROTODD_BASE_THREAT_EXPANSION_GUARD "Evaluate keeping the field army near a threatened surviving base" OFF)
 option(PROTODD_ABANDONED_BASE_WORKER_EVACUATION "Evaluate evacuating workers from a threatened lost base" OFF)
-option(PROTODD_SAFE_REMOTE_MINING "Evaluate bounded mining at a planned neutral site after owned minerals exhaust" OFF)
+option(PROTODD_SAFE_REMOTE_MINING "Evaluate staging up to eight workers per update at a completed planned expansion" OFF)
 option(PROTODD_BASE_DEFENSE_CONSOLIDATION "Evaluate committing the field army to a heavily threatened economy" OFF)
 option(PROTODD_STATIC_DEFENSE_COVERAGE "Evaluate limiting static-defense allocation credit to covered attackers" OFF)
 option(PROTODD_DETECTOR_WAIT_VOLLEY "Evaluate stationary legal shots while the main army waits for detection" OFF)
@@ -39,11 +42,25 @@ set(BWAPI_LIBRARY "" CACHE FILEPATH "Path to a 32-bit BWAPILIB.lib")
 set(PROTODD_WHOLE_GAME_WEIGHTS "" CACHE FILEPATH "Whole-game model weights to embed in Protodd.dll")
 option(PROTODD_WHOLE_GAME_CONTROL "Allow the embedded whole-game policy to issue BWAPI commands" OFF)
 option(PROTODD_WHOLE_GAME_HYBRID "Retain native systems and arbitrate learned combat targets in local evaluation" OFF)
-option(PROTODD_ALLIN_LOCAL_EVALUATION "Evaluate replay-derived aggressive openings with bounded transitions" OFF)
+option(PROTODD_NATIVE_ALLIN_OPENING "Enable replay-derived native aggressive openings" OFF)
 option(PROTODD_WHOLE_GAME_EVALUATION_BUILD
     "Build a six-slot controller for local evaluation before it has a promotion receipt" OFF)
 set(PROTODD_WHOLE_GAME_PROMOTION_RECEIPT "" CACHE FILEPATH
     "Promotion receipt binding a six-slot tournament policy to its exact weights")
+
+if(PROTODD_TOURNAMENT_PROFILE AND PROTODD_DEVELOPER_PROFILE)
+    message(FATAL_ERROR "Choose either the tournament profile or the developer profile")
+endif()
+if(PROTODD_TOURNAMENT_PROFILE AND PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY)
+    message(FATAL_ERROR "The tournament profile cannot enable learned research authority")
+endif()
+if(PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY AND NOT PROTODD_DEVELOPER_PROFILE)
+    message(FATAL_ERROR "Learned research authority requires the developer profile")
+endif()
+if(PROTODD_BUILD_BWAPI_MODULE AND NOT PROTODD_TOURNAMENT_PROFILE AND
+   NOT PROTODD_DEVELOPER_PROFILE)
+    message(FATAL_ERROR "BWAPI modules require an explicit tournament or developer profile")
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(ProtoddWarnings)
@@ -133,9 +150,6 @@ if(PROTODD_BUILD_BWAPI_MODULE)
     if(PROTODD_WHOLE_GAME_HYBRID AND
        (NOT PROTODD_WHOLE_GAME_CONTROL OR NOT PROTODD_WHOLE_GAME_EVALUATION_BUILD))
         message(FATAL_ERROR "Hybrid control requires a weighted local evaluation controller")
-    endif()
-    if(PROTODD_ALLIN_LOCAL_EVALUATION AND NOT PROTODD_WHOLE_GAME_HYBRID)
-        message(FATAL_ERROR "All-in evaluation requires the weighted hybrid controller")
     endif()
     if(NOT WIN32)
         message(FATAL_ERROR "The injected BWAPI module must be built for 32-bit Windows")
@@ -334,9 +348,9 @@ if(PROTODD_BUILD_BWAPI_MODULE)
         if(PROTODD_WHOLE_GAME_HYBRID)
             target_compile_definitions(protodd_bwapi PRIVATE PROTODD_WHOLE_GAME_HYBRID=1)
         endif()
-        if(PROTODD_ALLIN_LOCAL_EVALUATION)
-            target_compile_definitions(protodd_bwapi PRIVATE PROTODD_ALLIN_LOCAL_EVALUATION=1)
-        endif()
+    endif()
+    if(PROTODD_NATIVE_ALLIN_OPENING)
+        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_NATIVE_ALLIN_OPENING=1)
     endif()
     target_include_directories(protodd_bwapi PRIVATE
         "${BWAPI_INCLUDE_DIR}"
@@ -346,6 +360,15 @@ if(PROTODD_BUILD_BWAPI_MODULE)
     target_link_libraries(protodd_bwapi PRIVATE Protodd::Core "${BWAPI_LIBRARY}")
     target_compile_features(protodd_bwapi PRIVATE cxx_std_20)
     target_compile_definitions(protodd_bwapi PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    if(PROTODD_TOURNAMENT_PROFILE)
+        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_TOURNAMENT_PROFILE=1)
+    endif()
+    if(PROTODD_DEVELOPER_PROFILE)
+        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_DEVELOPER_PROFILE=1)
+    endif()
+    if(PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY)
+        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY=1)
+    endif()
     if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
         target_compile_options(protodd_bwapi PRIVATE /arch:SSE2)
     endif()
@@ -406,9 +429,69 @@ if(PROTODD_BUILD_TESTS)
         target_compile_features(protodd_audit_scenario PRIVATE cxx_std_20)
         target_compile_definitions(protodd_audit_scenario PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
         set_target_properties(protodd_audit_scenario PROPERTIES PREFIX "" OUTPUT_NAME "AuditScenario" SUFFIX ".dll")
+        add_library(protodd_audit_racebot_scenario MODULE
+            tests/bwapi_racebot_audit_scenario.cpp
+            src/bwapi/RaceBotModule.cpp
+            src/bwapi/PolicyRuntime.cpp
+        )
+        target_include_directories(protodd_audit_racebot_scenario PRIVATE
+            "${BWAPI_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src/bwapi")
+        target_link_libraries(protodd_audit_racebot_scenario PRIVATE
+            Protodd::Core "${BWAPI_LIBRARY}")
+        target_compile_features(protodd_audit_racebot_scenario PRIVATE cxx_std_20)
+        target_compile_definitions(protodd_audit_racebot_scenario PRIVATE
+            WIN32_LEAN_AND_MEAN NOMINMAX)
+        protodd_enable_warnings(protodd_audit_racebot_scenario)
+        set_target_properties(protodd_audit_racebot_scenario PROPERTIES
+            PREFIX "" OUTPUT_NAME "RaceBotAuditScenario" SUFFIX ".dll")
+        # This isolated module runs the production ProtoddModule callbacks with
+        # test-only, explicitly configured exception injection. It is never
+        # included in tournament packages.
+        add_library(protodd_audit_fault_scenario MODULE
+            tests/bwapi_fault_scenario.cpp
+            src/bwapi/ProtoddModule.cpp
+            src/bwapi/BwapiBridge.cpp
+            src/bwapi/PolicyRuntime.cpp
+            src/bwapi/ModelRuntime.cpp
+            src/bwapi/ProductionRuntime.cpp
+            src/bwapi/ProductionFeedback.cpp
+            src/bwapi/WholeGameRuntime.cpp
+            src/bwapi/WholeGameAction.cpp
+            src/cpu/WholeGameCpu.cpp
+            src/cpu/WholeGameEncoder.cpp
+            src/cpu/WholeGameIntent.cpp
+        )
+        target_include_directories(protodd_audit_fault_scenario PRIVATE
+            "${BWAPI_INCLUDE_DIR}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/bwapi"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu"
+        )
+        target_link_libraries(protodd_audit_fault_scenario PRIVATE
+            Protodd::Core "${BWAPI_LIBRARY}")
+        target_compile_features(protodd_audit_fault_scenario PRIVATE cxx_std_20)
+        target_compile_definitions(protodd_audit_fault_scenario PRIVATE
+            WIN32_LEAN_AND_MEAN NOMINMAX PROTODD_ENGINE_FAULT_INJECTION=1)
+        if(PROTODD_TOURNAMENT_PROFILE)
+            target_compile_definitions(protodd_audit_fault_scenario PRIVATE
+                PROTODD_TOURNAMENT_PROFILE=1)
+        endif()
+        if(PROTODD_DEVELOPER_PROFILE)
+            target_compile_definitions(protodd_audit_fault_scenario PRIVATE
+                PROTODD_DEVELOPER_PROFILE=1)
+        endif()
+        if(PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY)
+            target_compile_definitions(protodd_audit_fault_scenario PRIVATE
+                PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY=1)
+        endif()
+        if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+            target_compile_options(protodd_audit_fault_scenario PRIVATE /arch:SSE2)
+        endif()
+        protodd_enable_warnings(protodd_audit_fault_scenario)
+        set_target_properties(protodd_audit_fault_scenario PROPERTIES
+            PREFIX "" OUTPUT_NAME "AuditFaultScenario" SUFFIX ".dll")
         add_library(protodd_audit_load MODULE tests/bwapi_audit_load.cpp)
         target_include_directories(protodd_audit_load PRIVATE "${BWAPI_INCLUDE_DIR}")
-        target_link_libraries(protodd_audit_load PRIVATE "${BWAPI_LIBRARY}")
+        target_link_libraries(protodd_audit_load PRIVATE "${BWAPI_LIBRARY}" Psapi)
         target_compile_features(protodd_audit_load PRIVATE cxx_std_20)
         target_compile_definitions(protodd_audit_load PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
         set_target_properties(protodd_audit_load PROPERTIES PREFIX "" OUTPUT_NAME "AuditLoad" SUFFIX ".dll")
@@ -426,6 +509,16 @@ if(PROTODD_BUILD_TESTS)
             add_test(NAME protodd_direct_match_runner_tests
                 COMMAND "${PROTODD_POWERSHELL_EXECUTABLE}" -NoProfile -File
                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_direct_match.ps1")
+            add_test(NAME protodd_tournament_package_provenance_tests
+                COMMAND "${PROTODD_POWERSHELL_EXECUTABLE}" -NoProfile -File
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_tournament_package.ps1")
+            add_test(NAME protodd_build_profile_tests
+                COMMAND "${PROTODD_POWERSHELL_EXECUTABLE}" -NoProfile -File
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_build_profiles.ps1")
+            add_test(NAME protodd_runtime_recovery_tests
+                COMMAND "${PROTODD_POWERSHELL_EXECUTABLE}" -NoProfile -File
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_runtime_recovery.ps1")
+            set_tests_properties(protodd_runtime_recovery_tests PROPERTIES SKIP_RETURN_CODE 77)
         endif()
     endif()
     if(Python3_Interpreter_FOUND)

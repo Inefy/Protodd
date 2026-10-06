@@ -22,7 +22,8 @@ has not demonstrated competent control of those scopes. This is a combination
 with explicit ownership, not two independent bots issuing competing orders.
 
 `PROTODD_WHOLE_GAME_HYBRID` requires both whole-game control and a local evaluation
-build. Tournament promotion remains blocked. Hybrid results are explicitly
+build. `PROTODD_NATIVE_ALLIN_OPENING` independently selects the native opening
+repertoire in either native or hybrid DLLs. Tournament promotion remains blocked. Hybrid results are explicitly
 rejected by the exclusive whole-game controller audit, so native gameplay cannot
 be credited as evidence that the full learned model passed its gates.
 
@@ -34,6 +35,9 @@ be credited as evidence that the full learned model passed its gates.
 
 The script verifies the six-slot export manifest and weights digest, embeds those
 weights, builds the Win32 `ProtoddEvaluation.dll`, runs tests and prints digests.
+Its all-in opening switch changes only the native opening repertoire; it does
+not select the learned controller mode. Use `scripts/build-opening-comparison.ps1`
+to build the complete native/hybrid by standard/all-in matrix with separate manifests.
 Default weights are the opening continuation below. `-Weights` selects another
 intact export; `-Exclusive` reproduces the research controller without the hybrid.
 Model checkpoints and game artifacts are local ignored files, not Git payloads.

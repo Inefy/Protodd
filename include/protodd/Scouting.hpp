@@ -54,6 +54,7 @@ private:
 class ScoutManager {
 public:
     void reset() noexcept;
+    void forgetUnit(UnitId id) noexcept;
 
     [[nodiscard]] UnitId selectWorkerScout(
         const GameState& state, const ThreatAssessment& threat,

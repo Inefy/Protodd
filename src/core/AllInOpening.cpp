@@ -16,17 +16,38 @@ void goal(StrategicPlan& plan, GoalKind kind, UnitKind target, int desired, int 
           bool blocking = true) {
     plan.goals.push_back({kind, target, desired, priority, blocking, "ladder opening commitment"});
 }
-struct Profile { int workers; int gates; int ready; Frame window; Frame deadline; };
+struct Profile { int workers; int gates; int ready; Frame window; Frame travelTimeout; Frame deadline; };
 void protectObservedDtBreach(StrategicPlan& plan, const GameState& state) {
-    const auto breached = std::ranges::any_of(state.enemy.units, [&state](const UnitSnapshot& enemy) {
-        return enemy.kind == UnitKind::darkTemplar && enemy.visible && enemy.position.valid() &&
-            std::ranges::any_of(state.self.units, [&enemy](const UnitSnapshot& own) {
-                return own.kind == UnitKind::nexus && own.position.valid() &&
-                       distanceSquared(own.position, enemy.position) <= 1200 * 1200;
-            });
+    const UnitSnapshot* threat = nullptr;
+    const UnitSnapshot* base = nullptr;
+    auto nearestBaseThreat = 1200 * 1200;
+    for (const auto& enemy : state.enemy.units) {
+        if (enemy.kind != UnitKind::darkTemplar || !enemy.visible || !enemy.position.valid()) continue;
+        for (const auto& own : state.self.units) {
+            if (own.kind != UnitKind::nexus || !own.position.valid()) continue;
+            const auto separation = distanceSquared(own.position, enemy.position);
+            if (separation <= nearestBaseThreat) {
+                nearestBaseThreat = separation;
+                threat = &enemy;
+                base = &own;
+            }
+        }
+    }
+    if (threat == nullptr || base == nullptr) return;
+    const auto covered = std::ranges::any_of(state.self.units, [&threat, &base](const UnitSnapshot& own) {
+        if (!own.completed || !own.position.valid() ||
+            distanceSquared(own.position, threat->position) > 320 * 320) return false;
+        if (own.kind == UnitKind::observer) return true;
+        return own.kind == UnitKind::photonCannon && own.powered &&
+               distanceSquared(own.position, base->position) <= 416 * 416;
     });
-    if (breached) plan.goals.push_back({GoalKind::build, UnitKind::photonCannon, 1, 130, true,
-        "immediate detection anchor for observed DT at economy"});
+    if (covered) return;
+
+    // Macro goals count structures globally. Raise the total target by one so
+    // a Cannon at another Nexus cannot satisfy this local detection emergency.
+    const auto existingCannons = count(state, UnitKind::photonCannon);
+    goal(plan, GoalKind::build, UnitKind::photonCannon, existingCannons + 1, 130);
+    plan.attackTarget = base->position;
 }
 Position recoveryExpansion(const GameState& state) {
     const BaseSnapshot* best = nullptr;
@@ -44,10 +65,10 @@ Position recoveryExpansion(const GameState& state) {
 }
 Profile profile(const AllInBuild build) {
     switch (build) {
-        case AllInBuild::twoGateZealot: return {14, 2, 4, 120 * 24, 9000};
-        case AllInBuild::threeGateDragoon: return {20, 3, 4, 120 * 24, 12000};
-        case AllInBuild::fourGateDragoon: return {20, 4, 6, 150 * 24, 13200};
-        case AllInBuild::darkTemplar: return {18, 2, 1, 90 * 24, 10800};
+        case AllInBuild::twoGateZealot: return {14, 2, 4, 120 * 24, 90 * 24, 9000};
+        case AllInBuild::threeGateDragoon: return {20, 3, 4, 120 * 24, 90 * 24, 12000};
+        case AllInBuild::fourGateDragoon: return {20, 4, 6, 150 * 24, 90 * 24, 13200};
+        case AllInBuild::darkTemplar: return {18, 2, 1, 90 * 24, 60 * 24, 10800};
         case AllInBuild::standard: break;
     }
     return {};
@@ -80,7 +101,8 @@ std::string_view allInPhaseName(const AllInPhase phase) noexcept {
     return "invalid";
 }
 void AllInOpeningPlanner::reset(const AllInBuild build) noexcept {
-    build_ = build; phase_ = AllInPhase::assemble; launch_ = -1; peakArmy_ = 0; reason_ = "none";
+    build_ = build; phase_ = AllInPhase::assemble; launch_ = departure_ = arrival_ = contact_ =
+        pressureStart_ = -1; peakArmy_ = 0; reason_ = "none";
 }
 void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
                                const ThreatAssessment& threat) {
@@ -96,13 +118,59 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
     // Economic failure never locks us into rebuilding the same one-base push.
     if (phase_ != AllInPhase::transition) {
         if (state.frame >= p.deadline) { phase_ = AllInPhase::transition; reason_ = "deadline"; }
-        else if (launch_ >= 0 && state.frame - launch_ >= p.window) {
-            phase_ = AllInPhase::transition; reason_ = "pressure-window";
-        } else if (launch_ >= 0 && state.frame - launch_ >= 24 * 12 &&
-                   peakArmy_ >= p.ready && army <= std::max(1, peakArmy_ / 3)) {
-            phase_ = AllInPhase::transition; reason_ = "army-loss";
-        } else if (ready >= p.ready && launch_ < 0) {
+        else if (ready >= p.ready && launch_ < 0) {
             phase_ = AllInPhase::pressure; launch_ = state.frame;
+        }
+        if (phase_ == AllInPhase::pressure && launch_ >= 0) {
+            const auto home = std::ranges::find(state.self.units, UnitKind::nexus,
+                                                &UnitSnapshot::kind);
+            const auto homePosition = home != state.self.units.end() ? home->position : Position{-1, -1};
+            const auto pressureArmy = [&](const UnitSnapshot& unit) {
+                return unit.completed && !unit.hallucination &&
+                    (unit.kind == UnitKind::zealot || unit.kind == UnitKind::dragoon ||
+                     unit.kind == UnitKind::darkTemplar);
+            };
+            const auto away = std::ranges::count_if(state.self.units, [&](const UnitSnapshot& unit) {
+                return pressureArmy(unit) && homePosition.valid() && unit.position.valid() &&
+                       distanceSquared(homePosition, unit.position) > 800 * 800;
+            });
+            if (departure_ < 0 && away >= std::max(1, p.ready / 2)) departure_ = state.frame;
+            if (arrival_ < 0 && plan.attackTarget.valid()) {
+                const auto atObjective = std::ranges::count_if(state.self.units,
+                    [&](const UnitSnapshot& unit) {
+                        return pressureArmy(unit) && unit.position.valid() &&
+                            distanceSquared(plan.attackTarget, unit.position) <= 640 * 640;
+                    });
+                if (atObjective >= std::max(1, p.ready / 2)) arrival_ = state.frame;
+            }
+            if (contact_ < 0) {
+                const auto madeContact = std::ranges::any_of(state.self.units,
+                    [&](const UnitSnapshot& own) {
+                        if (!pressureArmy(own) || !own.position.valid()) return false;
+                        return std::ranges::any_of(state.enemy.units, [&](const UnitSnapshot& enemy) {
+                            if (!enemy.visible || !enemy.completed || !enemy.position.valid() ||
+                                enemy.hallucination) return false;
+                            const auto weapon = enemy.flying ? own.airWeapon : own.groundWeapon;
+                            return own.canAttack(enemy) &&
+                                distanceSquared(own.position, enemy.position) <=
+                                    (weapon.maxRange + 32) * (weapon.maxRange + 32);
+                        });
+                    });
+                if (madeContact) contact_ = state.frame;
+            }
+            if (pressureStart_ < 0) {
+                if (contact_ >= 0) pressureStart_ = contact_;
+                else if (arrival_ >= 0) pressureStart_ = arrival_;
+            }
+            if (pressureStart_ >= 0 && state.frame - pressureStart_ >= p.window) {
+                phase_ = AllInPhase::transition; reason_ = "pressure-window";
+            } else if (arrival_ < 0 &&
+                       state.frame - (departure_ >= 0 ? departure_ : launch_) >= p.travelTimeout) {
+                phase_ = AllInPhase::transition; reason_ = "travel-timeout";
+            } else if (state.frame - launch_ >= 24 * 12 && peakArmy_ >= p.ready &&
+                       army <= std::max(1, peakArmy_ / 3)) {
+                phase_ = AllInPhase::transition; reason_ = "army-loss";
+            }
         }
     }
     plan.name += " [" + std::string(allInBuildName(build_)) + ":" +
@@ -128,6 +196,11 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
         return;
     }
     const auto original = plan.goals;
+    const auto nativeDetectionRequired = plan.requireMobileDetection;
+    const auto inheritedDetection = std::ranges::any_of(original, [](const ProductionGoal& prior) {
+        return prior.goal == GoalKind::detect ||
+               (prior.blocking && prior.target == UnitKind::observer);
+    });
     plan.goals.clear();
     // Explicit fulfilled demands retire remembered optional tech/cannon goals.
     for (const auto& prior : original) {
@@ -197,17 +270,29 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
             }
         }
     }
-    // Only observed cloak threats justify interrupting the opening for detection.
+    // Preserve native safety commitments across the opening's goal reset.
+    // Only blocking/native demand survives; optional Observer scouting does not.
+    for (const auto& prior : original) {
+        if (prior.goal == GoalKind::detect ||
+            (prior.blocking && prior.target == UnitKind::observer))
+            plan.goals.push_back(prior);
+    }
+    // Direct evidence also retains the detector obligation during an all-in.
     const auto observedCloak = std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& unit) {
         return ((unit.cloaked || unit.burrowed) &&
                 (unit.groundWeapon.damage > 0 || unit.airWeapon.damage > 0)) || unit.kind == UnitKind::darkTemplar ||
                unit.kind == UnitKind::lurker || unit.kind == UnitKind::spiderMine;
     });
-    plan.requireMobileDetection = observedCloak;
-    if (observedCloak) {
+    plan.requireMobileDetection = nativeDetectionRequired || inheritedDetection || observedCloak;
+    if (observedCloak && std::ranges::none_of(plan.goals, [](const ProductionGoal& prior) {
+            return prior.target == UnitKind::observer;
+        })) {
         plan.desiredGasWorkers = 3;
         goal(plan, GoalKind::detect, UnitKind::observer, 1, 128);
     }
+    if (plan.requireMobileDetection && std::ranges::none_of(plan.goals,
+            [](const ProductionGoal& prior) { return prior.target == UnitKind::observer; }))
+        goal(plan, GoalKind::detect, UnitKind::observer, 1, 128);
     protectObservedDtBreach(plan, state);
     if (emergency) {
         for (const auto& prior : original)

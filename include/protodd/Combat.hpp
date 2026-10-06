@@ -82,6 +82,7 @@ public:
         double requiredRatio,
         Frame frame,
         bool contact = true);
+    void forgetUnit(UnitId id);
     void reset();
 
 private:

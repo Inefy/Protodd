@@ -4,6 +4,7 @@
 #include "protodd/MacroObservationStream.hpp"
 
 #include <ostream>
+#include <string_view>
 
 namespace protodd::bwapi {
 
@@ -13,6 +14,7 @@ public:
     void start(std::ostream& log);
     void observe(const GameState& state);
     void infer(Frame frame, const FrameBudget& budget, std::ostream& log);
+    void disable(std::ostream& log, std::string_view reason) noexcept;
     [[nodiscard]] bool enabled() const noexcept { return policy_.loaded(); }
 private:
     LearnedPolicy policy_;

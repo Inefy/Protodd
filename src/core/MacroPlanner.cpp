@@ -40,6 +40,10 @@ int queuedForProducer(const GameState& state, const UnitKind producer) {
     return queued + busyWithoutQueue;
 }
 
+int queuedUnitsOf(const GameState& state, const UnitKind kind) {
+    return static_cast<int>(std::ranges::count(state.self.queuedUnits, kind));
+}
+
 int usableProducers(const GameState& state, const UnitKind kind) {
     return static_cast<int>(std::ranges::count_if(state.self.units,
         [kind](const UnitSnapshot& unit) {
@@ -49,23 +53,107 @@ int usableProducers(const GameState& state, const UnitKind kind) {
         }));
 }
 
+bool usableProducerUnit(const UnitSnapshot& unit, const UnitKind kind) noexcept {
+    return unit.kind == kind && unit.completed && !unit.disabled && !unit.loaded &&
+           !unit.hallucination && (!unitStats(kind).requiresPsi || unit.powered);
+}
+
+bool activeTechnologyStillExecutable(const GameState& state,
+                                     const TechnologyKind technology) {
+    if (!technologyInProgress(state.self, technology)) return false;
+    const auto producer = technologyStats(technology).producer;
+    return producer != UnitKind::unknown && std::ranges::any_of(
+        state.self.units, [producer](const UnitSnapshot& unit) {
+            return usableProducerUnit(unit, producer);
+        });
+}
+
+int availableTrainingProducers(const GameState& state, const UnitKind kind) {
+    if (state.self.producerSlots.empty()) {
+        return std::clamp(usableProducers(state, kind) -
+                              queuedForProducer(state, kind),
+                          0, usableProducers(state, kind));
+    }
+    return static_cast<int>(std::ranges::count_if(
+        state.self.units, [&state, kind](const UnitSnapshot& unit) {
+            if (!usableProducerUnit(unit, kind)) return false;
+            const auto slot = std::ranges::find(state.self.producerSlots, unit.id,
+                                                &ProducerSlotSnapshot::id);
+            return slot != state.self.producerSlots.end() &&
+                   !slot->researching && !slot->upgrading &&
+                   trainingSlotAvailable(slot->activeTraining,
+                                         slot->trainingQueueSize,
+                                         slot->remainingTrainFrames,
+                                         slot->latencyFrames,
+                                         slot->recentTrainCommand);
+        }));
+}
+
+int availableTechnologyProducers(const GameState& state, const UnitKind kind) {
+    if (state.self.producerSlots.empty()) {
+        return std::max(0, usableProducers(state, kind) -
+                               queuedForProducer(state, kind));
+    }
+    return static_cast<int>(std::ranges::count_if(
+        state.self.units, [&state, kind](const UnitSnapshot& unit) {
+            if (!usableProducerUnit(unit, kind)) return false;
+            const auto slot = std::ranges::find(state.self.producerSlots, unit.id,
+                                                &ProducerSlotSnapshot::id);
+            return slot != state.self.producerSlots.end() &&
+                   !slot->researching && !slot->upgrading &&
+                   trainingSlotAvailable(slot->activeTraining,
+                                         slot->trainingQueueSize,
+                                         slot->remainingTrainFrames,
+                                         slot->latencyFrames,
+                                         slot->recentTrainCommand);
+        }));
+}
+
 // A paid-for prerequisite is a future deadline, not a reason to freeze every
 // currently usable producer for its entire construction time.
 int prerequisiteWait(const GameState& state, const UnitKind kind) {
-    auto wait = 0;
-    for (const auto prerequisite : unitPrerequisites(kind)) {
-        auto earliest = std::numeric_limits<int>::max();
-        for (const auto& unit : state.self.units) {
-            if (unit.kind != prerequisite) continue;
-            const auto remaining = unit.completed ? 0 :
-                unitStats(prerequisite).buildTime *
-                    (100 - std::clamp(unit.buildProgress, 0, 100)) / 100;
-            earliest = std::min(earliest, remaining);
+    constexpr auto cycleWait = 10 * 60 * 24 + 1;
+    std::unordered_set<UnitKind> visiting;
+    const auto visit = [&state, &visiting](const auto& self,
+                                          const UnitKind current) -> int {
+        if (!visiting.insert(current).second) return cycleWait;
+        auto wait = 0;
+        for (const auto prerequisite : unitPrerequisites(current)) {
+            auto earliest = std::numeric_limits<int>::max();
+            for (const auto& unit : state.self.units) {
+                if (unit.kind != prerequisite) continue;
+                const auto remaining = unit.completed ? 0 :
+                    unitStats(prerequisite).buildTime *
+                        (100 - std::clamp(unit.buildProgress, 0, 100)) / 100;
+                earliest = std::min(earliest, remaining);
+            }
+            if (earliest != std::numeric_limits<int>::max()) {
+                wait = std::max(wait, earliest);
+            } else {
+                wait = std::max(wait, self(self, prerequisite));
+            }
         }
-        if (earliest != std::numeric_limits<int>::max()) wait = std::max(wait, earliest);
-        else wait = std::max(wait, prerequisiteWait(state, prerequisite));
-    }
-    return wait;
+        visiting.erase(current);
+        return wait;
+    };
+    return visit(visit, kind);
+}
+
+int countExistingAtSite(const GameState& state, const UnitKind kind,
+                        const ConstructionTaskSite& site) {
+    if (!site.valid()) return 0;
+    const auto radius = kind == UnitKind::pylon ? 128 : 416;
+    return static_cast<int>(std::ranges::count_if(
+        state.self.units, [kind, &site, radius](const UnitSnapshot& unit) {
+            return unit.kind == kind && unit.position.valid() &&
+                   distanceSquared(unit.position, site.anchor) <= radius * radius;
+        }));
+}
+
+bool sameConstructionTask(const ConstructionTaskSite& left,
+                          const ConstructionTaskSite& right) noexcept {
+    return left.valid() == right.valid() &&
+           (!left.valid() || left.id == right.id);
 }
 
 }  // namespace
@@ -79,8 +167,40 @@ bool trainingSlotAvailable(const bool active, const int queueSize,
            remainingFrames <= std::max(0, latencyFrames);
 }
 
+std::optional<UnitId> selectTrainingProducer(
+    const std::span<const TrainingProducerCandidate> candidates) noexcept {
+    std::optional<UnitId> selected;
+    for (const auto& candidate : candidates) {
+        if (candidate.id < 0 || !candidate.completed || !candidate.powered ||
+            candidate.disabled || candidate.loaded || candidate.hallucination ||
+            !candidate.legalForTarget || candidate.researching || candidate.upgrading ||
+            !trainingSlotAvailable(candidate.activeTraining,
+                                   candidate.trainingQueueSize,
+                                   candidate.remainingTrainFrames,
+                                   candidate.latencyFrames,
+                                   candidate.recentTrainCommand)) {
+            continue;
+        }
+        if (!selected || candidate.id < *selected) selected = candidate.id;
+    }
+    return selected;
+}
+
+void ResourceLedger::beginFrame(const int observedMinerals, const int observedGas) noexcept {
+    minerals = std::max(0, observedMinerals);
+    gas = std::max(0, observedGas);
+    reservedMinerals = std::min(std::max(0, reservedMinerals), minerals);
+    reservedGas = std::min(std::max(0, reservedGas), gas);
+    protectedMinerals = std::min(std::max(0, protectedMinerals), reservedMinerals);
+    protectedGas = std::min(std::max(0, protectedGas), reservedGas);
+    committedMinerals = std::min(std::max(0, committedMinerals),
+                                 reservedMinerals - protectedMinerals);
+    committedGas = std::min(std::max(0, committedGas), reservedGas - protectedGas);
+}
+
 bool ResourceLedger::canReserve(const int mineralCost, const int gasCost) const noexcept {
-    return freeMinerals() >= mineralCost && freeGas() >= gasCost;
+    return mineralCost >= 0 && gasCost >= 0 &&
+           freeMinerals() >= mineralCost && freeGas() >= gasCost;
 }
 
 bool ResourceLedger::reserve(const int mineralCost, const int gasCost) noexcept {
@@ -89,19 +209,60 @@ bool ResourceLedger::reserve(const int mineralCost, const int gasCost) noexcept 
     }
     reservedMinerals += mineralCost;
     reservedGas += gasCost;
+    committedMinerals += mineralCost;
+    committedGas += gasCost;
     return true;
 }
 
 void ResourceLedger::protect(const int mineralCost, const int gasCost) noexcept {
-    reservedMinerals += std::min(std::max(0, mineralCost),
-                                 std::max(0, freeMinerals()));
-    reservedGas += std::min(std::max(0, gasCost), std::max(0, freeGas()));
+    const auto protectedMineralsNow = std::min(std::max(0, mineralCost), freeMinerals());
+    const auto protectedGasNow = std::min(std::max(0, gasCost), freeGas());
+    reservedMinerals += protectedMineralsNow;
+    reservedGas += protectedGasNow;
+    protectedMinerals += protectedMineralsNow;
+    protectedGas += protectedGasNow;
+}
+
+bool ResourceLedger::canSpendCommitted(const int mineralCost, const int gasCost) const noexcept {
+    return mineralCost >= 0 && gasCost >= 0 && minerals >= mineralCost && gas >= gasCost &&
+           committedMinerals >= mineralCost && committedGas >= gasCost &&
+           reservedMinerals >= mineralCost && reservedGas >= gasCost;
+}
+
+bool ResourceLedger::spendCommitted(const int mineralCost, const int gasCost) noexcept {
+    if (!canSpendCommitted(mineralCost, gasCost)) return false;
+    minerals -= mineralCost;
+    gas -= gasCost;
+    reservedMinerals -= mineralCost;
+    reservedGas -= gasCost;
+    committedMinerals -= mineralCost;
+    committedGas -= gasCost;
+    return true;
+}
+
+bool ResourceLedger::releaseCommitted(const int mineralCost, const int gasCost) noexcept {
+    if (mineralCost < 0 || gasCost < 0 ||
+        committedMinerals < mineralCost || committedGas < gasCost ||
+        reservedMinerals < mineralCost || reservedGas < gasCost) return false;
+    reservedMinerals -= mineralCost;
+    reservedGas -= gasCost;
+    committedMinerals -= mineralCost;
+    committedGas -= gasCost;
+    return true;
+}
+
+bool ResourceLedger::spendAvailable(const int mineralCost, const int gasCost) noexcept {
+    if (!canReserve(mineralCost, gasCost)) return false;
+    minerals -= mineralCost;
+    gas -= gasCost;
+    return true;
 }
 
 std::vector<MacroAction> MacroPlanner::reconcile(
     const GameState& state,
     const StrategicPlan& plan,
-    ResourceLedger& ledger) const {
+    ResourceLedger& ledger,
+    const std::span<const BuildBlockerFeedback> buildBlockers) const {
     std::vector<MacroAction> actions;
     std::vector<ProductionGoal> goals = plan.goals;
     actions.reserve(goals.size() + 1U);
@@ -117,11 +278,18 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     // Keep only a bounded, actionable history.  Existing structures clear the
     // demand immediately; otherwise it survives brief scouting/plan churn.
     std::erase_if(pendingGoals_, [&state](const PendingGoal& pending) {
-        const auto existing = countExisting(state, pending.target);
+        const auto existing = pending.constructionSite.valid()
+            ? countExistingAtSite(state, pending.target, pending.constructionSite)
+            : countExisting(state, pending.target);
         return existing >= pending.desiredCount || pending.lastRequested < 0 ||
                state.frame < pending.lastRequested ||
                state.frame - pending.lastRequested > 30 * 24;
     });
+    if (plan.recoveringLastNexus) {
+        std::erase_if(pendingGoals_, [](const PendingGoal& pending) {
+            return pending.target != UnitKind::nexus;
+        });
+    }
     // An explicit lower/cancelled demand supersedes memory. Expansions must
     // obey today's safety decision immediately, even during the grace period.
     std::erase_if(pendingGoals_, [&plan](const PendingGoal& pending) {
@@ -133,6 +301,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                  }))) ||
                std::ranges::any_of(plan.goals, [&pending](const ProductionGoal& goal) {
                    return goal.goal == pending.goal && goal.target == pending.target &&
+                          sameConstructionTask(goal.constructionSite,
+                                               pending.constructionSite) &&
                           (!goal.blocking || goal.desiredCount < pending.desiredCount);
                });
     });
@@ -140,11 +310,15 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         const auto alreadyRequested = std::ranges::any_of(
             goals, [&pending](const ProductionGoal& candidate) {
                 return candidate.goal == pending.goal &&
-                       candidate.target == pending.target;
+                       candidate.target == pending.target &&
+                       sameConstructionTask(candidate.constructionSite,
+                                            pending.constructionSite);
             });
         if (alreadyRequested) continue;
         goals.push_back({pending.goal, pending.target, pending.desiredCount,
-                         pending.priority, true, pending.reason});
+                         pending.priority, true, pending.reason,
+                         TechnologyKind::none, false, false,
+                         pending.constructionSite});
     }
 
     // Strategy is assembled from several independent signals (opening
@@ -160,7 +334,10 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         if (candidate.goal != GoalKind::train) {
             const auto fulfilled = candidate.technology != TechnologyKind::none
                 ? technologyLevel(state.self, candidate.technology) >= candidate.desiredCount
-                : countExisting(state, candidate.target) >= candidate.desiredCount;
+                : (candidate.constructionSite.valid()
+                       ? countExistingAtSite(state, candidate.target,
+                                             candidate.constructionSite)
+                       : countExisting(state, candidate.target)) >= candidate.desiredCount;
             if (fulfilled) continue;
         }
         // Train goals are intentionally not merged: one demand can fill one
@@ -174,7 +351,10 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                                         mergedGoals, [&candidate](const ProductionGoal& prior) {
                                             return prior.goal == candidate.goal &&
                                                    prior.target == candidate.target &&
-                                                   prior.technology == candidate.technology;
+                                                   prior.technology == candidate.technology &&
+                                                   sameConstructionTask(
+                                                       prior.constructionSite,
+                                                       candidate.constructionSite);
                                         });
         if (existing == mergedGoals.end()) {
             mergedGoals.push_back(candidate);
@@ -191,17 +371,28 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     std::unordered_map<UnitKind, int> planned;
     std::unordered_map<UnitKind, int> committedProducers;
     std::unordered_set<UnitKind> gasStarvedProducers;
+    const auto blockedBuild = [&state, buildBlockers](
+                                  const UnitKind target,
+                                  const ConstructionTaskSite& constructionSite) {
+        return std::ranges::find_if(buildBlockers,
+            [&state, target, &constructionSite](const BuildBlockerFeedback& feedback) {
+                return feedback.target == target && feedback.retryAt > state.frame &&
+                       sameConstructionTask(feedback.constructionSite, constructionSite);
+            });
+    };
     // A blocking Pylon is a supply deadline, not a license to idle the
     // Nexus.  Before the game is within four supply of the cap, let a Probe
     // spend an otherwise-unaffordable Pylon's current mineral shortfall and
     // start the Pylon on the next pass.  This mirrors Stardust's forward
     // resource schedule: protect a future deadline without sacrificing
     // continuous worker production in the present frame.
-    const auto protectBlocking = [&ledger, &state](
+    const auto protectBlocking = [&ledger, &state, &blockedBuild, buildBlockers](
                                     const UnitKind target,
                                     const int minerals,
                                     const int gas,
-                                    const int priority) {
+                                    const int priority,
+                                    const ConstructionTaskSite& constructionSite) {
+        if (blockedBuild(target, constructionSite) != buildBlockers.end()) return;
         const auto supplyRoom = state.self.supplyTotal - state.self.supplyUsed;
         if (target == UnitKind::pylon && supplyRoom > 4) return;
         // A high-priority Forge/Cannon in an active emergency is a hard
@@ -238,9 +429,11 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         ledger.protect(minerals, gas);
     };
     auto plannedSupply = state.self.supplyUsed;
-    for (const auto& technology : state.self.technologies) {
-        if (technology.inProgress) {
-            ++committedProducers[technologyStats(technology.kind).producer];
+    if (state.self.producerSlots.empty()) {
+        for (const auto& technology : state.self.technologies) {
+            if (activeTechnologyStillExecutable(state, technology.kind)) {
+                ++committedProducers[technologyStats(technology.kind).producer];
+            }
         }
     }
 
@@ -250,10 +443,18 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     if (state.self.race == Race::protoss && state.self.supplyTotal > 0 &&
         state.self.supplyTotal < 400) {
         const auto pylons = countExisting(state, UnitKind::pylon);
-        const auto pendingPylons = static_cast<int>(std::ranges::count_if(
-            state.self.units, [](const UnitSnapshot& unit) {
-                return unit.kind == UnitKind::pylon && !unit.completed;
-            })) + static_cast<int>(std::ranges::count(state.self.queuedUnits, UnitKind::pylon));
+        const auto pylonBuildFrames = unitStats(UnitKind::pylon).buildTime;
+        const auto horizon = pylonBuildFrames + std::clamp(
+            state.pylonBuilderTravelFrames, 0, 2 * 60 * 24);
+        const auto timelyPendingPylons = static_cast<int>(std::ranges::count_if(
+            state.self.units, [horizon](const UnitSnapshot& unit) {
+                if (unit.kind != UnitKind::pylon || unit.completed) return false;
+                const auto remaining = unitStats(UnitKind::pylon).buildTime *
+                    (100 - std::clamp(unit.buildProgress, 0, 100)) / 100;
+                return remaining <= horizon;
+            }));
+        const auto projectedSupplyTotal = std::min(
+            400, state.self.supplyTotal + timelyPendingPylons * 16);
         const auto activeProducers = countCompleted(state, UnitKind::nexus) +
                                      countCompleted(state, UnitKind::gateway) +
                                      countCompleted(state, UnitKind::roboticsFacility) +
@@ -284,31 +485,83 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             rates[UnitKind::nexus] = static_cast<double>(probe.supply) / probe.buildTime;
             firstCycle[UnitKind::nexus] = probe.supply;
         }
-        // Include the next discrete queue commitment and producers finishing
-        // during construction. Used supply already includes the current queue;
-        // neither that queue nor a nearly complete Gateway is a smooth rate.
-        const auto horizon = unitStats(UnitKind::pylon).buildTime + 144;
+        // Include waiting items on each producer and the cycles that can start
+        // before a new Pylon can finish. BWAPI supplyUsed includes the active
+        // item, but not items queued behind it. A new Pylon also needs its
+        // builder to reach the home anchor before construction begins.
         double forecastSupply = 0.0;
         for (const auto& producer : state.self.units) {
             if (!firstCycle.contains(producer.kind) || producer.disabled || producer.loaded ||
                 producer.hallucination || (producer.completed && !producer.powered)) continue;
-            const auto availableIn = producer.completed ? std::max(0, producer.remainingTrainFrames)
+            auto availableIn = producer.completed ? std::max(0, producer.remainingTrainFrames)
                 : unitStats(producer.kind).buildTime *
                     (100 - std::clamp(producer.buildProgress, 0, 100)) / 100;
+            const auto slot = std::ranges::find(state.self.producerSlots, producer.id,
+                                                &ProducerSlotSnapshot::id);
+            if (slot != state.self.producerSlots.end()) {
+                if (slot->researching || slot->upgrading) continue;
+                if (slot->activeTraining) {
+                    availableIn = std::max(availableIn, slot->remainingTrainFrames);
+                    if (slot->recentTrainCommand && availableIn == 0)
+                        availableIn = std::max(1, slot->latencyFrames);
+                }
+                auto queuedDuration = 0;
+                auto queuedIndex = std::size_t{};
+                const auto queueTailCount = std::max(
+                    0, slot->trainingQueueSize - (slot->activeTraining ? 1 : 0));
+                for (; queuedIndex < slot->queuedUnits.size() &&
+                       queuedIndex < static_cast<std::size_t>(queueTailCount); ++queuedIndex) {
+                    const auto queued = slot->queuedUnits[queuedIndex];
+                    const auto queuedFrames = std::max(1, unitStats(queued).buildTime);
+                    if (availableIn + queuedDuration <= horizon)
+                        forecastSupply += unitStats(queued).supply;
+                    queuedDuration += queuedFrames;
+                }
+                // A transitional BWAPI queue entry may not yet have a usable
+                // UnitType. Reserve the average planned cycle for its supply
+                // and duration instead of pretending that the producer is idle.
+                while (queuedIndex < static_cast<std::size_t>(queueTailCount)) {
+                    const auto averageFrames = weights[producer.kind] > 0.0 &&
+                        rates[producer.kind] > 0.0
+                            ? std::max(1, static_cast<int>(std::ceil(
+                                  weights[producer.kind] / rates[producer.kind])))
+                            : 1;
+                    if (availableIn + queuedDuration <= horizon)
+                        forecastSupply += firstCycle[producer.kind];
+                    queuedDuration += averageFrames;
+                    ++queuedIndex;
+                }
+                availableIn += queuedDuration;
+            }
             if (availableIn > horizon) continue;
-            forecastSupply += firstCycle[producer.kind];
-            if (weights[producer.kind] > 0.0 && firstCycle[producer.kind] > 0) {
-                const auto cycles = static_cast<int>((horizon - availableIn) *
-                    rates[producer.kind] / weights[producer.kind] / firstCycle[producer.kind]);
-                forecastSupply += cycles * firstCycle[producer.kind];
+            const auto cycleSupply = firstCycle[producer.kind];
+            forecastSupply += cycleSupply;
+            if (weights[producer.kind] > 0.0 && rates[producer.kind] > 0.0 &&
+                cycleSupply > 0) {
+                const auto cycleFrames = std::max(1, static_cast<int>(std::ceil(
+                    weights[producer.kind] * cycleSupply / rates[producer.kind])));
+                const auto cycles = (horizon - availableIn) / cycleFrames;
+                forecastSupply += cycles * cycleSupply;
             }
         }
+        if (state.self.producerSlots.empty()) {
+            // Legacy and pure-planner snapshots lack queue ownership by
+            // building. Retain their global commitments conservatively.
+            for (const auto queued : state.self.queuedUnits)
+                if (producerFor(queued) != UnitKind::unknown)
+                    forecastSupply += unitStats(queued).supply;
+        }
         const auto forecast = static_cast<int>(std::ceil(forecastSupply));
-        const auto safetyMargin = std::max(std::clamp(2 + activeProducers * 2, 4, 16), forecast);
-        const auto remaining = state.self.supplyTotal + pendingPylons * 16 - state.self.supplyUsed;
+        // With a single Nexus, the old four-supply minimum waited until two
+        // Probes were the only remaining buffer. If minerals still had to be
+        // gathered, the Pylon could not finish before the Nexus consumed that
+        // headroom. Keep six supply in reserve even in a one-producer opening.
+        const auto safetyMargin = std::max(
+            std::clamp(2 + activeProducers * 2, 6, 16), forecast);
+        const auto remaining = projectedSupplyTotal - state.self.supplyUsed;
         const auto openingDeadline = pylons == 0 && state.self.supplyUsed >= 12;
-        if (state.self.supplyTotal + pendingPylons * 16 < 400 &&
-            ((openingDeadline && pendingPylons == 0) || remaining <= safetyMargin)) {
+        if (!plan.recoveringLastNexus && projectedSupplyTotal < 400 &&
+            (openingDeadline || remaining <= safetyMargin)) {
             // At four supply or less, an unstarted Pylon is already on the
             // critical path. A planned Nexus may have priority 120, but
             // reserving its 400 minerals first can leave every Gateway idle
@@ -322,8 +575,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         // Fund one cycle per usable Gateway before optional structures or
         // research. This remains useful when a matchup rule cleared its
         // composition to save for tech. Busy/unpowered producers reserve none.
-        const auto slots = std::clamp(usableProducers(state, UnitKind::gateway) -
-            queuedForProducer(state, UnitKind::gateway), 0, 4);
+        const auto slots = std::clamp(
+            availableTrainingProducers(state, UnitKind::gateway), 0, 4);
         const auto counterWindow = usableProducers(state, UnitKind::photonCannon) >= 2 &&
             countCompleted(state, UnitKind::zealot) + countCompleted(state, UnitKind::dragoon) >= 1;
         const auto mobileScreen = countCompleted(state, UnitKind::zealot) +
@@ -412,8 +665,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         state.frame >= 2 * 60 * 24 &&
         state.frame < 4 * 60 * 24 &&
         openingScreen < 2 && countExisting(state, UnitKind::cyberneticsCore) == 0 &&
-        usableProducers(state, UnitKind::gateway) >
-            queuedForProducer(state, UnitKind::gateway)) {
+        availableTrainingProducers(state, UnitKind::gateway) > 0) {
         goals.push_back({GoalKind::train, UnitKind::zealot,
             countExisting(state, UnitKind::zealot) + 1, openingScreen == 0 ? 127 : 119, true,
             "deliver the first mobile screen before opening infrastructure"});
@@ -457,7 +709,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             const auto currentLevel = technologyLevel(state.self, goal.technology);
             const auto desiredLevel = std::clamp(goal.desiredCount, 1, stats.maximumLevel);
             if (currentLevel >= desiredLevel ||
-                technologyInProgress(state.self, goal.technology)) {
+                activeTechnologyStillExecutable(state, goal.technology)) {
                 continue;
             }
 
@@ -483,18 +735,21 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                 if (goal.blocking &&
                     countExisting(state, prerequisite) + planned[prerequisite] == 0) {
                     const auto& unit = unitStats(prerequisite);
+                    const auto blockerActive =
+                        blockedBuild(prerequisite, ConstructionTaskSite{}) != buildBlockers.end();
                     MacroAction action{
                         MacroActionKind::build, prerequisite, goal.priority,
                         unit.minerals, unit.gas, false,
                         "unlock " + std::string(stats.name), TechnologyKind::none,
                         goal.blocking,
                     };
-                    action.reserved = ledger.reserve(unit.minerals, unit.gas);
+                    action.reserved = !blockerActive && ledger.reserve(unit.minerals, unit.gas);
+                    action.executable = !blockerActive;
                     actions.push_back(std::move(action));
                     ++planned[prerequisite];
                     if (goal.blocking && !actions.back().reserved) {
                         protectBlocking(prerequisite, unit.minerals, unit.gas,
-                                        goal.priority);
+                                        goal.priority, ConstructionTaskSite{});
                     }
                 } else if (goal.blocking) {
                     MacroAction waiting{
@@ -508,7 +763,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                     actions.push_back(std::move(waiting));
                     if (!actions.back().reserved) {
                         protectBlocking(UnitKind::unknown, minerals, gas,
-                                        goal.priority);
+                                        goal.priority, ConstructionTaskSite{});
                     }
                 }
                 continue;
@@ -516,7 +771,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
 
             // Research and upgrades share one slot on a building. Saving for
             // another operation there must not starve a usable producer.
-            if (usableProducers(state, stats.producer) <=
+            if (availableTechnologyProducers(state, stats.producer) <=
                 committedProducers[stats.producer]) continue;
 
             MacroAction action{
@@ -529,12 +784,16 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             if (action.reserved || goal.blocking) actions.push_back(std::move(action));
             if (goal.blocking && !actions.back().reserved) {
                 protectBlocking(UnitKind::unknown, minerals, gas,
-                                goal.priority);
+                                goal.priority, ConstructionTaskSite{});
             }
             continue;
         }
 
-        const auto existing = countExisting(state, goal.target) + planned[goal.target];
+        const auto existing = goal.constructionSite.valid()
+            ? countExistingAtSite(state, goal.target, goal.constructionSite)
+            : countExisting(state, goal.target) + planned[goal.target] +
+                  (goal.goal == GoalKind::train
+                       ? queuedUnitsOf(state, goal.target) : 0);
         if (existing >= goal.desiredCount) {
             continue;
         }
@@ -542,10 +801,10 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             const auto producer = producerFor(goal.target);
             if (unitStats(goal.target).gas > ledger.freeGas() &&
                 gasStarvedProducers.contains(producer)) continue;
-            const auto producerCount = countCompleted(state, producer);
-            if (producer != UnitKind::unknown && producerCount > 0 &&
-                queuedForProducer(state, producer) + committedProducers[producer] >=
-                    usableProducers(state, producer)) {
+            if (producer != UnitKind::unknown &&
+                countCompleted(state, producer) > 0 &&
+                availableTrainingProducers(state, producer) <=
+                    committedProducers[producer]) {
                 // A queued train action is already keeping every producer
                 // occupied. Do not reserve a second layer of queue entries and
                 // starve structures that increase actual throughput.
@@ -557,38 +816,45 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             if (prerequisite != UnitKind::unknown &&
                 countExisting(state, prerequisite) + planned[prerequisite] == 0) {
                 const auto& stats = unitStats(prerequisite);
+                const auto blockerActive =
+                    blockedBuild(prerequisite, ConstructionTaskSite{}) != buildBlockers.end();
                 MacroAction action{
                     MacroActionKind::build, prerequisite, goal.priority,
                     stats.minerals, stats.gas, false,
                     "unlock " + std::string(unitStats(goal.target).name),
                     TechnologyKind::none, goal.blocking,
                 };
-                action.reserved = ledger.reserve(stats.minerals, stats.gas);
+                action.reserved = !blockerActive && ledger.reserve(stats.minerals, stats.gas);
+                action.executable = !blockerActive;
                 if (action.reserved || goal.blocking) {
                     actions.push_back(std::move(action));
                     ++planned[prerequisite];
                 }
                 if (goal.blocking && !actions.back().reserved) {
                     protectBlocking(prerequisite, stats.minerals, stats.gas,
-                                    goal.priority);
+                                    goal.priority, ConstructionTaskSite{});
                 }
             } else if (goal.blocking) {
                 // The prerequisite already exists but is incomplete. Reserve
                 // the target now so routine production cannot drain its bank
                 // before the structure finishes.
                 const auto& target = unitStats(goal.target);
+                const auto blockerActive =
+                    blockedBuild(goal.target, goal.constructionSite) != buildBlockers.end();
                 MacroAction waiting{
                     actionKind(goal.goal), goal.target, goal.priority,
                     target.minerals, target.gas, false, goal.reason,
                     TechnologyKind::none, true,
                 };
-                waiting.reserved = ledger.reserve(target.minerals, target.gas);
+                waiting.constructionSite = goal.constructionSite;
+                waiting.reserved = !blockerActive &&
+                                   ledger.reserve(target.minerals, target.gas);
                 waiting.executable = false;
                 actions.push_back(std::move(waiting));
                 ++planned[goal.target];
                 if (!actions.back().reserved) {
                     protectBlocking(goal.target, target.minerals, target.gas,
-                                    goal.priority);
+                                    goal.priority, goal.constructionSite);
                 }
             }
             continue;
@@ -606,10 +872,16 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             stats.minerals, stats.gas, false, goal.reason,
             TechnologyKind::none, goal.blocking,
         };
-        action.reserved = ledger.reserve(stats.minerals, stats.gas);
+        action.constructionSite = goal.constructionSite;
+        const auto isConstructionGoal = goal.goal == GoalKind::build ||
+                                        goal.goal == GoalKind::expand;
+        const auto blockerActive = isConstructionGoal &&
+            blockedBuild(goal.target, goal.constructionSite) != buildBlockers.end();
+        action.reserved = !blockerActive && ledger.reserve(stats.minerals, stats.gas);
+        action.executable = !blockerActive;
         if (action.reserved || goal.blocking) {
             actions.push_back(std::move(action));
-            ++planned[goal.target];
+            if (!goal.constructionSite.valid()) ++planned[goal.target];
             if (goal.goal == GoalKind::train) {
                 ++committedProducers[producerFor(goal.target)];
                 if (actions.back().reserved) plannedSupply += stats.supply;
@@ -620,7 +892,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         // paid for from the true surplus.
         if (goal.blocking && !actions.back().reserved) {
             protectBlocking(goal.target, stats.minerals, stats.gas,
-                            goal.priority);
+                            goal.priority, goal.constructionSite);
             // One future unit can reserve its mineral cost while gas arrives.
             // Repeating that reservation for every idle Gateway locks the
             // entire bank behind an income stream that may have been raided.
@@ -659,13 +931,14 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         }
         if (producer == UnitKind::unknown || openProducerSlots.contains(producer)) continue;
         openProducerSlots[producer] = std::max(
-            0, usableProducers(state, producer) - queuedForProducer(state, producer) -
+            0, availableTrainingProducers(state, producer) -
                    committedProducers[producer]);
     }
 
     auto armyCount = 0;
     for (const auto& target : plan.composition) {
-        armyCount += countExisting(state, target.kind) + planned[target.kind];
+        armyCount += countExisting(state, target.kind) +
+                     queuedUnitsOf(state, target.kind) + planned[target.kind];
     }
     constexpr auto maximumCompositionActions = 8;
     for (auto cycle = 0; cycle < maximumCompositionActions &&
@@ -686,7 +959,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                 !ledger.canReserve(stats.minerals, stats.gas)) {
                 continue;
             }
-            const auto current = countExisting(state, target.kind) + planned[target.kind];
+            const auto current = countExisting(state, target.kind) +
+                                 queuedUnitsOf(state, target.kind) + planned[target.kind];
             const auto desired = target.weight / availableCompositionWeight *
                                  static_cast<double>(armyCount + 1);
             // Affordability is not permission to keep growing an already
@@ -765,16 +1039,22 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             (candidate.goal != GoalKind::build && candidate.goal != GoalKind::expand)) {
             continue;
         }
-        if (countExisting(state, candidate.target) >= candidate.desiredCount) continue;
+        const auto existingAtDemand = candidate.constructionSite.valid()
+            ? countExistingAtSite(state, candidate.target, candidate.constructionSite)
+            : countExisting(state, candidate.target);
+        if (existingAtDemand >= candidate.desiredCount) continue;
         const auto existing = std::ranges::find_if(
             pendingGoals_, [&candidate](const PendingGoal& pending) {
                 return pending.goal == candidate.goal &&
-                       pending.target == candidate.target;
+                       pending.target == candidate.target &&
+                       sameConstructionTask(pending.constructionSite,
+                                            candidate.constructionSite);
             });
         if (existing == pendingGoals_.end()) {
             pendingGoals_.push_back({candidate.goal, candidate.target,
                                      candidate.desiredCount, candidate.priority,
-                                     candidate.reason, state.frame});
+                                     candidate.reason, state.frame,
+                                     candidate.constructionSite});
         } else {
             if (existing->lastRequested == state.frame) {
                 // Several strategic signals may renew the same checkpoint.
@@ -818,16 +1098,24 @@ bool MacroPlanner::prerequisitesMet(const GameState& state, const UnitKind kind)
 UnitKind MacroPlanner::nextMissingPrerequisite(
     const GameState& state,
     const UnitKind kind) {
-    for (const auto prerequisite : unitPrerequisites(kind)) {
-        if (countCompleted(state, prerequisite) > 0) continue;
-        // Construction has already been paid for. Continue walking the direct
-        // requirements so the ledger can fund the next structure in the chain
-        // rather than reserving an impossible end-unit behind this one.
-        if (countExisting(state, prerequisite) > 0) continue;
-        const auto nested = nextMissingPrerequisite(state, prerequisite);
-        return nested != UnitKind::unknown ? nested : prerequisite;
-    }
-    return UnitKind::unknown;
+    std::unordered_set<UnitKind> visiting;
+    const auto visit = [&state, &visiting](const auto& self,
+                                           const UnitKind current) -> UnitKind {
+        if (!visiting.insert(current).second) return UnitKind::unknown;
+        for (const auto prerequisite : unitPrerequisites(current)) {
+            if (countCompleted(state, prerequisite) > 0) continue;
+            // Construction has already been paid for. Continue walking the
+            // direct requirements so the ledger can fund the next structure
+            // in the chain rather than reserving an impossible end-unit.
+            if (countExisting(state, prerequisite) > 0) continue;
+            const auto nested = self(self, prerequisite);
+            visiting.erase(current);
+            return nested != UnitKind::unknown ? nested : prerequisite;
+        }
+        visiting.erase(current);
+        return UnitKind::unknown;
+    };
+    return visit(visit, kind);
 }
 
 MacroActionKind MacroPlanner::actionKind(const GoalKind goal) noexcept {

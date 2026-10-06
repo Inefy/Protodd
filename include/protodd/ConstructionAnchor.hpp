@@ -2,6 +2,8 @@
 
 #include "protodd/GameState.hpp"
 
+#include <string_view>
+
 namespace protodd {
 
 [[nodiscard]] constexpr bool usesHomeConstructionAnchor(UnitKind kind) noexcept {
@@ -29,6 +31,15 @@ namespace protodd {
     if (kind == UnitKind::nexus && expansion.valid()) return expansion;
     if (usesHomeConstructionAnchor(kind) && home.valid()) return home;
     return rally.valid() ? rally : home;
+}
+
+[[nodiscard]] constexpr bool homeAnchoredSupplyPylon(
+    const UnitKind kind, const std::string_view reason,
+    const bool hasConstructionSite) noexcept {
+    if (kind != UnitKind::pylon || hasConstructionSite) return false;
+    return reason == "operational supply invariant" ||
+           reason == "maintain a supply buffer" ||
+           reason == "restore power to disabled production";
 }
 
 }  // namespace protodd

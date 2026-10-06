@@ -24,6 +24,9 @@ public:
     void end(std::ostream& log);
     bool enabled() const noexcept { return observing_; }
     void disable(std::ostream& log) { fail("adapter-exception", log); }
+#ifdef PROTODD_ENGINE_FAULT_INJECTION
+    void enableAuditProbe() noexcept { enabled_ = observing_ = true; }
+#endif
 private:
     struct Pending {
         int action{}, type{}, issued{}, queueBefore{}, orderBefore{}, buildBefore{};

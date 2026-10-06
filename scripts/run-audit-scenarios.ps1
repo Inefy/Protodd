@@ -2,16 +2,19 @@ param(
  [string]$Dll = 'build/test-review-20260926-win32/Release/AuditScenario.dll',
  [string]$Label = 'candidate',
  [string[]]$Cases = @('storm-allies','storm-clear','producer','prerequisite','combat'),
- [switch]$Resume
+ [switch]$Resume,
+ [string]$RuntimePath = 'build/audit-validation-20260926/runtime',
+ [string]$ArchiveParent = 'build/audit-validation-20260926'
 )
 $ErrorActionPreference='Stop'
-$repo=(Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$root=Join-Path $repo 'build/audit-validation-20260926'
-$runtime=Join-Path $root 'runtime'
+$repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$runtime=if([IO.Path]::IsPathRooted($RuntimePath)){[IO.Path]::GetFullPath($RuntimePath)}else{[IO.Path]::GetFullPath((Join-Path $repo $RuntimePath))}
+$archiveRoot=if([IO.Path]::IsPathRooted($ArchiveParent)){[IO.Path]::GetFullPath($ArchiveParent)}else{[IO.Path]::GetFullPath((Join-Path $repo $ArchiveParent))}
+foreach($path in @($runtime,$archiveRoot)){if(-not $path.StartsWith([IO.Path]::GetFullPath((Join-Path $repo 'build')).TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)){throw "Audit paths must stay under build/: $path"}}
 if ($Label -notmatch '^[a-zA-Z0-9-]+$') { throw 'Invalid label' }
 if (Get-Process StarCraft -ErrorAction SilentlyContinue) { throw 'Existing game; refusing duplicate' }
 $dllPath=(Resolve-Path -LiteralPath $Dll).Path
-$archive=Join-Path $root "scenarios-$Label"
+$archive=Join-Path $archiveRoot "scenarios-$Label"
 if(Test-Path $archive) {
  if(-not $Resume){throw 'Scenario output already exists'}
  $prior=Get-Content (Join-Path $archive 'receipt.json') -Raw | ConvertFrom-Json
@@ -20,13 +23,16 @@ if(Test-Path $archive) {
 Copy-Item -LiteralPath $dllPath -Destination (Join-Path $runtime 'bwapi-data/AI/AuditScenario.dll')
 if(-not $Resume){[ordered]@{dll=$dllPath;sha256=(Get-FileHash $dllPath).Hash;cases=$Cases;started=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json | Set-Content (Join-Path $archive 'receipt.json')}
 foreach($case in $Cases) {
- if($case -notin @('storm-allies','storm-clear','producer','prerequisite','combat')) { throw 'Invalid case' }
+ if($case -notin @('storm-allies','storm-clear','producer','producer-pair','cannon-blocker','resource-overlap','build-cancel','builder-evacuation','worker-issuer','worker-local-defense','worker-mining','scout-issuer','whole-game-issuer','racebot-worker-defense','racebot-combat','command-suppression','observer-safety','fault-callback','fault-lifecycle','fault-startup','fault-diagnostics','fault-end-history','fault-end-reporting','fault-phase','fault-observe','fault-production','fault-whole-game','slow-observation','slow-observation-model','pylon-loss','prerequisite','combat','supply-anchor','power-recovery')) { throw 'Invalid case' }
+ $mapCase=if($case -eq 'supply-anchor'){'prerequisite'}elseif($case -eq 'builder-evacuation'){'build-cancel'}elseif($case -in @('slow-observation','slow-observation-model')){'load'}elseif($case -in @('scout-issuer','whole-game-issuer')){'worker-mining'}elseif($case -in @('fault-callback','fault-lifecycle','fault-startup','fault-diagnostics','fault-end-history','fault-end-reporting','fault-phase','fault-observe','fault-production','fault-whole-game')){'resource-overlap'}else{$case}
+ $mapPath=Join-Path $runtime "maps/audit/$mapCase.scx"
  if($Resume -and (Test-Path (Join-Path $archive "$case.csv"))){
   if(-not (Select-String -Path (Join-Path $archive "$case.csv") -Pattern '^DONE,')){throw 'Archived case incomplete'}
-  if((Get-FileHash (Join-Path $archive "$case.scx")).Hash -ne (Get-FileHash (Join-Path $runtime "maps/audit/$case.scx")).Hash){throw 'Resume map differs'}
+  if((Get-FileHash (Join-Path $archive "$case.scx")).Hash -ne (Get-FileHash $mapPath).Hash){throw 'Resume map differs'}
   continue
  }
  $case | Set-Content (Join-Path $runtime 'bwapi-data/read/scenario.txt') -Encoding ascii
+ $playerRace=if($case.StartsWith('racebot-')){'Terran'}else{'Protoss'}
  $ini=@"
 [ai]
 ai = bwapi-data/AI/AuditScenario.dll
@@ -38,9 +44,9 @@ lan_mode = Local PC
 character_name = AstraBot
 pause_dbg = OFF
 auto_restart = OFF
-map = maps/audit/$case.scx
+map = maps/audit/$mapCase.scx
 mapiteration = SEQUENCE
-race = Protoss
+race = $playerRace
 enemy_count = 1
 enemy_race = Zerg
 game_type = USE_MAP_SETTINGS
@@ -102,7 +108,15 @@ log_path = bwapi-data/logs
   & (Join-Path $PSScriptRoot 'stop-owned-starcraft.ps1') -Runtime $runtime
  }
  Copy-Item (Join-Path $runtime 'bwapi-data/bwapi.ini') (Join-Path $archive "$case.ini")
- Copy-Item (Join-Path $runtime "maps/audit/$case.scx") (Join-Path $archive "$case.scx")
+ Copy-Item $mapPath (Join-Path $archive "$case.scx")
+ if($case -in @('racebot-worker-defense','racebot-combat')){
+  $raceBotLog=Join-Path $runtime 'bwapi-data/write/RaceBot.log'
+  if(Test-Path -LiteralPath $raceBotLog){Copy-Item -LiteralPath $raceBotLog -Destination (Join-Path $archive 'RaceBot.log')}
+  $issuer=if($case -eq 'racebot-worker-defense'){'worker-defense'}else{'combat-defense'}
+  if(-not (Select-String -Path (Join-Path $archive 'RaceBot.log') -Pattern "^COMMAND,\d+,\d+,$issuer,Attack_Unit,.*accepted=1,error=accepted$")){
+   throw "RaceBot did not record an accepted $issuer command"
+  }
+ }
  Move-Item -LiteralPath $result -Destination (Join-Path $archive "$case.csv")
  Get-Content (Join-Path $archive "$case.csv") | Where-Object {$_ -match 'CHECK|DONE'}
 }

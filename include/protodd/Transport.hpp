@@ -23,6 +23,7 @@ public:
         bool economicTargets = false,
         const NavigationGrid* navigation = nullptr);
     void reset();
+    void forgetUnit(UnitId id);
     [[nodiscard]] bool ownsReaver(UnitId id) const;
 
 private:

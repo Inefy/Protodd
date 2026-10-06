@@ -1,4 +1,5 @@
 #include "protodd/ConstructionAnchor.hpp"
+#include "protodd/BuildTaskProgress.hpp"
 #include "protodd/Operations.hpp"
 #include "protodd/UnitCatalog.hpp"
 
@@ -25,6 +26,36 @@ int main() {
           "static intercept was relocated to the home tech anchor");
     check(constructionBuilderAnchor(UnitKind::shieldBattery, home, {-1, -1}, site) == home,
           "missing rally did not fall back to home");
+    check(homeAnchoredSupplyPylon(UnitKind::pylon,
+                                  "operational supply invariant", false),
+          "operational supply Pylons share the home anchor used by their travel forecast");
+    check(homeAnchoredSupplyPylon(UnitKind::pylon, "maintain a supply buffer", false),
+          "ordinary strategy supply Pylons stay at home");
+    check(homeAnchoredSupplyPylon(UnitKind::pylon,
+                                  "restore power to disabled production", false),
+          "unlocated power recovery falls back to a home Pylon");
+    check(!homeAnchoredSupplyPylon(UnitKind::pylon,
+                                   "power the new PvZ natural before pressure", false),
+          "explicit natural power remains anchored at the expansion");
+    check(!homeAnchoredSupplyPylon(UnitKind::pylon,
+                                   "operational supply invariant", true),
+          "site-scoped power recovery keeps its local task anchor");
+    check(!homeAnchoredSupplyPylon(UnitKind::pylon,
+                                   "give the forward defensive shell redundant power", false),
+          "forward-defense Pylons keep their tactical anchor");
+    check(!homeAnchoredSupplyPylon(UnitKind::gateway,
+                                   "operational supply invariant", false),
+          "the supply placement rule does not redirect other structures");
+    check(buildTaskTravelDeadlineFrames(UnitKind::pylon, 256, 4920, false) == 8 * 24,
+          "urgent local supply retains its short recovery deadline");
+    const auto remotePylonDeadline =
+        buildTaskTravelDeadlineFrames(UnitKind::pylon, 1280, 4920, false);
+    check(remotePylonDeadline > 8 * 24 && remotePylonDeadline < 60 * 24,
+          "a distant Pylon receives a route-scaled travel window");
+    check(buildTaskTravelDeadlineFrames(UnitKind::photonCannon, 0, 4920, false) == 18 * 24,
+          "other constructions retain a bounded minimum acknowledgment lease");
+    check(buildTaskTravelDeadlineFrames(UnitKind::pylon, 5000, 4920, true) == 60 * 24,
+          "a blocked or orbiting remote worker still hits the hard lease bound");
 
     const auto fighter = [](int id, UnitKind kind, Position position) {
         UnitSnapshot unit;

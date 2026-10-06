@@ -1,84 +1,100 @@
 param(
     [string]$DllPath = "build/tournament/Release/Protodd.dll",
-    [string]$OutputPath = "artifacts/Protodd-AIIDE-2026.zip"
+    [string]$OutputPath = "artifacts/Protodd-AIIDE-2026.zip",
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
-$repoPath = Split-Path -Parent $PSScriptRoot
-$artifactRoot = [System.IO.Path]::GetFullPath((Join-Path $repoPath "artifacts"))
-$stagingRoot = [System.IO.Path]::GetFullPath((Join-Path $artifactRoot "staging/Protodd"))
-$resolvedDll = if ([System.IO.Path]::IsPathRooted($DllPath)) {
-    [System.IO.Path]::GetFullPath($DllPath)
+$repoPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+Import-Module (Join-Path $PSScriptRoot "TournamentManifest.psm1") -Force
+$artifactRoot = [IO.Path]::GetFullPath((Join-Path $repoPath "artifacts"))
+$resolvedDll = if ([IO.Path]::IsPathRooted($DllPath)) {
+    [IO.Path]::GetFullPath($DllPath)
 } else {
-    [System.IO.Path]::GetFullPath((Join-Path $repoPath $DllPath))
+    [IO.Path]::GetFullPath((Join-Path $repoPath $DllPath))
 }
-$resolvedOutput = if ([System.IO.Path]::IsPathRooted($OutputPath)) {
-    [System.IO.Path]::GetFullPath($OutputPath)
+$resolvedOutput = if ([IO.Path]::IsPathRooted($OutputPath)) {
+    [IO.Path]::GetFullPath($OutputPath)
 } else {
-    [System.IO.Path]::GetFullPath((Join-Path $repoPath $OutputPath))
+    [IO.Path]::GetFullPath((Join-Path $repoPath $OutputPath))
 }
 $artifactPrefix = $artifactRoot.TrimEnd('\') + '\'
-if (-not $stagingRoot.StartsWith($artifactPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
-    -not $resolvedOutput.StartsWith($artifactPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "Package staging and output must stay inside $artifactRoot"
+if (-not $resolvedOutput.StartsWith($artifactPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Package output must stay inside $artifactRoot"
 }
-if (-not (Test-Path -LiteralPath $resolvedDll)) {
+if (-not (Test-Path -LiteralPath $resolvedDll -PathType Leaf)) {
     throw "Build the Release|Win32 DLL first: $resolvedDll"
 }
-
-if (Test-Path -LiteralPath $stagingRoot) {
-    Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+if ((Test-Path -LiteralPath $resolvedOutput) -and -not $Force) {
+    throw "Package already exists; choose another OutputPath or pass -Force: $resolvedOutput"
 }
-New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
+
+$manifestPath = Join-Path (Split-Path -Parent $resolvedDll) "Protodd.build-manifest.json"
+if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw "A successful build manifest is required beside the DLL: $manifestPath"
+}
+$buildManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+if ($buildManifest.schema -ne "protodd-build-v1") {
+    throw "Unsupported build manifest schema: $($buildManifest.schema)"
+}
+Assert-TournamentDllMatchesManifest -Manifest $buildManifest -DllPath $resolvedDll
+Assert-TournamentSourceMatchesManifest -Manifest $buildManifest -RepositoryRoot $repoPath
+
+$stagingParent = Join-Path $artifactRoot "staging"
+$stagingRoot = Join-Path $stagingParent ("Protodd-" + [Guid]::NewGuid().ToString("N"))
 $sourceRoot = Join-Path $stagingRoot "source"
 New-Item -ItemType Directory -Path $sourceRoot -Force | Out-Null
+$stagingPrefix = $sourceRoot.TrimEnd('\') + '\'
+try {
+    Copy-Item -LiteralPath $resolvedDll -Destination (Join-Path $stagingRoot "Protodd.dll")
+    foreach ($item in $buildManifest.source_files) {
+        $relative = [string]$item.path
+        if (-not (Test-TournamentManifestPath -Path $relative)) {
+            throw "Unsafe path in build manifest: $relative"
+        }
+        $sourceFile = [IO.Path]::GetFullPath((Join-Path $repoPath $relative))
+        $targetFile = [IO.Path]::GetFullPath((Join-Path $sourceRoot $relative))
+        if (-not $targetFile.StartsWith($stagingPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Package path escapes its source directory: $relative"
+        }
+        if (-not (Test-Path -LiteralPath $sourceFile -PathType Leaf)) {
+            throw "A build input disappeared before packaging: $relative"
+        }
+        $currentHash = (Get-FileHash -LiteralPath $sourceFile -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($currentHash -ne ([string]$item.sha256).ToLowerInvariant()) {
+            throw "A build input changed after compilation: $relative"
+        }
+        New-Item -ItemType Directory -Path (Split-Path -Parent $targetFile) -Force | Out-Null
+        Copy-Item -LiteralPath $sourceFile -Destination $targetFile
+    }
+    Copy-Item -LiteralPath (Join-Path $repoPath "SUBMISSION.md") -Destination $stagingRoot
+    $packageManifest = [ordered]@{
+        schema = "protodd-tournament-package-v1"
+        bot = "Protodd"
+        race = "Protoss"
+        bwapi_version = "4.4.0"
+        build_manifest = $buildManifest
+        source_snapshot_sha256 = $buildManifest.source_snapshot_sha256
+        package_dll_sha256 = $buildManifest.dll_sha256
+        packaged_utc = [DateTime]::UtcNow.ToString("o")
+    }
+    [IO.File]::WriteAllText((Join-Path $stagingRoot "manifest.json"),
+        ($packageManifest | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
 
-Copy-Item -LiteralPath $resolvedDll -Destination (Join-Path $stagingRoot "Protodd.dll")
-foreach ($file in @("README.md", "LICENSE", "CMakeLists.txt", "CMakePresets.json")) {
-    Copy-Item -LiteralPath (Join-Path $repoPath $file) -Destination $sourceRoot
+    $outputDirectory = Split-Path -Parent $resolvedOutput
+    New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+    if (Test-Path -LiteralPath $resolvedOutput) {
+        if (-not $Force) { throw "Package already exists: $resolvedOutput" }
+        Remove-Item -LiteralPath $resolvedOutput -Force
+    }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::CreateFromDirectory(
+        $stagingRoot, $resolvedOutput, [IO.Compression.CompressionLevel]::Optimal, $false)
+} finally {
+    if (Test-Path -LiteralPath $stagingRoot) {
+        Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+    }
 }
-foreach ($directory in @("cmake", "include", "src", "tests", "tools", "docs", "bwapi-data")) {
-    Copy-Item -LiteralPath (Join-Path $repoPath $directory) -Destination $sourceRoot -Recurse
-}
-# Runtime helper caches can be present after verification, but they are not
-# source and should never inflate or contaminate the tournament submission.
-Get-ChildItem -LiteralPath $sourceRoot -Directory -Filter "__pycache__" -Recurse |
-    Remove-Item -Recurse -Force
-Get-ChildItem -LiteralPath $sourceRoot -File -Include "*.pyc", "*.pyo" -Recurse |
-    Remove-Item -Force
-New-Item -ItemType Directory -Path (Join-Path $sourceRoot "scripts") -Force | Out-Null
-foreach ($script in @("build-tournament.ps1", "package-tournament.ps1", "verify.ps1", "ladder.ps1",
-                      "direct-match.ps1")) {
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) `
-        -Destination (Join-Path $sourceRoot "scripts/$script")
-}
-New-Item -ItemType Directory -Path (Join-Path $sourceRoot "ladder") -Force | Out-Null
-foreach ($file in @("README.md", "ladder.example.json")) {
-    Copy-Item -LiteralPath (Join-Path $repoPath "ladder/$file") `
-        -Destination (Join-Path $sourceRoot "ladder/$file")
-}
-Copy-Item -LiteralPath (Join-Path $repoPath "SUBMISSION.md") -Destination $stagingRoot
-
-$manifest = [ordered]@{
-    bot = "Protodd"
-    race = "Protoss"
-    bwapi = "4.4.0"
-    git_commit = (& git -C $repoPath rev-parse HEAD).Trim()
-    source_dirty = -not [string]::IsNullOrWhiteSpace(
-        ((& git -C $repoPath status --porcelain) -join "`n"))
-    dll_sha256 = (Get-FileHash -LiteralPath $resolvedDll -Algorithm SHA256).Hash
-    packaged_utc = [DateTime]::UtcNow.ToString("o")
-}
-$manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stagingRoot "manifest.json") `
-    -Encoding utf8
-
-$outputDirectory = Split-Path -Parent $resolvedOutput
-New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
-if (Test-Path -LiteralPath $resolvedOutput) {
-    Remove-Item -LiteralPath $resolvedOutput -Force
-}
-Compress-Archive -LiteralPath $stagingRoot -DestinationPath $resolvedOutput -CompressionLevel Optimal
-Remove-Item -LiteralPath $stagingRoot -Recurse -Force
 
 $packageHash = (Get-FileHash -LiteralPath $resolvedOutput -Algorithm SHA256).Hash
 Write-Output "Tournament package: $resolvedOutput"

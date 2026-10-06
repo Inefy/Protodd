@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PolicyRuntime.hpp"
+#include "protodd/CallbackBoundary.hpp"
 
 #include <BWAPI.h>
 
@@ -8,6 +9,8 @@
 #include <cstdint>
 #include <fstream>
 #include <map>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace protodd::bwapi {
@@ -63,11 +66,29 @@ private:
     Construction construction_;
     std::map<int, BWAPI::TilePosition> enemyBuildings_;
     std::vector<BWAPI::Position> searchPoints_;
+    std::uint64_t callbackErrors_{};
+    std::uint64_t commandLogErrors_{};
+    int lastCallbackErrorFrame_{-1000};
 
+    template <class Callback>
+    void callbackBoundary(std::string_view callbackName, Callback&& callback) noexcept {
+        protodd::invokeCallbackBoundary(
+            callbackName, std::forward<Callback>(callback),
+            [this](const std::string_view name, const std::string_view message) noexcept {
+                recordCallbackFailure(name, message);
+            });
+    }
+
+    void recordCallbackFailure(std::string_view callbackName,
+                               std::string_view message) noexcept;
+    void onStartImpl();
+    void onEndImpl(bool winner);
+    void onFrameImpl();
     [[nodiscard]] int count(BWAPI::UnitType type, bool completedOnly = false) const;
     [[nodiscard]] int incomingSupply() const;
     [[nodiscard]] bool affordable(BWAPI::UnitType type) const;
     [[nodiscard]] bool reserved(BWAPI::Unit worker) const;
+    bool issueCommand(const BWAPI::UnitCommand& command, std::string_view issuer);
     [[nodiscard]] BWAPI::Position home() const;
     [[nodiscard]] std::vector<BWAPI::Unit> bases() const;
     [[nodiscard]] BWAPI::Unit workerNear(BWAPI::Position position) const;

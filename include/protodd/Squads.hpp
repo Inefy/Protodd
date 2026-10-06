@@ -46,6 +46,7 @@ enum class MainArmyTravelMode : std::uint8_t {
 class SquadPlanner {
 public:
     void reset() { harassment_.reset(); }
+    void forgetUnit(UnitId id) { harassment_.forgetUnit(id); }
     [[nodiscard]] static std::optional<Position> threatenedNaturalRally(
         const GameState& state, const StrategicPlan& plan);
     [[nodiscard]] std::vector<Squad> form(

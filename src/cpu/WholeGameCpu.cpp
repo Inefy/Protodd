@@ -169,6 +169,8 @@ void WholeGameCpu::load(std::istream& input) {
             tensor.shape.push_back(size);
             elements *= size;
         }
+        if (elements > maximumParameterCount - parameterCount_)
+            throw std::runtime_error("whole-game model parameter limit exceeded");
         tensor.values.resize(elements);
         input.read(reinterpret_cast<char*>(tensor.values.data()),
                    static_cast<std::streamsize>(elements * sizeof(float)));

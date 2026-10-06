@@ -508,12 +508,18 @@ def normalize_detailed(item: dict[str, Any], our_bot: str) -> dict[str, Any]:
     crash_index = item.get("crash", -1)
     timeout_index = item.get("timeout", -1)
     frames = int(item.get("finalFrame", 0) or 0) or duration_to_frames(str(item.get("duration", "")))
+    invalid_reasons = []
+    if int(item.get("gameID", -1)) < 0:
+        invalid_reasons.append("missing_game_id")
+    if len(set(bots)) != 2 or our_bot not in bots:
+        invalid_reasons.append("invalid_bot_roster")
+    invalid = bool(invalid_reasons)
     return {
         "game_id": int(item.get("gameID", -1)),
         "round": int(item.get("round", item.get("roundID", -1))),
         "opponent": opponent,
         "map": str(item.get("map", "unknown")),
-        "won": winner == our_bot if winner is not None else None,
+        "won": winner == our_bot if winner is not None and not invalid else None,
         "winner": winner,
         "frames": frames,
         "end_type": str(item.get("gameEndType", "NORMAL")),
@@ -522,7 +528,9 @@ def normalize_detailed(item: dict[str, Any], our_bot: str) -> dict[str, Any]:
         "our_timeout": isinstance(timeout_index, int) and 0 <= timeout_index < len(bots) and bots[timeout_index] == our_bot,
         "opponent_timeout": isinstance(timeout_index, int) and 0 <= timeout_index < len(bots) and bots[timeout_index] != our_bot,
         "game_timeout": bool(item.get("gameTimeout", False)),
-        "complete": str(item.get("gameEndType", "NORMAL")) != "NO_REPORT",
+        "complete": str(item.get("gameEndType", "NORMAL")) != "NO_REPORT" and not invalid,
+        "invalid": invalid,
+        "invalid_reasons": invalid_reasons,
     }
 
 
@@ -539,7 +547,36 @@ def merge_raw_reports(items: Sequence[dict[str, Any]], our_bot: str, timeout_lim
                 name = str(report.get(key, ""))
                 if name and name not in bots:
                     bots.append(name)
+        invalid_reasons: list[str] = []
+        reporters = [str(report.get("reportingBot", "")) for report in reports]
+        if game_id < 0:
+            invalid_reasons.append("missing_game_id")
+        if len(bots) != 2 or our_bot not in bots:
+            invalid_reasons.append("invalid_bot_roster")
+        if len(set(reporters)) != len(reporters):
+            invalid_reasons.append("duplicate_reporter")
+        if len(reports) > 2:
+            invalid_reasons.append("too_many_reports")
+        if len(set(str(report.get("map", "")) for report in reports)) > 1:
+            invalid_reasons.append("map_mismatch")
+        if len(set(int(report.get("round", -1)) for report in reports)) > 1:
+            invalid_reasons.append("round_mismatch")
+        if len(reports) == 2 and len(set(reporters)) == 2:
+            for report in reports:
+                reporter = str(report.get("reportingBot", ""))
+                other = next((name for name in reporters if name != reporter), "")
+                if str(report.get("opponentBot", "")) != other:
+                    invalid_reasons.append("nonreciprocal_roster")
+                    break
         winner = next((str(report["reportingBot"]) for report in reports if report.get("won")), None)
+        winners = {str(report["reportingBot"]) for report in reports if report.get("won")}
+        if len(winners) > 1:
+            invalid_reasons.append("winner_conflict")
+        elif len(reports) == 2 and (
+            not all(isinstance(report.get("won"), bool) for report in reports)
+            or sum(report.get("won") is True for report in reports) != 1
+        ):
+            invalid_reasons.append("winner_missing")
         crash_bot = next((str(report["reportingBot"]) for report in reports if report.get("crash")), None)
         timeout_bot = None
         for report in reports:
@@ -561,13 +598,17 @@ def merge_raw_reports(items: Sequence[dict[str, Any]], our_bot: str, timeout_lim
         else:
             end_type = min(end_types, key=lambda value: END_TYPE_PRECEDENCE.get(value, 99))
         opponent = next((bot for bot in bots if bot != our_bot), "unknown")
+        invalid_reasons = list(dict.fromkeys(invalid_reasons))
+        invalid = bool(invalid_reasons)
+        if invalid:
+            winner = None
         records.append(
             {
                 "game_id": game_id,
                 "round": int(first.get("round", -1)),
                 "opponent": opponent,
                 "map": str(first.get("map", "unknown")),
-                "won": winner == our_bot if winner is not None else None,
+                "won": winner == our_bot if winner is not None and not invalid else None,
                 "winner": winner,
                 "frames": max(int(report.get("finalFrame", 0) or 0) for report in reports),
                 "end_type": end_type if len(reports) >= 2 else "NO_REPORT",
@@ -576,7 +617,9 @@ def merge_raw_reports(items: Sequence[dict[str, Any]], our_bot: str, timeout_lim
                 "our_timeout": timeout_bot == our_bot,
                 "opponent_timeout": timeout_bot not in {None, our_bot},
                 "game_timeout": any(bool(report.get("gameTimeout")) for report in reports),
-                "complete": len({str(report.get("reportingBot")) for report in reports}) >= 2,
+                "complete": len(set(reporters)) == 2 and not invalid,
+                "invalid": invalid,
+                "invalid_reasons": invalid_reasons,
             }
         )
     return records
@@ -587,7 +630,16 @@ def parse_results(paths: Sequence[Path], our_bot: str, timeout_limits: Sequence[
     if not objects:
         return []
     if all("bots" in item and "winner" in item for item in objects):
-        return [normalize_detailed(item, our_bot) for item in objects]
+        records = [normalize_detailed(item, our_bot) for item in objects]
+        counts = Counter(record["game_id"] for record in records)
+        for record in records:
+            if counts[record["game_id"]] > 1:
+                record["invalid"] = True
+                record["complete"] = False
+                record["won"] = None
+                record["invalid_reasons"] = list(dict.fromkeys(
+                    [*record.get("invalid_reasons", []), "duplicate_game_id"]))
+        return records
     if all("reportingBot" in item for item in objects):
         return merge_raw_reports(objects, our_bot, timeout_limits)
     if all("our_bot" in item and "won" in item for item in objects):
@@ -664,6 +716,7 @@ def summarize(records: Sequence[dict[str, Any]], our_bot: str, manifest: dict[st
             "reported_games": len(records),
             "scored_games": len(scored),
             "excluded_incomplete_games": len(excluded),
+            "invalid_games": sum(bool(record.get("invalid")) for record in records),
             "excluded_non_strategic_games": len(operational) - len(scored),
             "missing_scheduled_games": max(0, scheduled - len(received_ids)),
             "wins": wins,
@@ -738,7 +791,7 @@ Generated {report['generated_utc']}.
 **{summary['indication']}** - {summary['wins']}-{summary['losses']} over {summary['scored_games']} normal games, {percent(summary['win_rate'])} strategic win rate (Wilson 95% CI {percent(low)} to {percent(high)}).
 
 - Operational score including failures: {operational['wins']}-{operational['losses']} over {operational['scored_games']} completed scored games. Failure outcomes do not establish strategic strength.
-- Reliability: {summary['our_crashes']} Protodd crashes, {summary['our_timeouts']} per-frame timeouts, {summary['game_timeouts']} game-length timeouts, {summary['excluded_incomplete_games']} incomplete/excluded.
+- Reliability: {summary['our_crashes']} Protodd crashes, {summary['our_timeouts']} per-frame timeouts, {summary['game_timeouts']} game-length timeouts, {summary['excluded_incomplete_games']} incomplete/excluded, {summary['invalid_games']} invalid reports.
 - Opponent failures: {summary.get('opponent_crashes', 0)} crashes and {summary.get('opponent_timeouts', 0)} per-frame timeouts, excluded from strategic results.
 - Coverage: {summary['reported_games']} result records, {summary['missing_scheduled_games']} scheduled games missing.
 - Trend: first half {percent(summary['first_half_win_rate'])}, second half {percent(summary['second_half_win_rate'])}, latest 20 {percent(summary['latest_20_win_rate'])}.
@@ -788,11 +841,11 @@ def report_html(report: dict[str, Any]) -> str:
 <title>Protodd ladder report</title><style>
 :root{{--bg:#0b1020;--panel:#151c32;--text:#edf2ff;--muted:#9daaca;--accent:#6ee7b7;--bad:#fb7185}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,sans-serif}}main{{max-width:1120px;margin:auto;padding:32px}}h1{{font-size:32px;margin-bottom:6px}}.sub{{color:var(--muted)}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:24px 0}}.card,section{{background:var(--panel);border:1px solid #283352;border-radius:12px;padding:18px}}.big{{font-size:28px;font-weight:750;margin-top:8px}}section{{margin:16px 0;overflow:auto}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;text-align:left;border-bottom:1px solid #283352;white-space:nowrap}}th{{color:var(--muted)}}.track{{width:130px}}.bar{{display:block;height:8px;max-width:130px;background:var(--accent);border-radius:10px}}@media(max-width:650px){{main{{padding:16px}}}}
 </style></head><body><main><h1>Protodd ladder report</h1><div class="sub">{html.escape(report['generated_utc'])} · {html.escape(summary['indication'])}</div>
-<div class="cards"><div class="card">Strategic win rate<div class="big">{percent(summary['win_rate'])}</div><div class="sub">95% CI {percent(low)} to {percent(high)}</div></div><div class="card">Normal-game record<div class="big">{summary['wins']}-{summary['losses']}</div><div class="sub">{summary['scored_games']} normal games</div></div><div class="card">Operational score<div class="big">{operational['wins']}-{operational['losses']}</div><div class="sub">Includes failure outcomes</div></div><div class="card">Reliability<div class="big">{summary['our_crashes']} crashes</div><div class="sub">{summary['our_timeouts']} timeouts / {summary['excluded_incomplete_games']} incomplete</div></div><div class="card">Coverage<div class="big">{summary['reported_games']}</div><div class="sub">{summary['missing_scheduled_games']} scheduled games missing</div></div><div class="card">Latest 20<div class="big">{percent(summary['latest_20_win_rate'])}</div><div class="sub">First {percent(summary['first_half_win_rate'])} / second {percent(summary['second_half_win_rate'])}</div></div></div>{diagnostic_section}{sections}</main></body></html>"""
+<div class="cards"><div class="card">Strategic win rate<div class="big">{percent(summary['win_rate'])}</div><div class="sub">95% CI {percent(low)} to {percent(high)}</div></div><div class="card">Normal-game record<div class="big">{summary['wins']}-{summary['losses']}</div><div class="sub">{summary['scored_games']} normal games</div></div><div class="card">Operational score<div class="big">{operational['wins']}-{operational['losses']}</div><div class="sub">Includes failure outcomes</div></div><div class="card">Reliability<div class="big">{summary['our_crashes']} crashes</div><div class="sub">{summary['our_timeouts']} timeouts / {summary['excluded_incomplete_games']} incomplete / {summary['invalid_games']} invalid</div></div><div class="card">Coverage<div class="big">{summary['reported_games']}</div><div class="sub">{summary['missing_scheduled_games']} scheduled games missing</div></div><div class="card">Latest 20<div class="big">{percent(summary['latest_20_win_rate'])}</div><div class="sub">First {percent(summary['first_half_win_rate'])} / second {percent(summary['second_half_win_rate'])}</div></div></div>{diagnostic_section}{sections}</main></body></html>"""
 
 
 def write_games_csv(path: Path, games: Sequence[dict[str, Any]]) -> None:
-    fields = ["game_id", "round", "opponent", "opponent_race", "map", "won", "winner", "frames", "end_type", "our_crash", "opponent_crash", "our_timeout", "opponent_timeout", "game_timeout", "complete", "strategic_result"]
+    fields = ["game_id", "round", "opponent", "opponent_race", "map", "won", "winner", "frames", "end_type", "our_crash", "opponent_crash", "our_timeout", "opponent_timeout", "game_timeout", "complete", "invalid", "invalid_reasons", "strategic_result"]
     with path.open("w", newline="", encoding="utf-8") as target:
         writer = csv.DictWriter(target, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
@@ -883,7 +936,12 @@ def command_compare(args: argparse.Namespace) -> None:
     delta, low, high = difference_interval(a["wins"], a["scored_games"], b["wins"], b["scored_games"])
     strength_verdict = "likely improvement" if low > 0 else "likely regression" if high < 0 else "inconclusive"
     blockers = []
-    for field in ("our_crashes", "our_timeouts", "excluded_incomplete_games", "missing_scheduled_games"):
+    for field in ("excluded_incomplete_games", "invalid_games", "missing_scheduled_games"):
+        if a.get(field, 0):
+            blockers.append(f"baseline {field}: {a[field]}")
+        if b.get(field, 0):
+            blockers.append(f"candidate {field}: {b[field]}")
+    for field in ("our_crashes", "our_timeouts"):
         if b.get(field, 0):
             blockers.append(f"candidate {field}: {b[field]}")
     runtime = candidate.get("protodd_telemetry", {}).get("runtime", {})

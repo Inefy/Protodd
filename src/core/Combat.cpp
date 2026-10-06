@@ -479,6 +479,19 @@ void EngagementTracker::reset() {
     nextKey_ = 1;
 }
 
+void EngagementTracker::forgetUnit(const UnitId id) {
+    if (id < 0) return;
+    for (auto group = groups_.begin(); group != groups_.end();) {
+        std::erase(group->members, id);
+        if (group->members.empty()) {
+            memory_.erase(group->key);
+            group = groups_.erase(group);
+        } else {
+            ++group;
+        }
+    }
+}
+
 const UnitSnapshot* CombatEvaluator::selectTarget(
     const UnitSnapshot& attacker,
     const std::span<const UnitSnapshot> candidates,

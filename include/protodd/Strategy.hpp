@@ -14,6 +14,20 @@ enum class OpeningStyle : std::uint8_t { standard, aggressive, economic, decepti
 
 enum class GoalKind : std::uint8_t { build, train, expand, detect, research, upgrade };
 
+// Optional stable identity for a structure demand tied to one map location.
+// IDs are caller-owned, globally unique within a game, and stable across
+// planning frames. The upper bit is reserved by the BWAPI adapter for legacy
+// type-only leases.
+struct ConstructionTaskSite {
+    std::uint64_t id{};
+    int baseId{-1};
+    Position anchor{-1, -1};
+
+    [[nodiscard]] constexpr bool valid() const noexcept {
+        return id != 0 && (id >> 63U) == 0 && anchor.valid();
+    }
+};
+
 struct ProductionGoal {
     GoalKind goal{GoalKind::train};
     UnitKind target{UnitKind::unknown};
@@ -24,6 +38,7 @@ struct ProductionGoal {
     TechnologyKind technology{TechnologyKind::none};
     bool allowMineralFallback{};
     bool harassmentOnly{};
+    ConstructionTaskSite constructionSite{};
 };
 
 struct CompositionTarget {
@@ -55,6 +70,12 @@ struct StrategicPlan {
     // Temporarily release expansion savings while a failed builder recovers.
     bool deferExpansion{};
     int harassmentDrops{};
+    // Stop supply/production fallback spending while a lost last Nexus has no
+    // legal mineral drop-off and recovery is awaiting a viable rebuild.
+    bool recoveringLastNexus{};
+    // Estimated frames of mining remaining across all currently owned mineral
+    // sites, based on the live worker count. -1 means the estimate is unknown.
+    Frame estimatedMiningRunwayFrames{-1};
 };
 
 class StrategyEngine {

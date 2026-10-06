@@ -189,9 +189,54 @@ void testOpponentInferenceAndStrategy() {
                     singleObservation) < 0.0001 &&
                distantModel.assessment().aggression < 0.6,
            "repeated snapshots of one remote Zealot cannot manufacture certainty about a rush");
-    expect(protodd::StrategyEngine{}.plan(distantOpening, distantModel.assessment()).posture !=
-               protodd::Posture::defend,
+    const auto remoteZealotPlan = protodd::StrategyEngine{}.plan(
+        distantOpening, distantModel.assessment());
+    expect(remoteZealotPlan.posture != protodd::Posture::defend &&
+               remoteZealotPlan.name.find("two-gate robotics control") == std::string::npos,
            "an ordinary first enemy Zealot does not cancel the opening technology plan");
+    auto homeBreach = distantOpening;
+    homeBreach.enemy.units.front().position = {300, 256};
+    const auto homeZealotPlan = protodd::StrategyEngine{}.plan(
+        homeBreach, distantModel.assessment());
+    expect(homeZealotPlan.posture == protodd::Posture::defend &&
+               homeZealotPlan.name.find("two-gate emergency defense") != std::string::npos,
+           "the same Zealot changes the defensive plan only when it reaches our main");
+
+    protodd::GameState expansionRisk;
+    expansionRisk.frame = 7 * 60 * 24;
+    expansionRisk.self.id = 1;
+    expansionRisk.enemy.id = 2;
+    expansionRisk.self.race = expansionRisk.enemy.race = protodd::Race::protoss;
+    expansionRisk.self.units.push_back(unit(1, protodd::UnitKind::nexus, true, {256, 256}));
+    for (int id = 10; id < 12; ++id)
+        expansionRisk.self.units.push_back(unit(id, protodd::UnitKind::photonCannon, true,
+                                                {300 + id * 8, 300}));
+    for (int id = 20; id < 25; ++id)
+        expansionRisk.self.units.push_back(unit(id, protodd::UnitKind::zealot, true,
+                                                {400 + id * 8, 400}));
+    for (int id = 30; id < 46; ++id) {
+        auto worker = unit(id, protodd::UnitKind::probe, true, {440 + (id % 4) * 16, 500});
+        worker.role = protodd::UnitRole::worker;
+        expansionRisk.self.units.push_back(worker);
+    }
+    protodd::BaseSnapshot mainBase;
+    mainBase.id = 1; mainBase.center = {256, 256}; mainBase.ownerId = 1;
+    mainBase.startLocation = true; mainBase.mineralsRemaining = 8000;
+    protodd::BaseSnapshot natural;
+    natural.id = 2; natural.center = {1500, 256}; natural.ownerId = -1;
+    natural.mineralsRemaining = 8000; natural.mineralPatches = 8; natural.geysers = 1;
+    expansionRisk.bases = {mainBase, natural};
+    expansionRisk.enemy.units = {
+        unit(102, protodd::UnitKind::zealot, false, {3300, 3400}),
+        unit(103, protodd::UnitKind::zealot, false, {3380, 3400}),
+    };
+    const auto remoteArmyPlan = protodd::StrategyEngine{}.plan(expansionRisk, {});
+    auto naturalArmy = expansionRisk;
+    naturalArmy.enemy.units[0].position = {1500, 256};
+    naturalArmy.enemy.units[1].position = {1580, 256};
+    const auto threatenedNaturalPlan = protodd::StrategyEngine{}.plan(naturalArmy, {});
+    expect(remoteArmyPlan.desiredBases >= 2 && threatenedNaturalPlan.desiredBases == 1,
+           "remote enemy-army visibility permits the natural while contact at that site delays it");
 
     protodd::GameState state;
     state.frame = 3 * 60 * 24;
@@ -1127,8 +1172,10 @@ void testEconomicRecovery() {
     state.enemy.race = protodd::Race::terran;
     state.self.supplyUsed = 30;
     state.self.supplyTotal = 50;
+    state.self.minerals = 500;
     state.bases.push_back(
         {1, {256, 256}, {280, 260}, 6000, 5000, -1, 0, true, false, 8, 1});
+    state.bases.back().groundDistanceFromMain = 0;
     for (int id = 1; id <= 5; ++id) {
         auto probe = unit(id, protodd::UnitKind::probe, true, {256 + id * 4, 256});
         probe.role = protodd::UnitRole::worker;
@@ -1136,12 +1183,13 @@ void testEconomicRecovery() {
     }
     protodd::StrategyEngine strategy;
     const auto lostMain = strategy.plan(state, {});
-    expect(lostMain.posture == protodd::Posture::recover &&
+    expect(lostMain.posture == protodd::Posture::hold &&
+               lostMain.expansionTarget == state.bases.front().center &&
                std::ranges::any_of(lostMain.goals, [](const protodd::ProductionGoal& goal) {
                    return goal.target == protodd::UnitKind::nexus && goal.blocking &&
-                          goal.priority == 100;
+                          goal.priority == 127;
                }),
-           "surviving workers trigger an emergency Nexus rebuild");
+           "surviving workers fund a safe reachable Nexus rebuild before other goals");
 
     state.self.units.clear();
     state.bases.clear();
@@ -1580,6 +1628,54 @@ void testMacroReservations() {
            "an imminent supply block funds its Pylon before reserving a fourth Nexus");
 }
 
+void testSiteScopedConstructionTasks() {
+    using namespace protodd;
+    GameState state;
+    state.frame = 100;
+    state.self.minerals = 300;
+    StrategicPlan plan;
+    ProductionGoal mainPylon{GoalKind::build, UnitKind::pylon, 1, 110, true,
+                             "main power"};
+    mainPylon.constructionSite = {101, 1, {320, 320}};
+    ProductionGoal naturalPylon{GoalKind::build, UnitKind::pylon, 1, 109, true,
+                                "natural power"};
+    naturalPylon.constructionSite = {202, 2, {1600, 320}};
+    plan.goals = {mainPylon, naturalPylon};
+
+    MacroPlanner planner;
+    ResourceLedger bank{300, 0};
+    auto actions = planner.reconcile(state, plan, bank);
+    expect(actions.size() == 2 &&
+               actions[0].constructionSite.id != actions[1].constructionSite.id &&
+               std::ranges::count_if(actions, [](const MacroAction& action) {
+                   return action.action == MacroActionKind::build &&
+                          action.target == UnitKind::pylon && action.reserved &&
+                          action.constructionSite.valid();
+               }) == 2,
+           "same-kind structure tasks at separate bases retain distinct identities");
+
+    state.frame = 124;
+    state.self.units.push_back(unit(10, UnitKind::pylon, true, {352, 336}));
+    ResourceLedger nextBank{300, 0};
+    actions = planner.reconcile(state, plan, nextBank);
+    expect(actions.size() == 1 && actions.front().target == UnitKind::pylon &&
+               actions.front().constructionSite.id == 202 &&
+               actions.front().constructionSite.anchor == Position{1600, 320},
+           "construction at one site fulfills only that site-scoped task");
+
+    ProductionGoal nearbySitePylon{GoalKind::build, UnitKind::pylon, 1, 108, true,
+                                   "restore nearby power"};
+    nearbySitePylon.constructionSite = {303, 3, {600, 336}};
+    plan.goals.push_back(nearbySitePylon);
+    state.frame = 148;
+    ResourceLedger nearbyBank{300, 0};
+    actions = planner.reconcile(state, plan, nearbyBank);
+    expect(std::ranges::any_of(actions, [](const MacroAction& action) {
+               return action.target == UnitKind::pylon && action.reserved &&
+                      action.constructionSite.id == 303;
+           }), "a nearby Pylon outside psi range does not fulfill a local recovery task");
+}
+
 void testPvZMineralFallback() {
     using namespace protodd;
     GameState state;
@@ -1686,6 +1782,89 @@ void testOpponentLearning() {
                restored.lookup("Bot", "Map", protodd::OpeningStyle::aggressive).losses == 8,
            "read and write learning snapshots merge without losing cumulative results");
 
+    constexpr std::string_view alias = "Tournament-Alias";
+    constexpr std::string_view map = "Benzene";
+    constexpr auto standard = protodd::OpeningStyle::standard;
+    protodd::OpponentHistory roundOneFirstGame;
+    roundOneFirstGame.parse({});
+    roundOneFirstGame.record(alias, map, standard, true,
+                             "00000000000000000000000000000001");
+    const auto roundOneWriteAfterFirstGame = roundOneFirstGame.serialize();
+    protodd::OpponentHistory roundOneSecondGame;
+    roundOneSecondGame.parse({});  // The server read snapshot stays blank in round one.
+    roundOneSecondGame.merge(roundOneWriteAfterFirstGame);
+    roundOneSecondGame.record(alias, map, standard, false,
+                              "00000000000000000000000000000002");
+    const auto roundOneServerWrite = roundOneSecondGame.serialize();
+
+    // Independent workers can start from the same read snapshot. Merge their
+    // unique outcomes, and merging the same worker twice must be idempotent.
+    protodd::OpponentHistory parallelWin;
+    protodd::OpponentHistory parallelLoss;
+    parallelWin.parse({});
+    parallelLoss.parse({});
+    parallelWin.record(alias, map, standard, true,
+                       "00000000000000000000000000000003");
+    parallelLoss.record(alias, map, standard, false,
+                         "00000000000000000000000000000004");
+    protodd::OpponentHistory parallelMerged;
+    parallelMerged.parse({});
+    parallelMerged.merge(parallelWin.serialize());
+    parallelMerged.merge(parallelLoss.serialize());
+    parallelMerged.merge(parallelWin.serialize());
+    const auto parallelCounts = parallelMerged.lookup(alias, map, standard);
+
+    // After round turnover, the cumulative read snapshot is copied forward and
+    // the write directory starts empty. Re-importing a write snapshot must not
+    // count any of its already-seen outcomes twice.
+    const auto roundTwoRead = roundOneServerWrite;
+    protodd::OpponentHistory roundTwoFirstGame;
+    roundTwoFirstGame.parse(roundTwoRead);
+    roundTwoFirstGame.record(alias, map, standard, true,
+                             "00000000000000000000000000000005");
+    const auto roundTwoWriteAfterFirstGame = roundTwoFirstGame.serialize();
+    protodd::OpponentHistory roundTwoSecondGame;
+    roundTwoSecondGame.parse(roundTwoRead);
+    roundTwoSecondGame.merge(roundTwoWriteAfterFirstGame);
+    roundTwoSecondGame.merge(roundTwoWriteAfterFirstGame);
+    roundTwoSecondGame.record(alias, map, standard, false,
+                              "00000000000000000000000000000006");
+    protodd::OpponentHistory afterTwoRounds;
+    afterTwoRounds.parse(roundTwoSecondGame.serialize());
+    const auto twoRoundCounts = afterTwoRounds.lookup(alias, map, standard);
+    expect(parallelCounts.wins == 1 && parallelCounts.losses == 1 &&
+               twoRoundCounts.wins == 2 && twoRoundCounts.losses == 2 &&
+               protodd::OpponentHistory::filename(alias) !=
+                   protodd::OpponentHistory::filename("Tournament-Alias-2") &&
+               protodd::OpponentHistory::filename("Alias,A") !=
+                   protodd::OpponentHistory::filename("Alias_A"),
+           "round transfer deduplicates repeated snapshots but retains distinct parallel outcomes");
+
+    protodd::OpponentHistory collisionSafe;
+    collisionSafe.record("Alias,A", "Map,A#hash-1", standard, true,
+                         "00000000000000000000000000000007");
+    collisionSafe.record("Alias_A", "Map_A#hash-1", standard, false,
+                         "00000000000000000000000000000008");
+    collisionSafe.record("Alias%A", "Map\nA#hash-2", standard, true,
+                         "00000000000000000000000000000009");
+    const auto collisionSnapshot = collisionSafe.serialize();
+    protodd::OpponentHistory collisionRestored;
+    collisionRestored.parse(collisionSnapshot);
+    protodd::OpponentHistory legacySnapshot;
+    legacySnapshot.parse("Bot,OldMap,aggressive,2,1\n");
+    const auto migratedLegacy = legacySnapshot.serialize();
+    protodd::OpponentHistory migratedRestored;
+    migratedRestored.parse(migratedLegacy);
+    protodd::OpponentHistory malformedV3;
+    malformedV3.parse("# protodd-history-v3\nBot%QZ,Map,standard,99,0\n"
+                       "outcome,not-an-id,Bot,Map,standard,win\n");
+    expect(collisionRestored.lookup("Alias,A", "Map,A#hash-1", standard).wins == 1 &&
+               collisionRestored.lookup("Alias_A", "Map_A#hash-1", standard).losses == 1 &&
+               collisionRestored.lookup("Alias%A", "Map\nA#hash-2", standard).wins == 1 &&
+               migratedRestored.lookup("Bot", "OldMap", protodd::OpeningStyle::aggressive).wins == 2 &&
+               malformedV3.lookup("Bot", "Map", standard).games() == 0,
+           "versioned history preserves punctuation, map identity, legacy rows, and malformed-input safety");
+
     protodd::OpponentHistory fresh;
     const auto exploration = fresh.choose("NewBot", "Map", 3);
     expect(exploration == protodd::OpeningStyle::standard,
@@ -1693,6 +1872,43 @@ void testOpponentLearning() {
     fresh.record("NewBot", "Map", protodd::OpeningStyle::standard, true);
     expect(fresh.choose("NewBot", "Map", 3) != protodd::OpeningStyle::standard,
            "learning explores an untried style after collecting baseline evidence");
+
+    protodd::OpponentHistory bounded;
+    bounded.parse("Bot,Map,standard,4,2\n");
+    bounded.merge(std::string(protodd::OpponentHistory::maximumSerializedBytes + 1, 'x'));
+    expect(bounded.lookup("Bot", "Map", protodd::OpeningStyle::standard).wins == 4,
+           "oversized history merge is ignored without replacing valid records");
+    bounded.record("Bot", "Map", protodd::OpeningStyle::standard, true);
+    bounded.record("Bot", "Map", static_cast<protodd::OpeningStyle>(255), true);
+    bounded.record(std::string(protodd::OpponentHistory::maximumFieldBytes + 1, 'x'),
+                   "Map", protodd::OpeningStyle::standard, true);
+    bounded.merge(std::string(protodd::OpponentHistory::maximumFieldBytes + 1, 'x') +
+                  ",Map,standard,1,0\n");
+    expect(bounded.lookup("Bot", "Map", protodd::OpeningStyle::standard).wins == 5 &&
+               bounded.serialize().find(std::string(
+                   protodd::OpponentHistory::maximumFieldBytes + 1, 'x')) == std::string::npos &&
+               protodd::OpponentHistory::filename(std::string(
+                   protodd::OpponentHistory::maximumOpponentFilenameBytes + 1, 'x')).empty(),
+           "history updates and alias filenames reject out-of-bound fields");
+
+    protodd::OpponentHistory cappedCount;
+    cappedCount.parse("Bot,Map,standard,1000000,0\n");
+    cappedCount.record("Bot", "Map", protodd::OpeningStyle::standard, true);
+    expect(cappedCount.lookup("Bot", "Map", protodd::OpeningStyle::standard).wins == 1000000,
+           "runtime counters stop at the persisted count limit");
+
+    std::string rows;
+    for (std::size_t index = 0; index <= protodd::OpponentHistory::maximumRecords; ++index)
+        rows += "Bot,Map" + std::to_string(index) + ",standard,1,0\n";
+    protodd::OpponentHistory recordLimited;
+    recordLimited.parse(rows);
+    expect(recordLimited.lookup("Bot", "Map" + std::to_string(
+                   protodd::OpponentHistory::maximumRecords - 1),
+                   protodd::OpeningStyle::standard).wins == 1 &&
+               recordLimited.lookup("Bot", "Map" + std::to_string(
+                   protodd::OpponentHistory::maximumRecords),
+                   protodd::OpeningStyle::standard).games() == 0,
+           "history parser caps distinct records");
 }
 
 void testInfluenceAndCombat() {
@@ -2024,6 +2240,149 @@ void testCommandArbitration() {
     }
 }
 
+void testCommandSuppressionCalibration() {
+    using namespace protodd;
+    const auto windowBoundary = [](const CommandType type, const int latency,
+                                   const int expectedWindow) {
+        const Command command{1, type, 9, {320, 320}, UnitKind::dragoon,
+                              80, 0, "calibration"};
+        const auto suppressedAt = [&](const int age) {
+            CommandBus bus;
+            bus.beginFrame(100, latency);
+            bus.markIssued(command);
+            bus.beginFrame(100 + age, latency);
+            bus.submit(command);
+            return bus.finalize().empty();
+        };
+        expect(suppressedAt(expectedWindow), "duplicate stays suppressed through the configured window");
+        expect(!suppressedAt(expectedWindow + 1), "duplicate becomes eligible after the configured window");
+    };
+
+    for (const auto latency : {0, 2, 6, 12, 24}) {
+        windowBoundary(CommandType::train, latency, std::max(2, latency + 1));
+    }
+    windowBoundary(CommandType::attackUnit, 0, 18);
+    windowBoundary(CommandType::move, 0, 24);
+    windowBoundary(CommandType::attackMove, 6, 24);
+    windowBoundary(CommandType::recharge, 6, 24);
+    windowBoundary(CommandType::hold, 6, 120);
+
+    CommandBus bus;
+    auto oldMove = Command{1, CommandType::move, -1, {100, 100}, UnitKind::unknown,
+                           50, 0, "old-route"};
+    bus.beginFrame(100, 6);
+    bus.markIssued(oldMove);
+    auto replacementMove = oldMove;
+    replacementMove.targetPosition = {400, 100};
+    replacementMove.source = "changed-route";
+    bus.beginFrame(101, 6);
+    bus.submit(replacementMove);
+    expect(bus.finalize().size() == 1,
+           "a changed movement destination bypasses same-order suppression");
+
+    bus.clear();
+    const Command oldTarget{1, CommandType::attackUnit, 10, {}, UnitKind::unknown,
+                            80, 0, "dead-target"};
+    auto replacementTarget = oldTarget;
+    replacementTarget.targetUnit = 11;
+    replacementTarget.source = "replacement-target";
+    bus.beginFrame(200, 6);
+    bus.markIssued(oldTarget);
+    bus.beginFrame(209, 6);
+    bus.submit(replacementTarget);
+    expect(bus.finalize().size() == 1,
+           "a replacement target is eligible after attack-latency protection expires");
+
+    bus.clear();
+    const Command interrupted{1, CommandType::move, -1, {300, 300}, UnitKind::unknown,
+                              50, 0, "interrupted-route"};
+    bus.beginFrame(300, 2);
+    bus.markIssued(interrupted);
+    bus.beginFrame(326, 2);
+    bus.submit(interrupted);
+    expect(bus.finalize().size() == 1,
+           "an interrupted movement can retry after its suppression window");
+}
+
+void testActorLifecycleInvalidation() {
+    using namespace protodd;
+
+    CommandBus commands;
+    const Command staleActor{41, CommandType::attackUnit, 90, {-1, -1},
+                             UnitKind::unknown, 80, 0, "old-unit"};
+    commands.beginFrame(100, 6);
+    commands.markIssued(staleActor);
+    commands.beginFrame(101, 6);
+    commands.submit(staleActor);
+    expect(commands.finalize().empty(), "ordinary duplicate remains suppressed before lifecycle change");
+    commands.forgetUnit(41);
+    commands.beginFrame(102, 6);
+    commands.submit(staleActor);
+    expect(commands.finalize().size() == 1,
+           "a reused actor ID does not inherit the old actor's command suppression");
+
+    const Command staleTarget{42, CommandType::attackUnit, 41, {-1, -1},
+                              UnitKind::unknown, 80, 0, "old-target"};
+    commands.beginFrame(200, 6);
+    commands.markIssued(staleTarget);
+    commands.forgetUnit(41);
+    commands.beginFrame(201, 6);
+    commands.submit(staleTarget);
+    expect(commands.finalize().size() == 1,
+           "orders targeting a destroyed or renegade ID are eligible for fresh arbitration");
+
+    GameState scoutState;
+    scoutState.frame = 100;
+    scoutState.self.id = 1;
+    scoutState.enemy.id = 2;
+    scoutState.self.units = {unit(1, UnitKind::nexus, true),
+                             unit(2, UnitKind::pylon, true),
+                             unit(41, UnitKind::probe, true)};
+    ScoutManager scouts;
+    expect(scouts.selectWorkerScout(scoutState, {}) == 41 && scouts.openingScout() == 41,
+           "the opening scout acquires its unit mission");
+    scouts.forgetUnit(41);
+    expect(scouts.openingScout() == -1,
+           "death or ownership change releases the worker-scout mission immediately");
+    scoutState.self.units = {unit(1, UnitKind::nexus, true),
+                             unit(2, UnitKind::pylon, true),
+                             unit(41, UnitKind::dragoon, true),
+                             unit(42, UnitKind::probe, true)};
+    expect(scouts.selectWorkerScout(scoutState, {}) == 42,
+           "a newly created Probe cannot inherit a reused ID's old scout mission");
+
+    GameState observerState;
+    observerState.frame = 300;
+    observerState.self.id = 1;
+    auto home = unit(3, UnitKind::nexus, true, {100, 100});
+    home.role = UnitRole::resourceDepot;
+    auto observer = unit(55, UnitKind::observer, true, {600, 600});
+    observer.flying = true;
+    observer.underAttack = true;
+    observerState.self.units = {home, observer};
+    InfluenceMap influence;
+    influence.update(observerState);
+    ScoutManager observerMissions;
+    static_cast<void>(observerMissions.protectObservers(observerState, influence));
+    expect(observerMissions.observerEvading(55, observerState.frame),
+           "a threatened Observer receives a temporary evacuation lease");
+    observerMissions.forgetUnit(55);
+    expect(!observerMissions.observerEvading(55, observerState.frame),
+           "a reused Observer ID cannot inherit an old evacuation lease");
+
+    EngagementTracker engagements;
+    std::vector<UnitSnapshot> squad{unit(77, UnitKind::dragoon, true)};
+    const auto oldKey = engagements.identify(squad, 400);
+    static_cast<void>(engagements.stabilize(oldKey, FightDecision::retreat,
+                                            0.4, 1.2, 400));
+    engagements.forgetUnit(77);
+    const auto newKey = engagements.identify(squad, 401);
+    expect(newKey != oldKey &&
+               engagements.stabilize(newKey, FightDecision::engage,
+                                     2.0, 1.2, 401) == FightDecision::engage,
+           "a reused combat-unit ID receives a new engagement identity and no old retreat state");
+}
+
 void testFrameBudget() {
     protodd::FrameBudget budget;
     expect(budget.load(100) == protodd::RuntimeLoad::normal,
@@ -2275,10 +2634,9 @@ void testWorkersAndScouts() {
                               &protodd::WorkerAssignment::job) == 6,
            "a melee breach commits enough healthy Probes to form a surround");
 
-    // Once a real mobile screen is already trading with a three-Zealot wave,
-    // the economy should mineral-walk away instead of waiting for the last
-    // Probe to become militia.  This is deliberately just before the six
-    // minute militia-demand cutoff, matching the live opening pressure window.
+    // Once a real mobile screen can answer a three-Zealot wave, keep the
+    // mineral line working instead of pulling Probes into unnecessary militia
+    // or evacuation. This is just before the six-minute demand cutoff.
     militiaState.frame = 5 * 60 * 24 + 12 * 24;
     auto screenZealot = zealotThreat;
     screenZealot.id = 210;
@@ -2291,6 +2649,8 @@ void testWorkersAndScouts() {
     screenZealotThree.position = {368, 260};
     auto screenUnit = unit(213, protodd::UnitKind::zealot, true, {328, 260});
     screenUnit.role = protodd::UnitRole::groundArmy;
+    screenUnit.groundWeapon = {.damage = 16, .cooldown = 22, .maxRange = 32,
+                               .targetsGround = true, .hits = 2};
     auto screenUnitTwo = screenUnit;
     screenUnitTwo.id = 214;
     screenUnitTwo.position = {344, 260};
@@ -2299,15 +2659,15 @@ void testWorkersAndScouts() {
     militiaState.enemy.units = {screenZealot, screenZealotTwo, screenZealotThree};
     militiaInfluence.update(militiaState);
     const auto evacuatedScreen = workers.assign(militiaState, {}, militiaInfluence);
-    expect(std::ranges::count(evacuatedScreen, protodd::WorkerJob::evacuate,
-                               &protodd::WorkerAssignment::job) >= 2 &&
-               std::ranges::count(evacuatedScreen, protodd::WorkerJob::evacuate,
-                                  &protodd::WorkerAssignment::job) <= 4 &&
+    expect(std::ranges::none_of(
+               evacuatedScreen, [](const protodd::WorkerAssignment& assignment) {
+                   return assignment.job == protodd::WorkerJob::evacuate;
+               }) &&
                std::ranges::none_of(
                    evacuatedScreen, [](const protodd::WorkerAssignment& assignment) {
                        return assignment.job == protodd::WorkerJob::defend;
                    }),
-           "a screened three-Zealot wave evacuates only the exposed edge while keeping a mining floor");
+           "an effective local screen avoids unnecessary Probe militia and evacuation");
 
     militiaState.self.units.erase(
         std::remove_if(militiaState.self.units.begin(), militiaState.self.units.end(),
@@ -2371,8 +2731,9 @@ void testWorkersAndScouts() {
     recoveryInfluence.update(noNexus);
     const auto recoveryMining = workers.assign(noNexus, {}, recoveryInfluence);
     expect(recoveryMining.size() == 1 &&
-               recoveryMining.front().job == protodd::WorkerJob::minerals,
-           "surviving Probes keep mining while a replacement Nexus is built");
+               recoveryMining.front().job == protodd::WorkerJob::rebuild &&
+               !recoveryMining.front().targetPosition.valid(),
+           "surviving Probes never claim mineral income without a legal completed Nexus drop-off");
 
     const auto scoutState = state;
     state.bases[1].ownerId = 1;
@@ -2665,10 +3026,18 @@ void testDepletedMineralControl() {
     }
     influence.update(state);
     const auto remote = WorkerManager{}.assign(state, plan, influence, {}, false, true);
-    expect(std::ranges::count_if(remote, [](const WorkerAssignment& assignment) {
+    expect(std::ranges::none_of(remote, [](const WorkerAssignment& assignment) {
                return assignment.job == WorkerJob::transfer && assignment.baseId == 3;
+           }), "remote mining waits for a completed depot at the planned site");
+    state.bases.back().ownerId = state.self.id;
+    state.self.units.push_back(unit(51, UnitKind::nexus, true, state.bases.back().center));
+    influence.update(state);
+    const auto readyExpansion = WorkerManager{}.assign(state, plan, influence, {}, false, true);
+    expect(std::ranges::count_if(readyExpansion, [](const WorkerAssignment& assignment) {
+               return assignment.job == WorkerJob::transfer && assignment.baseId == 3 &&
+                   assignment.priority == 60;
            }) == 8,
-           "remote mining leases at most eight workers to a planned neutral site");
+           "staged expansion mining leases at most eight workers after Nexus completion");
     auto raider = unit(50, UnitKind::vulture, false, {2820, 512});
     raider.visible = true;
     raider.groundWeapon = {20, 30, 0, 160, DamageType::normal, false, true};
@@ -2677,7 +3046,7 @@ void testDepletedMineralControl() {
     const auto unsafe = WorkerManager{}.assign(state, plan, influence, {}, false, true);
     expect(std::ranges::none_of(unsafe, [](const WorkerAssignment& assignment) {
                return assignment.job == WorkerJob::transfer && assignment.baseId == 3;
-           }), "an observed attacker vetoes remote mining at the neutral site");
+           }), "an observed attacker vetoes staged workers at the exposed Nexus");
 }
 
 void testCoveredPressureRelease() {
@@ -3087,6 +3456,9 @@ void testTransportMissions() {
                       command.source == "reaver-extract";
            }),
            "drop mission extracts its reaver after the bounded firing window");
+    transports.forgetUnit(201);
+    expect(!transports.ownsReaver(201),
+           "a dead or renegade Reaver immediately releases its Shuttle mission ownership");
 }
 
 }  // namespace
@@ -3690,6 +4062,160 @@ void testRangedDefense() {
     expect(std::ranges::none_of(plan.goals, [](const ProductionGoal& goal) {
                return goal.target == UnitKind::photonCannon && goal.blocking;
            }), "observed ranged tech changes the double-Gateway response back to mobile counters");
+}
+
+void testAntiRushWorkerCapRecovery() {
+    using namespace protodd;
+    const auto addProbes = [](GameState& state, const int firstId, const int amount) {
+        for (int index = 0; index < amount; ++index) {
+            auto probe = unit(firstId + index, UnitKind::probe, true);
+            probe.role = UnitRole::worker;
+            state.self.units.push_back(probe);
+        }
+    };
+
+    GameState terran;
+    terran.frame = 9 * 60 * 24;
+    terran.self.id = 1;
+    terran.enemy.id = 2;
+    terran.self.race = Race::protoss;
+    terran.enemy.race = Race::terran;
+    terran.self.supplyUsed = 100;
+    terran.self.supplyTotal = 160;
+    terran.self.units = {
+        unit(1, UnitKind::nexus, true, {256, 256}),
+        unit(2, UnitKind::nexus, true, {1200, 256}),
+        unit(3, UnitKind::pylon, true),
+        unit(4, UnitKind::forge, true),
+        unit(5, UnitKind::gateway, true),
+        unit(6, UnitKind::gateway, true),
+        unit(7, UnitKind::cyberneticsCore, true),
+        unit(8, UnitKind::photonCannon, true),
+        unit(9, UnitKind::photonCannon, true),
+        unit(10, UnitKind::photonCannon, true),
+        unit(11, UnitKind::zealot, true),
+        unit(12, UnitKind::zealot, true),
+        unit(13, UnitKind::zealot, true),
+        unit(14, UnitKind::zealot, true),
+        unit(15, UnitKind::dragoon, true),
+        unit(16, UnitKind::dragoon, true),
+        unit(17, UnitKind::dragoon, true),
+    };
+    addProbes(terran, 30, 24);
+    terran.bases = {
+        {1, {256, 256}, {280, 256}, 7000, 4000, 1},
+        {2, {1200, 256}, {1180, 256}, 7000, 4000, 1},
+    };
+    ThreatAssessment oldTerranAlarm;
+    oldTerranAlarm.mostLikely = EnemyPlan::fastRush;
+    oldTerranAlarm.uncertainty = 1.0;
+    oldTerranAlarm.aggression = 0.90;
+    auto plan = StrategyEngine{}.plan(terran, oldTerranAlarm);
+    expect(plan.desiredWorkers > 14 && plan.desiredBases >= 2 &&
+               plan.name.find("anti-pressure hold") == std::string::npos &&
+               std::ranges::any_of(plan.goals, [](const ProductionGoal& goal) {
+                   return goal.technology == TechnologyKind::protossGroundWeapons;
+               }),
+           "a stale Terran aggression score cannot preserve the anti-rush worker cap after the screen is complete");
+
+    auto renewedTerranPressure = oldTerranAlarm;
+    renewedTerranPressure.combatEnemiesNearMain = 1;
+    plan = StrategyEngine{}.plan(terran, renewedTerranPressure);
+    expect(plan.posture == Posture::defend && plan.desiredWorkers > 14 &&
+               plan.desiredBases == 2 &&
+               std::ranges::none_of(plan.goals, [](const ProductionGoal& goal) {
+                   return goal.target == UnitKind::photonCannon &&
+                          goal.desiredCount > 3 && goal.blocking;
+               }),
+           "renewed local Terran pressure calls for reinforcements without replaying the static-opening budget");
+
+    GameState zerg;
+    zerg.frame = 7 * 60 * 24;
+    zerg.self.id = 1;
+    zerg.enemy.id = 2;
+    zerg.self.race = Race::protoss;
+    zerg.enemy.race = Race::zerg;
+    zerg.self.supplyUsed = 80;
+    zerg.self.supplyTotal = 120;
+    zerg.self.units = {
+        unit(1, UnitKind::nexus, true, {256, 256}),
+        unit(2, UnitKind::nexus, true, {1200, 256}),
+        unit(3, UnitKind::pylon, true),
+        unit(4, UnitKind::forge, true),
+        unit(5, UnitKind::gateway, true),
+        unit(6, UnitKind::gateway, true),
+        unit(7, UnitKind::photonCannon, true),
+        unit(8, UnitKind::photonCannon, true),
+        unit(9, UnitKind::zealot, true),
+        unit(10, UnitKind::zealot, true),
+        unit(11, UnitKind::zealot, true),
+        unit(12, UnitKind::zealot, true),
+    };
+    addProbes(zerg, 30, 24);
+    zerg.bases = terran.bases;
+    ThreatAssessment zergContact;
+    zergContact.combatEnemiesNearMain = 1;
+    plan = StrategyEngine{}.plan(zerg, zergContact);
+    expect(plan.posture == Posture::defend && plan.desiredWorkers > 12 &&
+               plan.desiredBases == 2 && plan.desiredGasWorkers >= 3,
+           "a completed PvZ Cannon and Zealot screen releases the twelve-worker cap during pressure");
+
+    GameState mirror;
+    mirror.frame = 7 * 60 * 24;
+    mirror.self.id = 1;
+    mirror.enemy.id = 2;
+    mirror.self.race = Race::protoss;
+    mirror.enemy.race = Race::protoss;
+    mirror.self.supplyUsed = 100;
+    mirror.self.supplyTotal = 160;
+    mirror.self.units = {
+        unit(1, UnitKind::nexus, true, {256, 256}),
+        unit(2, UnitKind::nexus, true, {1200, 256}),
+        unit(3, UnitKind::pylon, true),
+        unit(4, UnitKind::forge, true),
+        unit(5, UnitKind::gateway, true),
+        unit(6, UnitKind::gateway, true),
+        unit(7, UnitKind::cyberneticsCore, true),
+        unit(8, UnitKind::photonCannon, true),
+        unit(9, UnitKind::photonCannon, true),
+        unit(10, UnitKind::zealot, true),
+        unit(11, UnitKind::zealot, true),
+        unit(12, UnitKind::zealot, true),
+        unit(13, UnitKind::zealot, true),
+        unit(14, UnitKind::zealot, true),
+        unit(15, UnitKind::dragoon, true),
+        unit(16, UnitKind::dragoon, true),
+        unit(17, UnitKind::dragoon, true),
+        unit(18, UnitKind::dragoon, true),
+        unit(19, UnitKind::dragoon, true),
+        unit(20, UnitKind::observer, true),
+    };
+    addProbes(mirror, 30, 24);
+    mirror.bases = terran.bases;
+    auto enemyGateway = unit(80, UnitKind::gateway, false, {3200, 3200});
+    enemyGateway.visible = true;
+    enemyGateway.lastSeen = mirror.frame;
+    auto enemySecondGateway = enemyGateway;
+    enemySecondGateway.id = 81;
+    enemySecondGateway.position = {3400, 3200};
+    mirror.enemy.units = {enemyGateway, enemySecondGateway};
+    ThreatAssessment mirrorOpening;
+    mirrorOpening.uncertainty = 1.0;
+    plan = StrategyEngine{}.plan(mirror, mirrorOpening);
+    expect(plan.desiredBases == 2 && plan.desiredWorkers > 22 &&
+               plan.name.find("scouted two-gate screen") == std::string::npos,
+           "a completed PvP screen exits the remembered two-Gateway opening and resumes economy growth");
+
+    mirrorOpening.combatEnemiesNearMain = 1;
+    auto localZealot = unit(82, UnitKind::zealot, false, {300, 256});
+    localZealot.groundWeapon = {.damage = 8, .cooldown = 22, .maxRange = 32,
+                                .targetsGround = true};
+    mirror.enemy.units.push_back(localZealot);
+    plan = StrategyEngine{}.plan(mirror, mirrorOpening);
+    expect(plan.posture == Posture::defend && plan.desiredBases == 2 &&
+               plan.desiredWorkers > 22 &&
+               plan.name.find("scouted two-gate screen") == std::string::npos,
+           "renewed PvP local pressure redirects posture without reinstating the opening economy cap");
 }
 
 void testBananaBrainMacroRegressions() {
@@ -5240,6 +5766,14 @@ void testEconomicHarassment() {
     auto mission = raids.update(state, army, plan, home, false);
     expect(mission.members.size() == 2 && !mission.withdrawing,
            "two spare fighters launch an economic raid while ten remain");
+    HarassmentPlanner lifecycleRaids;
+    const auto lifecycleMission = lifecycleRaids.update(state, army, plan, home, false);
+    const auto lostRaider = lifecycleMission.members.front();
+    lifecycleRaids.forgetUnit(lostRaider);
+    const auto afterRaiderReuse = lifecycleRaids.update(state, army, plan, home, false);
+    expect(std::ranges::find(afterRaiderReuse.members, lostRaider) == afterRaiderReuse.members.end() &&
+               afterRaiderReuse.withdrawing,
+           "a raid drops a destroyed actor ID and withdraws its remaining detachment");
     const auto members = mission.members;
     state.frame += 24;
     army.push_back(unit(99, UnitKind::zealot, true, {500, 500}));
@@ -5502,6 +6036,25 @@ void testDecisionDiagnosticsAndOperations() {
     economy.self.gas = 350;
     gasPlan.goals = {{GoalKind::train, UnitKind::arbiter, 1, 120, true, "gas-heavy tech"}};
     expect(gasPolicy.target(economy, gasPlan) == 6, "an unmet expensive unit raises the protected gas reserve");
+    gasPlan.goals = {
+        {GoalKind::research, UnitKind::unknown, 1, 120, true, "Storm", TechnologyKind::psionicStorm},
+        {GoalKind::research, UnitKind::unknown, 1, 119, true, "Stasis", TechnologyKind::stasisField},
+    };
+    economy.self.gas = 350;
+    economy.frame = 72;
+    expect(gasPolicy.target(economy, gasPlan) == 6,
+           "unpaid research obligations keep gas workers mining for both tech goals");
+    economy.self.gas = 450;
+    economy.frame = 96;
+    expect(gasPolicy.target(economy, gasPlan) == 0,
+           "completed technology bank threshold pauses gas after the obligations are funded");
+    economy.self.technologies = {{TechnologyKind::psionicStorm, 0, true}};
+    economy.self.gas = 350;
+    economy.frame = 120;
+    GasBankController paidResearchPolicy;
+    expect(paidResearchPolicy.target(economy, gasPlan) == 0,
+           "in-progress research is not reserved a second time");
+    economy.self.technologies.clear();
 
     CommandBus measuredBus;
     measuredBus.beginFrame(0, 3);
@@ -7290,9 +7843,12 @@ void testProtectedLateEconomyOption() {
     state.self.supplyUsed = 80;
     state.self.supplyTotal = 150;
     state.bases = {
-        {1, {256, 256}, {320, 256}, 4000, 2000, 1},
-        {2, {1024, 256}, {1088, 256}, 3500, 2000, 1},
-        {3, {2048, 256}, {2112, 256}, 6500, 3000, -1},
+        {1, {256, 256}, {320, 256}, 4000, 2000, 1,
+         0, false, false, 8, 1, -1, {}, 0},
+        {2, {1024, 256}, {1088, 256}, 3500, 2000, 1,
+         0, false, false, 8, 1, -1, {}, 768},
+        {3, {2048, 256}, {2112, 256}, 6500, 3000, -1,
+         0, false, false, 8, 1, -1, {}, 1792},
     };
     state.self.units = {unit(1, UnitKind::nexus, true, {256, 256}),
         unit(2, UnitKind::nexus, true, {1024, 256}),
@@ -7447,6 +8003,7 @@ int main() {
     testContainmentRecovery();
     testLadderSourceImprovements();
     testReportImprovements();
+    testAntiRushWorkerCapRecovery();
     testBananaBrainMacroRegressions();
     testReserveCounterattack();
     testEconomicTargeting();
@@ -7463,10 +8020,13 @@ int main() {
     testStrategicTargeting();
     testEconomicRecovery();
     testMacroReservations();
+    testSiteScopedConstructionTasks();
     testPvZMineralFallback();
     testOpponentLearning();
     testInfluenceAndCombat();
     testCommandArbitration();
+    testCommandSuppressionCalibration();
+    testActorLifecycleInvalidation();
     testFrameBudget();
     testWorkersAndScouts();
     testDepletedMineralControl();

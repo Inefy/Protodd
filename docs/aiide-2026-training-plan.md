@@ -459,6 +459,15 @@ changes. Log separately:
 3. Failure incidence for both sides; opponent crashes are not evidence of better
    strategic decisions and cannot compensate for our new failures.
 
+Merge paired Tournament Manager results by game ID only when the two reports
+agree on roster, map, round and winner. Conflicting pairs, duplicate reporters,
+invalid rosters and duplicate detailed game IDs are marked invalid, excluded
+from both score views, and reported with their reason. Freeze complete schedules
+before comparison; any invalid, incomplete or missing scheduled result in either
+arm blocks a promotion claim. Candidate crashes and timeouts remain operational
+losses and block promotion; opponent failures remain visible but do not count as
+evidence of strategic strength.
+
 Freeze complete baseline/candidate and opponent packages, configurations,
 map hashes, model versions, and both sides' persistent learning snapshots.
 Record actual spawns and pair/cluster IDs. Requested seeds alone do not prove

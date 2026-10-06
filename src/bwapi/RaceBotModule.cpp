@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
 #include <limits>
+#include <string>
 #include <utility>
 
 namespace protodd::bwapi {
@@ -26,13 +28,102 @@ bool ready(Unit u) {
 
 RaceBotModule::RaceBotModule(int brandedRace) : brandedRace_(brandedRace) {}
 
+void RaceBotModule::recordCallbackFailure(const std::string_view callbackName,
+                                         const std::string_view message) noexcept {
+    ++callbackErrors_;
+    int frame = -1;
+    try {
+        if (BWAPI::BroodwarPtr) frame = BWAPI::Broodwar->getFrameCount();
+    } catch (...) {
+    }
+    if (frame - lastCallbackErrorFrame_ < 24) return;
+
+    try {
+        const auto safe = [](const std::string_view value) {
+            std::string result;
+            result.reserve(value.size());
+            for (const auto character : value) {
+                const auto byte = static_cast<unsigned char>(character);
+                if (byte < 0x20 || byte == 0x7f) continue;
+                result.push_back(character == ',' ? ';' : character);
+            }
+            return result;
+        };
+        const auto record = "CALLBACK_ERROR," + std::to_string(frame) + "," +
+            safe(callbackName) + "," + safe(message) + ",total=" +
+            std::to_string(callbackErrors_) + "\n";
+        if (log_) {
+            log_ << record;
+            log_.flush();
+            if (log_) {
+                lastCallbackErrorFrame_ = frame;
+                return;
+            }
+        }
+        std::error_code error;
+        std::filesystem::create_directories("bwapi-data/write", error);
+        std::ofstream fallback("bwapi-data/write/RaceBot.log", std::ios::app);
+        if (fallback) {
+            fallback << record;
+            fallback.flush();
+            if (fallback) {
+                lastCallbackErrorFrame_ = frame;
+                return;
+            }
+        }
+    } catch (...) {
+    }
+}
+
 void RaceBotModule::configure(int opening, int posture) noexcept {
     choice_ = {std::clamp(opening, 0, 2), std::clamp(posture, 0, 2)};
 }
 
 void RaceBotModule::setActionChoiceHook(ActionChoiceHook hook) { hook_ = std::move(hook); }
 
+bool RaceBotModule::issueCommand(const BWAPI::UnitCommand& command,
+                                 const std::string_view issuer) {
+    using namespace BWAPI;
+    const auto actor = command.getUnit();
+    if (actor == nullptr) return false;
+    const auto accepted = actor->issueCommand(command);
+    // Capture the result immediately; a later BWAPI query can replace it.
+    const std::string error = BroodwarPtr ? Broodwar->getLastError().toString() : "unavailable";
+    try {
+        if (log_) {
+            const auto safe = [](const std::string_view value) {
+                std::string result;
+                result.reserve(value.size());
+                for (const auto character : value) {
+                    const auto byte = static_cast<unsigned char>(character);
+                    if (byte < 0x20 || byte == 0x7f) continue;
+                    result.push_back(character == ',' ? ';' : character);
+                }
+                return result;
+            };
+            const auto target = command.getTarget();
+            const auto position = command.getTargetPosition();
+            log_ << "COMMAND," << (BroodwarPtr ? Broodwar->getFrameCount() : -1)
+                 << ',' << actor->getID() << ',' << safe(issuer) << ','
+                 << safe(command.getType().toString()) << ",target="
+                 << (target ? target->getID() : -1) << ",x=" << position.x
+                 << ",y=" << position.y << ",accepted=" << (accepted ? 1 : 0)
+                 << ",error=" << safe(accepted ? "accepted" : error) << '\n';
+        }
+    } catch (...) {
+        ++commandLogErrors_;
+    }
+    return accepted;
+}
+
 void RaceBotModule::onStart() {
+    callbackBoundary("onStart", [this] { onStartImpl(); });
+}
+
+void RaceBotModule::onStartImpl() {
+    callbackErrors_ = 0;
+    commandLogErrors_ = 0;
+    lastCallbackErrorFrame_ = -1000;
     supported_ = false;
     if (!BWAPI::BroodwarPtr || BWAPI::Broodwar->isReplay() || !BWAPI::Broodwar->self()) return;
     const auto race = BWAPI::Broodwar->self()->getRace();
@@ -77,6 +168,10 @@ void RaceBotModule::onStart() {
 }
 
 void RaceBotModule::onEnd(bool winner) {
+    callbackBoundary("onEnd", [this, winner] { onEndImpl(winner); });
+}
+
+void RaceBotModule::onEndImpl(const bool winner) {
     if (supported_ && BWAPI::BroodwarPtr) {
         logSnapshot();
         policy_.end(winner);
@@ -150,6 +245,7 @@ void RaceBotModule::logSnapshot() noexcept {
              << ",accepted_production=" << acceptedProduction_ << ",accepted_builds=" << acceptedBuilds_
              << ",accepted_resumes=" << acceptedResumes_ << ",observed_build_starts=" << observedBuildStarts_
              << ",abandoned_build_orders=" << abandonedBuildOrders_ << ",last_accepted_frame=" << lastAcceptedFrame_
+             << ",command_log_errors=" << commandLogErrors_
              << ",pending_build_type=" << (construction_.issued >= 0 ? construction_.type.getID() : -1)
              << ",pending_build_age=" << (construction_.issued >= 0 ? o.frame - construction_.issued : 0);
         // Per-type keys use BWAPI UnitType IDs; absent keys mean zero.
@@ -277,7 +373,9 @@ bool RaceBotModule::build(BWAPI::UnitType type) {
         auto issue = [&](BWAPI::TilePosition tile) {
             if (!tile.isValid() || !BWAPI::Broodwar->canBuildHere(tile, type, worker, true) ||
                 !worker->hasPath(BWAPI::Position(tile)) || !worker->canBuild(type, tile)) return false;
-            if (!worker->build(type, tile)) { diagnostic("command_rejected"); return false; }
+            if (!issueCommand(UnitCommand::build(worker, tile, type), "macro-build")) {
+                diagnostic("command_rejected"); return false;
+            }
             construction_ = {worker, type, tile, BWAPI::Broodwar->getFrameCount()};
             ++acceptedBuilds_;
             ++acceptedByType_[type.getID()];
@@ -325,9 +423,11 @@ bool RaceBotModule::produce(BWAPI::UnitType type) {
         bool accepted = false;
         if (terran_) {
             if (u->getType() == type.whatBuilds().first && !u->isTraining() &&
-                u->getTrainingQueue().empty() && u->canTrain(type)) accepted = u->train(type);
+                u->getTrainingQueue().empty() && u->canTrain(type))
+                accepted = issueCommand(UnitCommand::train(u, type), "macro-production");
         } else if (u->getType() == BWAPI::UnitTypes::Zerg_Larva &&
-                   u->canMorph(type)) accepted = u->morph(type);
+                   u->canMorph(type))
+            accepted = issueCommand(UnitCommand::morph(u, type), "macro-production");
         if (accepted) {
             ++acceptedProduction_;
             ++acceptedByType_[type.getID()];
@@ -352,7 +452,8 @@ bool RaceBotModule::maintainConstruction() {
             else ++abandonedBuildOrders_;
             construction_ = {};
             // Release a timed-out walking builder, but never cancel an active structure.
-            if (!started && alive(worker) && worker->getType().isWorker() && ready(worker)) worker->stop();
+            if (!started && alive(worker) && worker->getType().isWorker() && ready(worker))
+                issueCommand(BWAPI::UnitCommand::stop(worker), "construction-timeout-release");
         }
     }
     if (!terran_) return false;
@@ -367,7 +468,8 @@ bool RaceBotModule::maintainConstruction() {
         }
         if (assigned) continue;
         auto worker = workerNear(building->getPosition());
-        if (worker && worker->canRightClick(building) && worker->rightClick(building)) {
+        if (worker && worker->canRightClick(building) &&
+            issueCommand(BWAPI::UnitCommand::rightClick(worker, building), "construction-resume")) {
             ++acceptedResumes_;
             lastAcceptedFrame_ = Broodwar->getFrameCount();
             return true;
@@ -469,11 +571,12 @@ void RaceBotModule::workers() {
         if (threat && !threat->isFlying() && w->getDistance(home()) < 448 && defenders < 4 &&
             w->getHitPoints() > 20 && w->canAttack(threat)) {
             ++defenders;
-            if (w->getOrderTarget() != threat) w->attack(threat);
+            if (w->getOrderTarget() != threat)
+                issueCommand(UnitCommand::attack(w, threat), "worker-defense");
             continue;
         }
         if (w->isCarryingGas() || w->isCarryingMinerals()) {
-            if (w->isIdle()) w->returnCargo();
+            if (w->isIdle()) issueCommand(UnitCommand::returnCargo(w), "worker-return-cargo");
             continue;
         }
         const bool currentGas = alive(target) &&
@@ -484,7 +587,7 @@ void RaceBotModule::workers() {
             if (loads[gas->getID()] < 3 && w->canGather(gas) && w->hasPath(gas)) {
                 gasTarget = gas; break;
             }
-        if (gasTarget && w->gather(gasTarget)) {
+        if (gasTarget && issueCommand(UnitCommand::gather(w, gasTarget), "worker-gas")) {
             if (alive(target)) --loads[target->getID()];
             ++loads[gasTarget->getID()];
             continue;
@@ -497,7 +600,8 @@ void RaceBotModule::workers() {
             const int cost = w->getDistance(m) + 128 * loads[m->getID()];
             if (cost < score && w->canGather(m) && w->hasPath(m)) { best = m; score = cost; }
         }
-        if (best && (target != best || w->isIdle()) && w->gather(best)) {
+        if (best && (target != best || w->isIdle()) &&
+            issueCommand(UnitCommand::gather(w, best), "worker-minerals")) {
             if (alive(target)) --loads[target->getID()];
             ++loads[best->getID()];
         }
@@ -570,28 +674,31 @@ void RaceBotModule::combat() {
                 if (d < distance && u->canUseTech(TechTypes::Healing, ally)) { wounded = ally; distance = d; }
             }
             if (wounded) {
-                if (u->getOrderTarget() != wounded) u->useTech(TechTypes::Healing, wounded);
+                if (u->getOrderTarget() != wounded)
+                    issueCommand(UnitCommand::useTech(u, TechTypes::Healing, wounded), "combat-healing");
             } else {
                 Unit escort = nullptr;
                 for (auto ally : army) if (ally->getType() == UnitTypes::Terran_Marine) { escort = ally; break; }
                 const Position p = escort ? escort->getPosition() : destination;
-                if (u->getDistance(p) > 96 && (u->isIdle() || u->getOrderTargetPosition().getDistance(p) > 96)) u->move(p);
+                if (u->getDistance(p) > 96 && (u->isIdle() || u->getOrderTargetPosition().getDistance(p) > 96))
+                    issueCommand(UnitCommand::move(u, p), "combat-medic-escort");
             }
             continue;
         }
         if (u->isAttackFrame()) continue;
         if (threat && u->getDistance(threat) < 384 && u->canAttack(threat)) {
-            if (u->getOrderTarget() != threat) u->attack(threat);
+            if (u->getOrderTarget() != threat)
+                issueCommand(UnitCommand::attack(u, threat), "combat-defense");
         } else if ((u->isIdle() || u->getOrderTargetPosition().getDistance(destination) > 128) &&
                    u->getDistance(destination) > 96 && u->hasPath(destination) && u->canAttack(destination)) {
-            u->attack(destination);
+            issueCommand(UnitCommand::attack(u, destination), "combat-advance");
         }
     }
     // Supply providers stay behind the army; do not scout them into enemy defenses.
     if (!terran_)
         for (auto u : Broodwar->self()->getUnits())
             if (ready(u) && u->getType() == UnitTypes::Zerg_Overlord && u->isIdle() && u->getDistance(home()) > 192)
-                u->move(home());
+                issueCommand(UnitCommand::move(u, home()), "overlord-home");
 }
 
 RaceBotModule::Observation RaceBotModule::observation() const {
@@ -619,6 +726,10 @@ RaceBotModule::Observation RaceBotModule::observation() const {
 }
 
 void RaceBotModule::onFrame() {
+    callbackBoundary("onFrame", [this] { onFrameImpl(); });
+}
+
+void RaceBotModule::onFrameImpl() {
     if (!supported_ || !BWAPI::BroodwarPtr || BWAPI::Broodwar->isReplay() ||
         BWAPI::Broodwar->isPaused() || !BWAPI::Broodwar->self()) return;
     const int frame = BWAPI::Broodwar->getFrameCount();

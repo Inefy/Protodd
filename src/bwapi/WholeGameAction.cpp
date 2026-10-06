@@ -1,4 +1,5 @@
 #include "WholeGameAction.hpp"
+#include "protodd/WholeGameActionPolicy.hpp"
 
 #include <algorithm>
 #include <optional>
@@ -126,6 +127,8 @@ std::vector<LegalWholeGameCommand> legalWholeGameCommands(
     std::size_t maximumCommands) {
     std::vector<LegalWholeGameCommand> accepted;
     if (!game || maximumCommands == 0 || intent.kind >= cpu::kindNames.size()) return accepted;
+    if (!protodd::wholeGameActionAuthorityAllowed(intent.kind))
+        return accepted;
     BWAPI::Unit target = nullptr;
     if (intent.targetEntityId) {
         const auto entity = observation.entities.find(*intent.targetEntityId);
@@ -149,8 +152,11 @@ std::vector<LegalWholeGameCommand> legalWholeGameCommands(
             lookup == unitByToken.end()) continue;
         const auto actor = lookup->second;
         if (!actor || !actor->exists() || actor->getPlayer() != game->self() ||
-            !actor->isCompleted() || actor->isLoaded() || actor->isLockedDown() ||
+            actor->isLoaded() || actor->isLockedDown() ||
             actor->isMaelstrommed() || actor->isStasised()) continue;
+        if (!wholeGameActorEligible(intent.kind, intent.targetMode, actor->isCompleted(),
+                                    actor->getType().isBuilding(),
+                                    actor->isBeingConstructed())) continue;
         const auto command = makeCommand(intent, actor, target, position);
         if (command && actor->canIssueCommand(*command))
             accepted.push_back({token, *command});

@@ -3,6 +3,8 @@
 #include <BWAPI.h>
 #include <Windows.h>
 
+#include <exception>
+
 #ifndef PROTODD_BOT_RACE
 #error Define PROTODD_BOT_RACE=1 for TerranTodd or =2 for ZergTodd
 #endif
@@ -14,7 +16,14 @@ extern "C" __declspec(dllexport) void gameInit(BWAPI::Game* game) {
 }
 
 extern "C" __declspec(dllexport) BWAPI::AIModule* newAIModule() {
-    return new protodd::bwapi::RaceBotModule(PROTODD_BOT_RACE);
+    try {
+        return new protodd::bwapi::RaceBotModule(PROTODD_BOT_RACE);
+    } catch (const std::exception&) {
+        OutputDebugStringA("RaceBot: module construction failed\n");
+    } catch (...) {
+        OutputDebugStringA("RaceBot: unknown module construction failure\n");
+    }
+    return nullptr;
 }
 
 BOOL APIENTRY DllMain(HANDLE, DWORD, LPVOID) {

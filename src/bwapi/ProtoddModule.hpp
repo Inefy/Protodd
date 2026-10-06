@@ -7,6 +7,9 @@
 #include "WholeGameRuntime.hpp"
 
 #include "protodd/Combat.hpp"
+#include "protodd/CallbackBoundary.hpp"
+#include "protodd/CallbackBudget.hpp"
+#include "protodd/PhaseFailurePolicy.hpp"
 #include "protodd/AllInOpening.hpp"
 #include "protodd/HybridPolicy.hpp"
 #include "protodd/Diagnostics.hpp"
@@ -25,12 +28,15 @@
 #include "protodd/TacticalTargetModel.hpp"
 #include "protodd/Workers.hpp"
 #include "protodd/WorkerTrainingIntervention.hpp"
+#include "protodd/UrgentEvents.hpp"
 
 #include <BWAPI.h>
 
 #include <cstdint>
 #include <fstream>
 #include <map>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace protodd::bwapi {
@@ -48,6 +54,11 @@ public:
     void onUnitRenegade(BWAPI::Unit unit) override;
     void onUnitCreate(BWAPI::Unit unit) override;
     void onUnitComplete(BWAPI::Unit unit) override;
+#ifdef PROTODD_ENGINE_FAULT_INJECTION
+    void configureAuditFaultInjection(std::string kind, std::string target,
+                                      std::uint32_t count);
+    void configureAuditSlowObservation(std::uint32_t count, std::uint32_t delayUs);
+#endif
 
 private:
     BwapiBridge bridge_;
@@ -125,6 +136,12 @@ private:
     std::vector<std::int64_t> callbackTimes_;
     bool callbackAudit_{};
     WholeGameRuntime wholeGame_;
+    UrgentEventQueue urgentEvents_;
+    std::vector<Position> previousStorms_;
+    std::vector<UnitId> previousWorkerLineThreats_;
+    std::vector<UnitId> currentWorkerLineThreats_;
+    std::vector<UnitId> previousCloakedThreats_;
+    std::vector<UnitId> currentCloakedThreats_;
     struct HybridProposal { Command command; Frame frame{}; };
     std::vector<HybridProposal> hybridProposals_;
     bool hybridControl_{};
@@ -133,9 +150,12 @@ private:
     std::uint64_t hybridSubmitted_{};
     std::uint64_t hybridAccepted_{};
     bool validatedLearning_{false};
+    bool historyPersistenceEnabled_{false};
     OpeningStyle openingStyle_{OpeningStyle::standard};
     std::string opponentName_;
     std::string mapName_;
+    std::string historyMapIdentity_;
+    std::string gameOutcomeId_;
     std::vector<UnitId> detectorEscorts_;
     std::vector<UnitId> leasedScouts_;
     std::vector<Position> advanceWaypoints_;
@@ -178,21 +198,24 @@ private:
     int postureChanges_{};
     std::string lastPlanName_;
     Posture lastPosture_{Posture::hold};
-    int maintenanceMineralReserve_{};
-    int maintenanceGasReserve_{};
-    Frame lastErrorFrame_{-1000};
+    std::map<std::string, Frame> lastCallbackErrorFrames_;
     Frame slowWindowStart_{-1};
     Frame slowWindowPeakFrame_{-1};
     std::int64_t slowWindowPeakUs_{};
     RuntimeLoad slowWindowLoad_{RuntimeLoad::normal};
     std::ofstream log_;
-    ResourceLedger lastLedger_;
+    ResourceLedger spendingLedger_;
     Frame lastMacroFrame_{-1};
     Frame lastSquadLogFrame_{-1};
-    FrameIntegral supplyBlockedFrames_;
+    FrameIntegral supplyTightFrames_;
+    FrameIntegral supplyHardBlockedFrames_;
+    FrameIntegral supplyUnintendedBlockedFrames_;
+    FrameIntegral supplyDeliberateOpeningPauseFrames_;
     FrameIntegral idleGatewayFrames_;
     FrameIntegral idleWorkerFrames_;
     std::map<std::string, PhaseTiming> phases_;
+    std::map<std::string, Frame> deferredOptionalPhases_;
+    PhaseFailurePolicy phaseFailurePolicy_;
     struct TraceEntry { std::string value; Frame frame{-1}; };
     std::map<std::string, TraceEntry> traceMemory_;
     std::uint64_t commandsAttempted_{};
@@ -213,7 +236,39 @@ private:
     const char* activePhase_{"startup"};
     std::uint64_t caughtErrors_{};
     std::uint64_t loggingErrors_{};
+#ifdef PROTODD_ENGINE_FAULT_INJECTION
+    std::string auditFaultKind_;
+    std::string auditFaultTarget_;
+    std::uint32_t auditFaultRemaining_{};
+    std::uint32_t auditSlowObservationRemaining_{};
+    std::uint32_t auditSlowObservationDelayUs_{};
+    Frame auditSlowObservationFrame_{-1};
+    std::uint64_t auditSlowObservationCombatCallsBefore_{};
+    void maybeInjectAuditFault(std::string_view kind, std::string_view target);
+#endif
 
+    template <class Callback>
+    void callbackBoundary(std::string_view callbackName, Callback&& callback) noexcept {
+        protodd::invokeCallbackBoundary(
+            callbackName, [this, callbackName, &callback] {
+#ifdef PROTODD_ENGINE_FAULT_INJECTION
+                maybeInjectAuditFault("callback", callbackName);
+#endif
+                std::forward<Callback>(callback)();
+            },
+            [this](const std::string_view name, const std::string_view message) noexcept {
+                recordCallbackFailure(name, message);
+            });
+    }
+
+    void recordCallbackFailure(std::string_view callbackName,
+                              std::string_view message) noexcept;
+    void onPhaseDisabled(std::string_view phase,
+                         std::uint32_t consecutiveFailures) noexcept;
+    void onStartImpl();
+    void onEndImpl(bool winner);
+    void invalidateActorState(UnitId id);
+    void onUnitDestroyImpl(BWAPI::Unit unit);
     void logAction(const ActionDiagnostic& action) noexcept;
     void logBuildLease(const BuildLeaseDiagnostic& lease) noexcept;
     void logBuildSelection(const BuildSelectionDiagnostic& selection) noexcept;
@@ -222,7 +277,8 @@ private:
     void incident(std::string_view kind, UnitId unit, bool active, Frame threshold,
                   std::string_view evidence);
 
-    void runFrame();
+    void runFrame(CallbackBudget& callbackBudget,
+                  CallbackBudget::Clock::time_point callbackStarted);
     void updateStrategy();
     void updateMacro();
     void updateWorkers();

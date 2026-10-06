@@ -152,6 +152,64 @@ class LadderTests(unittest.TestCase):
         self.assertEqual(summary["scored_games"], 0)
         self.assertEqual(summary["excluded_incomplete_games"], 1)
 
+    def test_conflicting_raw_reports_are_invalid_and_not_scored(self) -> None:
+        first = {
+            "gameID": 3, "round": 0, "map": "Python", "reportingBot": "Protodd",
+            "opponentBot": "Iron", "won": True, "crash": False, "gameEndType": "NORMAL",
+            "gameTimeout": False, "finalFrame": 7200, "timers": [],
+        }
+        second = {
+            "gameID": 3, "round": 0, "map": "Python", "reportingBot": "Iron",
+            "opponentBot": "Protodd", "won": False, "crash": False, "gameEndType": "NORMAL",
+            "gameTimeout": False, "finalFrame": 7200, "timers": [],
+        }
+        conflicts = {
+            "map_mismatch": ("map", "Benzene"),
+            "round_mismatch": ("round", 1),
+            "winner_conflict": ("won", True),
+            "winner_missing": ("won", None),
+        }
+        for reason, (field, value) in conflicts.items():
+            with self.subTest(reason=reason):
+                reports = [dict(first), dict(second)]
+                reports[1][field] = value
+                records = ladder.merge_raw_reports(reports, "Protodd", [])
+                summary = ladder.summarize(records, "Protodd")["summary"]
+                self.assertTrue(records[0]["invalid"])
+                self.assertIn(reason, records[0]["invalid_reasons"])
+                self.assertIsNone(records[0]["won"])
+                self.assertFalse(records[0]["complete"])
+                self.assertEqual(summary["scored_games"], 0)
+                self.assertEqual(summary["invalid_games"], 1)
+
+        reports = [dict(first), dict(second)]
+        reports[1]["opponentBot"] = "Other"
+        record = ladder.merge_raw_reports(reports, "Protodd", [])[0]
+        self.assertIn("nonreciprocal_roster", record["invalid_reasons"])
+
+        reports = [dict(first), dict(second)]
+        reports[1]["reportingBot"] = "Protodd"
+        reports[1]["opponentBot"] = "Iron"
+        record = ladder.merge_raw_reports(reports, "Protodd", [])[0]
+        self.assertIn("duplicate_reporter", record["invalid_reasons"])
+
+    def test_duplicate_detailed_game_ids_are_invalid(self) -> None:
+        payload = [
+            {"gameID": 4, "round": 0, "bots": ["Protodd", "Iron"], "winner": 0,
+             "crash": -1, "timeout": -1, "map": "Python", "gameEndType": "NORMAL", "finalFrame": 7200},
+            {"gameID": 4, "round": 0, "bots": ["Protodd", "Iron"], "winner": 1,
+             "crash": -1, "timeout": -1, "map": "Python", "gameEndType": "NORMAL", "finalFrame": 7200},
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "detailed.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            records = ladder.parse_results([path], "Protodd", [])
+        summary = ladder.summarize(records, "Protodd")["summary"]
+        self.assertTrue(all(record["invalid"] for record in records))
+        self.assertTrue(all("duplicate_game_id" in record["invalid_reasons"] for record in records))
+        self.assertEqual(summary["invalid_games"], 2)
+        self.assertEqual(summary["scored_games"], 0)
+
     def test_failure_points_are_separate_from_strategic_results(self) -> None:
         def game(index: int, won: bool, **changes: object) -> dict:
             return dict(game_id=index, round=index, opponent="Iron", map="Python",
@@ -187,7 +245,7 @@ class LadderTests(unittest.TestCase):
                        for index in range(100)]
             return ladder.summarize(records, "Protodd")
 
-        for failure in ("our_crashes", "our_timeouts", "excluded_incomplete_games", "missing_scheduled_games"):
+        for failure in ("our_crashes", "our_timeouts", "excluded_incomplete_games", "invalid_games", "missing_scheduled_games"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 baseline = report(20)
@@ -203,6 +261,29 @@ class LadderTests(unittest.TestCase):
                 self.assertEqual(comparison["strength_verdict"], "likely improvement")
                 self.assertTrue(comparison["verdict"].startswith("blocked"))
                 self.assertTrue(any(failure in reason for reason in comparison["promotion_blockers"]))
+
+    def test_comparison_blocks_invalid_or_incomplete_baseline(self) -> None:
+        records = [dict(game_id=index, round=index, opponent="Iron", map="Python",
+                        won=index < 50, frames=7200, complete=True, end_type="NORMAL")
+                   for index in range(100)]
+        baseline = ladder.summarize(records, "Protodd")
+        candidate = ladder.summarize(records, "Protodd")
+        baseline["summary"]["excluded_incomplete_games"] = 1
+        baseline["summary"]["invalid_games"] = 1
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "baseline.json").write_text(json.dumps(baseline), encoding="utf-8")
+            (root / "candidate.json").write_text(json.dumps(candidate), encoding="utf-8")
+            with redirect_stdout(io.StringIO()):
+                ladder.command_compare(Namespace(baseline=str(root / "baseline.json"),
+                    candidate=str(root / "candidate.json"), output=str(root / "compare.json"),
+                    allow_mismatch=False))
+            comparison = json.loads((root / "compare.json").read_text(encoding="utf-8"))
+        self.assertTrue(comparison["verdict"].startswith("blocked"))
+        self.assertTrue(any("baseline excluded_incomplete_games" in item
+                            for item in comparison["promotion_blockers"]))
+        self.assertTrue(any("baseline invalid_games" in item
+                            for item in comparison["promotion_blockers"]))
 
     def test_comparison_rejects_legacy_reports_with_mixed_outcomes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
