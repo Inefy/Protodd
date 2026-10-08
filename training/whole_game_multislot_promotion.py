@@ -17,6 +17,7 @@ import subprocess
 
 from . import arena
 from .whole_game_controller_audit import summarize as controller_audit
+from .whole_game_contract import model_contract
 
 
 SCHEMA = "protodd-whole-game-promotion-v1"
@@ -45,6 +46,70 @@ def source_fingerprint():
         combined.update(path.relative_to(root).as_posix().encode() + b"\0")
         combined.update(bytes.fromhex(digest(path)))
     return combined.hexdigest()
+
+
+def read_cmake_cache(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf8", errors="replace").splitlines():
+        if line and not line.startswith(("#", "//")) and ":" in line and "=" in line:
+            name, value = line.split(":", 1)[0], line.split("=", 1)[1]
+            values[name] = value
+    return values
+
+
+def registered_build_configuration(cmake_cache):
+    root = Path(__file__).resolve().parents[1]
+    registry_path = root / "docs/feature-registry.json"
+    registry = read_json(registry_path)
+    cache = read_cmake_cache(cmake_cache)
+    options = {entry["id"]: cache.get(entry["id"]) for entry in registry["options"]}
+    inputs = {entry["id"]: cache.get(entry["id"]) for entry in registry["build_inputs"]}
+    require(all(value is not None for value in options.values()),
+            "evaluation CMake cache is missing registered options")
+    require(all(value is not None for value in inputs.values()),
+            "evaluation CMake cache is missing registered build inputs")
+    return dict(registry_sha256=digest(registry_path), options=options, inputs=inputs)
+
+
+def make_evaluation_build_record(dll, weights, cmake_cache):
+    dll, weights = Path(dll), Path(weights)
+    require_win32_pe(dll)
+    package_manifest_path = weights.parent / "manifest.json"
+    require(package_manifest_path.is_file(), "evaluation build needs the model weight manifest")
+    package_manifest = read_json(package_manifest_path)
+    weights_sha = digest(weights)
+    contract = model_contract()
+    configuration = registered_build_configuration(cmake_cache)
+    options = configuration["options"]
+    require(package_manifest.get("schema") == contract["weights_schema"] and
+            package_manifest.get("model_contract") == contract and
+            package_manifest.get("tournament_ready") is False and
+            package_manifest.get("weights_sha256") == weights_sha,
+            "evaluation build weights do not match their versioned model contract")
+    require(options.get("PROTODD_WHOLE_GAME_CONTROL") == "ON" and
+            options.get("PROTODD_WHOLE_GAME_EVALUATION_BUILD") == "ON" and
+            options.get("PROTODD_DEVELOPER_PROFILE") == "OFF" and
+            options.get("PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY") == "OFF",
+            "evaluation build has an unsafe command or research scope")
+    hybrid = options.get("PROTODD_WHOLE_GAME_HYBRID") == "ON"
+    require(options.get("PROTODD_WHOLE_GAME_HYBRID") in ("ON", "OFF"),
+            "evaluation build has an invalid hybrid-control flag")
+    weight_input = configuration["inputs"].get("PROTODD_WHOLE_GAME_WEIGHTS")
+    require(weight_input and Path(weight_input).resolve() == weights.resolve(),
+            "evaluation CMake cache references different model weights")
+    return dict(
+        schema="protodd-whole-game-evaluation-build-v2",
+        dll_sha256=digest(dll),
+        weights_sha256=weights_sha,
+        weights_manifest_sha256=digest(package_manifest_path),
+        registry_sha256=configuration["registry_sha256"],
+        cmake_cache_sha256=digest(cmake_cache),
+        build_options=options,
+        build_inputs=configuration["inputs"],
+        command_scope="hybrid-target-authority" if hybrid else "exclusive-whole-game-authority",
+        model_contract=contract,
+        source_fingerprint=source_fingerprint(),
+    )
 
 
 def read_json(path):
@@ -142,6 +207,9 @@ def evaluate(package, checkpoint, training_release, validation_release, audit,
     require(manifest.get("schema") == "protodd-whole-game-multislot-weights-v2" and
             manifest.get("maximum_slots") == 6 and
             manifest.get("tournament_ready") is False, "not an unpromoted six-slot package")
+    contract = model_contract()
+    require(manifest.get("model_contract") == contract,
+            "weight package encoder/decoder contract differs from the current runtime")
     weights_sha = digest(weights)
     require(manifest.get("weights_sha256") == weights_sha and
             manifest.get("checkpoint_sha256") == digest(checkpoint) and
@@ -261,10 +329,33 @@ def evaluate(package, checkpoint, training_release, validation_release, audit,
     resource_probe = Path(resource_probe)
     require_win32_pe(resource_probe)
     build_record = read_json(evaluation_build_record)
-    require(build_record.get("schema") == "protodd-whole-game-evaluation-build-v1" and
+    root = Path(__file__).resolve().parents[1]
+    registry = read_json(root / "docs/feature-registry.json")
+    build_options = build_record.get("build_options", {})
+    build_inputs = build_record.get("build_inputs", {})
+    expected_option_ids = {entry["id"] for entry in registry["options"]}
+    expected_input_ids = {entry["id"] for entry in registry["build_inputs"]}
+    hybrid = build_options.get("PROTODD_WHOLE_GAME_HYBRID") == "ON"
+    expected_command_scope = ("hybrid-target-authority" if hybrid
+                              else "exclusive-whole-game-authority")
+    require(build_record.get("schema") == "protodd-whole-game-evaluation-build-v2" and
             build_record.get("dll_sha256") == digest(dll) and
-            build_record.get("source_fingerprint") == source_fingerprint(),
-            "evaluation DLL was not built from the current frozen source")
+            build_record.get("weights_sha256") == weights_sha and
+            build_record.get("weights_manifest_sha256") == digest(paths["package_manifest"]) and
+            build_record.get("registry_sha256") == digest(root / "docs/feature-registry.json") and
+            build_record.get("source_fingerprint") == source_fingerprint() and
+            build_record.get("model_contract") == contract and
+            set(build_options) == expected_option_ids and
+            set(build_inputs) == expected_input_ids and
+            all(value in ("ON", "OFF") for value in build_options.values()) and
+            build_options.get("PROTODD_WHOLE_GAME_CONTROL") == "ON" and
+            build_options.get("PROTODD_WHOLE_GAME_EVALUATION_BUILD") == "ON" and
+            build_options.get("PROTODD_DEVELOPER_PROFILE") == "OFF" and
+            build_options.get("PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY") == "OFF" and
+            build_record.get("command_scope") == expected_command_scope and
+            build_inputs.get("PROTODD_WHOLE_GAME_WEIGHTS") and
+            Path(build_inputs["PROTODD_WHOLE_GAME_WEIGHTS"]).resolve() == weights.resolve(),
+            "evaluation DLL, build flags, command scope, or model contract is not bound to this receipt")
     process = subprocess.run([str(resource_probe), str(dll), str(weights)],
                              capture_output=True, text=True, timeout=120)
     require(process.returncode == 0 and "max_abs_difference=0" in process.stdout,
@@ -274,12 +365,18 @@ def evaluate(package, checkpoint, training_release, validation_release, audit,
     arena.verify(baseline)
     candidate_manifest = read_json(paths["candidate_manifest"])
     baseline_manifest = read_json(paths["baseline_manifest"])
+    candidate_features = candidate_manifest.get("active_feature_manifest", {})
+    candidate_runtime = {entry.get("id"): entry.get("configured_value")
+                         for entry in candidate_features.get("runtime_controls", [])}
+    expected_hybrid_mode = "target" if hybrid else "unset"
     require(candidate_manifest.get("race") == baseline_manifest.get("race") == "Protoss" and
             candidate_manifest.get("bot") == baseline_manifest.get("bot") == "Protodd" and
             candidate_manifest.get("purpose") in ("development", "final-test") and
             baseline_manifest.get("purpose") in ("development", "final-test") and
             candidate_manifest["components"].get("server/bots/Protodd/AI/Protodd.dll") == digest(dll),
             "candidate campaign was not played by the supplied evaluation DLL")
+    require(candidate_runtime.get("whole_game_hybrid_mode") == expected_hybrid_mode,
+            "candidate campaign command scope differs from the evaluated build flags")
     candidate_components = candidate_manifest["components"]
     baseline_components = baseline_manifest["components"]
     common = [name for name in candidate_components if name.startswith("server/bots/") and
@@ -338,6 +435,9 @@ def evaluate(package, checkpoint, training_release, validation_release, audit,
     return dict(weights_sha256=weights_sha, checkpoint_sha256=digest(checkpoint),
                 source_fingerprint=source_fingerprint(),
                 candidate_dll_sha256=digest(dll), games=len(schedule),
+                build_options=build_options, build_inputs=build_inputs,
+                command_scope=build_record["command_scope"], model_contract=contract,
+                evaluation_build_record_sha256=digest(evaluation_build_record),
                 candidate_trace_sha256=trace_sha,
                 candidate_wins=total_candidate, baseline_wins=total_baseline,
                 by_race={race: dict(counts) for race, counts in by_race.items()},
@@ -378,7 +478,7 @@ def promote(args):
     return receipt
 
 
-def verify(receipt_path, weights):
+def verify(receipt_path, weights, cmake_cache=None):
     receipt = read_json(receipt_path)
     require(receipt.get("schema") == SCHEMA and receipt.get("tournament_ready") is True and
             receipt.get("weights_sha256") == digest(weights),
@@ -399,6 +499,32 @@ def verify(receipt_path, weights):
             "promotion input list changed")
     summary = evaluate(**inputs)
     require(summary == receipt["summary"], "promotion evidence summary changed")
+    if cmake_cache is not None:
+        current = registered_build_configuration(cmake_cache)
+        evaluated_options = summary["build_options"]
+        require(set(current["options"]) == set(evaluated_options),
+                "release build feature inventory differs from the promotion")
+        for name, value in evaluated_options.items():
+            if name == "PROTODD_WHOLE_GAME_EVALUATION_BUILD":
+                require(current["options"].get(name) == "OFF",
+                        "a local evaluation build cannot be packaged as a tournament controller")
+            else:
+                require(current["options"].get(name) == value,
+                        f"release build flag differs from promotion evidence: {name}")
+        evaluated_inputs = summary["build_inputs"]
+        require(set(current["inputs"]) == set(evaluated_inputs),
+                "release build input inventory differs from the promotion")
+        for name, value in evaluated_inputs.items():
+            if name == "PROTODD_WHOLE_GAME_PROMOTION_RECEIPT":
+                require(Path(current["inputs"][name]).resolve() == Path(receipt_path).resolve(),
+                        "release CMake cache references another promotion receipt")
+            elif name == "PROTODD_WHOLE_GAME_WEIGHTS":
+                require(Path(current["inputs"][name]).resolve() == Path(weights).resolve() and
+                        digest(current["inputs"][name]) == digest(weights),
+                        "release build references different whole-game weights")
+            else:
+                require(current["inputs"][name] == value,
+                        f"release build input differs from promotion evidence: {name}")
     return summary
 
 
@@ -409,6 +535,8 @@ def main():
     record = commands.add_parser("record-evaluation")
     record.add_argument("dll", type=Path)
     record.add_argument("output", type=Path)
+    record.add_argument("--weights", type=Path, required=True)
+    record.add_argument("--cmake-cache", type=Path, required=True)
     for name in ("package", "checkpoint", "training_release", "validation_release",
                  "audit", "parity_early", "parity_mid", "parity_late", "benchmark",
                  "candidate", "baseline", "dll", "resource_probe", "parity_probe",
@@ -417,18 +545,16 @@ def main():
     check = commands.add_parser("verify")
     check.add_argument("receipt", type=Path)
     check.add_argument("weights", type=Path)
+    check.add_argument("--cmake-cache", type=Path)
     args = parser.parse_args()
     if args.command == "promote":
         result = promote(args)
     elif args.command == "record-evaluation":
         require(args.dll.name == "ProtoddEvaluation.dll", "expected evaluation DLL")
-        require_win32_pe(args.dll)
-        result = dict(schema="protodd-whole-game-evaluation-build-v1",
-                      dll_sha256=digest(args.dll),
-                      source_fingerprint=source_fingerprint())
+        result = make_evaluation_build_record(args.dll, args.weights, args.cmake_cache)
         args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf8")
     else:
-        result = verify(args.receipt, args.weights)
+        result = verify(args.receipt, args.weights, args.cmake_cache)
     print(json.dumps(result, indent=2))
 
 

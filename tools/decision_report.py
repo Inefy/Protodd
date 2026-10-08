@@ -57,6 +57,19 @@ class DecisionTrace:
         self.actions = deque(maxlen=12000)
         self.action_totals = {}
         self.action_examples = {}
+        self.spell_totals = {}
+        self.spell_effect_totals = {}
+        self.macro_reservation_totals = {}
+        self.health_covered_frames = 0
+        self.probe_unit_frames = 0
+        self.squad_exposure_previous = {}
+        self.squad_unit_frames = 0
+        self.contact_unit_frames = 0
+        self.squad_observations = 0
+        self.contact_observations = 0
+        self.first_local_army_contact = None
+        self.detection_waits = {}
+        self.detection_episodes = []
         self.incident_latest = {}
         self.incident_totals = {}
         self.damage_totals = Counter()
@@ -99,7 +112,7 @@ class DecisionTrace:
             except (ValueError, IndexError):
                 self.malformed += 1
             return
-        supported = {"HEALTH", "SQUAD", "PHASE", "BELIEF", "ENTITY", "LOSS", "MACRO", "STRATEGY", "DETECTOR_ALLOC", "ORDER", "EVENT", "STATE", "WORKERS", "SCOUT", "SNAPSHOT", "ACTION", "ACTION_TOTAL", "INCIDENT", "DAMAGE", "LIFECYCLE", "ERROR"}
+        supported = {"HEALTH", "SQUAD", "PHASE", "BELIEF", "ENTITY", "LOSS", "MACRO", "STRATEGY", "DETECTOR_ALLOC", "ORDER", "EVENT", "STATE", "WORKERS", "SCOUT", "SNAPSHOT", "ACTION", "ACTION_TOTAL", "SPELL_TOTAL", "SPELL_EFFECT_TOTAL", "INCIDENT", "DAMAGE", "LIFECYCLE", "ERROR"}
         if kind not in supported:
             return
         try:
@@ -114,6 +127,11 @@ class DecisionTrace:
                     if gap > 48:
                         self.health_gaps += 1
                         self.largest_health_gap = max(self.largest_health_gap, gap)
+                    elif gap > 0:
+                        self.health_covered_frames += gap
+                        previous_probes = self.health[-1].get("probes")
+                        if isinstance(previous_probes, (int, float)):
+                            self.probe_unit_frames += max(0, int(previous_probes)) * gap
                 self.append(self.health, {"frame": frame, **extras(fields[2:])})
             elif kind == "SNAPSHOT":
                 if not self.entities or self.entities[-1]["frame"] != frame:
@@ -123,6 +141,16 @@ class DecisionTrace:
                 if count < 0 or fields[3] not in ("issued", "blocked"):
                     raise ValueError("invalid action count")
                 self.action_totals[tuple(fields[2:5])] = {"count": count, "frame": frame}
+            elif kind == "SPELL_TOTAL":
+                count = int(fields[6])
+                if count < 0 or fields[4] not in ("issued", "blocked") or fields[5] not in ("accepted", "not-accepted"):
+                    raise ValueError("invalid spell count")
+                self.spell_totals[tuple(fields[2:6])] = {"count": count, "frame": frame}
+            elif kind == "SPELL_EFFECT_TOTAL":
+                count = int(fields[5])
+                if count < 0 or fields[4] not in ("observed", "ineffective", "censored"):
+                    raise ValueError("invalid spell effect count")
+                self.spell_effect_totals[tuple(fields[2:5])] = {"count": count, "frame": frame}
             elif kind == "ACTION":
                 row = {"frame": frame, "actor": int(fields[2]), "source": fields[3],
                        "type": fields[4], "stage": fields[5], "outcome": fields[6], **extras(fields[7:])}
@@ -145,9 +173,12 @@ class DecisionTrace:
                 prior = self.incident_latest.get(key)
                 fresh = not prior or prior["since"] != since
                 total = self.incident_totals.setdefault(row["kind"],
-                    {"occurrences": 0, "duration_frames": 0, "first_frame": since, "last_frame": frame, "examples": []})
+                    {"occurrences": 0, "resolved_occurrences": 0, "duration_frames": 0,
+                     "first_frame": since, "last_frame": frame, "examples": []})
                 total["duration_frames"] += max(0, duration - (0 if fresh else prior["duration"]))
                 total["occurrences"] += int(fresh)
+                if not row.get("active") and (fresh or (prior and prior.get("active"))):
+                    total["resolved_occurrences"] += 1
                 total["last_frame"] = frame
                 if fresh:
                     total["examples"] = (total["examples"] + [row])[-5:]
@@ -186,6 +217,33 @@ class DecisionTrace:
                 row = {"frame": frame, "role": fields[2], **extras(fields[3:])}
                 self.append(self.squads, row)
                 key = row.get("key", row["role"])
+                prior_exposure = self.squad_exposure_previous.get(key)
+                if prior_exposure:
+                    gap = frame - prior_exposure["frame"]
+                    if 0 < gap <= 48:
+                        units = max(0, int(prior_exposure.get("units", 0)))
+                        self.squad_unit_frames += units * gap
+                        if int(prior_exposure.get("enemies", 0)) > 0:
+                            self.contact_unit_frames += units * gap
+                if int(row.get("units", 0)) > 0:
+                    self.squad_observations += 1
+                    if int(row.get("enemies", 0)) > 0:
+                        self.contact_observations += 1
+                        if self.first_local_army_contact is None:
+                            self.first_local_army_contact = frame
+                self.squad_exposure_previous[key] = row
+                needs_detection = bool(row.get("detectionNeeded", 0))
+                detection_ready = bool(row.get("detectionReady", not row.get("detectionBlocked", 0)))
+                waiting = self.detection_waits.get(key)
+                if needs_detection and not detection_ready:
+                    if waiting is None:
+                        self.detection_waits[key] = {"since": frame, "role": row["role"]}
+                elif waiting is not None:
+                    useful = needs_detection and detection_ready and int(row.get("enemies", 0)) > 0 and int(row.get("units", 0)) > 0
+                    self.detection_episodes.append({"since": waiting["since"], "frame": frame,
+                        "wait_frames": max(0, frame - waiting["since"]), "role": waiting["role"],
+                        "useful_arrival": useful})
+                    del self.detection_waits[key]
                 prior = self.decisions.get(key)
                 if prior and prior.get("decision") != row.get("decision"):
                     transition = {"frame": frame, "key": key, "from": prior.get("decision"),
@@ -240,6 +298,15 @@ class DecisionTrace:
                 row = {"frame": frame, "target": fields[3], "technology": int(fields[4]), "status": fields[5],
                        "accepted": bool(int(fields[6])), "reason": fields[7], "minerals": int(fields[8]),
                        "gas": int(fields[9]), "reserved": bool(int(fields[10])), "executable": bool(int(fields[11]))}
+                reservation = self.macro_reservation_totals.setdefault(row["reason"],
+                    {"samples": 0, "reserved_samples": 0,
+                     "reserved_cost_minerals_sample_sum": 0,
+                     "reserved_cost_gas_sample_sum": 0})
+                reservation["samples"] += 1
+                if row["reserved"]:
+                    reservation["reserved_samples"] += 1
+                    reservation["reserved_cost_minerals_sample_sum"] += max(0, row["minerals"])
+                    reservation["reserved_cost_gas_sample_sum"] += max(0, row["gas"])
                 previous = self.macro.get(key)
                 if previous and not previous["accepted"]:
                     # A trace disappears when a goal completes/cancels. Never
@@ -319,9 +386,142 @@ class DecisionTrace:
         rejected = sorted((r for r in action_outcomes if r["stage"] == "issued" and r["outcome"] != "accepted"),
                           key=lambda r: -r["count"])
         caught = max(self.error_count, int(health.get("caughtErrors", 0)))
+        issued_actions = sum(value["count"] for (_, stage, _), value in self.action_totals.items()
+                             if stage == "issued")
+        accepted_actions = sum(value["count"] for (_, stage, outcome), value in self.action_totals.items()
+                               if stage == "issued" and outcome == "accepted")
+        blocked_actions = sum(value["count"] for (_, stage, _), value in self.action_totals.items()
+                              if stage == "blocked")
+        rejected_actions = issued_actions - accepted_actions
+        spell_issued = sum(value["count"] for (_, _, stage, _), value in self.spell_totals.items()
+                           if stage == "issued")
+        spell_accepted = sum(value["count"] for (_, _, stage, outcome), value in self.spell_totals.items()
+                             if stage == "issued" and outcome == "accepted")
+        spell_effect_counts = Counter()
+        for (_, _, outcome), value in self.spell_effect_totals.items():
+            spell_effect_counts[outcome] += value["count"]
+        spell_effect_observed = spell_effect_counts["observed"]
+        spell_effect_ineffective = spell_effect_counts["ineffective"]
+        spell_effect_censored = spell_effect_counts["censored"]
+        spell_effect_classifiable = spell_effect_observed + spell_effect_ineffective
+        spell_effect_tracked = spell_effect_classifiable + spell_effect_censored
+        affordable_idle_frames = health.get("affordableProducerIdleFrames")
+        idle_producer_frames = health.get("idleTrainingProducerFrames")
+        supply_capped_frames = health.get("supplyCappedFrames")
+        unintended_supply_frames = health.get("supplyUnintendedBlockedFrames")
+        probe_unit_minutes = self.probe_unit_frames / 1440
+        worker_losses = [row for row in self.losses if row["side"] == "self" and
+                         row["kind"] in ("Probe", "SCV", "Drone", "Worker")]
+        resolved_detection = list(self.detection_episodes)
+        useful_arrivals = sum(bool(episode["useful_arrival"]) for episode in resolved_detection)
+        useful_waits = sorted(episode["wait_frames"] for episode in resolved_detection
+                              if episode["useful_arrival"])
+        median_useful_wait = None
+        if useful_waits:
+            middle = len(useful_waits) // 2
+            median_useful_wait = useful_waits[middle] if len(useful_waits) % 2 else (
+                useful_waits[middle - 1] + useful_waits[middle]) / 2
+        incident_metrics = {}
+        for kind, total in self.incident_totals.items():
+            open_episodes = sum(1 for (incident_kind, _), row in self.incident_latest.items()
+                                if incident_kind == kind and row.get("active"))
+            resolved = total["resolved_occurrences"]
+            incident_metrics[kind] = {
+                "occurrences": total["occurrences"], "resolved": resolved,
+                "unresolved_censored": max(0, total["occurrences"] - resolved),
+                "open_at_eof": open_episodes,
+                "recovery_rate": resolved / total["occurrences"] if total["occurrences"] else None,
+                "observed_duration_frames": total["duration_frames"],
+            }
+        reservations_by_reason = [
+            {"reason": reason, **values,
+             "reserved_sample_share": values["reserved_samples"] / values["samples"]
+                if values["samples"] else None,
+             "mean_reserved_action_cost_minerals_per_sample":
+                values["reserved_cost_minerals_sample_sum"] / values["reserved_samples"]
+                if values["reserved_samples"] else None,
+             "mean_reserved_action_cost_gas_per_sample":
+                values["reserved_cost_gas_sample_sum"] / values["reserved_samples"]
+                if values["reserved_samples"] else None}
+            for reason, values in sorted(self.macro_reservation_totals.items())
+        ]
+        operating_metrics = {
+            "affordable_producer_idle": {
+                "numerator_frames": affordable_idle_frames,
+                "denominator_frames": idle_producer_frames,
+                "numerator_unit_minutes": affordable_idle_frames / 1440
+                    if affordable_idle_frames is not None else None,
+                "denominator_unit_minutes": idle_producer_frames / 1440
+                    if idle_producer_frames is not None else None,
+                "share": affordable_idle_frames / idle_producer_frames
+                    if isinstance(affordable_idle_frames, (int, float)) and
+                       isinstance(idle_producer_frames, (int, float)) and idle_producer_frames > 0 else None,
+            },
+            "unintended_supply_cap": {
+                "numerator_frames": unintended_supply_frames,
+                "denominator_frames": supply_capped_frames,
+                "share": unintended_supply_frames / supply_capped_frames
+                    if isinstance(unintended_supply_frames, (int, float)) and
+                       isinstance(supply_capped_frames, (int, float)) and supply_capped_frames > 0 else None,
+            },
+            "detection_arrivals": {
+                "useful_arrivals": useful_arrivals, "resolved_waits": len(resolved_detection),
+                "open_censored_waits": len(self.detection_waits),
+                "arrival_rate": useful_arrivals / len(resolved_detection) if resolved_detection else None,
+                "median_useful_wait_frames": median_useful_wait,
+            },
+            "reservations_by_reason": reservations_by_reason,
+            "worker_deaths": {
+                "count": len(worker_losses), "probe_unit_frames": self.probe_unit_frames,
+                "probe_unit_minutes": probe_unit_minutes,
+                "deaths_per_1000_probe_unit_minutes": len(worker_losses) * 1000 / probe_unit_minutes
+                    if probe_unit_minutes > 0 else None,
+            },
+            "army_contact": {
+                "contact_unit_frames": self.contact_unit_frames,
+                "squad_unit_frames": self.squad_unit_frames,
+                "contact_unit_frame_share": self.contact_unit_frames / self.squad_unit_frames
+                    if self.squad_unit_frames else None,
+                "contact_observations": self.contact_observations,
+                "squad_observations": self.squad_observations,
+                "first_contact_frame": self.first_local_army_contact,
+            },
+            "commands": {
+                "issued": issued_actions, "accepted": accepted_actions,
+                "failed_issued": rejected_actions, "blocked_before_issue": blocked_actions,
+                "acceptance_rate": accepted_actions / issued_actions if issued_actions else None,
+                "failure_rate": rejected_actions / issued_actions if issued_actions else None,
+            },
+            "spell_commands": {
+                "issued": spell_issued, "accepted": spell_accepted,
+                "not_accepted": spell_issued - spell_accepted,
+                "acceptance_rate": spell_accepted / spell_issued if spell_issued else None,
+                "effect_observed": spell_effect_observed,
+                "effect_ineffective": spell_effect_ineffective,
+                "effect_censored": spell_effect_censored,
+                "effect_classifiable": spell_effect_classifiable,
+                "effect_tracked": spell_effect_tracked,
+                "effect_unattributed_accepted": max(0, spell_accepted - spell_effect_tracked),
+                "ineffective_rate_among_classifiable": spell_effect_ineffective / spell_effect_classifiable
+                    if spell_effect_classifiable else None,
+                "effect_observation_coverage": spell_effect_tracked / spell_accepted
+                    if spell_accepted else None,
+                "effect_outcomes": "observed changes are time/actor/location correlated, not proof of causality; incomplete windows are censored",
+                "by_type_and_technology": [
+                    {"type": kind, "technology": tech, "stage": stage, "outcome": outcome, **value}
+                    for (kind, tech, stage, outcome), value in sorted(self.spell_totals.items())
+                ],
+                "effects_by_type_and_technology": [
+                    {"type": kind, "technology": tech, "outcome": outcome, **value}
+                    for (kind, tech, outcome), value in sorted(self.spell_effect_totals.items())
+                ],
+            },
+            "recovery_by_incident": incident_metrics,
+        }
         checks = {
             "idle-worker": "Inspect the worker assignment, resource target, builder/scout lease, and command outcome.",
             "idle-production-with-bank": "Check unit demand, reserved resources, gas, supply, prerequisites, and the producer queue.",
+            "affordable-idle-production": "Check unit demand, reserved resources, gas, supply, prerequisites, and the producer queue.",
             "unpowered-building": "Review Pylon placement and losses, and whether production or detection lost power.",
             "empty-ammunition": "Inspect ammunition funding and train outcomes before sending this unit into combat.",
             "movement-stalled": "Review the movement destination, terrain, unit congestion, and repeated orders.",
@@ -353,6 +553,7 @@ class DecisionTrace:
                 "evidence": f'{row["kind"]} #{row["id"]} lost; last accepted action: {row.get("lastAction", "unknown")}.',
                 "check": "Inspect this unit's damage and order history, nearby visible enemies, and assigned role."})
         return {"diagnostics_version": self.version, "last_frame": self.frame,
+            "operating_metrics": operating_metrics,
             "supply_tight_seconds": health["supplyTightFrames"] / 24 if "supplyTightFrames" in health else None,
             "idle_gateway_seconds": health["idleGatewayFrames"] / 24 if "idleGatewayFrames" in health else None,
             "idle_worker_seconds": health["idleWorkerFrames"] / 24 if "idleWorkerFrames" in health else None,
@@ -479,6 +680,90 @@ class DecisionReportTests(unittest.TestCase):
         self.assertEqual(summary["rejected_commands"][0]["count"], 20)
         self.assertEqual(summary["improvement_candidates"][0]["frame"], 10)
         self.assertEqual(summary["entity_sample_frames"], 24)
+
+    def test_operating_metrics_keep_exposure_and_failure_denominators(self):
+        trace = DecisionTrace()
+        for line in (
+            "HEALTH,24,probes=12,idleTrainingProducerFrames=100,affordableProducerIdleFrames=40,supplyCappedFrames=20,supplyUnintendedBlockedFrames=5",
+            "HEALTH,48,probes=12,idleTrainingProducerFrames=200,affordableProducerIdleFrames=100,supplyCappedFrames=40,supplyUnintendedBlockedFrames=10",
+            "LOSS,30,self,7,Probe,100,100,50,0",
+            "ACTION_TOTAL,48,combat,issued,accepted,4",
+            "ACTION_TOTAL,48,combat,issued,Unit_Busy,2",
+            "ACTION_TOTAL,48,combat,blocked,preflight,3",
+            "SPELL_TOTAL,48,useTech,3,issued,accepted,1",
+            "SPELL_TOTAL,48,feedback,0,issued,not-accepted,1",
+            "MACRO,24,0,Gateway,0,accepted,1,range,100,50,1,1",
+            "MACRO,48,0,Gateway,0,accepted,1,range,100,50,0,1",
+            "INCIDENT,24,movement-stalled,7,since=0,duration=24,active=1",
+            "INCIDENT,48,movement-stalled,7,since=0,duration=48,active=0",
+        ):
+            trace.feed(line)
+        metrics = trace.summary()["operating_metrics"]
+        self.assertEqual(metrics["affordable_producer_idle"]["share"], 0.5)
+        self.assertEqual(metrics["unintended_supply_cap"]["share"], 0.25)
+        self.assertEqual(metrics["worker_deaths"]["count"], 1)
+        self.assertEqual(metrics["worker_deaths"]["probe_unit_frames"], 288)
+        self.assertEqual(metrics["commands"], {
+            "issued": 6, "accepted": 4, "failed_issued": 2, "blocked_before_issue": 3,
+            "acceptance_rate": 4 / 6, "failure_rate": 2 / 6,
+        })
+        self.assertEqual(metrics["spell_commands"]["issued"], 2)
+        self.assertEqual(metrics["spell_commands"]["accepted"], 1)
+        self.assertIn("not proof of causality", metrics["spell_commands"]["effect_outcomes"])
+        reservation = metrics["reservations_by_reason"][0]
+        self.assertEqual((reservation["reason"], reservation["samples"], reservation["reserved_samples"]),
+                         ("range", 2, 1))
+        self.assertEqual(metrics["recovery_by_incident"]["movement-stalled"]["recovery_rate"], 1.0)
+
+    def test_spell_effect_metrics_keep_ineffective_and_censored_denominators(self):
+        trace = DecisionTrace()
+        for line in (
+            "SPELL_TOTAL,48,useTech,3,issued,accepted,5",
+            "SPELL_EFFECT_TOTAL,48,useTech,3,observed,1",
+            "SPELL_EFFECT_TOTAL,72,useTech,3,ineffective,2",
+            "SPELL_EFFECT_TOTAL,96,useTech,3,censored,1",
+        ):
+            trace.feed(line)
+        metrics = trace.summary()["operating_metrics"]["spell_commands"]
+        self.assertEqual(metrics["effect_observed"], 1)
+        self.assertEqual(metrics["effect_ineffective"], 2)
+        self.assertEqual(metrics["effect_censored"], 1)
+        self.assertEqual(metrics["effect_classifiable"], 3)
+        self.assertEqual(metrics["effect_tracked"], 4)
+        self.assertEqual(metrics["effect_unattributed_accepted"], 1)
+        self.assertAlmostEqual(metrics["ineffective_rate_among_classifiable"], 2 / 3)
+        self.assertEqual(metrics["effect_observation_coverage"], 4 / 5)
+        self.assertIn("not proof of causality", metrics["effect_outcomes"])
+
+    def test_legacy_spell_acceptance_without_effect_rows_stays_unknown(self):
+        trace = DecisionTrace()
+        trace.feed("SPELL_TOTAL,48,useTech,3,issued,accepted,2")
+        metrics = trace.summary()["operating_metrics"]["spell_commands"]
+        self.assertEqual(metrics["effect_classifiable"], 0)
+        self.assertIsNone(metrics["ineffective_rate_among_classifiable"])
+        self.assertEqual(metrics["effect_unattributed_accepted"], 2)
+        self.assertEqual(metrics["effect_observation_coverage"], 0)
+
+    def test_contact_and_detection_arrival_require_a_live_useful_denominator(self):
+        trace = DecisionTrace()
+        for line in (
+            "SQUAD,100,main,key=7,units=4,enemies=0,detectionNeeded=1,detectionReady=0",
+            "SQUAD,124,main,key=7,units=4,enemies=2,detectionNeeded=1,detectionReady=1",
+            "SQUAD,148,main,key=7,units=4,enemies=2,detectionNeeded=0,detectionReady=1",
+            "SQUAD,100,scout,key=8,units=2,enemies=0,detectionNeeded=1,detectionReady=0",
+            "SQUAD,100,support,key=9,units=2,enemies=0,detectionNeeded=1,detectionReady=0",
+            "SQUAD,148,support,key=9,units=2,enemies=2,detectionNeeded=1,detectionReady=1",
+        ):
+            trace.feed(line)
+        metrics = trace.summary()["operating_metrics"]
+        self.assertEqual(metrics["detection_arrivals"]["useful_arrivals"], 2)
+        self.assertEqual(metrics["detection_arrivals"]["resolved_waits"], 2)
+        self.assertEqual(metrics["detection_arrivals"]["open_censored_waits"], 1)
+        self.assertEqual(metrics["detection_arrivals"]["median_useful_wait_frames"], 36)
+        self.assertEqual(metrics["army_contact"]["contact_unit_frames"], 96)
+        self.assertEqual(metrics["army_contact"]["squad_unit_frames"], 288)
+        self.assertEqual(metrics["army_contact"]["contact_unit_frame_share"], 1 / 3)
+        self.assertEqual(metrics["army_contact"]["first_contact_frame"], 124)
 
     def test_incident_heartbeats_do_not_double_count_duration(self):
         trace = DecisionTrace()

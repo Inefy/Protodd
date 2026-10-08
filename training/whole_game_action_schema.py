@@ -6,6 +6,9 @@ import torch
 from .whole_game_model import KINDS, TARGET_MODES
 
 
+ACTION_SCHEMA = "protodd-whole-game-actions-v1"
+
+
 KIND_TARGET_MODES = {
     **{kind: {"position"} for kind in
        ("move", "attack_move", "patrol", "unload_position", "build")},

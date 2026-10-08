@@ -54,7 +54,8 @@ def build(template, output, javac, seed_base=None, archive_pluto_logs=False):
     commands = commands.replace(launch, '''try {
             Process process = new ProcessBuilder("powershell.exe", "-NoProfile", "-NonInteractive",
                 "-WindowStyle", "Hidden", "-File", new File("start-owned-starcraft.ps1").getAbsolutePath(),
-                "-Runtime", new File(ClientSettings.Instance().ClientStarcraftDir).getCanonicalPath())
+                "-Runtime", new File(ClientSettings.Instance().ClientStarcraftDir).getCanonicalPath(),
+                "-MonitorOwnedLock")
                 .inheritIO().start();
             if (process.waitFor() != 0) throw new IOException("Owned StarCraft launch failed");
         } catch (Exception e) { throw new RuntimeException(e); }''')
@@ -88,7 +89,12 @@ def build(template, output, javac, seed_base=None, archive_pluto_logs=False):
     (output / helper.name).write_bytes(helper.read_bytes())
     launcher = root / "scripts/start-owned-starcraft.ps1"
     (output / launcher.name).write_bytes(launcher.read_bytes())
-    inputs = [jar, sources / "Client.java", sources / "ClientCommands.java", helper, launcher, Path(__file__)]
+    headless_helpers = [root / 'scripts' / name for name in
+                        ('HeadlessStarCraft.psm1', 'HeadlessStarCraft.cs', 'run-headless-starcraft.ps1',
+                         'MatchProcessOwnership.psm1')]
+    for headless_helper in headless_helpers:
+        (output / headless_helper.name).write_bytes(headless_helper.read_bytes())
+    inputs = [jar, sources / "Client.java", sources / "ClientCommands.java", helper, launcher, Path(__file__), *headless_helpers]
     digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
     (output / "build.json").write_text(json.dumps(dict(
         seed_base=seed_base,seed_rule='seed_base + game_id' if seed_base is not None else None,

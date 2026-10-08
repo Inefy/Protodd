@@ -4,10 +4,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <numeric>
-#include <sstream>
+#include <streambuf>
 #include <stdexcept>
 #if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
 #include <emmintrin.h>
@@ -16,6 +17,53 @@
 
 namespace protodd::cpu {
 namespace {
+
+constexpr float maximumModelValue = 1000.0F;
+constexpr float maximumOutputValue = 1.0e6F;
+
+class ByteSpanBuffer final : public std::streambuf {
+public:
+    explicit ByteSpanBuffer(const std::span<const std::uint8_t> bytes) : bytes_(bytes) {}
+
+protected:
+    int_type underflow() override {
+        if (position_ >= bytes_.size()) return traits_type::eof();
+        return traits_type::to_int_type(static_cast<char>(bytes_[position_]));
+    }
+
+    int_type uflow() override {
+        const auto value = underflow();
+        if (!traits_type::eq_int_type(value, traits_type::eof())) ++position_;
+        return value;
+    }
+
+    std::streamsize xsgetn(char* destination, const std::streamsize count) override {
+        if (count <= 0) return 0;
+        const auto requested = static_cast<std::size_t>(count);
+        const auto copied = std::min(requested, bytes_.size() - position_);
+        if (copied > 0) {
+            std::memcpy(destination, bytes_.data() + position_, copied);
+            position_ += copied;
+        }
+        return static_cast<std::streamsize>(copied);
+    }
+
+private:
+    std::span<const std::uint8_t> bytes_;
+    std::size_t position_{};
+};
+
+bool safeValues(const std::vector<float>& values, const float maximum) noexcept {
+    return std::ranges::all_of(values, [maximum](const float value) {
+        return std::isfinite(value) && std::abs(value) <= maximum;
+    });
+}
+
+bool safeHeads(const std::unordered_map<std::string, std::vector<float>>& heads) noexcept {
+    return !heads.empty() && std::ranges::all_of(heads, [](const auto& entry) {
+        return !entry.second.empty() && safeValues(entry.second, maximumOutputValue);
+    });
+}
 
 std::uint32_t read32(std::istream& input) {
     std::uint32_t value{};
@@ -129,6 +177,19 @@ float sigmoid(float value) { return 1.0f / (1.0f + std::exp(-value)); }
 
 }  // namespace
 
+bool safeWholeGameOutput(const Output& output) noexcept {
+    if (output.memory.empty() || output.heads.empty() ||
+        !safeValues(output.memory, maximumOutputValue)) return false;
+    return safeHeads(output.heads);
+}
+
+bool safeWholeGameOutput(const SlotOutput& output) noexcept {
+    return !output.memory.empty() && safeValues(output.memory, maximumOutputValue) &&
+        std::ranges::all_of(output.slots, [](const Output& slot) {
+            return safeHeads(slot.heads);
+        });
+}
+
 WholeGameCpu::WholeGameCpu(const std::filesystem::path& weights) {
     std::ifstream input(weights, std::ios::binary);
     if (!input) throw std::runtime_error("cannot open whole-game weights");
@@ -137,8 +198,8 @@ WholeGameCpu::WholeGameCpu(const std::filesystem::path& weights) {
 
 WholeGameCpu::WholeGameCpu(std::span<const std::uint8_t> weights) {
     if (weights.empty()) throw std::runtime_error("empty embedded whole-game weights");
-    const std::string bytes(reinterpret_cast<const char*>(weights.data()), weights.size());
-    std::istringstream input(bytes, std::ios::binary);
+    ByteSpanBuffer buffer(weights);
+    std::istream input(&buffer);
     load(input);
 }
 
@@ -174,7 +235,10 @@ void WholeGameCpu::load(std::istream& input) {
         tensor.values.resize(elements);
         input.read(reinterpret_cast<char*>(tensor.values.data()),
                    static_cast<std::streamsize>(elements * sizeof(float)));
-        if (!input || !parameters_.emplace(name, std::move(tensor)).second)
+        if (!input) throw std::runtime_error("truncated whole-game tensor");
+        if (!safeValues(tensor.values, maximumModelValue))
+            throw std::runtime_error("nonfinite or excessive whole-game parameter");
+        if (!parameters_.emplace(name, std::move(tensor)).second)
             throw std::runtime_error("truncated or duplicate whole-game tensor");
         parameterCount_ += elements;
     }

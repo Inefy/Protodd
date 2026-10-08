@@ -14,8 +14,30 @@ constexpr auto index(const EnemyPlan plan) noexcept {
     return static_cast<std::size_t>(plan);
 }
 
+constexpr auto index(const ThreatEvidenceFamily family) noexcept {
+    return static_cast<std::size_t>(family);
+}
+
 int count(const GameState& state, const UnitKind kind) {
     return static_cast<int>(std::ranges::count(state.enemy.units, kind, &UnitSnapshot::kind));
+}
+
+int enemyBaseSiteCount(const GameState& state) {
+    std::vector<Position> occupied;
+    occupied.reserve(state.bases.size() + state.enemy.units.size());
+    const auto addSite = [&occupied](const Position position) {
+        if (!position.valid() || std::ranges::any_of(occupied, [position](const Position prior) {
+                return distanceSquared(position, prior) <= 320 * 320;
+            })) return;
+        occupied.push_back(position);
+    };
+    for (const auto& base : state.bases) {
+        if (state.enemy.id >= 0 && base.ownerId == state.enemy.id) addSite(base.center);
+    }
+    for (const auto& unit : state.enemy.units) {
+        if (unit.role == UnitRole::resourceDepot && unit.position.valid()) addSite(unit.position);
+    }
+    return static_cast<int>(occupied.size());
 }
 
 bool seen(const GameState& state, const UnitKind kind) {
@@ -25,8 +47,9 @@ bool seen(const GameState& state, const UnitKind kind) {
 }
 
 double recencyWeight(const GameState& state, const UnitSnapshot& unit) {
-    const auto age = std::max(0, state.frame - unit.lastSeen);
-    return std::exp(-static_cast<double>(age) / (24.0 * 90.0));
+    auto memory = unit;
+    memory.updateMemoryConfidence(state.frame);
+    return std::clamp(memory.existenceConfidence, 0.0, 1.0);
 }
 
 Position homeAnchor(const GameState& state) {
@@ -74,28 +97,247 @@ double productionCapacity(const UnitKind kind) noexcept {
     }
 }
 
+Frame remainingBuildFrames(const UnitSnapshot& unit) noexcept {
+    if (unit.completed || unit.buildProgress >= 100) return 0;
+    const auto total = unitStats(unit.kind).buildTime;
+    if (total <= 0 || unit.buildProgress < 0) return 0;
+    return static_cast<Frame>((static_cast<std::int64_t>(total) *
+                               (100 - unit.buildProgress) + 99) / 100);
+}
+
+void addEvidence(
+    ThreatAssessment& assessment,
+    const ThreatEvidenceFamily family,
+    const UnitSnapshot& unit) {
+    if (unit.lastSeen < 0) return;
+    auto& stamp = assessment.evidence[index(family)];
+    ++stamp.observedSources;
+    stamp.latestFrame = std::max(stamp.latestFrame, unit.lastSeen);
+    assessment.latestEvidenceFrame = std::max(assessment.latestEvidenceFrame, unit.lastSeen);
+}
+
+bool advancedTechnology(const UnitKind kind) noexcept {
+    switch (kind) {
+        case UnitKind::templarArchives:
+        case UnitKind::roboticsSupportBay:
+        case UnitKind::fleetBeacon:
+        case UnitKind::starport:
+        case UnitKind::scienceFacility:
+        case UnitKind::covertOps:
+        case UnitKind::physicsLab:
+        case UnitKind::nuclearSilo:
+        case UnitKind::queensNest:
+        case UnitKind::ultraliskCavern:
+        case UnitKind::defilerMound:
+        case UnitKind::greaterSpire:
+        case UnitKind::scienceVessel:
+        case UnitKind::lair:
+        case UnitKind::hive:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool airUnit(const UnitKind kind) noexcept {
+    switch (kind) {
+        case UnitKind::wraith:
+        case UnitKind::mutalisk:
+        case UnitKind::scout:
+        case UnitKind::corsair:
+        case UnitKind::carrier:
+        case UnitKind::battlecruiser:
+        case UnitKind::valkyrie:
+        case UnitKind::guardian:
+        case UnitKind::devourer:
+        case UnitKind::scourge:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool cloakThreat(const UnitKind kind) noexcept {
+    switch (kind) {
+        case UnitKind::darkTemplar:
+        case UnitKind::lurker:
+        case UnitKind::wraith:
+        case UnitKind::ghost:
+        case UnitKind::spiderMine:
+        case UnitKind::templarArchives:
+        case UnitKind::hydraliskDen:
+        case UnitKind::lurkerEgg:
+        case UnitKind::covertOps:
+        case UnitKind::nuclearSilo:
+        case UnitKind::machineShop:
+            return true;
+        default:
+            return false;
+    }
+}
+
+void collectEvidenceFamilies(const GameState& state, ThreatAssessment& assessment,
+                             const Position anchor) {
+    const auto nearMain = [anchor](const UnitSnapshot& unit, const int radius) {
+        return anchor.valid() && unit.position.valid() &&
+               distanceSquared(unit.position, anchor) < radius * radius;
+    };
+    for (const auto& unit : state.enemy.units) {
+        if (unit.lastSeen < 0 || unit.lastSeen > state.frame ||
+            (!unit.visible && unit.existenceConfidence <= 0.01)) continue;
+        const auto current = unit.visible && unit.detected;
+        if (current && isWorker(unit.kind) && nearMain(unit, 704)) {
+            addEvidence(assessment, ThreatEvidenceFamily::localWorkers, unit);
+        }
+        if (current && proxyStructure(unit.kind) && nearMain(unit, 1248)) {
+            addEvidence(assessment, ThreatEvidenceFamily::forwardStructures, unit);
+        }
+        const auto fresh = unit.visible || state.frame - unit.lastSeen <= 30 * 24;
+        if (fresh && (unit.kind == UnitKind::zergling || unit.kind == UnitKind::marine ||
+                      unit.kind == UnitKind::zealot)) {
+            addEvidence(assessment, ThreatEvidenceFamily::rushCombat, unit);
+        }
+        if (fresh && advancedTechnology(unit.kind)) {
+            addEvidence(assessment, ThreatEvidenceFamily::technology, unit);
+        }
+        if (fresh && airUnit(unit.kind)) {
+            addEvidence(assessment, ThreatEvidenceFamily::air, unit);
+        }
+        if (fresh && cloakThreat(unit.kind)) {
+            addEvidence(assessment, ThreatEvidenceFamily::cloak, unit);
+        }
+    }
+    const auto bases = enemyBaseSiteCount(state);
+    if (bases >= 2) {
+        for (const auto& unit : state.enemy.units) {
+            if (unit.lastSeen < 0 || unit.lastSeen > state.frame ||
+                (!unit.visible && unit.existenceConfidence <= 0.01)) continue;
+            if ((unit.kind == UnitKind::commandCenter || unit.kind == UnitKind::hatchery ||
+                 unit.kind == UnitKind::lair || unit.kind == UnitKind::hive ||
+                 unit.kind == UnitKind::nexus) &&
+                (unit.visible || state.frame - unit.lastSeen <= 30 * 24)) {
+                addEvidence(assessment, ThreatEvidenceFamily::expansion, unit);
+            }
+        }
+    }
+    assessment.evidenceFamiliesPresent = static_cast<int>(std::ranges::count_if(
+        assessment.evidence, [](const ThreatEvidenceStamp& stamp) {
+            return stamp.observedSources > 0;
+        }));
+}
+
+void estimateProductionReadyFrame(const GameState& state, ThreatAssessment& assessment) {
+    // This is a physical lower bound, not a forecast: it assumes an observed
+    // producer can start immediately and ignores hidden resources/queues.
+    const UnitSnapshot* observedPool = nullptr;
+    for (const auto& unit : state.enemy.units) {
+        if (unit.kind == UnitKind::spawningPool && unit.visible && unit.detected) {
+            observedPool = &unit;
+            break;
+        }
+    }
+    for (const auto& producer : state.enemy.units) {
+        if (!producer.visible || !producer.detected) continue;
+        UnitKind output = UnitKind::unknown;
+        const UnitSnapshot* supportingTech = nullptr;
+        if (producer.kind == UnitKind::gateway) output = UnitKind::zealot;
+        else if (producer.kind == UnitKind::barracks) output = UnitKind::marine;
+        else if ((producer.kind == UnitKind::hatchery || producer.kind == UnitKind::lair ||
+                  producer.kind == UnitKind::hive) && observedPool != nullptr) {
+            output = UnitKind::zergling;
+            supportingTech = observedPool;
+        }
+        if (output == UnitKind::unknown) continue;
+        const auto ready = state.frame + std::max(remainingBuildFrames(producer),
+            supportingTech != nullptr ? remainingBuildFrames(*supportingTech) : 0) +
+            unitStats(output).buildTime;
+        assessment.earliestProductionReadyFrame =
+            assessment.earliestProductionReadyFrame < 0
+                ? ready : std::min(assessment.earliestProductionReadyFrame, ready);
+    }
+}
+
+void estimateApproachArrival(const GameState& state, const Position anchor,
+                             ThreatAssessment& assessment) {
+    if (!anchor.valid()) return;
+    for (const auto& unit : state.enemy.units) {
+        if (!unit.visible || !unit.detected || !unit.completed || unit.hallucination ||
+            !isCombatUnit(unit.kind) || !unit.position.valid() || !unit.lastPosition.valid() ||
+            !std::isfinite(unit.topSpeed) || unit.topSpeed <= 0.05) continue;
+        const auto previousDistance = distance(unit.lastPosition, anchor);
+        const auto currentDistance = distance(unit.position, anchor);
+        if (currentDistance > 4096.0 || previousDistance - currentDistance < 2.0) continue;
+        const auto travelDistance = std::max(0.0, currentDistance - 48.0);
+        const auto fastest = unit.topSpeed * 1.25;
+        const auto slowest = std::max(0.25, unit.topSpeed * 0.60);
+        const auto earliestDelta = static_cast<Frame>(std::floor(travelDistance / fastest));
+        const auto latestDelta = static_cast<Frame>(std::ceil(
+            (currentDistance * 1.75 + 96.0) / slowest));
+        const auto earliest = state.frame + std::max<Frame>(0, earliestDelta);
+        const auto latest = state.frame + std::max<Frame>(0, latestDelta);
+        assessment.earliestApproachArrivalFrame =
+            assessment.earliestApproachArrivalFrame < 0
+                ? earliest : std::min(assessment.earliestApproachArrivalFrame, earliest);
+        assessment.latestApproachArrivalFrame =
+            assessment.latestApproachArrivalFrame < 0
+                ? latest : std::min(assessment.latestApproachArrivalFrame, latest);
+    }
+}
+
 }  // namespace
 
 OpponentModel::OpponentModel() {
     reset(Race::unknown);
 }
 
-const BaseSnapshot* enemyNatural(const GameState& state) noexcept {
+EnemyNaturalEstimate enemyNaturalEstimate(const GameState& state) noexcept {
     const auto main = std::ranges::find_if(state.bases, [&state](const BaseSnapshot& base) {
         return base.startLocation && base.ownerId == state.enemy.id &&
                state.enemy.id >= 0 && base.center.valid();
     });
-    if (main == state.bases.end()) return nullptr;
-    const BaseSnapshot* natural = nullptr;
-    auto nearest = std::numeric_limits<int>::max();
+    if (main == state.bases.end()) return {};
+
+    const auto viable = [&state, main](const BaseSnapshot& base) {
+        return base.id != main->id && !base.startLocation &&
+               base.mineralPatches > 0 && base.mineralsRemaining > 0 && base.center.valid() &&
+               base.ownerId != state.self.id && base.enemyGroundReachabilityKnown &&
+               base.enemyGroundDistanceFromMain > 0;
+    };
+    const auto reachableGas = std::ranges::any_of(state.bases, [&viable](const BaseSnapshot& base) {
+        return viable(base) && base.geysers > 0;
+    });
+    const BaseSnapshot* best = nullptr;
+    auto bestScore = std::numeric_limits<double>::infinity();
+    auto secondScore = std::numeric_limits<double>::infinity();
+    auto candidateCount = 0;
     for (const auto& base : state.bases) {
-        if (base.id == main->id || base.startLocation || base.island ||
-            (base.mineralPatches <= 0 || base.mineralsRemaining <= 0) ||
-            !base.center.valid() || base.ownerId == state.self.id) continue;
-        const auto distance = distanceSquared(main->center, base.center);
-        if (distance < nearest) { nearest = distance; natural = &base; }
+        if (!viable(base)) continue;
+        ++candidateCount;
+        const auto route = static_cast<double>(base.enemyGroundDistanceFromMain);
+        const auto mineralPenalty = static_cast<double>(std::max(0, 8 - base.mineralPatches)) * 24.0;
+        const auto gasBonus = static_cast<double>(std::min(2, base.geysers)) * 64.0;
+        const auto mineralOnlyPenalty = reachableGas && base.geysers == 0 ? 768.0 : 0.0;
+        const auto score = route + mineralPenalty - gasBonus + mineralOnlyPenalty;
+        if (score < bestScore) {
+            secondScore = bestScore;
+            bestScore = score;
+            best = &base;
+        } else if (score < secondScore) {
+            secondScore = score;
+        }
     }
-    return natural;
+    if (best == nullptr) return {nullptr, 0.0, 0, true};
+    double confidence = best->geysers > 0 ? 0.92 : 0.64;
+    if (candidateCount > 1) {
+        const auto scoreGap = std::max(0.0, secondScore - bestScore);
+        confidence = 0.50 + 0.44 * std::clamp(scoreGap / 900.0, 0.0, 1.0);
+        if (reachableGas && best->geysers == 0) confidence = std::min(confidence, 0.72);
+    }
+    return {best, confidence, candidateCount, true};
+}
+
+const BaseSnapshot* enemyNatural(const GameState& state) noexcept {
+    return enemyNaturalEstimate(state).candidate;
 }
 
 void OpponentModel::reset(const Race enemyRace) {
@@ -115,6 +357,7 @@ void OpponentModel::update(const GameState& state) {
         reset(state.enemy.race);
     }
     lastUpdate_ = state.frame;
+    assessment_ = {};
 
     Beliefs evidence{};
     evidence.fill(1.0);
@@ -127,9 +370,7 @@ void OpponentModel::update(const GameState& state) {
         state.enemy.units, [&recentlySeen](const UnitSnapshot& unit) {
             return isCombatUnit(unit.kind) && recentlySeen(unit, 30 * 24);
         });
-    const auto enemyBases = count(state, UnitKind::commandCenter) +
-                            count(state, UnitKind::hatchery) + count(state, UnitKind::lair) +
-                            count(state, UnitKind::hive) + count(state, UnitKind::nexus);
+    const auto enemyBases = enemyBaseSiteCount(state);
     const auto anchor = homeAnchor(state);
     const auto nearMain = [&anchor](const UnitSnapshot& unit, const int radius) {
         return anchor.valid() && unit.position.valid() &&
@@ -196,8 +437,10 @@ void OpponentModel::update(const GameState& state) {
     if (enemyBases >= 2 && minutes < 8.0) {
         evidence[index(EnemyPlan::fastExpand)] += 5.0;
     }
-    const auto natural = enemyNatural(state);
-    const auto checkedEmpty = natural != nullptr && natural->ownerId == -1 &&
+    const auto naturalEstimate = enemyNaturalEstimate(state);
+    const auto natural = naturalEstimate.candidate;
+    const auto checkedEmpty = natural != nullptr && naturalEstimate.confidence >= 0.75 &&
+        natural->ownerId == -1 &&
         natural->lastConfirmedEmpty >= 3 * 60 * 24 &&
         natural->lastConfirmedEmpty <= state.frame &&
         state.frame - natural->lastConfirmedEmpty <= 45 * 24;
@@ -341,7 +584,12 @@ void OpponentModel::update(const GameState& state) {
         0.0, 1.0);
     assessment_.expansion = probability(EnemyPlan::fastExpand);
     assessment_.enemyNaturalCheckedEmpty = checkedEmpty;
+    assessment_.enemyNaturalConfidence = naturalEstimate.confidence;
+    assessment_.enemyNaturalCandidateCount = naturalEstimate.candidateCount;
     assessment_.estimatedArmyValue = std::max(visibleValue, armyValue);
+    collectEvidenceFamilies(state, assessment_, anchor);
+    estimateProductionReadyFrame(state, assessment_);
+    estimateApproachArrival(state, anchor, assessment_);
 
     const auto entropy = -std::accumulate(
         beliefs_.begin(), beliefs_.end(), 0.0,

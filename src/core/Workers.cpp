@@ -44,6 +44,8 @@ EvacuationRoute safestEvacuationRoute(
     const BaseSnapshot* safeBase,
     const InfluenceMap& influence,
     const NavigationGrid* navigation) {
+    const MovementFootprint footprint{worker.dimensionLeft, worker.dimensionRight,
+                                      worker.dimensionUp, worker.dimensionDown};
     std::vector<Position> candidates;
     const auto addCandidate = [&candidates](const Position candidate) {
         if (!candidate.valid() || std::ranges::any_of(candidates, [candidate](const Position prior) {
@@ -76,21 +78,19 @@ EvacuationRoute safestEvacuationRoute(
         auto peakThreat = 0.0F;
         auto destinationThreat = 0.0F;
         if (navigation != nullptr && !navigation->empty()) {
-            auto start = worker.position;
-            if (!navigation->walkable(start)) start = navigation->nearestWalkable(start);
-            auto finish = candidate;
-            if (!navigation->walkable(finish)) finish = navigation->nearestWalkable(finish);
-            if (!start.valid() || !finish.valid()) continue;
-            const auto path = navigation->findPath(start, finish, 700);
-            if (path.empty()) continue;
+            const auto path = navigation->findPath(
+                worker.position, candidate, 700, footprint);
+            if (!path.reached()) continue;
             routeLength = 0.0;
-            for (std::size_t index = 0; index < path.size(); ++index) {
-                if (index > 0) routeLength += distance(path[index - 1], path[index]);
-                if (index > 0 || path.size() == 1)
-                    peakThreat = std::max(peakThreat, influence.at(path[index]).groundThreat);
+            for (std::size_t index = 0; index < path.points.size(); ++index) {
+                if (index > 0)
+                    routeLength += distance(path.points[index - 1], path.points[index]);
+                if (index > 0 || path.points.size() == 1)
+                    peakThreat = std::max(
+                        peakThreat, influence.at(path.points[index]).groundThreat);
             }
-            destinationThreat = influence.at(path.back()).groundThreat;
-            waypoint = path[std::min<std::size_t>(4, path.size() - 1)];
+            destinationThreat = influence.at(path.points.back()).groundThreat;
+            waypoint = path.points[std::min<std::size_t>(4, path.points.size() - 1)];
         } else {
             waypoint = influence.safestStep(worker.position, candidate, false);
             peakThreat = influence.maximumGroundThreat(worker.position, waypoint);
@@ -109,8 +109,17 @@ EvacuationRoute safestEvacuationRoute(
                    2 * worker.position.y - threat->position.y}
         : preferredRefuge;
     auto fallback = influence.safestStep(worker.position, away, false);
-    if (navigation != nullptr && !navigation->empty() && !navigation->walkable(fallback))
-        fallback = navigation->nearestWalkable(fallback);
+    if (navigation != nullptr && !navigation->empty() &&
+        (!navigation->walkable(fallback, footprint) ||
+         !navigation->lineWalkable(worker.position, fallback, footprint))) {
+        const auto reachable = navigation->nextWaypoint(
+            worker.position, fallback, 1, 3000, footprint);
+        fallback = reachable.hasUsableWaypoint() ? reachable.waypoint : worker.position;
+    }
+    if (navigation != nullptr && !navigation->empty() &&
+        (!fallback.valid() ||
+         !navigation->lineWalkable(worker.position, fallback, footprint)))
+        fallback = worker.position;
     if (!fallback.valid()) fallback = worker.position;
     return {fallback, fallback, 0.0};
 }
@@ -123,11 +132,13 @@ Frame estimatedAttackArrivalFrames(const UnitSnapshot& defender,
         return std::numeric_limits<Frame>::max();
     }
     const auto& weapon = threat.flying ? defender.airWeapon : defender.groundWeapon;
+    const MovementFootprint footprint{defender.dimensionLeft, defender.dimensionRight,
+                                      defender.dimensionUp, defender.dimensionDown};
     auto separation = std::sqrt(static_cast<double>(
         distanceSquared(defender.position, threat.position)));
     if (separation > weapon.maxRange && navigation != nullptr &&
         !navigation->empty() &&
-        !navigation->lineWalkable(defender.position, threat.position)) {
+        !navigation->lineWalkable(defender.position, threat.position, footprint)) {
         // Avoid spending pathfinding work on units that already miss the
         // response deadline by the straight-line lower bound. Bound A* too:
         // an inconclusive route is not credited as local protection.
@@ -135,11 +146,11 @@ Frame estimatedAttackArrivalFrames(const UnitSnapshot& defender,
                                       defender.topSpeed;
         if (lowerBoundFrames > kLocalDefenseResponseFrames)
             return std::numeric_limits<Frame>::max();
-        const auto path = navigation->findPath(defender.position, threat.position, 3000);
-        if (path.empty()) return std::numeric_limits<Frame>::max();
-        separation = distance(defender.position, path.front()) +
-            distance(path.back(), threat.position);
-        for (auto step = path.begin() + 1; step != path.end(); ++step)
+        const auto path = navigation->findPath(defender.position, threat.position, 3000, footprint);
+        if (!path.reached()) return std::numeric_limits<Frame>::max();
+        separation = distance(defender.position, path.points.front()) +
+            distance(path.points.back(), threat.position);
+        for (auto step = path.points.begin() + 1; step != path.points.end(); ++step)
             separation += distance(*(step - 1), *step);
     }
     const auto approachDistance = std::max(
@@ -193,22 +204,73 @@ int targetPriority(const UnitSnapshot& enemy) {
 
 bool safeGroundRoute(const UnitSnapshot& worker, const Position destination,
                      const InfluenceMap& influence,
-                     const NavigationGrid* navigation) {
+                     const NavigationGrid* navigation,
+                     WorkerManager::RoutingStats& routingStats) {
     if (!worker.position.valid() || !destination.valid()) return false;
     if (navigation == nullptr || navigation->empty())
         return influence.maximumGroundThreat(worker.position, destination) <= 0.25F;
 
-    const auto path = navigation->findPath(worker.position, destination);
-    if (path.empty()) return false;
+    // Resource-line anchors are averages of mineral-field positions and can
+    // fall inside a blocked mineral cell. Route to a nearby walkable approach
+    // point, then require a complete center path and a safe final segment.
+    const auto searchRadius = std::max(
+        2, (64 + navigation->cellSize() - 1) / navigation->cellSize());
+    const auto routeTarget = navigation->walkable(destination)
+        ? destination : navigation->nearestWalkable(destination, searchRadius);
+    if (!routeTarget.valid()) return false;
+    if (navigation->lineWalkable(worker.position, routeTarget)) {
+        return influence.maximumGroundThreat(worker.position, routeTarget) <= 0.25F &&
+               influence.maximumGroundThreat(routeTarget, destination) <= 0.25F;
+    }
+    if (routingStats.economicPathSearches >= WorkerManager::maximumEconomicRouteSearches) {
+        ++routingStats.deferredChecks;
+        return false;
+    }
+    ++routingStats.economicPathSearches;
+    const auto path = navigation->findPath(worker.position, routeTarget);
+    if (!path.reached()) return false;
     auto previous = worker.position;
-    for (const auto waypoint : path) {
+    for (const auto waypoint : path.points) {
         if (influence.maximumGroundThreat(previous, waypoint) > 0.25F) return false;
         previous = waypoint;
     }
-    return influence.maximumGroundThreat(previous, destination) <= 0.25F;
+    return influence.maximumGroundThreat(previous, routeTarget) <= 0.25F &&
+           influence.maximumGroundThreat(routeTarget, destination) <= 0.25F;
 }
 
 }  // namespace
+
+MineralServiceEstimate estimateMineralService(
+    const MineralWorker& worker,
+    const MineralPatchCandidate& patch,
+    const int assignedWorkers,
+    const UnitId previousTarget,
+    const MineralServiceModel model) noexcept {
+    const auto speed = std::isfinite(worker.topSpeed) && worker.topSpeed > 0.1
+        ? worker.topSpeed : 4.0;
+    const auto travelFrames = [speed](const Position from, const Position to) {
+        if (!from.valid() || !to.valid()) return 1'000'000;
+        const auto estimate = std::ceil(distance(from, to) / speed);
+        return static_cast<int>(std::clamp(estimate, 0.0, 1'000'000.0));
+    };
+    MineralServiceEstimate estimate;
+    estimate.cargoReturnFrames = worker.carryingResources
+        ? travelFrames(worker.position, worker.mineralLine) : 0;
+    const auto nextOrigin = worker.carryingResources
+        ? worker.mineralLine : worker.position;
+    estimate.travelToPatchFrames = travelFrames(nextOrigin, patch.position);
+    estimate.travelToDepotFrames = travelFrames(patch.position, worker.mineralLine);
+    estimate.miningFrames = std::max(0, model.miningFrames);
+    estimate.congestionFrames = std::max(0, assignedWorkers - 1) *
+                                std::max(0, model.additionalWorkerFrames);
+    estimate.switchingFrames = previousTarget >= 0 && previousTarget != patch.id
+        ? std::max(0, model.switchingFrames) : 0;
+    const auto total = static_cast<long long>(estimate.cargoReturnFrames) +
+        estimate.travelToPatchFrames + estimate.travelToDepotFrames +
+        estimate.miningFrames + estimate.congestionFrames + estimate.switchingFrames;
+    estimate.totalFrames = static_cast<int>(std::min<long long>(total, 1'000'000));
+    return estimate;
+}
 
 UnitId selectMineralPatch(
     const std::span<const MineralPatchCandidate> candidates,
@@ -238,33 +300,95 @@ UnitId selectMineralPatch(
 const std::unordered_map<UnitId, UnitId>& MineralAllocator::assign(
     const std::span<const MineralWorker> workers,
     const std::span<const MineralPatchCandidate> patches) {
+    std::vector<const MineralWorker*> orderedWorkers;
+    std::unordered_map<UnitId, const MineralWorker*> workerById;
     std::unordered_map<UnitId, UnitId> retained;
-    std::unordered_map<UnitId, int> load;
+    std::unordered_map<UnitId, std::vector<UnitId>> assignedByPatch;
+    orderedWorkers.reserve(workers.size());
+    workerById.reserve(workers.size());
     for (const auto& worker : workers) {
+        orderedWorkers.push_back(&worker);
+        workerById.insert_or_assign(worker.id, &worker);
         const auto previous = targets_.find(worker.id);
         const auto target = previous != targets_.end() ? previous->second : worker.currentTarget;
         const auto patch = std::ranges::find(patches, target, &MineralPatchCandidate::id);
-        if (patch != patches.end() &&
+        if (patch != patches.end() && patch->position.valid() &&
             distanceSquared(patch->position, worker.mineralLine) <= 480 * 480) {
             retained[worker.id] = target;
-            ++load[target];
+            assignedByPatch[target].push_back(worker.id);
         }
     }
-    for (const auto& worker : workers) {
-        const auto previous = retained.find(worker.id);
-        const auto current = previous != retained.end() ? previous->second : -1;
-        if (current >= 0) --load[current];
-        std::vector<MineralPatchCandidate> candidates;
-        for (const auto& patch : patches) {
-            if (distanceSquared(patch.position, worker.mineralLine) <= 480 * 480) {
-                candidates.push_back({patch.id, patch.position, load[patch.id]});
+    std::ranges::sort(orderedWorkers, {}, [](const MineralWorker* worker) {
+        return worker->id;
+    });
+
+    const auto patchRate = [&](const MineralPatchCandidate& patch,
+                               const std::vector<UnitId>& workerIds,
+                               const UnitId changingWorker,
+                               const UnitId previousTarget) {
+        auto rate = 0.0;
+        const auto load = static_cast<int>(workerIds.size());
+        for (const auto workerId : workerIds) {
+            const auto found = workerById.find(workerId);
+            if (found == workerById.end()) continue;
+            const auto prior = workerId == changingWorker ? previousTarget : patch.id;
+            const auto service = estimateMineralService(
+                *found->second, patch, load, prior, model_);
+            rate += 8.0 / static_cast<double>(std::max(1, service.totalFrames));
+        }
+        return rate;
+    };
+
+    for (const auto* workerPointer : orderedWorkers) {
+        const auto& worker = *workerPointer;
+        const auto assigned = retained.find(worker.id);
+        auto previousTarget = assigned != retained.end()
+            ? assigned->second : worker.currentTarget;
+        if (assigned != retained.end()) {
+            auto& currentWorkers = assignedByPatch[assigned->second];
+            std::erase(currentWorkers, worker.id);
+        } else if (previousTarget >= 0) {
+            const auto currentPatch = std::ranges::find(
+                patches, previousTarget, &MineralPatchCandidate::id);
+            if (currentPatch == patches.end() || !currentPatch->position.valid() ||
+                distanceSquared(currentPatch->position, worker.mineralLine) > 480 * 480) {
+                previousTarget = -1;
             }
         }
-        const auto selected = selectMineralPatch(candidates, worker.mineralLine,
-                                                 worker.position, current);
+
+        auto selected = UnitId{-1};
+        auto bestGain = -std::numeric_limits<double>::infinity();
+        auto bestFrames = std::numeric_limits<int>::max();
+        for (const auto& patch : patches) {
+            if (patch.id < 0 || !patch.position.valid() ||
+                distanceSquared(patch.position, worker.mineralLine) > 480 * 480) continue;
+            const auto foundWorkers = assignedByPatch.find(patch.id);
+            const auto existing = foundWorkers != assignedByPatch.end()
+                ? foundWorkers->second : std::vector<UnitId>{};
+            const auto beforeRate = patchRate(patch, existing, -1, -1);
+            auto trial = existing;
+            trial.push_back(worker.id);
+            const auto afterRate = patchRate(patch, trial, worker.id, previousTarget);
+            const auto estimate = estimateMineralService(
+                worker, patch, static_cast<int>(trial.size()), previousTarget, model_);
+            const auto gain = afterRate - beforeRate;
+            const auto preferCurrent = patch.id == previousTarget && selected != previousTarget;
+            const auto keepCurrent = selected == previousTarget && patch.id != previousTarget;
+            if (gain > bestGain || (gain == bestGain &&
+                                    (preferCurrent || (!keepCurrent &&
+                                     (estimate.totalFrames < bestFrames ||
+                                      (estimate.totalFrames == bestFrames &&
+                                       (selected < 0 || patch.id < selected))))))) {
+                bestGain = gain;
+                bestFrames = estimate.totalFrames;
+                selected = patch.id;
+            }
+        }
         if (selected >= 0) {
             retained[worker.id] = selected;
-            ++load[selected];
+            assignedByPatch[selected].push_back(worker.id);
+        } else {
+            retained.erase(worker.id);
         }
     }
     targets_ = std::move(retained);
@@ -331,6 +455,7 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     const bool evacuateAbandonedBase,
     const bool stageExpansionWorkers,
     const NavigationGrid* navigation) const {
+    routingStats_ = {};
     std::vector<const UnitSnapshot*> workers;
     for (const auto& unit : state.self.units) {
         if (isWorker(unit.kind) && unit.completed && !unit.loaded &&
@@ -364,14 +489,14 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         return nearest;
     };
     std::unordered_map<std::uint64_t, bool> routeSafetyCache;
-    const auto safeRoute = [&routeSafetyCache, &influence, navigation](
+    const auto safeRoute = [this, &routeSafetyCache, &influence, navigation](
         const UnitSnapshot* worker, const int destinationKey, const Position destination) {
         const auto key = (static_cast<std::uint64_t>(
             static_cast<std::uint32_t>(worker->id)) << 32U) |
             static_cast<std::uint32_t>(destinationKey);
         if (const auto known = routeSafetyCache.find(key); known != routeSafetyCache.end())
             return known->second;
-        const auto safe = safeGroundRoute(*worker, destination, influence, navigation);
+        const auto safe = safeGroundRoute(*worker, destination, influence, navigation, routingStats_);
         routeSafetyCache.emplace(key, safe);
         return safe;
     };
@@ -985,6 +1110,7 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         if (funded && siteAnchor.valid()) {
             for (const auto& base : state.bases) {
                 if (!base.center.valid() || !base.mineralLine.valid() || base.island ||
+                    !base.depotFootprintAvailable ||
                     (!rebuilding && (base.ownerId != -1 || base.mineralPatches <= 0 ||
                                      base.mineralsRemaining < 1000)) ||
                     (rebuilding && base.ownerId >= 0 && base.ownerId != state.self.id) ||
@@ -1158,6 +1284,14 @@ std::vector<WorkerAssignment> WorkerManager::assign(
 
     // Greedily equalize mineral saturation while retaining a small distance
     // bias. A remote destination receives at most one staged group per update.
+    // Rotate the economic retry order so the same low IDs cannot consume every
+    // path-search slot on each pass. Worker defense and existing gas jobs have
+    // already been handled above; final assignments remain sorted by actor.
+    if (!available.empty()) {
+        const auto offset = static_cast<std::size_t>(std::max<Frame>(0, state.frame) / 12) %
+                            available.size();
+        std::rotate(available.begin(), available.begin() + offset, available.end());
+    }
     for (const auto* worker : available) {
         const BaseSnapshot* bestBase = nullptr;
         auto bestScore = std::numeric_limits<double>::infinity();
@@ -1186,6 +1320,55 @@ std::vector<WorkerAssignment> WorkerManager::assign(
             }
         }
         if (bestBase == nullptr) {
+            // A surviving Nexus can outlast every mineral patch at its base.
+            // If so, a safe neutral mineral line can bootstrap the 400-mineral
+            // expansion cost. Without this fallback, probes idle at home and
+            // the economy can never recover even when rich reachable sites
+            // remain on the map.
+            const BaseSnapshot* remoteMiningBase = nullptr;
+            auto bestRemoteScore = std::numeric_limits<double>::infinity();
+            for (const auto& candidate : state.bases) {
+                if (candidate.ownerId != -1 || candidate.island ||
+                    !candidate.depotFootprintAvailable ||
+                    !candidate.center.valid() || !candidate.mineralLine.valid() ||
+                    candidate.mineralPatches < 4 || candidate.mineralsRemaining < 1000 ||
+                    stagedTransfersPerBase[candidate.id] >= maximumStagedWorkersPerBase) {
+                    continue;
+                }
+                const auto occupied = std::ranges::any_of(state.self.units,
+                    [&candidate](const UnitSnapshot& unit) {
+                        return unit.kind == UnitKind::nexus && unit.position.valid() &&
+                               distanceSquared(unit.position, candidate.center) < 320 * 320;
+                    }) || std::ranges::any_of(state.enemy.units,
+                    [&candidate](const UnitSnapshot& unit) {
+                        return unit.kind == UnitKind::nexus && unit.position.valid() &&
+                               distanceSquared(unit.position, candidate.center) < 320 * 320;
+                    });
+                if (occupied || influence.at(candidate.center).groundThreat > 0.25F ||
+                    !safeRoute(worker, -candidate.id - 1, candidate.mineralLine)) {
+                    continue;
+                }
+                auto score = distance(worker->position, candidate.mineralLine) +
+                    static_cast<double>(influence.at(candidate.center).groundThreat) * 4096.0;
+                if (plan.expansionTarget.valid() &&
+                    distanceSquared(candidate.center, plan.expansionTarget) <= 384 * 384) {
+                    score -= 512.0;
+                }
+                if (score < bestRemoteScore ||
+                    (score == bestRemoteScore &&
+                     (remoteMiningBase == nullptr || candidate.id < remoteMiningBase->id))) {
+                    bestRemoteScore = score;
+                    remoteMiningBase = &candidate;
+                }
+            }
+            if (remoteMiningBase != nullptr) {
+                ++stagedTransfersPerBase[remoteMiningBase->id];
+                ++assignedPerBase[remoteMiningBase->id];
+                result.push_back({worker->id, WorkerJob::transfer,
+                    remoteMiningBase->id, -1, remoteMiningBase->mineralLine, 64});
+                continue;
+            }
+
             // An exhausted Nexus is still an owned base, but it has no local
             // patch to mine. Return stranded workers to safety instead of
             // leaving their previous remote gather order running.

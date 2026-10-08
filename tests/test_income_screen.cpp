@@ -210,5 +210,113 @@ int main() {
     plan = strategy.plan(state, threat);
     check(!plan.sustainEconomy && plan.desiredBases <= 1,
           "a real main breach failed to cancel expansion funding");
+
+    GameState unpoweredEconomy;
+    unpoweredEconomy.frame = 8 * 60 * 24;
+    unpoweredEconomy.self.id = 1;
+    unpoweredEconomy.self.race = Race::protoss;
+    unpoweredEconomy.self.minerals = 900;
+    unpoweredEconomy.self.supplyUsed = 60;
+    unpoweredEconomy.self.supplyTotal = 100;
+    unpoweredEconomy.enemy.id = 2;
+    unpoweredEconomy.enemy.race = Race::terran;
+    auto unpoweredGateway = unit(3, UnitKind::gateway);
+    unpoweredGateway.powered = false;
+    auto remotePylon = unit(2, UnitKind::pylon);
+    remotePylon.position = {600, 320};
+    unpoweredEconomy.self.units = {
+        unit(1, UnitKind::nexus), remotePylon, unpoweredGateway};
+    for (int id = 10; id < 32; ++id)
+        unpoweredEconomy.self.units.push_back(unit(id, UnitKind::probe));
+    BaseSnapshot incomeBase;
+    incomeBase.id = 1;
+    incomeBase.center = {320, 320};
+    incomeBase.ownerId = unpoweredEconomy.self.id;
+    incomeBase.mineralsRemaining = 8'000;
+    incomeBase.mineralPatches = 8;
+    incomeBase.geysers = 1;
+    unpoweredEconomy.bases.push_back(incomeBase);
+    ThreatAssessment calmEconomy;
+    calmEconomy.uncertainty = 0.2;
+    const auto recoveryPlan = StrategyEngine{}.plan(unpoweredEconomy, calmEconomy);
+    check(std::ranges::any_of(recoveryPlan.goals, [](const ProductionGoal& goal) {
+              return goal.target == UnitKind::pylon &&
+                     goal.reason == "restore power to disabled production";
+          }), "a high-bank unpowered producer opens its local Pylon recovery task");
+    check(std::ranges::none_of(recoveryPlan.goals, [](const ProductionGoal& goal) {
+              return goal.target == UnitKind::gateway &&
+                     goal.goal == GoalKind::build && goal.desiredCount > 1;
+          }), "an unusable existing Gateway does not trigger another Gateway investment");
+    ResourceLedger recoveryBank{900, 0};
+    const auto recoveryActions = MacroPlanner{}.reconcile(
+        unpoweredEconomy, recoveryPlan, recoveryBank);
+    for (const auto& action : recoveryActions)
+        std::cerr << "T030 target=" << static_cast<int>(action.target)
+                  << " reserved=" << action.reserved << " priority=" << action.priority
+                  << " reason=" << action.reason << '\n';
+    check(std::ranges::any_of(recoveryActions, [](const MacroAction& action) {
+              return action.action == MacroActionKind::build &&
+                     action.target == UnitKind::pylon && action.reserved &&
+                     action.reason == "restore power to disabled production";
+          }) &&
+          std::ranges::none_of(recoveryActions, [](const MacroAction& action) {
+              return action.action == MacroActionKind::build &&
+                     action.target == UnitKind::gateway && action.reserved &&
+                     action.reason != "restore power to disabled production";
+          }), "the high bank funds local power recovery before another Gateway");
+
+    GameState capacityEconomy;
+    capacityEconomy.frame = 4 * 60 * 24;
+    capacityEconomy.self.id = 1;
+    capacityEconomy.self.race = Race::protoss;
+    capacityEconomy.self.minerals = 700;
+    capacityEconomy.self.supplyUsed = 24;
+    capacityEconomy.self.supplyTotal = 34;
+    capacityEconomy.enemy.id = 2;
+    capacityEconomy.enemy.race = Race::terran;
+    capacityEconomy.self.units = {
+        unit(30, UnitKind::nexus), unit(31, UnitKind::pylon),
+        unit(32, UnitKind::gateway)};
+    capacityEconomy.bases.push_back(
+        {1, {128, 128}, {160, 128}, 8000, 5000, capacityEconomy.self.id,
+         capacityEconomy.frame, true, false, 8, 1});
+    capacityEconomy.estimatedMineralIncomePerMinute = 2000;
+    capacityEconomy.estimatedGasIncomePerMinute = 2000;
+    capacityEconomy.self.producerSlots = {
+        {32, UnitKind::gateway, false, 0, 0, 0, false, false, false}};
+    const auto idleCapacityPlan = StrategyEngine{}.plan(capacityEconomy, {});
+    const auto hasExtraGateway = [](const StrategicPlan& plan) {
+        return std::ranges::any_of(plan.goals, [](const ProductionGoal& goal) {
+            return goal.goal == GoalKind::build && goal.target == UnitKind::gateway &&
+                   goal.desiredCount > 1 && !goal.blocking;
+        });
+    };
+    check(!hasExtraGateway(idleCapacityPlan),
+          "an observed idle Gateway is filled before adding production capacity");
+
+    capacityEconomy.self.producerSlots[0].activeTraining = true;
+    const auto busyCapacityPlan = StrategyEngine{}.plan(capacityEconomy, {});
+    check(hasExtraGateway(busyCapacityPlan),
+          "busy capacity with an army readiness gap can expand when income sustains it");
+
+    capacityEconomy.estimatedGasIncomePerMinute = 50;
+    const auto gasLimitedPlan = StrategyEngine{}.plan(capacityEconomy, {});
+    check(!hasExtraGateway(gasLimitedPlan),
+          "a large bank cannot add a Gateway beyond measured sustainable gas income");
+
+    capacityEconomy.estimatedGasIncomePerMinute = 2000;
+    capacityEconomy.estimatedMineralIncomePerMinute = 50;
+    const auto mineralLimitedPlan = StrategyEngine{}.plan(capacityEconomy, {});
+    check(!hasExtraGateway(mineralLimitedPlan),
+          "a large bank cannot add a Gateway beyond measured sustainable mineral income");
+
+    capacityEconomy.estimatedMineralIncomePerMinute = 2000;
+    capacityEconomy.self.supplyUsed = 100;
+    capacityEconomy.self.supplyTotal = 120;
+    for (int id = 40; id < 64; ++id)
+        capacityEconomy.self.units.push_back(unit(id, UnitKind::zealot));
+    const auto readyArmyPlan = StrategyEngine{}.plan(capacityEconomy, {});
+    check(!hasExtraGateway(readyArmyPlan),
+          "a ready army does not trigger a bank-only Gateway beyond its throughput target");
     return errors ? 1 : 0;
 }

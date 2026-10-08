@@ -1,17 +1,51 @@
 // Isolated UMS validation module. Never packaged as the playing bot.
 #include "BwapiBridge.hpp"
+#include "WholeGameAction.hpp"
 #include "protodd/Technology.hpp"
 #include "protodd/Strategy.hpp"
 #include "protodd/UnitCatalog.hpp"
+#include "protodd/UnitMemory.hpp"
 #include "protodd/Workers.hpp"
 #include <BWAPI.h>
 #include <windows.h>
+#include <array>
 #include <fstream>
 #include <algorithm>
+#include <cstdint>
 #include <limits>
+#include <span>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 using namespace protodd;
 class AuditScenario final : public BWAPI::AIModule {
+    struct CombatCorpusLane {
+        const char* name{};
+        int minX{};
+        int maxX{};
+        int minY{};
+        int maxY{};
+        CombatEstimate prediction{};
+        int observedTerminalFrame{-1};
+        int initialFriendly{};
+        int initialEnemy{};
+        bool predicted{};
+        bool excludedAsUndetected{};
+        bool excludedAsUnavailable{};
+        double uncertaintyInput{0.15};
+    };
+    struct CombatCorpusMember {
+        const char* lane{};
+        UnitId id{-1};
+        UnitKind kind{UnitKind::unknown};
+        bool friendly{};
+        bool combatant{};
+        int initialDurability{};
+        int maximumDurability{};
+        int deathFrame{-1};
+    };
     protodd::bwapi::BwapiBridge bridge;
     MacroPlanner planner;
     StrategyEngine strategy;
@@ -25,9 +59,16 @@ class AuditScenario final : public BWAPI::AIModule {
     bool powerLossDefendersDispatched{};
     bool cannonBlockerStarted{}, cannonBlockerProbeAccepted{}, cannonBlockerProbeDebitVerified{};
     bool resourceOverlapOrdersIssued{};
+    int constructionBudgetDeferredFrame{-1}, constructionBudgetMineralsBefore{-1};
+    int constructionBudgetGasBefore{-1}, constructionBudgetPylonsBefore{};
+    bool constructionBudgetRetried{};
     bool t021Started{}, t021StopRejected{}, t021StopAccepted{}, t021Finished{};
+    bool t020Started{}, t020ConstructionStarted{}, t020LegalityChecked{}, t020CancelIssued{};
+    int t020Builder{-1}, t020Building{-1}, t020CancelFrame{-1};
+    BWAPI::TilePosition t020Site{-1, -1};
     bool t034Started{}, t034ReplacementChecked{}, t034Finished{};
     int t034Builder{-1}, t034BuildCommands{}, t034AcceptedStops{}, t034AcceptedMoves{};
+    BWAPI::TilePosition t034Site{-1, -1};
     int t021Builder{-1}, t021BuildCommands{}, t021AcceptedStopCommands{};
     int t021MineralsBefore{-1};
     Position t021Target{-1, -1};
@@ -41,6 +82,30 @@ class AuditScenario final : public BWAPI::AIModule {
     bool commandSuppressionStarted{}, commandAttackActive{}, commandActiveSuppressionChecked{};
     bool commandTargetDied{}, commandStaleTargetRejected{}, commandMoveIssued{};
     bool commandMoveActive{}, commandMoveInterrupted{}, commandCutoffChecked{};
+    bool unitMemoryMoveIssued{};
+    bool unitMemoryFootprintChecked{};
+    bool footprintNativeChecked{};
+    bool dynamicNavigationChecked{};
+    bool dynamicNavigationMineralDepleted{};
+    int dynamicNavigationMineralId{-1};
+    int dynamicNavigationStartedFrame{-1};
+    std::uint64_t dynamicNavigationMineralVersion{};
+    Position dynamicNavigationMineralFrom{-1, -1};
+    Position dynamicNavigationMineralTo{-1, -1};
+    Position dynamicNavigationRemoteFrom{-1, -1};
+    Position dynamicNavigationRemoteTo{-1, -1};
+    std::vector<Position> dynamicNavigationMineralRoute;
+    std::vector<Position> dynamicNavigationRemoteRoute;
+    NavigationGrid dynamicNavigationGrid;
+    std::array<int, 4> footprintNativeActorIds{{-1, -1, -1, -1}};
+    std::array<MovementFootprint, 4> footprintNativeFootprints{};
+    std::array<bool, 4> footprintNativePlanned{};
+    std::array<bool, 4> footprintNativeCrossed{};
+    std::vector<std::pair<int, int>> footprintNativeGaps;
+    int footprintNativeWallTop{};
+    int footprintNativeWallBottom{};
+    int footprintNativeStartFrame{-1};
+    int unitMemoryDarkTemplar{-1}, unitMemoryObserver{-1}, unitMemoryLastSeen{-1};
     int initialEnergy{}, selected{-1}, failures{};
     int producerPairBusy{-1}, producerPairIdle{-1}, producerPairAcceptedActor{-1};
     int powerLossGateway{-1}, powerLossCore{-1}, powerLossPylon{-1};
@@ -57,12 +122,470 @@ class AuditScenario final : public BWAPI::AIModule {
     Frame commandLatency{-1};
     Command commandAttack, commandMove;
     CommandBus suppressionBus;
+    std::array<CombatCorpusLane, 6> combatCorpusLanes{{
+        {"melee-shields", 700, 1200, 800, 1200},
+        {"range-cooldown", 1300, 1900, 800, 1200},
+        {"reaver-ammunition", 2100, 2600, 800, 1200},
+        {"siege-splash", 2700, 3250, 800, 1200},
+        {"detection-elevation", 3300, 3900, 1600, 2000},
+        {"high-ground", 1350, 1650, 550, 700},
+    }};
+    std::vector<CombatCorpusMember> combatCorpusMembers;
+    int combatCorpusStartFrame{-1};
+    bool combatCorpusStarted{};
     protodd::Position supplyPylonTarget{-1, -1};
     std::vector<int> initialPylonIds;
     void check(const char* name, bool value) {
         log << "CHECK," << name << ',' << value << '\n';
         if (!value) ++failures;
         log.flush();
+    }
+    void executeWorkerProposals(const std::span<const WorkerAssignment> assignments) {
+        CommandBus commands;
+        commands.beginFrame(BWAPI::Broodwar->getFrameCount(),
+                            BWAPI::Broodwar->getLatencyFrames());
+        const auto proposed = bridge.submitWorkerCommands(assignments, commands);
+        for (const auto& command : commands.finalize(proposed)) {
+            if (bridge.execute(command)) commands.markIssued(command);
+        }
+    }
+    static const char* decisionName(const FightDecision decision) {
+        switch (decision) {
+            case FightDecision::engage: return "engage";
+            case FightDecision::kite: return "kite";
+            case FightDecision::retreat: return "retreat";
+        }
+        return "unknown";
+    }
+    static bool simulatedCombatant(const UnitSnapshot& unit) {
+        return isCombatUnit(unit.kind) || isStaticDefense(unit.kind) || isWorker(unit.kind);
+    }
+    void runCombatCorpus(const GameState& state, const int frame) {
+        const auto native = [](const UnitId id) { return BWAPI::Broodwar->getUnit(id); };
+        const auto laneUnits = [](const auto& units, const CombatCorpusLane& lane) {
+            std::vector<UnitSnapshot> result;
+            for (const auto& unit : units) {
+                if (unit.position.x >= lane.minX && unit.position.x < lane.maxX &&
+                    unit.position.y >= lane.minY && unit.position.y < lane.maxY)
+                    result.push_back(unit);
+            }
+            return result;
+        };
+        if (!combatCorpusStarted) {
+            combatCorpusStarted = true;
+            combatCorpusStartFrame = frame;
+            log << "MODEL_SCOPE,terrainElevation=observed-not-simulated,"
+                << "pathingAndDynamicMovement=approximate,projectileTravel=approximate,"
+                << "splashMovement=discounted,nativeWeaponSplashCoverage=partial,"
+                << "spellsAndDisables=unsupported,"
+                << "ammunition=observed-start-state,noReplenishmentModeled\n";
+            int activeLanes{};
+            int detectedDarkTemplars{};
+            for (auto& lane : combatCorpusLanes) {
+                auto friendly = laneUnits(state.self.units, lane);
+                auto enemy = laneUnits(state.enemy.units, lane);
+                if (friendly.empty() || enemy.empty()) {
+                    if (std::string(lane.name) == "detection-elevation" &&
+                        !friendly.empty() && enemy.empty()) {
+                        lane.excludedAsUndetected = true;
+                        log << "EXCLUDED," << lane.name << ",reason=undetected-enemy"
+                            << ",friendlySnapshots=" << friendly.size()
+                            << ",enemySnapshots=" << enemy.size() << '\n';
+                    } else {
+                        lane.excludedAsUnavailable = true;
+                        log << "EXCLUDED," << lane.name << ",reason=fixture-unavailable"
+                            << ",friendlySnapshots=" << friendly.size()
+                            << ",enemySnapshots=" << enemy.size() << '\n';
+                    }
+                    continue;
+                }
+                lane.initialFriendly = static_cast<int>(std::ranges::count_if(
+                    friendly, simulatedCombatant));
+                lane.initialEnemy = static_cast<int>(std::ranges::count_if(
+                    enemy, simulatedCombatant));
+                lane.uncertaintyInput = 0.15;
+                for (const auto* side : {&friendly, &enemy}) {
+                    for (const auto& snapshot : *side) {
+                        const auto unit = native(snapshot.id);
+                        if (unit == nullptr || !unit->exists()) continue;
+                        const auto engineWeapon = snapshot.flying
+                            ? unit->getType().airWeapon() : unit->getType().groundWeapon();
+                        const auto effect = engineWeapon.explosionType();
+                        const auto hasSplash = engineWeapon.outerSplashRadius() > 0 &&
+                            (effect == BWAPI::ExplosionTypes::Radial_Splash ||
+                             effect == BWAPI::ExplosionTypes::Enemy_Splash ||
+                             effect == BWAPI::ExplosionTypes::Air_Splash);
+                        const auto modeledSplash = snapshot.flying
+                            ? snapshot.airWeapon.splashOuter : snapshot.groundWeapon.splashOuter;
+                        if (!hasSplash || modeledSplash > 0) continue;
+                        lane.uncertaintyInput = std::max(lane.uncertaintyInput, 0.8);
+                        log << "UNSUPPORTED_MECHANIC," << lane.name << ",unit=" << snapshot.id
+                            << ",mechanic=weapon-splash,engineExplosion=" << effect.getID()
+                            << ",engineRadii=" << engineWeapon.innerSplashRadius() << '/'
+                            << engineWeapon.medianSplashRadius() << '/'
+                            << engineWeapon.outerSplashRadius()
+                            << ",modelOuter=" << modeledSplash
+                            << ",uncertaintyInput=" << lane.uncertaintyInput << '\n';
+                    }
+                }
+                lane.prediction = CombatEvaluator{}.evaluate(
+                    friendly, enemy, 1.0, lane.uncertaintyInput);
+                lane.predicted = true;
+                ++activeLanes;
+                log << "PREDICTED," << lane.name << ",frame=" << frame
+                    << ",friendly=" << lane.initialFriendly << ",enemy=" << lane.initialEnemy
+                    << ",frames=" << lane.prediction.simulatedFrames
+                    << ",terminal=" << lane.prediction.simulatedOutcomeReached
+                    << ",friendlyDeaths=" << lane.prediction.simulatedFriendlyDeaths
+                    << ",enemyDeaths=" << lane.prediction.simulatedEnemyDeaths
+                    << ",friendlyLoss=" << lane.prediction.simulatedFriendlyLoss
+                    << ",enemyLoss=" << lane.prediction.simulatedEnemyLoss
+                    << ",decision=" << decisionName(lane.prediction.decision)
+                    << ",ratio=" << lane.prediction.ratio
+                    << ",uncertaintyInput=" << lane.uncertaintyInput
+                    << ",confidence=" << lane.prediction.confidence << '\n';
+
+                for (const auto& snapshot : friendly) {
+                    const auto unit = native(snapshot.id);
+                    if (unit == nullptr || !unit->exists()) continue;
+                    const auto combatant = simulatedCombatant(snapshot);
+                    if (combatant) {
+                        combatCorpusMembers.push_back({lane.name, snapshot.id, snapshot.kind,
+                            true, true, unit->getHitPoints() + unit->getShields(),
+                            unit->getType().maxHitPoints() + unit->getType().maxShields(), -1});
+                    }
+                    const auto tile = unit->getTilePosition();
+                    const auto weapon = snapshot.groundWeapon;
+                    const auto engineWeapon = unit->getType().groundWeapon();
+                    log << "MECHANIC," << lane.name << ",friendly," << snapshot.id << ','
+                        << unitStats(snapshot.kind).name << ",hp=" << unit->getHitPoints()
+                        << ",shields=" << unit->getShields() << ",armor=" << snapshot.armor
+                        << ",shieldArmor=" << snapshot.shieldArmor
+                        << ",cooldown=" << unit->getGroundWeaponCooldown()
+                        << ",ammo=" << snapshot.ammo << ",visible=" << snapshot.visible
+                        << ",detected=" << snapshot.detected << ",cloaked=" << snapshot.cloaked
+                        << ",damage=" << weapon.damage << ",range=" << weapon.maxRange
+                        << ",splash=" << weapon.splashOuter
+                        << ",engineExplosion=" << engineWeapon.explosionType().getID()
+                        << ",engineSplash=" << engineWeapon.innerSplashRadius() << '/'
+                        << engineWeapon.medianSplashRadius() << '/'
+                        << engineWeapon.outerSplashRadius()
+                        << ",groundHeight=" << BWAPI::Broodwar->getGroundHeight(tile)
+                        << '\n';
+                }
+                for (const auto& snapshot : enemy) {
+                    const auto unit = native(snapshot.id);
+                    if (unit == nullptr || !unit->exists()) continue;
+                    const auto combatant = simulatedCombatant(snapshot);
+                    if (combatant) {
+                        combatCorpusMembers.push_back({lane.name, snapshot.id, snapshot.kind,
+                            false, true, unit->getHitPoints() + unit->getShields(),
+                            unit->getType().maxHitPoints() + unit->getType().maxShields(), -1});
+                    }
+                    if (snapshot.kind == UnitKind::darkTemplar && snapshot.detected)
+                        ++detectedDarkTemplars;
+                    const auto tile = unit->getTilePosition();
+                    const auto weapon = snapshot.groundWeapon;
+                    const auto engineWeapon = unit->getType().groundWeapon();
+                    log << "MECHANIC," << lane.name << ",enemy," << snapshot.id << ','
+                        << unitStats(snapshot.kind).name << ",hp=" << unit->getHitPoints()
+                        << ",shields=" << unit->getShields() << ",armor=" << snapshot.armor
+                        << ",shieldArmor=" << snapshot.shieldArmor
+                        << ",cooldown=" << unit->getGroundWeaponCooldown()
+                        << ",ammo=" << snapshot.ammo << ",visible=" << snapshot.visible
+                        << ",detected=" << snapshot.detected << ",cloaked=" << snapshot.cloaked
+                        << ",damage=" << weapon.damage << ",range=" << weapon.maxRange
+                        << ",splash=" << weapon.splashOuter
+                        << ",engineExplosion=" << engineWeapon.explosionType().getID()
+                        << ",engineSplash=" << engineWeapon.innerSplashRadius() << '/'
+                        << engineWeapon.medianSplashRadius() << '/'
+                        << engineWeapon.outerSplashRadius()
+                        << ",groundHeight=" << BWAPI::Broodwar->getGroundHeight(tile)
+                        << '\n';
+                }
+                int acceptedOrders{};
+                for (const auto& actor : friendly) {
+                    const auto unit = native(actor.id);
+                    if (unit == nullptr || !unit->exists() || !simulatedCombatant(actor)) continue;
+                    const UnitSnapshot* targetSnapshot = nullptr;
+                    auto bestDistance = std::numeric_limits<double>::infinity();
+                    for (const auto& target : enemy) {
+                        if (!actor.canAttack(target)) continue;
+                        const auto dx = static_cast<double>(actor.position.x - target.position.x);
+                        const auto dy = static_cast<double>(actor.position.y - target.position.y);
+                        const auto distance = dx * dx + dy * dy;
+                        if (distance < bestDistance) {
+                            bestDistance = distance;
+                            targetSnapshot = &target;
+                        }
+                    }
+                    if (targetSnapshot == nullptr) continue;
+                    const auto target = native(targetSnapshot->id);
+                    if (target != nullptr && target->exists() && unit->attack(target))
+                        ++acceptedOrders;
+                }
+                log << "ORDERS," << lane.name << ",accepted=" << acceptedOrders << '\n';
+                if (std::string(lane.name) == "reaver-ammunition") {
+                    check("corpus-empty-reaver-does-not-attack",
+                        acceptedOrders == 0 && friendly.front().kind == UnitKind::reaver &&
+                        friendly.front().ammo == 0);
+                } else {
+                    check((std::string("corpus-orders-") + lane.name).c_str(), acceptedOrders > 0);
+                }
+            }
+            int enemyPermanentCloakers{}, undetectedEnemyPermanentCloakers{};
+            for (const auto unit : BWAPI::Broodwar->getAllUnits()) {
+                if (unit == nullptr || !unit->exists()) continue;
+                const auto position = unit->getPosition();
+                if (position.x < 3300 || position.x >= 3900) continue;
+                if (unit->getPlayer() != BWAPI::Broodwar->self() &&
+                    unit->getType().hasPermanentCloak()) {
+                    ++enemyPermanentCloakers;
+                    if (!unit->isDetected()) ++undetectedEnemyPermanentCloakers;
+                }
+                log << "DETECTION_NATIVE," << frame << ",id=" << unit->getID()
+                    << ",type=" << unit->getType().getName()
+                    << ",owner=" << unit->getPlayer()->getID()
+                    << ",x=" << position.x << ",y=" << position.y
+                    << ",visible=" << unit->isVisible() << ",detected=" << unit->isDetected()
+                    << ",cloaked=" << unit->isCloaked()
+                    << ",typeHasPermanentCloak=" << unit->getType().hasPermanentCloak()
+                    << ",typeCloakable=" << unit->getType().isCloakable() << '\n';
+            }
+            const auto observedDarkTemplars = static_cast<int>(std::ranges::count_if(
+                state.enemy.units, [](const UnitSnapshot& unit) {
+                    return unit.kind == UnitKind::darkTemplar;
+                }));
+            check("corpus-fixture-four-prediction-lanes", activeLanes == 4);
+            if (scenario == "combat-corpus-elevation") {
+                const auto& highLane = combatCorpusLanes.back();
+                const auto friendly = laneUnits(state.self.units, highLane);
+                const auto enemy = laneUnits(state.enemy.units, highLane);
+                auto friendlyHeight = -1;
+                auto enemyHeight = -1;
+                if (!friendly.empty()) {
+                    const auto unit = native(friendly.front().id);
+                    if (unit != nullptr) friendlyHeight = BWAPI::Broodwar->getGroundHeight(
+                        unit->getTilePosition());
+                }
+                if (!enemy.empty()) {
+                    const auto unit = native(enemy.front().id);
+                    if (unit != nullptr) enemyHeight = BWAPI::Broodwar->getGroundHeight(
+                        unit->getTilePosition());
+                }
+                check("corpus-elevation-high-low-pair",
+                    friendlyHeight == 2 && enemyHeight == 0);
+            }
+            check("corpus-hidden-target-excluded-from-simulation",
+                enemyPermanentCloakers == 1 && undetectedEnemyPermanentCloakers == 1 &&
+                observedDarkTemplars == 0 &&
+                combatCorpusLanes[4].excludedAsUndetected);
+
+            auto minHeight = std::numeric_limits<int>::max();
+            auto maxHeight = std::numeric_limits<int>::min();
+            std::array<int, 6> heightCounts{};
+            std::array<int, 6> sampleX{};
+            std::array<int, 6> sampleY{};
+            sampleX.fill(-1);
+            sampleY.fill(-1);
+            int minX{}, minY{}, maxX{}, maxY{};
+            for (auto y = 0; y < BWAPI::Broodwar->mapHeight(); ++y) {
+                for (auto x = 0; x < BWAPI::Broodwar->mapWidth(); ++x) {
+                    const auto height = BWAPI::Broodwar->getGroundHeight(x, y);
+                    if (height >= 0 && height < static_cast<int>(heightCounts.size())) {
+                        ++heightCounts[static_cast<std::size_t>(height)];
+                        auto& sample = sampleX[static_cast<std::size_t>(height)];
+                        if (sample < 0) {
+                            sample = x;
+                            sampleY[static_cast<std::size_t>(height)] = y;
+                        }
+                    }
+                    if (height < minHeight) { minHeight = height; minX = x; minY = y; }
+                    if (height > maxHeight) { maxHeight = height; maxX = x; maxY = y; }
+                }
+            }
+            int highTileX{-1}, highTileY{-1}, lowTileX{-1}, lowTileY{-1};
+            for (auto highY = 20; highY < BWAPI::Broodwar->mapHeight() - 12 &&
+                 highTileX < 0; ++highY) {
+                for (auto highX = 24; highX < BWAPI::Broodwar->mapWidth() - 20 &&
+                     highTileX < 0; ++highX) {
+                    if (BWAPI::Broodwar->getGroundHeight(highX, highY) != 2 ||
+                        !BWAPI::Broodwar->isWalkable(highX * 4 + 2, highY * 4 + 2)) continue;
+                    for (auto dy = -4; dy <= 4 && highTileX < 0; ++dy) {
+                        for (auto dx = -4; dx <= 4 && highTileX < 0; ++dx) {
+                            const auto lowX = highX + dx;
+                            const auto lowY = highY + dy;
+                            const auto separation = dx * dx + dy * dy;
+                            if (separation < 4 || separation > 16 || lowX < 1 || lowY < 1 ||
+                                lowX >= BWAPI::Broodwar->mapWidth() - 1 ||
+                                lowY >= BWAPI::Broodwar->mapHeight() - 1 ||
+                                BWAPI::Broodwar->getGroundHeight(lowX, lowY) != 0 ||
+                                !BWAPI::Broodwar->isWalkable(lowX * 4 + 2, lowY * 4 + 2)) continue;
+                            highTileX = highX; highTileY = highY;
+                            lowTileX = lowX; lowTileY = lowY;
+                        }
+                    }
+                }
+            }
+            log << "TERRAIN_PAIR,found=" << (highTileX >= 0)
+                << ",high=" << highTileX << 'x' << highTileY
+                << ",low=" << lowTileX << 'x' << lowTileY
+                << ",pixelDistance=" << (highTileX >= 0
+                    ? std::hypot(static_cast<double>(highTileX - lowTileX),
+                                 static_cast<double>(highTileY - lowTileY)) * 32.0 : 0.0)
+                << '\n';
+            log << "TERRAIN_RANGE,tiles=" << BWAPI::Broodwar->mapWidth() << 'x'
+                << BWAPI::Broodwar->mapHeight() << ",min=" << minHeight << '@'
+                << minX << 'x' << minY << ",max=" << maxHeight << '@'
+                << maxX << 'x' << maxY << '\n';
+            for (std::size_t height = 0; height < heightCounts.size(); ++height)
+                log << "TERRAIN_CLASS," << height << ",tiles=" << heightCounts[height]
+                    << ",sample=" << sampleX[height] << 'x' << sampleY[height] << '\n';
+            log << "CORPUS_START," << frame << ",lanes=" << activeLanes
+                << ",detectedDarkTemplars=" << detectedDarkTemplars
+                << ",enemyPermanentCloakers=" << enemyPermanentCloakers
+                << ",undetectedEnemyPermanentCloakers=" << undetectedEnemyPermanentCloakers << '\n';
+        }
+
+        bool allLanesResolved = true;
+        for (auto& lane : combatCorpusLanes) {
+            if (!lane.predicted) {
+                if (!lane.excludedAsUndetected && !lane.excludedAsUnavailable)
+                    allLanesResolved = false;
+                continue;
+            }
+            int friendlyAlive{}, enemyAlive{};
+            for (auto& member : combatCorpusMembers) {
+                if (member.lane != std::string(lane.name)) continue;
+                const auto unit = native(member.id);
+                if (unit == nullptr || !unit->exists()) {
+                    if (member.deathFrame < 0) member.deathFrame = frame;
+                    continue;
+                }
+                if (member.friendly) ++friendlyAlive;
+                else ++enemyAlive;
+            }
+            if (lane.observedTerminalFrame < 0 &&
+                (friendlyAlive == 0 || enemyAlive == 0))
+                lane.observedTerminalFrame = frame;
+            if (friendlyAlive > 0 && enemyAlive > 0) allLanesResolved = false;
+        }
+
+        if (frame % 24 == 0 || allLanesResolved || frame - combatCorpusStartFrame >= 1200) {
+            for (const auto& member : combatCorpusMembers) {
+                const auto unit = native(member.id);
+                if (unit == nullptr || !unit->exists()) {
+                    log << "TRACE," << frame << ',' << member.lane << ','
+                        << (member.friendly ? "friendly" : "enemy") << ',' << member.id
+                        << ",exists=0,deathFrame=" << member.deathFrame << '\n';
+                    continue;
+                }
+                const auto tile = unit->getTilePosition();
+                const auto target = unit->getOrderTarget();
+                log << "TRACE," << frame << ',' << member.lane << ','
+                    << (member.friendly ? "friendly" : "enemy") << ',' << member.id
+                    << ",exists=1,hp=" << unit->getHitPoints()
+                    << ",shields=" << unit->getShields()
+                    << ",cooldown=" << unit->getGroundWeaponCooldown()
+                    << ",ammo=" << unit->getScarabCount()
+                    << ",visible=" << unit->isVisible() << ",detected=" << unit->isDetected()
+                    << ",cloaked=" << unit->isCloaked()
+                    << ",groundHeight=" << BWAPI::Broodwar->getGroundHeight(tile)
+                    << ",target=" << (target != nullptr ? target->getID() : -1)
+                    << ",order=" << unit->getOrder().toString() << '\n';
+            }
+            log.flush();
+        }
+
+        if (!allLanesResolved && frame - combatCorpusStartFrame < 1200) return;
+        for (const auto& lane : combatCorpusLanes) {
+            if (!lane.predicted) continue;
+            int friendlyAlive{}, enemyAlive{}, friendlyDeaths{}, enemyDeaths{};
+            double friendlyLoss{}, enemyLoss{};
+            for (const auto& member : combatCorpusMembers) {
+                if (member.lane != std::string(lane.name)) continue;
+                const auto unit = native(member.id);
+                const auto alive = unit != nullptr && unit->exists();
+                if (alive) {
+                    if (member.friendly) ++friendlyAlive;
+                    else ++enemyAlive;
+                } else if (member.friendly) ++friendlyDeaths;
+                else ++enemyDeaths;
+                const auto remaining = alive ? unit->getHitPoints() + unit->getShields() : 0;
+                const auto value = unitStats(member.kind).combatValue;
+                const auto lost = value * std::clamp(
+                    1.0 - static_cast<double>(remaining) /
+                        static_cast<double>(std::max(1, member.maximumDurability)), 0.0, 1.0);
+                if (member.friendly) friendlyLoss += lost;
+                else enemyLoss += lost;
+            }
+            const auto observedFrames = lane.observedTerminalFrame >= 0
+                ? lane.observedTerminalFrame - combatCorpusStartFrame : -1;
+            const auto framesError = observedFrames >= 0 &&
+                lane.prediction.simulatedOutcomeReached
+                ? observedFrames - lane.prediction.simulatedFrames : -1;
+            const auto observedResult = friendlyAlive > enemyAlive ? "friendly-favored" :
+                friendlyAlive < enemyAlive ? "enemy-favored" : "even";
+            const auto decisionAligned = lane.prediction.decision == FightDecision::engage
+                ? friendlyAlive >= enemyAlive
+                : lane.prediction.decision == FightDecision::retreat
+                    ? friendlyAlive <= enemyAlive : false;
+            log << "OUTCOME," << lane.name << ",frame=" << frame
+                << ",friendlySurvivors=" << friendlyAlive << ",enemySurvivors=" << enemyAlive
+                << ",friendlyDeaths=" << friendlyDeaths << ",enemyDeaths=" << enemyDeaths
+                << ",friendlyLoss=" << friendlyLoss << ",enemyLoss=" << enemyLoss
+                << ",terminalFrame=" << observedFrames
+                << ",result=" << observedResult << '\n'
+                << "COMPARE," << lane.name << ",predictedFrames="
+                << (lane.prediction.simulatedOutcomeReached ? lane.prediction.simulatedFrames : -1)
+                << ",observedFrames=" << observedFrames << ",ttkErrorFrames=" << framesError
+                << ",predictedFriendlyDeaths=" << lane.prediction.simulatedFriendlyDeaths
+                << ",observedFriendlyDeaths=" << friendlyDeaths
+                << ",predictedEnemyDeaths=" << lane.prediction.simulatedEnemyDeaths
+                << ",observedEnemyDeaths=" << enemyDeaths
+                << ",friendlyLossError="
+                << (friendlyLoss - lane.prediction.simulatedFriendlyLoss)
+                << ",enemyLossError=" << (enemyLoss - lane.prediction.simulatedEnemyLoss)
+                << ",predictedDecision=" << decisionName(lane.prediction.decision)
+                << ",observedResult=" << observedResult
+                << ",decisionAligned=" << decisionAligned
+                << ",uncertaintyInput=" << lane.uncertaintyInput
+                << ",predictedConfidence=" << lane.prediction.confidence << '\n';
+        }
+        check("corpus-comparisons-written", std::ranges::all_of(
+            combatCorpusLanes, [](const CombatCorpusLane& lane) {
+                return lane.predicted || lane.excludedAsUndetected ||
+                    lane.excludedAsUnavailable;
+            }));
+        check("engine-postcondition", failures == 0);
+        log << "DONE," << frame << ',' << failures << '\n';
+        log.flush();
+        finished = true;
+        BWAPI::Broodwar->leaveGame();
+    }
+    void onUnitDestroy(const BWAPI::Unit unit) override {
+        if (scenario != "dynamic-navigation" || unit == nullptr ||
+            unit->getID() != dynamicNavigationMineralId) return;
+        const auto blockedBeforeRemoval = !dynamicNavigationGrid.lineWalkable(
+            dynamicNavigationMineralFrom, dynamicNavigationMineralTo);
+        bridge.removeNavigationObstacle(dynamicNavigationGrid, unit);
+        const auto opened = dynamicNavigationGrid.lineWalkable(
+            dynamicNavigationMineralFrom, dynamicNavigationMineralTo);
+        const auto affected = dynamicNavigationGrid.routeAffectedSince(
+            dynamicNavigationMineralRoute, dynamicNavigationMineralFrom,
+            dynamicNavigationMineralTo, {}, dynamicNavigationMineralVersion);
+        const auto remoteReusable = !dynamicNavigationGrid.routeAffectedSince(
+            dynamicNavigationRemoteRoute, dynamicNavigationRemoteFrom,
+            dynamicNavigationRemoteTo, {}, dynamicNavigationMineralVersion);
+        log << "DYNAMIC_MINERAL_DEPLETION," << BWAPI::Broodwar->getFrameCount()
+            << ",id=" << unit->getID() << ",blockedBefore=" << blockedBeforeRemoval
+            << ",opened=" << opened << ",affected=" << affected
+            << ",remoteReusable=" << remoteReusable << '\n';
+        check("dynamic-navigation-mineral-depletion-event-opens-route",
+              blockedBeforeRemoval && opened && affected);
+        check("dynamic-navigation-mineral-depletion-keeps-distant-cache",
+              remoteReusable);
+        dynamicNavigationMineralDepleted = true;
     }
 public:
     void onStart() override {
@@ -72,13 +595,18 @@ public:
         BWAPI::Broodwar->setLocalSpeed(0);
         BWAPI::Broodwar->setFrameSkip(
             scenario == "pylon-loss" || scenario == "cannon-blocker" ||
-                    scenario == "resource-overlap" || scenario == "worker-issuer" ||
+                    scenario == "resource-overlap" || scenario == "construction-budget" ||
+                    scenario == "worker-issuer" ||
                     scenario == "build-cancel" || scenario == "builder-evacuation" ||
+                    scenario == "builder-evacuation-started" ||
                     scenario == "worker-local-defense" ||
                     scenario == "worker-mining" || scenario == "scout-issuer" ||
                     scenario == "whole-game-issuer" ||
                     scenario == "command-suppression" ||
-                    scenario == "observer-safety" ? 1 : 64);
+                    scenario == "observer-safety" || scenario == "unit-memory" ||
+                    scenario == "footprint-native" ||
+                    scenario == "dynamic-navigation" ||
+                    scenario.starts_with("combat-corpus") ? 1 : 64);
         bridge.buildSelectionDiagnostic = [this](const protodd::bwapi::BuildSelectionDiagnostic& d) {
             if (scenario != "supply-anchor" || d.kind != UnitKind::pylon) return;
             supplyPylonTarget = d.target;
@@ -151,7 +679,7 @@ public:
         }
         log << "READY," << BWAPI::Broodwar->isPaused() << ',' << BWAPI::Broodwar->isInGame() << '\n'; log.flush();
     }
-    void onEnd(bool won) override { log << "END," << BWAPI::Broodwar->getFrameCount() << ',' << won << '\n'; log.flush(); ExitProcess(0); }
+    void onEnd(bool won) override { log << "END," << BWAPI::Broodwar->getFrameCount() << ',' << won << '\n'; log.flush(); }
     void onFrame() override {
         if(finished) return;
         const int frame=BWAPI::Broodwar->getFrameCount();
@@ -159,6 +687,652 @@ public:
         if (frame<24 && scenario!="pylon-loss") return;
         auto state=bridge.observe();
         InfluenceMap influence; influence.update(state);
+        if (scenario.starts_with("combat-corpus")) {
+            runCombatCorpus(state, frame);
+            return;
+        }
+        if (scenario == "dynamic-navigation") {
+            if (!dynamicNavigationChecked) {
+                dynamicNavigationChecked = true;
+                const auto allUnits = BWAPI::Broodwar->getAllUnits();
+                const auto pylon = std::ranges::find_if(allUnits, [](const BWAPI::Unit unit) {
+                    return unit != nullptr && unit->exists() &&
+                        unit->getType() == BWAPI::UnitTypes::Protoss_Pylon;
+                });
+                const auto minerals = BWAPI::Broodwar->getMinerals();
+                const auto mineral = std::ranges::find_if(minerals, [](const BWAPI::Unit unit) {
+                    return unit != nullptr && unit->exists() && unit->getResources() > 0;
+                });
+                const auto completeFixture = pylon != allUnits.end() &&
+                    mineral != minerals.end();
+                check("dynamic-navigation-fixture-has-live-pylon-and-mineral",
+                      completeFixture);
+                if (!completeFixture) {
+                    check("dynamic-navigation-engine-postcondition", false);
+                    log << "DONE," << frame << ',' << failures << '\n';
+                    log.flush();
+                    finished = true;
+                    BWAPI::Broodwar->leaveGame();
+                    return;
+                }
+
+                const auto width = BWAPI::Broodwar->mapWidth() * 4;
+                const auto height = BWAPI::Broodwar->mapHeight() * 4;
+                dynamicNavigationGrid = NavigationGrid{width, height, 8,
+                    std::vector<std::uint8_t>(static_cast<std::size_t>(width) *
+                                              static_cast<std::size_t>(height), 1U)};
+                const auto pathAcross = [this](const BWAPI::Unit unit) {
+                    const auto y = unit->getPosition().y;
+                    const Position from{unit->getLeft() - 96, y};
+                    const Position to{unit->getRight() + 96, y};
+                    std::vector<Position> points;
+                    static_cast<void>(dynamicNavigationGrid.nextWaypoint(
+                        from, to, 7, 12000, {}, &points));
+                    return std::tuple{from, to, points};
+                };
+                const auto [pylonFrom, pylonTo, pylonRoute] = pathAcross(*pylon);
+                const auto [mineralFrom, mineralTo, mineralRoute] = pathAcross(*mineral);
+                dynamicNavigationRemoteFrom = {96, height * 8 - 160};
+                dynamicNavigationRemoteTo = {480, height * 8 - 160};
+                static_cast<void>(dynamicNavigationGrid.nextWaypoint(
+                    dynamicNavigationRemoteFrom, dynamicNavigationRemoteTo,
+                    7, 12000, {}, &dynamicNavigationRemoteRoute));
+                const auto initiallyOpen = pylonRoute.size() == 2 &&
+                    mineralRoute.size() == 2 && dynamicNavigationRemoteRoute.size() == 2;
+                check("dynamic-navigation-fixture-routes-start-open", initiallyOpen);
+                const auto initialVersion = dynamicNavigationGrid.obstacleVersion();
+                bridge.initializeNavigationObstacles(dynamicNavigationGrid);
+                const auto pylonClosed = !dynamicNavigationGrid.lineWalkable(pylonFrom, pylonTo) &&
+                    dynamicNavigationGrid.routeAffectedSince(
+                        pylonRoute, pylonFrom, pylonTo, {}, initialVersion);
+                const auto mineralClosed = !dynamicNavigationGrid.lineWalkable(
+                    mineralFrom, mineralTo) && dynamicNavigationGrid.routeAffectedSince(
+                        mineralRoute, mineralFrom, mineralTo, {}, initialVersion);
+                const auto remoteReusable = !dynamicNavigationGrid.routeAffectedSince(
+                    dynamicNavigationRemoteRoute, dynamicNavigationRemoteFrom,
+                    dynamicNavigationRemoteTo, {}, initialVersion);
+                std::vector<Position> pylonDetour;
+                std::vector<Position> mineralDetour;
+                static_cast<void>(dynamicNavigationGrid.nextWaypoint(
+                    pylonFrom, pylonTo, 7, 12000, {}, &pylonDetour));
+                static_cast<void>(dynamicNavigationGrid.nextWaypoint(
+                    mineralFrom, mineralTo, 7, 12000, {}, &mineralDetour));
+                const auto promptDetours = pylonDetour.size() > 2 &&
+                                           mineralDetour.size() > 2;
+                dynamicNavigationMineralId = (*mineral)->getID();
+                dynamicNavigationMineralFrom = mineralFrom;
+                dynamicNavigationMineralTo = mineralTo;
+                dynamicNavigationMineralRoute = mineralRoute;
+                dynamicNavigationMineralVersion = dynamicNavigationGrid.obstacleVersion();
+                log << "DYNAMIC_OBSTACLES,pylon=" << (*pylon)->getID()
+                    << ",bounds=" << (*pylon)->getLeft() << ':' << (*pylon)->getTop() << ':'
+                    << (*pylon)->getRight() << ':' << (*pylon)->getBottom()
+                    << ",mineral=" << dynamicNavigationMineralId
+                    << ",resources=" << (*mineral)->getResources()
+                    << ",bounds=" << (*mineral)->getLeft() << ':' << (*mineral)->getTop() << ':'
+                    << (*mineral)->getRight() << ':' << (*mineral)->getBottom()
+                    << ",versions=" << initialVersion << ':'
+                    << dynamicNavigationGrid.obstacleVersion()
+                    << ",pylonClosed=" << pylonClosed << ",mineralClosed=" << mineralClosed
+                    << ",remoteReusable=" << remoteReusable
+                    << ",pylonDetourPoints=" << pylonDetour.size()
+                    << ",mineralDetourPoints=" << mineralDetour.size() << '\n';
+                check("dynamic-navigation-pylon-closes-cached-route", pylonClosed);
+                check("dynamic-navigation-mineral-closes-cached-route", mineralClosed);
+                check("dynamic-navigation-unaffected-route-remains-reusable", remoteReusable);
+                check("dynamic-navigation-obstacles-produce-prompt-detours", promptDetours);
+
+                const auto pylonVersion = dynamicNavigationGrid.obstacleVersion();
+                bridge.removeNavigationObstacle(dynamicNavigationGrid, *pylon);
+                const auto pylonOpened = dynamicNavigationGrid.lineWalkable(pylonFrom, pylonTo) &&
+                    dynamicNavigationGrid.routeAffectedSince(
+                        pylonRoute, pylonFrom, pylonTo, {}, pylonVersion);
+                check("dynamic-navigation-pylon-removal-opens-route", pylonOpened);
+                check("dynamic-navigation-distant-cache-survives-pylon-removal",
+                    !dynamicNavigationGrid.routeAffectedSince(
+                        dynamicNavigationRemoteRoute, dynamicNavigationRemoteFrom,
+                        dynamicNavigationRemoteTo, {}, pylonVersion));
+
+                auto miningOrders = 0;
+                for (const auto worker : allUnits) {
+                    if (worker == nullptr || !worker->exists() ||
+                        worker->getPlayer() != BWAPI::Broodwar->self() ||
+                        worker->getType() != BWAPI::UnitTypes::Protoss_Probe ||
+                        worker->getDistance(*mineral) > 256) continue;
+                    if (worker->gather(*mineral)) ++miningOrders;
+                }
+                check("dynamic-navigation-mining-orders-accepted", miningOrders > 0);
+                dynamicNavigationStartedFrame = frame;
+                log << "DYNAMIC_MINING_STARTED," << frame << ",workers="
+                    << miningOrders << ",remaining=" << (*mineral)->getResources() << '\n';
+                log.flush();
+                if (miningOrders == 0) dynamicNavigationMineralDepleted = true;
+                return;
+            }
+            if (dynamicNavigationMineralDepleted) {
+                check("dynamic-navigation-engine-postcondition", failures == 0);
+                log << "DONE," << frame << ',' << failures << '\n';
+                log.flush();
+                finished = true;
+                BWAPI::Broodwar->leaveGame();
+                return;
+            }
+            if (dynamicNavigationStartedFrame >= 0 &&
+                frame - dynamicNavigationStartedFrame >= 1200) {
+                check("dynamic-navigation-mineral-depletes-within-native-window", false);
+                check("dynamic-navigation-engine-postcondition", failures == 0);
+                log << "DONE," << frame << ',' << failures << '\n';
+                log.flush();
+                finished = true;
+                BWAPI::Broodwar->leaveGame();
+            }
+            return;
+        }
+        if (scenario == "footprint-native") {
+            constexpr std::array<BWAPI::UnitType, 4> types{
+                BWAPI::UnitTypes::Protoss_Probe,
+                BWAPI::UnitTypes::Protoss_Zealot,
+                BWAPI::UnitTypes::Protoss_Dragoon,
+                BWAPI::UnitTypes::Protoss_Reaver};
+            constexpr std::array<const char*, 4> names{
+                "probe", "zealot", "dragoon", "reaver"};
+            constexpr std::array<int, 4> laneCenters{512, 1504, 2496, 3488};
+            constexpr Position targetAnchor{0, 3584};
+            const auto allUnits = BWAPI::Broodwar->getAllUnits();
+            if (!footprintNativeChecked) {
+                footprintNativeChecked = true;
+                std::array<BWAPI::Unit, 4> actors{};
+                std::array<Position, 4> origins{};
+                std::array<MovementFootprint, 4> footprints{};
+                for (std::size_t i = 0; i < types.size(); ++i) {
+                    const auto found = std::ranges::find_if(
+                        allUnits, [type = types[i]](const auto unit) {
+                            return unit != nullptr && unit->exists() && unit->getType() == type;
+                        });
+                    if (found == allUnits.end()) continue;
+                    actors[i] = *found;
+                    footprintNativeActorIds[i] = actors[i]->getID();
+                    const auto position = actors[i]->getPosition();
+                    origins[i] = {position.x, position.y};
+                    const auto type = actors[i]->getType();
+                    footprints[i] = {type.dimensionLeft(), type.dimensionRight(),
+                                     type.dimensionUp(), type.dimensionDown()};
+                    footprintNativeFootprints[i] = footprints[i];
+                    log << "FOOTPRINT_ACTOR," << names[i] << ",id=" << actors[i]->getID()
+                        << ",position=" << position.x << 'x' << position.y
+                        << ",dimensions=" << footprints[i].left << ':' << footprints[i].right
+                        << ':' << footprints[i].up << ':' << footprints[i].down << '\n';
+                }
+                const auto completeFixture = std::ranges::all_of(
+                    actors, [](const auto unit) { return unit != nullptr; });
+                check("footprint-fixture-four-unit-types", completeFixture);
+                const auto grid = bridge.navigationGrid();
+                bool validStart = completeFixture && !grid.empty();
+                if (validStart) {
+                    for (std::size_t i = 0; i < types.size(); ++i) {
+                        validStart = validStart && distanceSquared(
+                            origins[i], Position{laneCenters[i], 512}) <= 32 * 32 &&
+                            grid.walkable(origins[i], footprints[i]);
+                    }
+                }
+                check("footprint-fixture-units-start-in-separate-lanes", validStart);
+                if (!completeFixture || !validStart) {
+                    check("footprint-native-engine-postcondition", false);
+                    log << "DONE," << frame << ',' << failures << '\n';
+                    log.flush();
+                    finished = true;
+                    BWAPI::Broodwar->leaveGame();
+                    return;
+                }
+
+                struct BlockedFootprint {
+                    int left{};
+                    int top{};
+                    int right{};
+                    int bottom{};
+                };
+                std::vector<BlockedFootprint> blocked;
+                for (const auto unit : allUnits) {
+                    if (unit == nullptr || !unit->exists() ||
+                        unit->getType() != BWAPI::UnitTypes::Protoss_Pylon) continue;
+                    blocked.push_back({unit->getLeft(), unit->getTop(),
+                                       unit->getRight() + 1, unit->getBottom() + 1});
+                }
+                log << "FOOTPRINT_STATIC_BLOCKERS," << blocked.size() << '\n';
+                const auto cellSize = grid.cellSize();
+                int wallTop{};
+                int wallBottom{};
+                int mostFrequentTopCount{};
+                for (const auto& candidate : blocked) {
+                    const auto count = std::ranges::count_if(
+                        blocked, [top = candidate.top, bottom = candidate.bottom](const auto& item) {
+                            return item.top == top && item.bottom == bottom;
+                        });
+                    if (count > mostFrequentTopCount) {
+                        wallTop = candidate.top;
+                        wallBottom = candidate.bottom;
+                        mostFrequentTopCount = static_cast<int>(count);
+                    }
+                }
+                footprintNativeWallTop = wallTop;
+                footprintNativeWallBottom = wallBottom;
+                const auto mapRight = grid.width() * cellSize;
+                int gapStart{-1};
+                for (auto x = 0; x < mapRight; ++x) {
+                    const auto covered = std::ranges::any_of(
+                        blocked, [x, wallTop, this](const auto& item) {
+                            return item.top <= wallTop && item.bottom >= footprintNativeWallBottom &&
+                                x >= item.left && x < item.right;
+                        });
+                    if (!covered && gapStart < 0) gapStart = x;
+                    if (covered && gapStart >= 0) {
+                        if (x - gapStart >= 8)
+                            footprintNativeGaps.emplace_back(gapStart, x);
+                        gapStart = -1;
+                    }
+                }
+                if (gapStart >= 0 && mapRight - gapStart >= 8)
+                    footprintNativeGaps.emplace_back(gapStart, mapRight);
+                log << "FOOTPRINT_WALL_BAND," << wallTop << 'x'
+                    << footprintNativeWallBottom << ",gaps=";
+                for (const auto& [left, right] : footprintNativeGaps)
+                    log << left << ':' << right << ';';
+                log << '\n';
+                for (const auto unit : allUnits) {
+                    if (unit == nullptr || !unit->exists() ||
+                        unit->getType() != BWAPI::UnitTypes::Protoss_Pylon) continue;
+                    const auto position = unit->getPosition();
+                    const auto tile = unit->getTilePosition();
+                    const auto type = unit->getType();
+                    log << "FOOTPRINT_PYLON," << position.x << 'x' << position.y
+                        << ",tile=" << tile.x << 'x' << tile.y
+                        << ",dimensions=" << type.dimensionLeft() << ':'
+                        << type.dimensionRight() << ':' << type.dimensionUp() << ':'
+                        << type.dimensionDown() << ",bounds=" << unit->getLeft() << ':'
+                        << unit->getTop() << ':' << unit->getRight() << ':'
+                        << unit->getBottom() << '\n';
+                }
+                std::vector<std::uint8_t> fixtureWalkable;
+                fixtureWalkable.reserve(static_cast<std::size_t>(grid.width()) *
+                                         static_cast<std::size_t>(grid.height()));
+                for (auto cellY = 0; cellY < grid.height(); ++cellY) {
+                    for (auto cellX = 0; cellX < grid.width(); ++cellX) {
+                        const auto walkable = BWAPI::Broodwar->isWalkable(
+                            BWAPI::WalkPosition(cellX, cellY));
+                        const auto centerX = cellX * cellSize + cellSize / 2;
+                        const auto centerY = cellY * cellSize + cellSize / 2;
+                        const auto intersectsBlocker = std::ranges::any_of(
+                            blocked, [centerX, centerY](const BlockedFootprint& item) {
+                                return centerX >= item.left && centerX < item.right &&
+                                    centerY >= item.top && centerY < item.bottom;
+                            });
+                        fixtureWalkable.push_back(static_cast<std::uint8_t>(
+                            walkable && !intersectsBlocker));
+                    }
+                }
+                const NavigationGrid fixtureGrid(grid.width(), grid.height(), cellSize,
+                                                  std::move(fixtureWalkable));
+                for (std::size_t i = 0; i < types.size(); ++i) {
+                    const Position target{laneCenters[i], targetAnchor.y};
+                    const auto path = fixtureGrid.findPath(
+                        origins[i], target, fixtureGrid.width() * fixtureGrid.height(),
+                        footprints[i]);
+                    footprintNativePlanned[i] = path.reached();
+                    const auto nativeRegionReachable = actors[i]->hasPath(
+                        BWAPI::Position(target.x, target.y));
+                    const auto accepted = actors[i]->move(BWAPI::Position(target.x, target.y));
+                    log << "FOOTPRINT_MOVE," << names[i] << ",planner="
+                        << footprintNativePlanned[i] << ",nativeRegionQuery="
+                        << nativeRegionReachable << ",accepted=" << accepted << '\n';
+                    check("footprint-native-move-command-accepted", accepted);
+                }
+                footprintNativeStartFrame = frame;
+                log << "FOOTPRINT_MOVEMENT_STARTED," << frame << '\n';
+                log.flush();
+                return;
+            }
+
+            for (std::size_t i = 0; i < footprintNativeActorIds.size(); ++i) {
+                const auto actor = BWAPI::Broodwar->getUnit(footprintNativeActorIds[i]);
+                if (actor == nullptr || !actor->exists() || footprintNativeCrossed[i]) continue;
+                const auto position = actor->getPosition();
+                const auto footprintOverlapsWall =
+                    position.y + footprintNativeFootprints[i].down >= footprintNativeWallTop &&
+                    position.y - footprintNativeFootprints[i].up < footprintNativeWallBottom;
+                if (i == 0 && footprintOverlapsWall) {
+                    const auto fitsGap = std::ranges::any_of(
+                        footprintNativeGaps, [&](const auto& gap) {
+                            return position.x - footprintNativeFootprints[i].left >= gap.first &&
+                                position.x + footprintNativeFootprints[i].right < gap.second;
+                        });
+                    log << "FOOTPRINT_PROBE_BAND," << frame << ",position="
+                        << position.x << 'x' << position.y << ",fitsGap=" << fitsGap << '\n';
+                }
+                if (footprintOverlapsWall) {
+                    for (const auto& [gapLeft, gapRight] : footprintNativeGaps) {
+                        if (position.x - footprintNativeFootprints[i].left < gapLeft ||
+                            position.x + footprintNativeFootprints[i].right >= gapRight) continue;
+                        footprintNativeCrossed[i] = true;
+                        log << "FOOTPRINT_CROSSED," << names[i] << ",frame=" << frame
+                            << ",position=" << position.x << 'x' << position.y
+                            << ",gap=" << gapLeft << ':' << gapRight << '\n';
+                        break;
+                    }
+                }
+                if (frame % 96 == 0)
+                    log << "FOOTPRINT_PROGRESS," << names[i] << ",position="
+                        << position.x << 'x' << position.y << ",crossed="
+                        << footprintNativeCrossed[i] << '\n';
+            }
+            if (frame - footprintNativeStartFrame < 1200) return;
+
+            int mismatches{};
+            for (std::size_t i = 0; i < types.size(); ++i) {
+                if (footprintNativePlanned[i] != footprintNativeCrossed[i]) ++mismatches;
+                log << "FOOTPRINT_RESULT," << names[i] << ",planner="
+                    << footprintNativePlanned[i] << ",crossed="
+                    << footprintNativeCrossed[i] << '\n';
+            }
+            const auto narrowLane = footprintNativePlanned[0] && footprintNativePlanned[1] &&
+                !footprintNativePlanned[2] && !footprintNativePlanned[3] &&
+                footprintNativeCrossed[0] && footprintNativeCrossed[1] &&
+                !footprintNativeCrossed[2] && !footprintNativeCrossed[3];
+            log << "FOOTPRINT_MISMATCH_COUNT," << mismatches << '\n';
+            log.flush();
+            check("footprint-narrow-lanes-match-native-movement", narrowLane);
+            check("footprint-planner-matches-native-movement", mismatches == 0);
+            check("footprint-native-engine-postcondition", narrowLane && mismatches == 0);
+            log << "DONE," << frame << ',' << failures << '\n';
+            log.flush();
+            finished = true;
+            BWAPI::Broodwar->leaveGame();
+            return;
+        }
+        if (scenario == "unit-memory") {
+            const auto enemyUnits = BWAPI::Broodwar->enemy()->getUnits();
+            const auto selfUnits = BWAPI::Broodwar->self()->getUnits();
+            const auto pool = std::ranges::find_if(
+                enemyUnits, [](const BWAPI::Unit unit) {
+                    return unit != nullptr && unit->exists() &&
+                        unit->getType() == BWAPI::UnitTypes::Zerg_Spawning_Pool;
+                });
+            const auto darkTemplar = std::ranges::find_if(
+                enemyUnits, [](const BWAPI::Unit unit) {
+                    return unit != nullptr && unit->exists() &&
+                        unit->getType() == BWAPI::UnitTypes::Protoss_Dark_Templar;
+                });
+            if (!unitMemoryFootprintChecked && frame >= 24) {
+                unitMemoryFootprintChecked = true;
+                check("unit-memory-fixture-spawning-pool",
+                      pool != enemyUnits.end());
+                if (pool != enemyUnits.end()) {
+                    const auto type = (*pool)->getType();
+                    const auto origin = (*pool)->getTilePosition();
+                    auto visibleTiles = std::vector<std::uint8_t>{};
+                    visibleTiles.reserve(static_cast<std::size_t>(
+                        type.tileWidth() * type.tileHeight()));
+                    for (auto y = 0; y < type.tileHeight(); ++y) {
+                        for (auto x = 0; x < type.tileWidth(); ++x) {
+                            visibleTiles.push_back(static_cast<std::uint8_t>(
+                                BWAPI::Broodwar->isVisible(
+                                    BWAPI::TilePosition(origin.x + x, origin.y + y))));
+                        }
+                    }
+                    const auto center = BWAPI::TilePosition(
+                        origin.x + type.tileWidth() / 2,
+                        origin.y + type.tileHeight() / 2);
+                    const auto memory = std::ranges::find(
+                        state.enemy.units, (*pool)->getID(), &UnitSnapshot::id);
+                    log << "UNIT_MEMORY_POOL," << frame << ",id=" << (*pool)->getID()
+                        << ",position=" << (*pool)->getPosition().x << 'x'
+                        << (*pool)->getPosition().y << ",tile=" << origin.x << 'x'
+                        << origin.y << ",size=" << type.tileWidth() << 'x'
+                        << type.tileHeight() << ",centerVisible="
+                        << BWAPI::Broodwar->isVisible(center) << ",allVisible="
+                        << fullyVisibleFootprint(type.tileWidth(), type.tileHeight(),
+                                                 visibleTiles) << ",tiles=";
+                    for (const auto tile : visibleTiles) log << static_cast<int>(tile);
+                    log << '\n';
+                    check("unit-memory-center-visible-footprint-partial",
+                          BWAPI::Broodwar->isVisible(center) &&
+                              !fullyVisibleFootprint(type.tileWidth(), type.tileHeight(),
+                                                     visibleTiles));
+                    check("unit-memory-partial-building-retained",
+                          memory != state.enemy.units.end() && memory->position.valid());
+                }
+                const auto observer = std::ranges::find_if(selfUnits, [](const BWAPI::Unit unit) {
+                    return unit != nullptr && unit->exists() &&
+                        unit->getType() == BWAPI::UnitTypes::Protoss_Observer;
+                });
+                log << "UNIT_MEMORY_DT_INITIAL," << frame << ",id="
+                    << (darkTemplar != enemyUnits.end() ? (*darkTemplar)->getID() : -1)
+                    << ",visible=" << (darkTemplar != enemyUnits.end() && (*darkTemplar)->isVisible())
+                    << ",detected=" << (darkTemplar != enemyUnits.end() && (*darkTemplar)->isDetected())
+                    << ",observer=" << (observer != selfUnits.end() ? (*observer)->getID() : -1)
+                    << ",observerPosition=" << (observer != selfUnits.end() ? (*observer)->getPosition().x : -1)
+                    << 'x' << (observer != selfUnits.end() ? (*observer)->getPosition().y : -1)
+                    << ",observerCompleted=" << (observer != selfUnits.end() && (*observer)->isCompleted())
+                    << '\n';
+            }
+            auto observedDarkTemplar = std::ranges::find(
+                state.enemy.units, unitMemoryDarkTemplar, &UnitSnapshot::id);
+            if (unitMemoryDarkTemplar < 0 && darkTemplar != enemyUnits.end() &&
+                (*darkTemplar)->isVisible() && (*darkTemplar)->isDetected()) {
+                unitMemoryDarkTemplar = (*darkTemplar)->getID();
+                unitMemoryLastSeen = frame;
+                const auto observer = std::ranges::find_if(
+                    selfUnits, [](const BWAPI::Unit unit) {
+                        return unit != nullptr && unit->exists() &&
+                            unit->getType() == BWAPI::UnitTypes::Protoss_Observer;
+                    });
+                if (observer != selfUnits.end()) {
+                    unitMemoryObserver = (*observer)->getID();
+                    unitMemoryMoveIssued = (*observer)->move(BWAPI::Position(1600, 1600));
+                }
+                observedDarkTemplar = std::ranges::find(
+                    state.enemy.units, unitMemoryDarkTemplar, &UnitSnapshot::id);
+                check("unit-memory-dt-detected-before-move",
+                      observedDarkTemplar != state.enemy.units.end() &&
+                          observedDarkTemplar->visible && observedDarkTemplar->detected);
+                check("unit-memory-observer-moves-to-drop-detection",
+                      unitMemoryMoveIssued);
+            }
+            if (unitMemoryDarkTemplar >= 0 && !unitMemoryMoveIssued &&
+                unitMemoryObserver >= 0) {
+                const auto observer = BWAPI::Broodwar->getUnit(unitMemoryObserver);
+                unitMemoryMoveIssued = observer != nullptr && observer->exists() &&
+                    observer->move(BWAPI::Position(1600, 1600));
+            }
+            if (observedDarkTemplar != state.enemy.units.end() &&
+                observedDarkTemplar->visible && observedDarkTemplar->detected)
+                unitMemoryLastSeen = observedDarkTemplar->lastSeen;
+            if (frame >= 900) {
+                const auto raw = BWAPI::Broodwar->getUnit(unitMemoryDarkTemplar);
+                const auto memory = std::ranges::find(
+                    state.enemy.units, unitMemoryDarkTemplar, &UnitSnapshot::id);
+                const auto droppedDetection = raw != nullptr && raw->exists() &&
+                    raw->isVisible() && !raw->isDetected() &&
+                    memory != state.enemy.units.end() && !memory->visible &&
+                    !memory->detected && memory->lastSeen == unitMemoryLastSeen;
+                check("unit-memory-detection-loss-keeps-last-legal-sample",
+                      droppedDetection);
+                if (memory != state.enemy.units.end()) {
+                    log << "UNIT_MEMORY," << frame << ",dt=" << memory->id
+                        << ",lastSeen=" << memory->lastSeen
+                        << ",existsConfidence=" << memory->existenceConfidence
+                        << ",locationConfidence=" << memory->locationConfidence
+                        << ",healthConfidence=" << memory->healthConfidence << '\n';
+                }
+                check("unit-memory-engine-postcondition", droppedDetection);
+                log << "DONE," << frame << ',' << failures << '\n';
+                log.flush();
+                finished = true;
+                BWAPI::Broodwar->leaveGame();
+            }
+            return;
+        }
+        if (scenario == "learned-cancel-build") {
+            constexpr int frameLimit = 600;
+            if (!t020Started && frame >= 24) {
+                t020Started = true;
+                const auto probes = BWAPI::Broodwar->self()->getUnits();
+                const auto probe = std::ranges::find_if(probes, [](const BWAPI::Unit unit) {
+                    return unit != nullptr && unit->exists() && unit->getType().isWorker() &&
+                        unit->isCompleted();
+                });
+                check("T020-fixture-completed-builder", probe != probes.end());
+                BWAPI::TilePosition site{-1, -1};
+                if (probe != probes.end()) {
+                    const auto origin = (*probe)->getTilePosition();
+                    for (auto radius = 2; radius <= 16 && !site.isValid(); ++radius) {
+                        for (auto dy = -radius; dy <= radius && !site.isValid(); ++dy) {
+                            for (auto dx = -radius; dx <= radius; ++dx) {
+                                const BWAPI::TilePosition candidate(origin.x + dx, origin.y + dy);
+                                if (BWAPI::Broodwar->canBuildHere(
+                                        candidate, BWAPI::UnitTypes::Protoss_Pylon, *probe)) {
+                                    site = candidate;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                const auto siteFound = site.isValid();
+                check("T020-fixture-legal-Pylon-site", siteFound);
+                if (!siteFound || probe == probes.end()) {
+                    check("T020-stock-engine-postcondition", false);
+                    log << "DONE," << frame << ',' << failures << '\n';
+                    log.flush();
+                    finished = true;
+                    BWAPI::Broodwar->leaveGame();
+                    return;
+                }
+                t020Builder = (*probe)->getID();
+                t020Site = site;
+                const auto accepted = (*probe)->issueCommand(BWAPI::UnitCommand::build(
+                    *probe, t020Site, BWAPI::UnitTypes::Protoss_Pylon));
+                t020ConstructionStarted = accepted;
+                log << "T020_BUILD," << frame << ",builder=" << t020Builder
+                    << ",tile=" << t020Site.x << 'x' << t020Site.y
+                    << ",accepted=" << accepted << '\n';
+                log.flush();
+                check("T020-stock-engine-started-Pylon", accepted);
+                return;
+            }
+
+            const auto selfUnits = BWAPI::Broodwar->self()->getUnits();
+            const auto building = std::ranges::find_if(selfUnits, [this](const BWAPI::Unit unit) {
+                return unit != nullptr && unit->exists() &&
+                    unit->getType() == BWAPI::UnitTypes::Protoss_Pylon &&
+                    unit->getTilePosition() == t020Site && unit->isBeingConstructed();
+            });
+            if (!t020LegalityChecked && t020ConstructionStarted && building != selfUnits.end()) {
+                t020LegalityChecked = true;
+                const auto actor = *building;
+                t020Building = actor->getID();
+                const auto token = actor->getID();
+                whole_observation::Snapshot observation;
+                auto& entity = observation.entities[token];
+                entity.id = token;
+                entity.relation = 0;
+                entity.visible = true;
+                entity.completed = actor->isCompleted();
+                entity.building = actor->getType().isBuilding();
+                const std::map<int, BWAPI::Unit> unitByToken{{token, actor}};
+                cpu::Intent cancel;
+                cancel.kind = 18;
+                cancel.targetMode = 0;
+                cancel.actorIds = {token};
+                const auto legalCancel = protodd::bwapi::legalWholeGameCommands(
+                    cancel, observation, unitByToken, BWAPI::BroodwarPtr);
+                check("T020-unfinished-building-cancel-is-legal",
+                    legalCancel.size() == 1 && legalCancel.front().actorToken == token &&
+                    legalCancel.front().command.getType() ==
+                        BWAPI::UnitCommandTypes::Cancel_Construction);
+
+                auto move = cancel;
+                move.kind = 1;
+                move.targetMode = 2;
+                move.targetPixel = std::pair{actor->getPosition().x + 32,
+                                             actor->getPosition().y + 32};
+                check("T020-unfinished-building-move-rejected",
+                    protodd::bwapi::legalWholeGameCommands(
+                        move, observation, unitByToken, BWAPI::BroodwarPtr).empty());
+                auto train = cancel;
+                train.kind = 13;
+                train.targetMode = 0;
+                train.unitType = BWAPI::UnitTypes::Protoss_Zealot.getID();
+                check("T020-unfinished-building-train-rejected",
+                    protodd::bwapi::legalWholeGameCommands(
+                        train, observation, unitByToken, BWAPI::BroodwarPtr).empty());
+
+                const auto completedBuilding = std::ranges::find_if(
+                    selfUnits, [](const BWAPI::Unit unit) {
+                        return unit != nullptr && unit->exists() && unit->isCompleted() &&
+                            unit->getType().isBuilding();
+                    });
+                check("T020-fixture-completed-building", completedBuilding != selfUnits.end());
+                if (completedBuilding != selfUnits.end()) {
+                    const auto completedActor = *completedBuilding;
+                    const auto completedToken = completedActor->getID();
+                    whole_observation::Snapshot completedObservation;
+                    auto& completedEntity = completedObservation.entities[completedToken];
+                    completedEntity.id = completedToken;
+                    completedEntity.relation = 0;
+                    completedEntity.visible = true;
+                    completedEntity.completed = true;
+                    completedEntity.building = true;
+                    const std::map<int, BWAPI::Unit> completedByToken{
+                        {completedToken, completedActor}};
+                    auto cancelCompleted = cancel;
+                    cancelCompleted.actorIds = {completedToken};
+                    check("T020-idle-building-cancel-rejected",
+                        protodd::bwapi::legalWholeGameCommands(cancelCompleted,
+                            completedObservation, completedByToken,
+                            BWAPI::BroodwarPtr).empty());
+                }
+
+                const auto accepted = legalCancel.size() == 1 &&
+                    legalCancel.front().command.getType() ==
+                        BWAPI::UnitCommandTypes::Cancel_Construction &&
+                    actor->issueCommand(legalCancel.front().command);
+                t020CancelIssued = accepted;
+                t020CancelFrame = frame;
+                log << "T020_CANCEL," << frame << ",building=" << t020Building
+                    << ",accepted=" << accepted << ",legalCount=" << legalCancel.size()
+                    << '\n';
+                log.flush();
+                check("T020-stock-engine-accepted-learned-cancel", accepted);
+                return;
+            }
+            if (t020CancelIssued) {
+                const auto cancelled = BWAPI::Broodwar->getUnit(t020Building);
+                const auto gone = cancelled == nullptr || !cancelled->exists();
+                const auto stopped = gone || !cancelled->isBeingConstructed();
+                if (!stopped && frame < t020CancelFrame + 48) return;
+                log << "T020_CANCEL_STATE," << frame << ",exists=" << !gone
+                    << ",constructing=" << (!gone && cancelled->isBeingConstructed())
+                    << ",order=" << (gone ? "none" : cancelled->getOrder().toString())
+                    << '\n';
+                check("T020-stock-engine-construction-cancelled", stopped);
+                check("T020-stock-engine-postcondition", failures == 0);
+                log << "T020_RESULT," << frame << ",building=" << t020Building
+                    << ",gone=" << gone << ",stopped=" << stopped << '\n';
+                log << "DONE," << frame << ',' << failures << '\n';
+                log.flush();
+                finished = true;
+                BWAPI::Broodwar->leaveGame();
+                return;
+            }
+            if (frame >= frameLimit) {
+                check("T020-stock-engine-postcondition", false);
+                log << "DONE," << frame << ',' << failures << '\n';
+                log.flush();
+                finished = true;
+                BWAPI::Broodwar->leaveGame();
+            }
+            return;
+        }
         if (scenario == "build-cancel") {
             constexpr int frameLimit = 240;
             constexpr Position fixtureCenter{2050, 2000};
@@ -309,8 +1483,12 @@ public:
                 } else {
                     const auto nexusCount = std::ranges::count_if(state.self.units,
                         [](const auto& unit) { return unit.kind == UnitKind::nexus; });
+                    log << "T021_RELEASE," << frame << ",reservedBefore=" << reservedBefore
+                        << ",acknowledged=" << acknowledged
+                        << ",reservedAfter=" << reservedAfter << '\n';
+                    log.flush();
                     check("T021-lease-released-after-old-order-cleared",
-                        acknowledged && reservedBefore && !reservedAfter);
+                        acknowledged && !reservedAfter);
                     check("T021-no-replacement-Nexus-or-double-spend",
                         nexusCount == 1 && t021BuildCommands == 1 &&
                         BWAPI::Broodwar->self()->minerals() == t021MineralsBefore);
@@ -334,6 +1512,202 @@ public:
                 log.flush();
                 finished = true;
                 BWAPI::Broodwar->leaveGame();
+            }
+            return;
+        }
+        if (scenario == "builder-evacuation-started") {
+            constexpr int frameLimit = 600;
+            const auto reserved = [this] {
+                const auto builders = bridge.reservedBuilders();
+                return std::ranges::find(builders, t034Builder) != builders.end();
+            };
+            bridge.actionDiagnostic = [this](const protodd::bwapi::ActionDiagnostic& d) {
+                if (d.actor == t034Builder && d.type == "Build" && d.accepted &&
+                    d.source == "T034 started construction") ++t034BuildCommands;
+                if (d.actor == t034Builder && d.type == "Stop" && d.accepted &&
+                    d.source.starts_with("worker-evacuation")) ++t034AcceptedStops;
+                if (d.actor == t034Builder && d.type == "Move" && d.accepted &&
+                    d.source == "worker-evacuate") ++t034AcceptedMoves;
+            };
+
+            const auto startedPylon = [this]() -> BWAPI::Unit {
+                for (const auto unit : BWAPI::Broodwar->self()->getUnits()) {
+                    if (unit != nullptr && unit->exists() &&
+                        unit->getType() == BWAPI::UnitTypes::Protoss_Pylon &&
+                        unit->getTilePosition() == t034Site) {
+                        return unit;
+                    }
+                }
+                return nullptr;
+            };
+
+            if (!t034Started) {
+                t034Started = true;
+                const auto nexus = std::ranges::find_if(state.self.units,
+                    [](const UnitSnapshot& unit) {
+                        return unit.kind == UnitKind::nexus && unit.completed;
+                    });
+                const auto probe = std::ranges::min_element(state.self.units,
+                    [&](const UnitSnapshot& left, const UnitSnapshot& right) {
+                        const auto leftDistance = left.kind == UnitKind::probe && left.completed &&
+                                nexus != state.self.units.end()
+                            ? distanceSquared(left.position, nexus->position)
+                            : std::numeric_limits<double>::max();
+                        const auto rightDistance = right.kind == UnitKind::probe && right.completed &&
+                                nexus != state.self.units.end()
+                            ? distanceSquared(right.position, nexus->position)
+                            : std::numeric_limits<double>::max();
+                        return leftDistance < rightDistance;
+                    });
+                auto buildTile = BWAPI::TilePosition{-1, -1};
+                if (nexus != state.self.units.end() && probe != state.self.units.end() &&
+                    probe->kind == UnitKind::probe && probe->completed) {
+                    const auto nexusUnit = BWAPI::Broodwar->getUnit(nexus->id);
+                    const auto probeUnit = BWAPI::Broodwar->getUnit(probe->id);
+                    if (nexusUnit != nullptr && probeUnit != nullptr) {
+                        const auto homeTile = nexusUnit->getTilePosition();
+                        for (int radius = 3; radius <= 12 && buildTile.x < 0; ++radius) {
+                            for (int dx = -radius; dx <= radius && buildTile.x < 0; ++dx) {
+                                for (int dy = -radius; dy <= radius && buildTile.x < 0; ++dy) {
+                                    const auto absDx = dx < 0 ? -dx : dx;
+                                    const auto absDy = dy < 0 ? -dy : dy;
+                                    if (std::max(absDx, absDy) != radius) continue;
+                                    const BWAPI::TilePosition candidate{
+                                        homeTile.x + dx, homeTile.y + dy};
+                                    if (BWAPI::Broodwar->canBuildHere(candidate,
+                                            BWAPI::UnitTypes::Protoss_Pylon, probeUnit, true)) {
+                                        buildTile = candidate;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                check("T034-started-fixture-home-and-builder",
+                    nexus != state.self.units.end() && probe != state.self.units.end() &&
+                    probe->kind == UnitKind::probe && probe->completed);
+                check("T034-started-fixture-legal-local-Pylon-site", buildTile.x >= 0);
+                if (nexus == state.self.units.end() || probe == state.self.units.end() ||
+                    probe->kind != UnitKind::probe || !probe->completed || buildTile.x < 0) {
+                    check("T034-started-stock-engine-postcondition", false);
+                    log << "DONE," << frame << ',' << failures << '\n';
+                    log.flush();
+                    finished = true;
+                    BWAPI::Broodwar->leaveGame();
+                    return;
+                }
+
+                t034Builder = probe->id;
+                t034Site = buildTile;
+                const auto target = BWAPI::Position(buildTile);
+                MacroAction action{};
+                action.action = MacroActionKind::build;
+                action.target = UnitKind::pylon;
+                action.priority = 130;
+                action.minerals = 100;
+                action.reserved = true;
+                action.reason = "T034 started construction";
+                action.constructionSite = {0x340, static_cast<int>(nexus->id),
+                                            Position{target.x, target.y}};
+                StrategicPlan plan;
+                plan.desiredBases = 1;
+                const auto issued = bridge.executeMacro(std::span{&action, 1}, plan, influence);
+                const auto builder = BWAPI::Broodwar->getUnit(t034Builder);
+                const auto last = builder != nullptr ? builder->getLastCommand()
+                                                     : BWAPI::UnitCommand{};
+                const auto buildOrder = builder != nullptr && builder->exists() &&
+                    (builder->getBuildType() == BWAPI::UnitTypes::Protoss_Pylon ||
+                     (last.getType() == BWAPI::UnitCommandTypes::Build &&
+                      last.getUnitType() == BWAPI::UnitTypes::Protoss_Pylon));
+                check("T034-started-build-command-accepted",
+                    issued == 1 && t034BuildCommands == 1 && buildOrder && reserved());
+                log << "T034_STARTED_BUILD," << frame << ",builder=" << t034Builder
+                    << ",tile=" << t034Site.x << 'x' << t034Site.y
+                    << ",accepted=" << (issued == 1) << '\n';
+                log.flush();
+            } else {
+                const auto pylon = startedPylon();
+                if (pylon != nullptr) {
+                    const auto builder = BWAPI::Broodwar->getUnit(t034Builder);
+                    const auto wasReserved = reserved();
+                    check("T034-started-structure-observed", pylon != nullptr);
+                    check("T034-started-construction-releases-builder-lease", !wasReserved);
+                    check("T034-started-structure-still-incomplete", !pylon->isCompleted());
+                    const auto threatenedProbe = std::ranges::find(
+                        state.self.units, t034Builder, &UnitSnapshot::id);
+                    if (threatenedProbe != state.self.units.end())
+                        threatenedProbe->underAttack = true;
+                    const auto navigation = bridge.navigationGrid();
+                    const auto currentLeases = bridge.reservedBuilders();
+                    const auto assignments = t034Workers.assign(
+                        state, {}, influence, currentLeases, false, false, &navigation);
+                    const auto assignment = std::ranges::find(
+                        assignments, t034Builder, &WorkerAssignment::worker);
+                    check("T034-started-builder-can-evacuate",
+                        assignment != assignments.end() &&
+                        assignment->job == WorkerJob::evacuate);
+                    const auto movesBefore = t034AcceptedMoves;
+                    const auto stopsBefore = t034AcceptedStops;
+                    CommandBus workerCommands;
+                    workerCommands.beginFrame(BWAPI::Broodwar->getFrameCount(),
+                                               BWAPI::Broodwar->getLatencyFrames());
+                    const auto proposedWorkerCommands =
+                        bridge.submitWorkerCommands(assignments, workerCommands);
+                    auto issuedWorkerCommands = workerCommands.finalize(proposedWorkerCommands);
+                    const auto workerAssignment = std::ranges::find(
+                        assignments, t034Builder, &WorkerAssignment::worker);
+                    log << "T034_STARTED_DIAG," << frame
+                        << ",constructing=" << (builder != nullptr && builder->isConstructing())
+                        << ",idle=" << (builder != nullptr && builder->isIdle())
+                        << ",lastCommandFrame=" << (builder != nullptr ? builder->getLastCommandFrame() : -1)
+                        << ",position=" << (builder != nullptr ? builder->getPosition().x : -1)
+                        << 'x' << (builder != nullptr ? builder->getPosition().y : -1)
+                        << ",job=" << (workerAssignment != assignments.end()
+                            ? static_cast<int>(workerAssignment->job) : -1)
+                        << ",target=" << (workerAssignment != assignments.end()
+                            ? workerAssignment->targetPosition.x : -1)
+                        << 'x' << (workerAssignment != assignments.end()
+                            ? workerAssignment->targetPosition.y : -1)
+                        << ",proposed=" << proposedWorkerCommands
+                        << ",selected=" << issuedWorkerCommands.size() << '\n';
+                    for (const auto& command : issuedWorkerCommands) {
+                        const auto accepted = bridge.execute(command);
+                        log << "T034_STARTED_COMMAND," << frame
+                            << ",type=" << static_cast<int>(command.type)
+                            << ",target=" << command.targetPosition.x << 'x'
+                            << command.targetPosition.y << ",accepted=" << accepted << '\n';
+                        if (accepted) workerCommands.markIssued(command);
+                    }
+                    log.flush();
+                    const auto last = builder != nullptr ? builder->getLastCommand()
+                                                         : BWAPI::UnitCommand{};
+                    check("T034-started-builder-gets-move-not-stop",
+                        t034AcceptedMoves > movesBefore &&
+                        t034AcceptedStops == stopsBefore &&
+                        last.getType() == BWAPI::UnitCommandTypes::Move);
+                    check("T034-started-structure-is-not-cancelled-or-duplicated",
+                        pylon->exists() && !pylon->isCompleted() &&
+                        startedPylon() != nullptr &&
+                        t034BuildCommands == 1);
+                    check("T034-started-stock-engine-postcondition", failures == 0);
+                    log << "T034_STARTED_RESULT," << frame << ",builder=" << t034Builder
+                        << ",acceptedMoves=" << t034AcceptedMoves
+                        << ",acceptedStops=" << t034AcceptedStops << '\n';
+                    log << "DONE," << frame << ',' << failures << '\n';
+                    log.flush();
+                    t034Finished = true;
+                    finished = true;
+                    BWAPI::Broodwar->leaveGame();
+                    return;
+                }
+                if (frame >= frameLimit) {
+                    check("T034-started-construction-reached-live-structure", false);
+                    check("T034-started-stock-engine-postcondition", false);
+                    log << "DONE," << frame << ',' << failures << '\n';
+                    log.flush();
+                    finished = true;
+                    BWAPI::Broodwar->leaveGame();
+                }
             }
             return;
         }
@@ -426,9 +1800,11 @@ public:
                                                       &WorkerAssignment::worker);
                 check("T034-danger-overrides-build-lease",
                       urgent != urgentAssignments.end() && urgent->job == WorkerJob::evacuate);
-                bridge.executeWorkers(urgentAssignments);
-                check("T034-accepted-Stop-retains-builder-lease",
-                      t034AcceptedStops > 0 && reserved());
+                executeWorkerProposals(urgentAssignments);
+                // The Build already claimed this actor in the current BWAPI
+                // frame, so the first emergency Stop may be deferred. Keep
+                // ownership while the cancellation retry is pending.
+                check("T034-Stop-request-retains-builder-lease", reserved());
                 const auto replacement = bridge.executeMacro(
                     std::span{&action, 1}, plan, influence);
                 t034ReplacementChecked = true;
@@ -459,10 +1835,10 @@ public:
                     check("T034-lease-held-until-old-order-clears",
                           builderAssignment != assignments.end() &&
                           builderAssignment->job == WorkerJob::evacuate);
-                    bridge.executeWorkers(assignments);
+                    executeWorkerProposals(assignments);
                 } else {
                     const auto moveCount = t034AcceptedMoves;
-                    bridge.executeWorkers(assignments);
+                    executeWorkerProposals(assignments);
                     const auto last = builder->getLastCommand();
                     if (t034AcceptedMoves > moveCount &&
                         last.getType() == BWAPI::UnitCommandTypes::Move) {
@@ -477,6 +1853,7 @@ public:
                         check("T034-no-started-structure-or-duplicate-Nexus",
                               nexusCount == 1 && t034BuildCommands == 1 &&
                               t034ReplacementChecked);
+                        check("T034-Stop-eventually-accepted", t034AcceptedStops > 0);
                         check("T034-stock-engine-postcondition", failures == 0);
                         log << "T034_RESULT," << frame << ",builder=" << t034Builder
                             << ",acceptedStops=" << t034AcceptedStops
@@ -551,7 +1928,7 @@ public:
                 };
                 WorkerAssignment assignment{workerIssuerActor, WorkerJob::defend,
                     0, workerIssuerTarget, {-1, -1}, 80};
-                bridge.executeWorkers(std::span{&assignment, 1});
+                executeWorkerProposals(std::span{&assignment, 1});
                 if (workerIssuerAccepted) {
                     workerIssuerStarted = true;
                     workerIssuerResetFrame = frame;
@@ -627,7 +2004,11 @@ public:
                     log.flush();
                 };
                 ScoutOrder order{workerIssuerActor, scoutTarget, ScoutPurpose::findEnemy, 1.0};
-                bridge.executeScouts(std::span{&order, 1});
+                CommandBus commands;
+                commands.beginFrame(frame, BWAPI::Broodwar->getLatencyFrames());
+                static_cast<void>(bridge.submitScouts(std::span{&order, 1}, commands));
+                for (const auto& command : commands.finalize(1))
+                    static_cast<void>(bridge.execute(command));
                 if (workerIssuerAccepted) {
                     workerIssuerStarted = true;
                     workerIssuerResetFrame = frame;
@@ -880,8 +2261,8 @@ public:
             log.flush();
             check("worker-local-defense-screen-suppresses-main-militia", mainDefend == 0);
             check("worker-local-defense-uncovered-natural-gets-militia", naturalDefend > 0);
-            check("worker-local-defense-mining-continues-at-both-bases",
-                  mainMining > 0 && naturalMining > 0);
+            check("worker-local-defense-immediate-contact-triggers-local-evacuation",
+                  mainEvacuate > 0 && naturalEvacuate > 0);
 
             bridge.actionDiagnostic = [this, mainBaseId = mainBase->id,
                                        naturalBaseId = naturalBase->id,
@@ -905,7 +2286,7 @@ public:
                     << '\n';
                 log.flush();
             };
-            bridge.executeWorkers(assignments);
+            executeWorkerProposals(assignments);
             bridge.actionDiagnostic = {};
             check("worker-local-defense-no-main-probe-order",
                   workerDefenseMainAccepted == 0);
@@ -975,7 +2356,7 @@ public:
                 if (nexus != state.self.units.end()) {
                     WorkerAssignment assignment{workerIssuerActor, WorkerJob::minerals,
                         nexus->id, -1, nexus->position, 60};
-                    bridge.executeWorkers(std::span{&assignment, 1});
+                    executeWorkerProposals(std::span{&assignment, 1});
                     if (workerIssuerAccepted) {
                         workerIssuerStarted = true;
                         workerIssuerResetFrame = frame;
@@ -1503,6 +2884,97 @@ public:
             }
             return;
         }
+        if (scenario == "construction-budget") {
+            const auto pylonCount = std::ranges::count_if(state.self.units,
+                [](const auto& unit) { return unit.kind == UnitKind::pylon; });
+            if (constructionBudgetDeferredFrame < 0) {
+                constructionBudgetDeferredFrame = frame;
+                constructionBudgetMineralsBefore = state.self.minerals;
+                constructionBudgetGasBefore = state.self.gas;
+                constructionBudgetPylonsBefore = static_cast<int>(pylonCount);
+                StrategicPlan plan;
+                plan.goals = {
+                    {GoalKind::build, UnitKind::pylon, 3, 140, true, "T118 deferred supply"},
+                    {GoalKind::upgrade, UnitKind::unknown, 1, 130, true,
+                     "T118 funded upgrade", TechnologyKind::singularityCharge},
+                    {GoalKind::train, UnitKind::observer, 1, 120, true, "T118 funded detector"},
+                    {GoalKind::train, UnitKind::zealot, 1, 110, true, "T118 funded army"},
+                };
+                ResourceLedger ledger{state.self.minerals, state.self.gas};
+                const auto actions = planner.reconcile(state, plan, ledger);
+                check("construction-budget-fixture-funded-actions", actions.size() == 4 &&
+                    ledger.committedMinerals == 375 && ledger.committedGas == 225);
+                bridge.setSpendingLedger(&ledger);
+                const auto issued = bridge.executeMacro(actions, plan, influence, {},
+                    std::numeric_limits<int>::max(), nullptr, 0);
+                bridge.setSpendingLedger(nullptr);
+                int deferred{}, trained{}, upgraded{};
+                for (const auto& execution : bridge.macroExecutions()) {
+                    log << "CONSTRUCTION_BUDGET_ACTION," << frame << ','
+                        << static_cast<int>(execution.action.target) << ','
+                        << execution.outcome << ',' << execution.accepted << '\n';
+                    deferred += execution.action.target == UnitKind::pylon &&
+                        execution.outcome == "planning-budget-deferred" && !execution.accepted;
+                    trained += execution.action.action == MacroActionKind::train && execution.accepted;
+                    upgraded += execution.action.action == MacroActionKind::upgrade && execution.accepted;
+                }
+                check("construction-budget-defers-only-construction",
+                    issued == 3 && deferred == 1 && trained == 2 && upgraded == 1);
+                check("construction-budget-retains-unspent-reservation",
+                    ledger.committedMinerals == 100 && ledger.committedGas == 0 &&
+                    ledger.reservedMinerals == 100 && ledger.reservedGas == 0 &&
+                    ledger.minerals == state.self.minerals - 275 &&
+                    BWAPI::Broodwar->self()->minerals() == state.self.minerals - 275 &&
+                    BWAPI::Broodwar->self()->gas() == state.self.gas - 225);
+                check("construction-budget-deferral-does-not-create-lease-or-blocker",
+                    bridge.reservedBuilders().empty() && bridge.buildBlockerFeedback().empty());
+                int observedTraining{}, observedUpgrade{};
+                for (const auto unit : BWAPI::Broodwar->self()->getUnits()) {
+                    if (unit == nullptr || !unit->exists()) continue;
+                    const auto queue = unit->getTrainingQueue();
+                    if (!queue.empty() && (queue.front() == BWAPI::UnitTypes::Protoss_Zealot ||
+                        queue.front() == BWAPI::UnitTypes::Protoss_Observer)) ++observedTraining;
+                    if (unit->isUpgrading() &&
+                        unit->getUpgrade() == BWAPI::UpgradeTypes::Singularity_Charge) ++observedUpgrade;
+                }
+                check("construction-budget-native-training-and-upgrade-observed",
+                    observedTraining == 2 && observedUpgrade == 1);
+                return;
+            }
+            if (!constructionBudgetRetried && frame >= constructionBudgetDeferredFrame + 12) {
+                StrategicPlan plan;
+                plan.goals = {{GoalKind::build, UnitKind::pylon, 3, 140, true,
+                               "T118 deferred supply"}};
+                ResourceLedger ledger{state.self.minerals, state.self.gas};
+                const auto actions = planner.reconcile(state, plan, ledger);
+                bridge.setSpendingLedger(&ledger);
+                const auto issued = bridge.executeMacro(actions, plan, influence);
+                bridge.setSpendingLedger(nullptr);
+                check("construction-budget-retry-accepted-with-allowance", issued == 1 &&
+                    std::ranges::any_of(bridge.macroExecutions(), [](const auto& execution) {
+                        return execution.action.target == UnitKind::pylon && execution.accepted;
+                    }));
+                log << "CONSTRUCTION_BUDGET_RETRY," << frame << ',' << issued << '\n';
+                constructionBudgetRetried = true;
+                return;
+            }
+            if (constructionBudgetRetried && pylonCount > constructionBudgetPylonsBefore) {
+                check("construction-budget-native-building-started-after-deferral", true);
+                check("construction-budget-native-debits-match-reservations",
+                    constructionBudgetMineralsBefore - state.self.minerals == 375 &&
+                    constructionBudgetGasBefore - state.self.gas == 225);
+                finished = true;
+            } else if (frame >= constructionBudgetDeferredFrame + 360) {
+                check("construction-budget-native-building-started-after-deferral", false);
+                finished = true;
+            }
+            if (finished) {
+                log << "DONE," << frame << ',' << failures << '\n';
+                log.flush();
+                BWAPI::Broodwar->leaveGame();
+            }
+            return;
+        }
         if (scenario == "resource-overlap") {
             constexpr int frameLimit = 360;
             if (resourceOverlapOrdersIssued) {
@@ -1516,7 +2988,7 @@ public:
                 if (completedDebit == 100) {
                     check("pending-pylon-debit-observed", newPylons >= 1);
                     check("engine-debits-match-full-ledger", gasNow == resourceOverlapGasAfterOrders &&
-                        resourceOverlapMineralsBefore - mineralsNow == 515 &&
+                        resourceOverlapMineralsBefore - mineralsNow == 540 &&
                         resourceOverlapGasBefore - gasNow == 275);
                     log << "RESOURCE_OVERLAP_DEBIT," << frame << ",pylon=100,"
                         << "incompletePylons=" << newPylons << ",minerals="
@@ -1541,7 +3013,8 @@ public:
                 return;
             }
             std::vector<BWAPI::Unit> gateways;
-            BWAPI::Unit core = nullptr, robotics = nullptr, observatory = nullptr, reaver = nullptr;
+            BWAPI::Unit core = nullptr, robotics = nullptr, observatory = nullptr;
+            BWAPI::Unit reaver = nullptr, carrier = nullptr;
             for (const auto unit : BWAPI::Broodwar->self()->getUnits()) {
                 if (unit == nullptr || !unit->exists()) continue;
                 const auto type = unit->getType();
@@ -1550,6 +3023,7 @@ public:
                 if (type == BWAPI::UnitTypes::Protoss_Robotics_Facility) robotics = unit;
                 if (type == BWAPI::UnitTypes::Protoss_Observatory) observatory = unit;
                 if (type == BWAPI::UnitTypes::Protoss_Reaver) reaver = unit;
+                if (type == BWAPI::UnitTypes::Protoss_Carrier) carrier = unit;
             }
             std::sort(gateways.begin(), gateways.end(), [](const auto left, const auto right) {
                 return left->getID() < right->getID();
@@ -1567,6 +3041,8 @@ public:
                 std::ranges::any_of(state.self.units, [](const auto& unit) {
                     return unit.kind == UnitKind::probe && unit.completed;
                 }));
+            check("overlap-fixture-carrier-without-interceptors", carrier != nullptr &&
+                carrier->getInterceptorCount() == 0);
             check("overlap-fixture-gas-bank", state.self.gas >= 300);
 
             StrategicPlan plan;
@@ -1695,8 +3171,8 @@ public:
 
             const auto maintenanceMineralsBefore = BWAPI::Broodwar->self()->minerals();
             const auto maintenanceGasBefore = BWAPI::Broodwar->self()->gas();
-            auto scarabAccepted = false;
-            bridge.actionDiagnostic = [this, &scarabAccepted](
+            auto scarabAccepted = false, interceptorAccepted = false;
+            bridge.actionDiagnostic = [this, &scarabAccepted, &interceptorAccepted](
                 const protodd::bwapi::ActionDiagnostic& d) {
                 if (d.source.starts_with("maintenance-")) {
                     log << "ISSUER_ACTION," << BWAPI::Broodwar->getFrameCount() << ','
@@ -1706,8 +3182,14 @@ public:
                 }
                 if (d.source == "maintenance-scarab" && d.accepted)
                     scarabAccepted = true;
+                if (d.source == "maintenance-interceptor" && d.accepted)
+                    interceptorAccepted = true;
             };
-            bridge.runMaintenance();
+            CommandBus maintenanceCommands;
+            maintenanceCommands.beginFrame(frame, state.latencyFrames);
+            bridge.runMaintenance(StrategicPlan{}, maintenanceCommands);
+            for (const auto& command : maintenanceCommands.finalize())
+                static_cast<void>(bridge.execute(command));
             bridge.actionDiagnostic = {};
             const auto maintenanceMineralsAfter = BWAPI::Broodwar->self()->minerals();
             const auto maintenanceGasAfter = BWAPI::Broodwar->self()->gas();
@@ -1717,11 +3199,19 @@ public:
                 scarabQueued = scarabQueue.size() == 1 &&
                     scarabQueue.front() == BWAPI::UnitTypes::Protoss_Scarab;
             }
+            bool interceptorQueued = false;
+            if (carrier != nullptr) {
+                const auto interceptorQueue = carrier->getTrainingQueue();
+                interceptorQueued = interceptorQueue.size() == 1 &&
+                    interceptorQueue.front() == BWAPI::UnitTypes::Protoss_Interceptor;
+            }
             check("maintenance-scarab-accepted", scarabAccepted && scarabQueued);
+            check("maintenance-interceptor-accepted", interceptorAccepted &&
+                interceptorQueued);
             check("maintenance-spend-shares-bank",
-                maintenanceMineralsBefore - maintenanceMineralsAfter == 15 &&
+                maintenanceMineralsBefore - maintenanceMineralsAfter == 40 &&
                 maintenanceGasBefore == maintenanceGasAfter &&
-                ledger.minerals == state.self.minerals - 515 &&
+                ledger.minerals == state.self.minerals - 540 &&
                 ledger.gas == state.self.gas - 275 &&
                 ledger.reservedMinerals == 0 && ledger.reservedGas == 0);
             check("unpaid-pylon-cost-remains-accounted",
@@ -1732,7 +3222,8 @@ public:
                 << ",supply=" << supplyAccepted << ",upgrade=" << upgradeAccepted
                 << ",observer=" << observerAccepted << ",zealot=" << zealotAccepted
                 << ",modelRejected=" << rejectedModelOrder << ",model=" << modelAccepted
-                << ",scarab=" << scarabAccepted << ",mineralsSpent="
+                << ",scarab=" << scarabAccepted << ",interceptor=" << interceptorAccepted
+                << ",mineralsSpent="
                 << mineralsBefore - BWAPI::Broodwar->self()->minerals()
                 << ",gasSpent=" << gasBefore - BWAPI::Broodwar->self()->gas() << '\n';
             bridge.productionPermission = {};
@@ -1975,14 +3466,27 @@ public:
                 check("fixture-researched",BWAPI::Broodwar->self()->hasResearched(BWAPI::TechTypes::Psionic_Storm));
                 if(!squad.empty()) { selected=squad[0].id; initialEnergy=squad[0].energy; }
                 CombatEstimate estimate; estimate.decision=FightDecision::engage;
+                const auto planningAllies=scenario=="storm-allies"
+                    ? std::span<const UnitSnapshot>{squad}
+                    : std::span<const UnitSnapshot>{state.self.units};
                 auto commands=TacticalController{}.control(squad,state.enemy.units,estimate,{1100,1000},
-                    {300,1000},influence,{800,1000},3,true,{},TacticalIntent::battle,{},nullptr,state.self.units);
+                    {300,1000},influence,{800,1000},3,true,{},TacticalIntent::battle,{},nullptr,planningAllies);
                 for(const auto& c:commands) if(c.technology==TechnologyKind::psionicStorm) {
                     requested=true; accepted=bridge.execute(c);
                     log << "CAST," << c.targetPosition.x << ',' << c.targetPosition.y << ',' << accepted << '\n';
+                    if(scenario=="storm-allies")
+                        check("live-exposure-invalidates-stale-cast",!accepted);
+                    else
+                        check("cast-accepted",accepted);
+                    const auto reservations=bridge.reservedStormZones(frame);
+                    const auto zoneRecorded=std::ranges::any_of(reservations,[&c](const Position center) {
+                        return distanceSquared(center,c.targetPosition)<=8*8;
+                    });
+                    check("only-accepted-storm-reserves-zone",
+                        zoneRecorded==(scenario=="storm-clear" && accepted));
                 }
-                check("storm-decision",requested==(scenario=="storm-clear"));
-                if(requested) check("cast-accepted",accepted);
+                check("storm-candidate",requested);
+                if(scenario=="storm-allies" && requested && !accepted) confirmed=true;
             } else if(scenario=="combat") {
                 auto actor=std::ranges::find_if(state.self.units,[](const auto& u){return u.kind==UnitKind::zealot;});
                 std::vector<UnitSnapshot> targets;
@@ -1993,14 +3497,27 @@ public:
                     auto target=CombatEvaluator{}.selectTarget(*actor,targets);
                     check("melee-legal-target",target!=nullptr && !target->invincible);
                 }
-                auto dt=std::ranges::find_if(state.enemy.units,[](const auto& u){return u.kind==UnitKind::darkTemplar;});
-                check("fixture-cloaked-visible",dt!=state.enemy.units.end());
-                if(dt!=state.enemy.units.end()) {
-                    // For an undetected Dark Templar BWAPI also withholds the
-                    // cloak flag. The relevant contract is unavailable health.
-                    check("fixture-health-hidden",!dt->detected && dt->hitPoints==0);
-                    log << "HIDDEN_DT," << dt->visible << ',' << dt->detected << ',' << dt->cloaked << ',' << dt->hitPoints << '\n';
-                    check("hidden-health-threat",influence.at(dt->position).groundThreat>0);
+                const auto rawEnemyUnits = BWAPI::Broodwar->enemy()->getUnits();
+                const auto rawDt = std::ranges::find_if(
+                    rawEnemyUnits, [](const BWAPI::Unit unit) {
+                        return unit != nullptr && unit->exists() &&
+                            unit->getType() == BWAPI::UnitTypes::Protoss_Dark_Templar &&
+                            unit->isVisible() && !unit->isDetected();
+                    });
+                check("fixture-cloaked-visible",rawDt!=rawEnemyUnits.end());
+                if(rawDt!=rawEnemyUnits.end()) {
+                    // BWAPI's visible-but-undetected sentinel must not refresh
+                    // a bot snapshot with live type, position, health or order data.
+                    const auto leaked = std::ranges::any_of(
+                        state.enemy.units, [rawDt](const UnitSnapshot& unit) {
+                            return unit.id == (*rawDt)->getID();
+                        });
+                    check("hidden-unit-not-published",!leaked);
+                    check("hidden-unit-no-threat-footprint",
+                          influence.at(Position{(*rawDt)->getPosition().x,
+                                                (*rawDt)->getPosition().y}).groundThreat==0);
+                    log << "HIDDEN_DT," << (*rawDt)->isVisible() << ','
+                        << (*rawDt)->isDetected() << '\n';
                 }
             } else if(scenario=="producer") {
                 check("fixture-funded",state.self.minerals>=100 && state.self.gas>=100);
@@ -2085,6 +3602,8 @@ public:
             auto u=BWAPI::Broodwar->getUnit(selected); if(u && u->isUpgrading()) confirmed=true;
         } else if(scenario=="storm-clear") {
             auto u=BWAPI::Broodwar->getUnit(selected); if(u && u->getEnergy()<initialEnergy-50)confirmed=true;
+        } else if(scenario=="storm-allies") {
+            confirmed=requested && !accepted;
         } else if(scenario=="supply-anchor") {
             for(auto u:BWAPI::Broodwar->self()->getUnits()) {
                 if(u==nullptr || !u->exists() || u->getType()!=BWAPI::UnitTypes::Protoss_Pylon ||

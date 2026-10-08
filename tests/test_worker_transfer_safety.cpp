@@ -64,6 +64,64 @@ int main() {
                   (assignment.job == WorkerJob::minerals || assignment.job == WorkerJob::transfer);
           }) >= 24,
           "staging leaves most of the established mineral line staffed");
+    WorkerManager clearRouteManager;
+    const auto clearRouteAssignments = clearRouteManager.assign(
+        expansion, growth, quiet, {}, false, false, &openMap);
+    check(clearRouteManager.routingStats().economicPathSearches == 0 &&
+          clearRouteManager.routingStats().deferredChecks == 0 &&
+          transfersTo(clearRouteAssignments, natural.id) > 0,
+          "clear economic routes keep transfers active without A* work");
+
+    auto routeLoad = expansion;
+    routeLoad.mapWidthPixels = 4096;
+    routeLoad.mapHeightPixels = 3072;
+    routeLoad.bases = {{5, {3500, 512}, {3500, 560}, 8000, 0, 1, 0,
+                       true, false, 8, 0}};
+    std::vector<std::uint8_t> routeLoadTerrain(128U * 96U, 1U);
+    for (int y = 0; y < 96; ++y)
+        routeLoadTerrain[static_cast<std::size_t>(y * 128 + 64)] = 0;
+    NavigationGrid routeLoadMap(128, 96, 32, std::move(routeLoadTerrain));
+    InfluenceMap routeLoadInfluence;
+    routeLoadInfluence.update(routeLoad);
+    WorkerManager routeLoadManager;
+    const auto beforeRouteLoad = NavigationGrid::diagnosticsForCurrentThread().searches;
+    const auto routeLoadAssignments = routeLoadManager.assign(
+        routeLoad, {}, routeLoadInfluence, {}, false, false, &routeLoadMap);
+    const auto routeLoadSearches = NavigationGrid::diagnosticsForCurrentThread().searches - beforeRouteLoad;
+    check(routeLoadSearches <= WorkerManager::maximumEconomicRouteSearches &&
+          routeLoadManager.routingStats().economicPathSearches <= WorkerManager::maximumEconomicRouteSearches &&
+          routeLoadManager.routingStats().deferredChecks > 0 &&
+          routeLoadAssignments.size() == 32 && transfersTo(routeLoadAssignments, 5) == 0,
+          "large disconnected economies bound aggregate route work and defer unproved transfers safely");
+
+    GameState spawnAdjacentToNexus;
+    spawnAdjacentToNexus.mapWidthPixels = 4096;
+    spawnAdjacentToNexus.mapHeightPixels = 3584;
+    spawnAdjacentToNexus.self.id = 1;
+    spawnAdjacentToNexus.bases.push_back(
+        {1, {3808, 464}, {3700, 520}, 8000, 0, 1, 0, true, false, 8, 0});
+    auto startingProbe = makeUnit(20, UnitKind::probe, {3760, 520});
+    startingProbe.dimensionLeft = 11;
+    startingProbe.dimensionRight = 11;
+    startingProbe.dimensionUp = 11;
+    startingProbe.dimensionDown = 11;
+    spawnAdjacentToNexus.self.units.push_back(startingProbe);
+    NavigationGrid startClearance(
+        512, 448, 8, std::vector<std::uint8_t>(512 * 448, 1));
+    startClearance.updateDynamicObstacle(1, {3744, 416, 3872, 512});
+    startClearance.updateDynamicObstacle(2, {3688, 500, 3712, 540});
+    check(!startClearance.walkable(startingProbe.position,
+              {11, 11, 11, 11}),
+          "starting Probe footprint overlaps the Nexus-edge navigation cells");
+    check(!startClearance.walkable(spawnAdjacentToNexus.bases.front().mineralLine),
+          "a mineral-line anchor can lie inside a blocked resource cell");
+    InfluenceMap spawnInfluence;
+    spawnInfluence.update(spawnAdjacentToNexus);
+    const auto spawnMining = WorkerManager{}.assign(
+        spawnAdjacentToNexus, {}, spawnInfluence, {}, false, false, &startClearance);
+    check(std::ranges::any_of(spawnMining, [](const WorkerAssignment& assignment) {
+              return assignment.worker == 20 && assignment.job == WorkerJob::minerals;
+          }), "a starting Probe can mine when its clearance footprint touches the Nexus obstacle");
 
     GameState nearbyExpansion = expansion;
     nearbyExpansion.bases[1].center = {800, 512};
@@ -104,15 +162,15 @@ int main() {
     }
     NavigationGrid corridorMap(75, 38, 32, std::move(corridor));
     const auto requiredDetour = corridorMap.findPath({300, 512}, natural.mineralLine);
-    check(requiredDetour.size() > 20,
+    check(requiredDetour.reached() && requiredDetour.points.size() > 20,
           "the second base route exercises the only open gap in a terrain wall");
-    if (!requiredDetour.empty()) {
-        const auto gap = std::ranges::find_if(requiredDetour, [](const Position point) {
+    if (requiredDetour.reached()) {
+        const auto gap = std::ranges::find_if(requiredDetour.points, [](const Position point) {
             return point.x / 32 == 37 && point.y / 32 == 2;
         });
-        check(gap != requiredDetour.end(), "the terrain route crosses the designated gap");
-        const auto siegePosition = gap != requiredDetour.end()
-            ? *gap : requiredDetour[requiredDetour.size() / 2];
+        check(gap != requiredDetour.points.end(), "the terrain route crosses the designated gap");
+        const auto siegePosition = gap != requiredDetour.points.end()
+            ? *gap : requiredDetour.points[requiredDetour.points.size() / 2];
         auto tank = makeUnit(500, UnitKind::siegeTank, siegePosition);
         tank.groundWeapon = {.damage = 70, .cooldown = 75, .minRange = 64,
                              .maxRange = 384, .targetsGround = true};
@@ -134,7 +192,7 @@ int main() {
     unready.mapHeightPixels = 1200;
     unready.self.id = 1;
     unready.bases = {
-        {1, {256, 512}, {300, 560}, 0, 0, 1, 0, true, false, 8, 0},
+        {1, {256, 512}, {300, 560}, 2400, 0, 1, 0, true, false, 8, 0},
         {3, {1900, 512}, {1850, 560}, 8000, 0, -1, 0, false, false, 8, 0},
     };
     unready.self.units.push_back(makeUnit(1, UnitKind::nexus, unready.bases[0].center));
@@ -148,7 +206,16 @@ int main() {
     const auto unreadyAssignments = WorkerManager{}.assign(
         unready, remotePlan, unreadyInfluence, {}, false, true, &unreadyMap);
     check(transfersTo(unreadyAssignments, unready.bases[1].id) == 0,
-          "mining transfers wait until the destination Nexus is complete and owned");
+          "planned expansion staging waits until the destination Nexus is complete and owned");
+
+    auto depleted = unready;
+    depleted.bases[0].mineralsRemaining = 0;
+    InfluenceMap depletedInfluence;
+    depletedInfluence.update(depleted);
+    const auto emergencyRecovery = WorkerManager{}.assign(
+        depleted, remotePlan, depletedInfluence, {}, false, true, &unreadyMap);
+    check(transfersTo(emergencyRecovery, depleted.bases[1].id) == 8,
+          "a fully depleted home bootstraps only a bounded worker group at safe remote minerals");
 
     GameState noRefinery = expansion;
     noRefinery.self.units.erase(std::remove_if(noRefinery.self.units.begin(),

@@ -1,7 +1,13 @@
 #include "protodd/AllInOpening.hpp"
+#include "protodd/UnitCatalog.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <utility>
+#include <vector>
 
 namespace protodd {
 namespace {
@@ -18,41 +24,102 @@ void goal(StrategicPlan& plan, GoalKind kind, UnitKind target, int desired, int 
 }
 struct Profile { int workers; int gates; int ready; Frame window; Frame travelTimeout; Frame deadline; };
 void protectObservedDtBreach(StrategicPlan& plan, const GameState& state) {
-    const UnitSnapshot* threat = nullptr;
-    const UnitSnapshot* base = nullptr;
-    auto nearestBaseThreat = 1200 * 1200;
+    std::vector<std::pair<const UnitSnapshot*, const UnitSnapshot*>> baseThreats;
     for (const auto& enemy : state.enemy.units) {
-        if (enemy.kind != UnitKind::darkTemplar || !enemy.visible || !enemy.position.valid()) continue;
+        if (enemy.kind != UnitKind::darkTemplar || !enemy.visible || !enemy.completed ||
+            enemy.hallucination || !enemy.position.valid()) continue;
+        const UnitSnapshot* nearestBase = nullptr;
+        auto nearestDistance = 1200 * 1200;
         for (const auto& own : state.self.units) {
-            if (own.kind != UnitKind::nexus || !own.position.valid()) continue;
+            if (own.kind != UnitKind::nexus || own.id < 0 || !own.position.valid()) continue;
             const auto separation = distanceSquared(own.position, enemy.position);
-            if (separation <= nearestBaseThreat) {
-                nearestBaseThreat = separation;
-                threat = &enemy;
-                base = &own;
+            if (separation <= nearestDistance) {
+                nearestDistance = separation;
+                nearestBase = &own;
             }
         }
+        if (nearestBase == nullptr) continue;
+        const auto existing = std::ranges::find_if(baseThreats,
+            [nearestBase](const auto& entry) { return entry.first->id == nearestBase->id; });
+        if (existing == baseThreats.end()) baseThreats.emplace_back(nearestBase, &enemy);
+        else if (distanceSquared(nearestBase->position, enemy.position) <
+                 distanceSquared(existing->first->position, existing->second->position))
+            existing->second = &enemy;
     }
-    if (threat == nullptr || base == nullptr) return;
-    const auto covered = std::ranges::any_of(state.self.units, [&threat, &base](const UnitSnapshot& own) {
-        if (!own.completed || !own.position.valid() ||
-            distanceSquared(own.position, threat->position) > 320 * 320) return false;
-        if (own.kind == UnitKind::observer) return true;
-        return own.kind == UnitKind::photonCannon && own.powered &&
-               distanceSquared(own.position, base->position) <= 416 * 416;
-    });
-    if (covered) return;
+    const auto framesTo = [](const Position from, const Position to, const double speed) {
+        if (!from.valid() || !to.valid() || speed <= 0.0)
+            return std::numeric_limits<Frame>::max();
+        return static_cast<Frame>(std::ceil(distance(from, to) / speed));
+    };
+    for (const auto& [base, threat] : baseThreats) {
+        if (threat->detected) continue;
+        const auto threatSpeed = threat->topSpeed > 0.0 ? threat->topSpeed : 3.0;
+        constexpr auto cannonDetectionRange = 224;
+        const auto timeUntilBaseCoverage = static_cast<Frame>(std::floor(
+            std::max(0.0, distance(base->position, threat->position) -
+                              cannonDetectionRange) / threatSpeed));
+        const auto coveredInTime = std::ranges::any_of(state.self.units,
+            [&](const UnitSnapshot& detector) {
+                if (!detector.position.valid() || detector.disabled || detector.loaded ||
+                    detector.hallucination || detector.durability() <= 0)
+                    return false;
+                const auto sight = detector.sightRange > 0 ? detector.sightRange :
+                    detector.kind == UnitKind::photonCannon ? cannonDetectionRange : 288;
+                const auto coversThreat = distanceSquared(detector.position, threat->position) <=
+                    sight * sight;
+                if (detector.kind == UnitKind::photonCannon) {
+                    if (!detector.powered) return false;
+                    if (detector.completed && coversThreat) return true;
+                    if (!detector.completed && detector.buildProgress >= 0 && coversThreat) {
+                        const auto remaining = static_cast<Frame>(unitStats(detector.kind).buildTime) *
+                            (100 - std::clamp(detector.buildProgress, 0, 100)) / 100;
+                        if (remaining <= timeUntilBaseCoverage) return true;
+                    }
+                    return false;
+                }
+                if (detector.kind != UnitKind::observer || !detector.completed ||
+                    detector.healthFraction() < 0.25) return false;
+                if (coversThreat) return true;
+                const auto speed = detector.topSpeed > 0.0 ? detector.topSpeed : 3.0;
+                return framesTo(detector.position, threat->position, speed) <=
+                       timeUntilBaseCoverage;
+            });
+        if (coveredInTime) continue;
 
-    // Macro goals count structures globally. Raise the total target by one so
-    // a Cannon at another Nexus cannot satisfy this local detection emergency.
-    const auto existingCannons = count(state, UnitKind::photonCannon);
-    goal(plan, GoalKind::build, UnitKind::photonCannon, existingCannons + 1, 130);
-    plan.attackTarget = base->position;
+        const auto siteRadius = 416 * 416;
+        const auto localCannons = static_cast<int>(std::ranges::count_if(
+            state.self.units, [base, siteRadius](const UnitSnapshot& own) {
+                return own.kind == UnitKind::photonCannon && own.position.valid() &&
+                       distanceSquared(own.position, base->position) <= siteRadius;
+            }));
+        const ConstructionTaskSite site{
+            0x200000000ULL + static_cast<std::uint32_t>(base->id), -1, base->position};
+        constexpr auto localPowerRadius = 128 * 128;
+        const auto hasLocalPylon = std::ranges::any_of(state.self.units,
+            [base](const UnitSnapshot& own) {
+                return own.kind == UnitKind::pylon && own.durability() > 0 && own.position.valid() &&
+                       distanceSquared(own.position, base->position) <= localPowerRadius;
+            });
+        if (!hasLocalPylon) {
+            const auto localPylons = static_cast<int>(std::ranges::count_if(
+                state.self.units, [base](const UnitSnapshot& own) {
+                    return own.kind == UnitKind::pylon && own.durability() > 0 && own.position.valid() &&
+                           distanceSquared(own.position, base->position) <= localPowerRadius;
+                }));
+            plan.goals.push_back({GoalKind::build, UnitKind::pylon, localPylons + 1,
+                131, true, "power local DT detection at the threatened base",
+                TechnologyKind::none, false, false, site});
+        }
+        plan.goals.push_back({GoalKind::build, UnitKind::photonCannon, localCannons + 1,
+            130, true, "local powered detection for observed DT breach",
+            TechnologyKind::none, false, false, site});
+    }
 }
 Position recoveryExpansion(const GameState& state) {
     const BaseSnapshot* best = nullptr;
     for (const auto& base : state.bases) {
-        if (base.ownerId >= 0 || base.island || base.startLocation || base.mineralsRemaining <= 0 ||
+        if (base.ownerId >= 0 || base.island || !base.depotFootprintAvailable ||
+            base.startLocation || base.mineralsRemaining <= 0 ||
             base.groundDistanceFromMain <= 0 || !base.center.valid()) continue;
         const bool occupied = std::ranges::any_of(state.enemy.units, [&base](const UnitSnapshot& unit) {
             return unit.visible && unit.position.valid() &&
@@ -158,10 +225,10 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
                     });
                 if (madeContact) contact_ = state.frame;
             }
-            if (pressureStart_ < 0) {
-                if (contact_ >= 0) pressureStart_ = contact_;
-                else if (arrival_ >= 0) pressureStart_ = arrival_;
-            }
+            // Arrival is a fallback clock; first weapon-range contact earns
+            // the full bounded engagement window when it happens later.
+            if (contact_ >= 0) pressureStart_ = contact_;
+            else if (pressureStart_ < 0 && arrival_ >= 0) pressureStart_ = arrival_;
             if (pressureStart_ >= 0 && state.frame - pressureStart_ >= p.window) {
                 phase_ = AllInPhase::transition; reason_ = "pressure-window";
             } else if (arrival_ < 0 &&
@@ -273,26 +340,48 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
     // Preserve native safety commitments across the opening's goal reset.
     // Only blocking/native demand survives; optional Observer scouting does not.
     for (const auto& prior : original) {
-        if (prior.goal == GoalKind::detect ||
-            (prior.blocking && prior.target == UnitKind::observer))
+        if (prior.goal == GoalKind::detect && prior.target == UnitKind::observer) {
+            auto detector = prior;
+            detector.goal = GoalKind::train;
+            plan.goals.push_back(std::move(detector));
+        } else if (prior.blocking && prior.target == UnitKind::observer) {
             plan.goals.push_back(prior);
+        }
     }
     // Direct evidence also retains the detector obligation during an all-in.
-    const auto observedCloak = std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& unit) {
+    const auto observedCloak = std::ranges::any_of(state.enemy.units, [&state](const UnitSnapshot& unit) {
+        const bool recent = unit.visible || (state.frame >= unit.lastSeen &&
+            state.frame - unit.lastSeen <= 15 * 24);
+        if (!recent) return false;
         return ((unit.cloaked || unit.burrowed) &&
-                (unit.groundWeapon.damage > 0 || unit.airWeapon.damage > 0)) || unit.kind == UnitKind::darkTemplar ||
-               unit.kind == UnitKind::lurker || unit.kind == UnitKind::spiderMine;
+                (unit.groundWeapon.damage > 0 || unit.airWeapon.damage > 0)) ||
+               unit.kind == UnitKind::darkTemplar || unit.kind == UnitKind::lurker ||
+               unit.kind == UnitKind::spiderMine;
     });
     plan.requireMobileDetection = nativeDetectionRequired || inheritedDetection || observedCloak;
-    if (observedCloak && std::ranges::none_of(plan.goals, [](const ProductionGoal& prior) {
-            return prior.target == UnitKind::observer;
-        })) {
-        plan.desiredGasWorkers = 3;
-        goal(plan, GoalKind::detect, UnitKind::observer, 1, 128);
+    if (plan.requireMobileDetection) {
+        plan.desiredGasWorkers = std::max(plan.desiredGasWorkers, 3);
+        for (auto& prior : plan.goals) {
+            if (prior.goal == GoalKind::train && prior.target == UnitKind::observer && prior.blocking)
+                prior.priority = std::max(prior.priority, 128);
+        }
+        const bool assimilatorDemand = std::ranges::any_of(plan.goals,
+            [](const ProductionGoal& prior) {
+                return prior.goal == GoalKind::build && prior.target == UnitKind::assimilator &&
+                       prior.blocking;
+            });
+        if (count(state, UnitKind::assimilator) == 0 && !assimilatorDemand)
+            goal(plan, GoalKind::build, UnitKind::assimilator, 1, 129,
+                 "fund required mobile detection");
+        const bool detectorDemand = std::ranges::any_of(plan.goals,
+            [](const ProductionGoal& prior) {
+                return prior.goal == GoalKind::train && prior.target == UnitKind::observer &&
+                       prior.blocking;
+            });
+        if (!detectorDemand)
+            goal(plan, GoalKind::train, UnitKind::observer, 1, 128,
+                 "complete required mobile detection");
     }
-    if (plan.requireMobileDetection && std::ranges::none_of(plan.goals,
-            [](const ProductionGoal& prior) { return prior.target == UnitKind::observer; }))
-        goal(plan, GoalKind::detect, UnitKind::observer, 1, 128);
     protectObservedDtBreach(plan, state);
     if (emergency) {
         for (const auto& prior : original)

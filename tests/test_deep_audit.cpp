@@ -12,6 +12,7 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <optional>
 #include <string_view>
 
 namespace {
@@ -31,14 +32,108 @@ UnitSnapshot unit(int id, UnitKind kind, Position position = {500, 500}, bool ou
 void navigation() {
     const NavigationGrid blocked{2, 2, 32, {1, 0, 0, 1}};
     check(!blocked.lineWalkable({16, 16}, {48, 48}), "diagonal cannot cut two blocked corners");
-    check(!blocked.nextWaypoint({16, 16}, {48, 48}).valid(), "unreachable corner has no direct waypoint");
+    const auto blockedWaypoint = blocked.nextWaypoint({16, 16}, {48, 48});
+    check(blockedWaypoint.status == NavigationStatus::partial &&
+              blockedWaypoint.waypoint == Position{16, 16},
+          "isolated nearby goal holds safely instead of returning the destination");
     const NavigationGrid oneCorner{2, 2, 32, {1, 0, 1, 1}};
     check(!oneCorner.lineWalkable({16, 16}, {48, 48}), "diagonal cannot cut one blocked corner");
-    check(oneCorner.findPath({16, 16}, {48, 48}).size() == 3, "legal orthogonal detour is preserved");
+    check(oneCorner.findPath({16, 16}, {48, 48}).points.size() == 3,
+          "legal orthogonal detour is preserved");
     const NavigationGrid open{3, 3, 32, std::vector<std::uint8_t>(9, 1)};
     check(open.lineWalkable({16, 16}, {80, 80}) && open.lineWalkable({80, 80}, {16, 16}),
           "open diagonal remains legal in both directions");
     check(open.lineWalkable({16, 16}, {80, 16}), "open horizontal remains legal");
+
+    const auto tunnel = [](const int widthInWalkTiles) {
+        constexpr auto width = 32;
+        constexpr auto height = 24;
+        std::vector<std::uint8_t> cells(width * height, 0U);
+        for (auto y = 0; y < height; ++y) {
+            for (auto x = 0; x < width; ++x) {
+                if (x < 8 || x > 23) cells[static_cast<std::size_t>(y * width + x)] = 1U;
+            }
+        }
+        const auto firstRow = 12 - widthInWalkTiles / 2;
+        for (auto y = firstRow; y < firstRow + widthInWalkTiles; ++y)
+            for (auto x = 8; x <= 23; ++x)
+                cells[static_cast<std::size_t>(y * width + x)] = 1U;
+        return NavigationGrid{width, height, 8, std::move(cells)};
+    };
+    const auto passes = [&tunnel](const int width, const MovementFootprint footprint) {
+        const auto grid = tunnel(width);
+        return grid.findPath({52, 100}, {204, 100}, 12000, footprint).reached();
+    };
+    const MovementFootprint probe{11, 11, 11, 11};
+    const MovementFootprint zealot{11, 11, 5, 13};
+    const MovementFootprint dragoon{15, 16, 15, 16};
+    const MovementFootprint reaver{16, 15, 16, 15};
+    check(!passes(2, probe) && passes(3, probe),
+          "Probe collision bounds distinguish a blocked 16-pixel tunnel from a 24-pixel one");
+    check(!passes(3, zealot) && passes(5, zealot),
+          "Zealot footprint rejects a narrow Probe route but fits its wider lane");
+    check(!passes(3, dragoon) && passes(5, dragoon),
+          "Dragoon footprint rejects narrow passages and fits its wider lane");
+    check(!passes(3, reaver) && passes(5, reaver),
+          "Reaver footprint rejects routes sized only for smaller units and fits its wider lane");
+}
+void dynamicNavigation() {
+    constexpr auto width = 64;
+    constexpr auto height = 64;
+    constexpr auto cellSize = 8;
+    const Position from{64, 128};
+    const Position to{448, 128};
+    NavigationGrid grid{width, height, cellSize,
+                        std::vector<std::uint8_t>(width * height, 1U)};
+    std::vector<Position> originalRoute;
+    check(grid.nextWaypoint(from, to, 7, 5000, {}, &originalRoute).waypoint == to &&
+              originalRoute.size() == 2,
+          "open terrain caches its direct route");
+    const auto initialVersion = grid.obstacleVersion();
+    const std::array pylonRoute{from, to};
+    const auto remoteFrom = Position{64, 400};
+    const auto remoteTo = Position{448, 400};
+    std::vector<Position> remoteRoute;
+    static_cast<void>(grid.nextWaypoint(remoteFrom, remoteTo, 7, 5000, {}, &remoteRoute));
+    check(grid.updateDynamicObstacle(100, {248, 0, 263, 256}),
+          "new Pylon footprint changes the obstacle version");
+    check(!grid.lineWalkable(from, to),
+          "new Pylon immediately closes the direct corridor");
+    std::vector<Position> aroundPylon;
+    const auto detour = grid.nextWaypoint(from, to, 7, 5000, {}, &aroundPylon);
+    check(detour.hasUsableWaypoint() && !aroundPylon.empty() && aroundPylon != originalRoute,
+          "cached route is replaced with a reachable Pylon detour");
+    check(grid.routeAffectedSince(pylonRoute, from, to, {}, initialVersion),
+          "Pylon closure invalidates a cached route through its cells");
+    check(!grid.routeAffectedSince(remoteRoute, remoteFrom, remoteTo, {}, initialVersion),
+          "distant cached routes survive a local Pylon update");
+
+    const auto afterPylonVersion = grid.obstacleVersion();
+    check(!grid.updateDynamicObstacle(100, {248, 0, 263, 256}) &&
+              grid.obstacleVersion() == afterPylonVersion,
+          "unchanged structure observations do not advance the path version");
+    check(grid.updateDynamicObstacle(101, {248, 0, 263, 256}),
+          "overlapping planned footprint is reference-counted");
+    const auto overlappedVersion = grid.obstacleVersion();
+    check(grid.removeDynamicObstacle(100) && grid.obstacleVersion() == overlappedVersion &&
+              !grid.lineWalkable(from, to),
+          "removing one overlapping footprint does not open a still-occupied route");
+    check(grid.removeDynamicObstacle(101) && grid.lineWalkable(from, to),
+          "removing the final footprint restores the direct route");
+
+    check(grid.updateDynamicObstacle(200, {248, 112, 263, 144}),
+          "remaining mineral field blocks its local walk cells");
+    std::vector<Position> aroundMineral;
+    static_cast<void>(grid.nextWaypoint(from, to, 7, 5000, {}, &aroundMineral));
+    const auto mineralVersion = grid.obstacleVersion();
+    check(!grid.lineWalkable(from, to) && !aroundMineral.empty(),
+          "route detours around the remaining mineral field");
+    check(grid.removeDynamicObstacle(200) && grid.lineWalkable(from, to),
+          "depleted mineral field opens the shorter route immediately");
+    check(grid.routeAffectedSince(aroundMineral, from, to, {}, mineralVersion),
+          "mineral depletion invalidates only nearby cached paths");
+    check(!grid.routeAffectedSince(remoteRoute, remoteFrom, remoteTo, {}, mineralVersion),
+          "mineral depletion preserves a distant cached route");
 }
 void meleeTargets() {
     auto zealot = unit(1, UnitKind::zealot);
@@ -239,6 +334,206 @@ void commandIdentity() {
     bus.beginFrame(101, 3); spell.technology = TechnologyKind::recall; bus.submit(spell);
     check(bus.finalize().size() == 1, "different technology is not the same command");
 }
+void navigationOutcomes() {
+    constexpr auto width = 20;
+    constexpr auto height = 20;
+    constexpr auto cellSize = 8;
+    const Position from{20, 20};
+    const Position to{140, 140};
+    NavigationGrid open{width, height, cellSize,
+        std::vector<std::uint8_t>(width * height, 1U)};
+    const auto reached = open.findPath(from, to, 400);
+    check(reached.status == NavigationStatus::reached &&
+              !reached.points.empty() && reached.points.back() == to,
+          "complete A-star route reports reached");
+    NavigationGrid boundedSearch{width, height, cellSize,
+        std::vector<std::uint8_t>(width * height, 1U)};
+    const auto partial = boundedSearch.findPath(from, to, 1);
+    check(partial.status == NavigationStatus::partial && partial.points.size() >= 2,
+          "bounded A-star returns a valid partial progress route when available");
+    for (std::size_t i = 1; i < partial.points.size(); ++i)
+        check(boundedSearch.lineWalkable(partial.points[i - 1], partial.points[i]),
+              "partial route contains only walkable legs");
+    std::vector<std::uint8_t> boundedDetour(width * height, 1U);
+    for (auto y = 0; y < height; ++y) {
+        if (y != 0)
+            boundedDetour[static_cast<std::size_t>(y * width + width / 2)] = 0U;
+    }
+    NavigationGrid boundedGrid{width, height, cellSize, std::move(boundedDetour)};
+    const auto partialWaypoint = boundedGrid.nextWaypoint({44, 84}, {116, 84}, 7, 1);
+    check(partialWaypoint.status == NavigationStatus::partial &&
+              partialWaypoint.hasUsableWaypoint() &&
+              boundedGrid.lineWalkable({44, 84}, partialWaypoint.waypoint),
+          "next waypoint exposes safe bounded-search progress");
+    const auto exhaustedWaypoint = boundedGrid.nextWaypoint({44, 84}, {116, 84}, 7, 0);
+    check(exhaustedWaypoint.status == NavigationStatus::budgetExhausted &&
+              !exhaustedWaypoint.hasUsableWaypoint() &&
+              exhaustedWaypoint.waypoint == Position{-1, -1},
+          "budget exhaustion provides no unsafe destination fallback");
+    check(open.findPath(from, to, 0).status == NavigationStatus::budgetExhausted,
+          "zero expansions report an inconclusive budget exhaustion");
+    check(open.findPath({-1, 20}, to).status == NavigationStatus::invalidInput,
+          "out-of-map coordinates report invalid input");
+    check(open.nextWaypoint(from, to, 7, -1).status == NavigationStatus::invalidInput,
+          "negative search budget reports invalid input");
+    check(NavigationGrid{}.nextWaypoint(from, to).status == NavigationStatus::invalidInput,
+          "empty navigation grid does not return the destination as a fallback waypoint");
+
+    constexpr auto disconnectedWidth = 80;
+    constexpr auto disconnectedHeight = 20;
+    std::vector<std::uint8_t> separated(disconnectedWidth * disconnectedHeight, 1U);
+    for (auto y = 0; y < disconnectedHeight; ++y)
+        separated[static_cast<std::size_t>(y * disconnectedWidth + disconnectedWidth / 2)] = 0U;
+    NavigationGrid disconnected{disconnectedWidth, disconnectedHeight, cellSize,
+                                std::move(separated)};
+    const auto unreachable = disconnected.findPath({40, 80}, {604, 80}, 2000);
+    check(unreachable.status == NavigationStatus::unreachable &&
+              disconnected.nextWaypoint({40, 80}, {604, 80}, 7, 2000).waypoint ==
+                  Position{-1, -1},
+          "exhausted search distinguishes proven isolation from budget exhaustion");
+    const std::array cleanupCandidates{Position{604, 80}, Position{180, 80}};
+    check(disconnected.nearestReachableTarget({40, 80}, cleanupCandidates, 2000) ==
+              Position{180, 80},
+          "cleanup target selection skips a proven-unreachable objective for a reachable legal search site");
+    const std::array isolatedCandidate{Position{604, 80}};
+    check(!disconnected.nearestReachableTarget({40, 80}, isolatedCandidate, 2000).valid(),
+          "cleanup target selection reports when no supplied objective is reachable");
+}
+void navigationWorkspaceReuse() {
+    constexpr auto width = 73;
+    constexpr auto height = 61;
+    NavigationGrid grid{width, height, 8,
+        std::vector<std::uint8_t>(width * height, 1U)};
+    const Position from{36, 244};
+    const Position to{548, 244};
+    const auto before = NavigationGrid::diagnosticsForCurrentThread();
+    const auto first = grid.findPath(from, to, 12000);
+    const auto afterFirst = NavigationGrid::diagnosticsForCurrentThread();
+    const auto second = grid.findPath(from, to, 12000);
+    const auto afterSecond = NavigationGrid::diagnosticsForCurrentThread();
+    check(first.reached() && second.reached() && first.points == second.points,
+          "cached shared route preserves the completed path");
+    check(afterFirst.searches == before.searches + 1U &&
+              afterSecond.searches == afterFirst.searches &&
+              afterSecond.routeCacheHits == afterFirst.routeCacheHits + 1U &&
+              afterFirst.workspaceResizes == before.workspaceResizes + 1U &&
+              afterSecond.workspaceResizes == afterFirst.workspaceResizes,
+          "repeated exact query reuses a version-checked route without another A-star search");
+
+    check(grid.updateDynamicObstacle(8400, {8, 8, 15, 15}),
+          "distant dynamic blocker updates the route revision");
+    const auto remoteChange = grid.findPath(from, to, 12000);
+    const auto afterRemoteChange = NavigationGrid::diagnosticsForCurrentThread();
+    check(remoteChange.points == first.points &&
+              afterRemoteChange.searches == afterSecond.searches &&
+              afterRemoteChange.routeCacheHits == afterSecond.routeCacheHits + 1U,
+          "versioned cache retains a route untouched by a distant obstacle");
+
+    check(grid.updateDynamicObstacle(8401, {280, 236, 295, 251}),
+          "dynamic blocker updates the route revision");
+    const auto detour = grid.findPath(from, to, 12000);
+    const auto afterDetour = NavigationGrid::diagnosticsForCurrentThread();
+    check(detour.reached(), "cached route invalidation still finds a complete detour");
+    check(detour.points != first.points,
+          "dynamic obstacle changes the cached route geometry");
+    auto detourSafe = true;
+    for (std::size_t i = 1; i < detour.points.size(); ++i)
+        detourSafe = detourSafe && grid.lineWalkable(detour.points[i - 1U], detour.points[i]);
+    check(detourSafe, "recomputed route clears the dynamic obstacle");
+    check(afterDetour.searches == afterRemoteChange.searches + 1U &&
+              afterDetour.routeCacheHits == afterRemoteChange.routeCacheHits &&
+              afterDetour.workspaceResizes == afterFirst.workspaceResizes,
+          "stale cached route is recomputed instead of returned as a cache hit");
+    check(afterDetour.searchWorkspaceBytes ==
+              static_cast<std::size_t>(width * height) * 20U &&
+              afterDetour.searchWorkspaceBytes <= NavigationGrid::maximumSearchWorkspaceBytes &&
+              afterDetour.cachedRouteBytes <= NavigationGrid::maximumCachedRouteBytes,
+          "reusable search and route-cache storage obey their strict memory ceilings");
+
+    // The engine assigns a fresh map into the same NavigationGrid member
+    // between games. A previously safe detour remains walkable on an open
+    // replacement map, so geometry validation alone cannot identify its age.
+    grid = NavigationGrid{width, height, 8,
+        std::vector<std::uint8_t>(width * height, 1U)};
+    const auto beforeReplacement = NavigationGrid::diagnosticsForCurrentThread();
+    const auto replacementPath = grid.findPath(from, to, 12000);
+    const auto afterReplacement = NavigationGrid::diagnosticsForCurrentThread();
+    NavigationGrid freshMap{width, height, 8,
+        std::vector<std::uint8_t>(width * height, 1U)};
+    const auto freshPath = freshMap.findPath(from, to, 12000);
+    check(replacementPath.reached() && replacementPath.points == freshPath.points &&
+              replacementPath.points != detour.points,
+          "a fresh map at the same grid address discards the prior game's still-walkable detour");
+    check(afterReplacement.searches == beforeReplacement.searches + 1U &&
+              afterReplacement.routeCacheHits == beforeReplacement.routeCacheHits,
+          "a new terrain lifetime cannot reuse a route solely because address and dimensions match");
+    const auto repeatedReplacement = grid.findPath(from, to, 12000);
+    const auto afterRepeatedReplacement = NavigationGrid::diagnosticsForCurrentThread();
+    check(repeatedReplacement.points == replacementPath.points &&
+              afterRepeatedReplacement.routeCacheHits == afterReplacement.routeCacheHits + 1U,
+          "ordinary repeated queries still reuse the fresh map's route after replacement");
+
+    std::optional<NavigationGrid> recycledGrid;
+    recycledGrid.emplace(width, height, 8,
+        std::vector<std::uint8_t>(width * height, 1U));
+    recycledGrid->updateDynamicObstacle(8410, {280, 236, 295, 251});
+    const auto recycledDetour = recycledGrid->findPath(from, to, 12000);
+    check(recycledDetour.reached() && recycledDetour.points != freshPath.points,
+          "the reconstructed-grid fixture first caches a real completed detour");
+    recycledGrid.reset();
+    recycledGrid.emplace(width, height, 8,
+        std::vector<std::uint8_t>(width * height, 1U));
+    const auto beforeReconstruction = NavigationGrid::diagnosticsForCurrentThread();
+    const auto reconstructedPath = recycledGrid->findPath(from, to, 12000);
+    const auto afterReconstruction = NavigationGrid::diagnosticsForCurrentThread();
+    check(reconstructedPath.points == freshPath.points &&
+              afterReconstruction.searches == beforeReconstruction.searches + 1U &&
+              afterReconstruction.routeCacheHits == beforeReconstruction.routeCacheHits,
+          "destroying and reconstructing terrain at the same address cannot inherit an old valid detour");
+
+    NavigationGrid oversized{1025, 1024, 8, {}};
+    check(oversized.empty(), "oversized navigation maps are rejected before scratch allocation");
+}
+void reachableTargetSnapping() {
+    constexpr auto width = 30;
+    constexpr auto height = 16;
+    constexpr auto cellSize = 32;
+    std::vector<std::uint8_t> walkable(width * height, 1U);
+    for (auto y = 0; y < height; ++y)
+        walkable[static_cast<std::size_t>(y * width + 15)] = 0U;
+    walkable[static_cast<std::size_t>(8 * width + 17)] = 0U;
+    NavigationGrid grid{width, height, cellSize, std::move(walkable)};
+    const Position from{112, 272};
+    const Position blockedTarget{560, 272};
+    const auto radialFirst = grid.nearestWalkable(blockedTarget);
+    check(radialFirst.valid() && radialFirst.x / cellSize > 15,
+          "geometric radial scan selects its first target-side cell across the wall");
+
+    const auto route = grid.findPath(from, blockedTarget, 4000);
+    auto clear = route.hasUsablePath() && route.points.size() >= 2U &&
+                 route.points.back().x / cellSize < 15;
+    for (std::size_t i = 1; clear && i < route.points.size(); ++i)
+        clear = grid.lineWalkable(route.points[i - 1U], route.points[i]);
+    check(route.status == NavigationStatus::partial && clear,
+          "blocked target snaps to safe progress in the origin's connected region");
+    const auto reachable = grid.nearestReachable(from, blockedTarget, 4000);
+    check(reachable.status == NavigationStatus::partial &&
+              reachable.hasUsableWaypoint() && !route.points.empty() &&
+              reachable.waypoint == route.points.back(),
+          "nearest reachable target exposes the validated route endpoint");
+
+    const Position isolatedWalkableTarget{560, 240};
+    const auto isolated = grid.findPath(from, isolatedWalkableTarget, 4000);
+    check(isolated.status == NavigationStatus::partial &&
+              !isolated.points.empty() && isolated.points.back().x / cellSize < 15,
+          "an exact but isolated target falls back to reachable nearby terrain");
+
+    const MovementFootprint wide{20, 20, 20, 20};
+    const auto clearance = grid.findPath(from, blockedTarget, 4000, wide);
+    check(clearance.status == NavigationStatus::partial &&
+              !clearance.points.empty() && clearance.points.back().x / cellSize < 14,
+          "target-region search applies the mover's footprint at the wall edge");
+}
 void legalTechnologyProducer() {
     struct Producer {
         int id; bool alive; bool completed; bool powered; bool researching; bool upgrading;
@@ -283,7 +578,9 @@ void ammunitionAndTargetDomain() {
 }
 }
 int main() {
-    navigation(); meleeTargets(); threatAndRoutes(); stormSafety(); upgrades(); commandIdentity(); unavailableWorkers();
+    navigation(); dynamicNavigation(); navigationOutcomes(); navigationWorkspaceReuse();
+    reachableTargetSnapping(); meleeTargets(); threatAndRoutes(); stormSafety(); upgrades();
+    commandIdentity(); unavailableWorkers();
     legalTechnologyProducer();
     ammunitionAndTargetDomain();
     if (!failures) std::cout << "Deep audit regression scenarios passed\n";

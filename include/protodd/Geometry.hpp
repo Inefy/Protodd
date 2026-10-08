@@ -17,6 +17,19 @@ struct Position {
     friend constexpr bool operator==(const Position&, const Position&) = default;
 };
 
+// Positions and radii in Brood War snapshots are measured in map pixels.
+struct PixelRadius {
+    int value{};
+
+    [[nodiscard]] constexpr int squared() const noexcept {
+        return value * value;
+    }
+};
+
+struct PixelDistance {
+    double value{};
+};
+
 struct BuildingFootprint {
     Position topLeft;
     int width{};
@@ -46,10 +59,34 @@ struct DefensivePosition {
                       static_cast<double>(a.y - b.y));
 }
 
+[[nodiscard]] inline bool movedCloserByAtLeast(
+    const Position previous,
+    const Position current,
+    const Position anchor,
+    const PixelDistance minimumProgress) noexcept {
+    return distance(previous, anchor) - distance(current, anchor) >=
+           minimumProgress.value;
+}
+
 [[nodiscard]] constexpr int distanceSquared(const Position a, const Position b) noexcept {
     const auto dx = a.x - b.x;
     const auto dy = a.y - b.y;
     return dx * dx + dy * dy;
+}
+
+[[nodiscard]] constexpr bool withinPixelRadius(
+    const Position a, const Position b, const PixelRadius radius) noexcept {
+    return distanceSquared(a, b) <= radius.squared();
+}
+
+[[nodiscard]] constexpr bool insidePixelRadius(
+    const Position a, const Position b, const PixelRadius radius) noexcept {
+    return distanceSquared(a, b) < radius.squared();
+}
+
+[[nodiscard]] constexpr bool outsidePixelRadius(
+    const Position a, const Position b, const PixelRadius radius) noexcept {
+    return distanceSquared(a, b) > radius.squared();
 }
 
 [[nodiscard]] inline Position moveToward(

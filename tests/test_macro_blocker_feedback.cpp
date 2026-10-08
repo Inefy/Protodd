@@ -122,5 +122,35 @@ int main() {
     check(retryA != retryActions.end() && retryA->reserved && retryA->executable,
           "the bounded retry deadline re-enables the blocked construction attempt");
 
+    state = baseState();
+    std::erase_if(state.self.units, [](const UnitSnapshot& existing) {
+        return existing.kind == UnitKind::forge;
+    });
+    plan.goals = {{GoalKind::build, UnitKind::photonCannon, 1, 120, true,
+                   "Cannon waits for its emergency Forge"}};
+    const std::vector<BuildBlockerFeedback> missingForgeBlocker{{
+        UnitKind::photonCannon, {}, BuildBlockerReason::missingPrerequisite, 500}};
+    ResourceLedger missingForgeLedger{149, 0};
+    const auto missingForgeActions = MacroPlanner{}.reconcile(
+        state, plan, missingForgeLedger, missingForgeBlocker);
+    check(std::ranges::any_of(missingForgeActions, [](const MacroAction& action) {
+        return action.target == UnitKind::forge && action.blocksLowerPriority;
+    }) && missingForgeLedger.protectedMinerals == 149 &&
+           missingForgeLedger.freeMinerals() == 0,
+           "an active Cannon prerequisite blocker still protects a viable emergency Forge");
+
+    state = baseState();
+    plan.goals = {{GoalKind::build, UnitKind::photonCannon, 1, 120, true,
+                   "retry after prerequisite recovery"}};
+    const std::vector<BuildBlockerFeedback> stalePrerequisiteBlocker{{
+        UnitKind::photonCannon, {}, BuildBlockerReason::missingPrerequisite, 500}};
+    ResourceLedger prerequisiteRetryLedger{150, 0};
+    const auto prerequisiteRetryActions = MacroPlanner{}.reconcile(
+        state, plan, prerequisiteRetryLedger, stalePrerequisiteBlocker);
+    check(std::ranges::any_of(prerequisiteRetryActions, [](const MacroAction& action) {
+        return action.target == UnitKind::photonCannon && action.reserved &&
+               action.executable;
+    }), "a repaired prerequisite re-enables its target before the generic retry deadline");
+
     return failures == 0 ? 0 : 1;
 }

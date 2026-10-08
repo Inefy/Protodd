@@ -18,6 +18,7 @@ from torch.nn import functional as F
 
 from .whole_game_batch import collate_observations
 from .whole_game_encoding_cache import ObservationCache
+from .whole_game_fit_gate import verify_pre_fit_gate
 from .whole_game_fit import (SCHEMA as FIT_SCHEMA, MATCHUPS, choose_games, collect,
                              sample_loss, summarize_validation, validate_release_pair)
 from .whole_game_cadence_collect import collect_cadence_actions
@@ -191,6 +192,9 @@ def supervised_output_loss(output, samples, ids, device):
 
 
 def fit(args):
+    pre_fit_gate = verify_pre_fit_gate(
+        args.release, args.validation_release,
+        args.representation_audit, args.native_parity_report)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU required for distillation")
     if args.output.exists():
@@ -201,6 +205,7 @@ def fit(args):
                                   "whole_game_encoding_cache.py",
                                   "whole_game_conditional_model.py",
                                   "whole_game_cadence_collect.py", "whole_game_fit.py",
+                                  "whole_game_fit_gate.py",
                                   "whole_game_quality.py", "whole_game_release.py",
                                   "whole_game_shards.py", "whole_game_sequences.py",
                                   "whole_game_future.py")}
@@ -306,6 +311,7 @@ def fit(args):
                   source_code_sha256=source_hashes,
                   source_identity_sha256=train_sha,
                   validation_identity_sha256=validation_sha,
+                  pre_fit_gate=pre_fit_gate,
                   training=train_info, validation=validation_info,
                   training_action_observation=args.action_source,
                   validation_action_observation="before_command",
@@ -340,6 +346,8 @@ def main():
     parser.add_argument("--teacher", required=True, type=Path)
     parser.add_argument("--release", required=True, type=Path)
     parser.add_argument("--validation-release", required=True, type=Path)
+    parser.add_argument("--representation-audit", required=True, type=Path)
+    parser.add_argument("--native-parity-report", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--quality-index", type=Path)
     parser.add_argument("--validation-quality-index", type=Path)

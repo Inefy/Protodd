@@ -4,6 +4,7 @@ Requires mpyq and dclimplode in the local validation environment. No playing
 runtime, trained model or tournament package is modified.
 """
 from pathlib import Path
+import argparse
 import struct
 import hashlib
 import json
@@ -15,8 +16,9 @@ import dclimplode
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'build/audit-validation-20260926'
 
-def chk_source():
-    path = ROOT / 'build/_deps/bwapi-src/bwapi/TestAIModule/maps/TestModule/ProtossTest.scm'
+def chk_source(template_path=None):
+    path = Path(template_path) if template_path is not None else (
+        ROOT / 'build/_deps/bwapi-src/bwapi/TestAIModule/maps/TestModule/ProtossTest.scm')
     archive = mpyq.MPQArchive(str(path), listfile=False)
     block = archive.block_table[archive.get_hash_table_entry('staredit\\scenario.chk').block_table_index]
     archive.file.seek(block.offset)
@@ -66,14 +68,21 @@ def mpq_write(path, chk, archive):
     assert mpyq.MPQArchive(str(path), listfile=False).read_file('staredit\\scenario.chk') == chk
 
 def make_map(name):
-    archive, tags, source = chk_source()
+    terrain_template = ROOT / 'build/match-runtime-a/maps/aiide/(2)HeartbreakRidge.scx'
+    footprint_starts = []
+    if name == 'footprint-native':
+        archive, tags, source = chk_source()
+        footprint_starts = [(512,512,0),(3500,3500,1)]
+    else:
+        archive, tags, source = chk_source(
+            terrain_template if name == 'combat-corpus-elevation' else None)
     units = []
     def unit(kind, x, y, owner=0, flags=0, hp=100, shields=100, resources=0,
              valid_state=31, valid_relation=15, energy=100):
         units.append(struct.pack('<IHHHHHHBBBBIHHII',len(units)+1,x,y,kind,0,
                                  valid_state,valid_relation,owner,hp,shields,energy,
                                  resources,0,flags,0,0))
-    if not name.startswith('racebot-'):
+    if not name.startswith('racebot-') and name != 'footprint-native':
         unit(214, 512, 512); unit(214, 3500, 3500, 1)
         unit(154, 512, 528); unit(131, 3504, 3504, 1)
     if name.startswith('storm'):
@@ -118,6 +127,7 @@ def make_map(name):
         unit(164,640,736)
         unit(155,864,544); unit(159,864,704)
         unit(83,1008,800) # Reaver starts without Scarabs for maintenance.
+        unit(72,1100,800) # Carrier starts without Interceptors for maintenance.
         unit(64,640,544) # Probe builder for the supply Pylon.
     elif name=='build-cancel':
         # A visible remote mineral site makes the first Nexus command an
@@ -193,6 +203,58 @@ def make_map(name):
         unit(84,1160,1100) # far-target visibility; not near the cloaked fixture
         unit(154,2512,2512)
         unit(61,2600,2500,1,1)
+    elif name in ('combat-corpus','combat-corpus-elevation'):
+        # Five isolated lanes exercise shields/range, cooldowns, Reaver ammo,
+        # native siege splash, and detected cloak with terrain-height traces.
+        unit(65,800,1000)
+        unit(0,920,1000,1)
+        unit(66,1400,1000)
+        unit(37,1540,1000,1)
+        unit(83,2200,1000)
+        for x,y in [(2280,1000),(2304,1016),(2328,1000)]:
+            unit(37,x,y,1)
+        for x,y in [(2760,1000),(2784,984),(2784,1016)]:
+            unit(65,x,y)
+        unit(30,2900,1000,1) # Siege Mode Arclite Shock Cannon splash.
+        unit(84,3470,1800) # Close detector for the cloaked Dark Templar lane.
+        unit(65,3400,1800)
+        unit(61,3500,1800,1,1)
+        if name=='combat-corpus-elevation':
+            # Engine terrain scan selected a walkable height-2/height-0 pair
+            # 115 pixels apart for an observed high-ground firing comparison.
+            unit(66,1552,656)
+            unit(37,1456,592,1)
+    elif name=='unit-memory':
+        # The Observer initially detects the cloaked DT, then moves away while
+        # the base vision keeps the DT visible but undetected. The Pool's
+        # center tile is visible near the Probe sight boundary while its far
+        # footprint tiles remain fogged.
+        unit(84,560,528) # Protoss Observer
+        unit(142,144,512,owner=1) # Zerg Spawning Pool, 3x2 footprint
+        unit(61,600,528,owner=1,flags=1) # Permanently cloaked Dark Templar
+    elif name=='footprint-native':
+        # Keep both UMS player starts, place the test units at player one's
+        # start, and make a terrain-clear wall from static own Pylons. The
+        # deliberately narrow opening lets the native engine distinguish unit
+        # clearance without depending on a particular tournament map layout.
+        for x,y,owner in footprint_starts:
+            unit(214,x,y,owner=owner)
+        lane_centers = (512,1504,2496,3488)
+        for kind,(x,y) in zip((64,65,66,83),((center,512) for center in lane_centers)):
+            unit(kind,x,y)
+        # Pylon collision bounds are 33 pixels wide even though their build
+        # footprints are 64 pixels wide. Spacing centers by 56 leaves 23-pixel
+        # passages: Probe and Zealot fit; Dragoon and Reaver do not.
+        wall_centers = range(16, 4080, 56)
+        for x in wall_centers:
+            unit(156,x,2048,owner=0)
+    elif name=='dynamic-navigation':
+        # Real engine collision bounds drive the dynamic path audit. A Probe
+        # reveals the neutral patch so the adapter observes it legally.
+        unit(156,1024,1024)
+        for i in range(10): unit(64,2700+(i%5)*24,1432+(i//5)*32)
+        unit(176,2816,1500,owner=11,hp=100,shields=0,resources=50,
+             valid_state=16,valid_relation=18,energy=0)
     elif name=='load':
         for i in range(80): unit(65,800+(i%10)*36,1000+(i//10)*36)
         for i in range(12): unit(66,660+(i%3)*44,1000+(i//3)*44)
@@ -202,6 +264,36 @@ def make_map(name):
         for i in range(100): unit(37,1200+(i%10)*24,1000+(i//10)*24,1)
         for i in range(20): unit(38,1480+(i%4)*32,1000+(i//4)*32,1)
         for i in range(8): unit(43,1300+(i%4)*48,1300+(i//4)*48,1)
+    elif name=='load-t118':
+        # 200 supply per side across two Protoss bases, with spellcasters,
+        # transports, detectors, production/tech structures and three Zerg
+        # unit classes. This stresses state reconciliation and combat without
+        # having the wrapper issue commands on the bot's behalf.
+        unit(154,2240,2208) # Second Nexus; the template supplies the main.
+        for i in range(10): unit(64,480+(i%5)*24,640+(i//5)*28)
+        for i in range(10): unit(64,2200+(i%5)*24,2304+(i//5)*28)
+        for i in range(52): unit(65,900+(i%10)*28,1000+(i//10)*28)
+        for i in range(16): unit(66,1200+(i%4)*36,960+(i//4)*36)
+        for i in range(8): unit(67,1360+(i%4)*40,1200+(i//4)*40,energy=250)
+        for i in range(2): unit(83,1550+i*48,1280)
+        for i in range(4): unit(84,1620+(i%2)*36,1160+(i//2)*36)
+        for i in range(2): unit(71,1720+i*48,1320,energy=250)
+        for i in range(4): unit(69,1820+(i%2)*40,1160+(i//2)*40)
+        # Existing and extra powered structures exercise placement and
+        # producer scans at both bases while leaving the 200-supply cap exact.
+        for kind,x,y in [
+            (156,416,704),(160,320,832),(160,416,832),(160,512,832),
+            (155,608,832),(166,704,832),(164,800,832),(163,896,832),
+            (165,992,832),(159,1088,832),(167,1184,832),(169,1280,832),
+            (170,1376,832),(171,1472,832),(172,1568,832),
+            (156,2144,2320),(160,2048,2416),(155,2144,2416),
+            (166,2240,2416),(164,2336,2416),(165,2432,2416),
+            (167,2528,2416),(170,2624,2416)]:
+            unit(kind,x,y)
+        for i in range(72): unit(37,1260+(i%9)*16,1080+(i//9)*16,1)
+        for i in range(20): unit(38,1400+(i%5)*24,1080+(i//5)*24,1)
+        for i in range(20): unit(43,1510+(i%5)*28,1200+(i//5)*28,1)
+        for i in range(4): unit(46,1650+i*28,1320,1,energy=250)
     tags[b'UNIT']=b''.join(units)
     tags[b'OWNR']=tags[b'IOWN']=bytes([6,5]+[0]*10)
     side=bytearray([2,0]+[7]*10)
@@ -216,6 +308,8 @@ def make_map(name):
     for tag,count in [(b'PTEC',24),(b'PTEx',44)]:
         researched=bytearray(count)
         if name.startswith('storm') or name=='load': researched[19]=1
+        if name=='load-t118':
+            for tech in (19,20,21,22): researched[tech]=1
         tags[tag]=bytes([1])*(12*count)+bytes(12*count)+bytes([1])*count+researched+bytes([1])*(12*count)
     for tag,count in [(b'UPGR',46),(b'PUPx',61)]:
         levels=bytearray(count)
@@ -228,7 +322,8 @@ def make_map(name):
     data=b''.join(tag+struct.pack('<I',len(value))+value for tag,value in tags.items())
     path=OUT/'maps'/f'{name}.scx'; path.parent.mkdir(parents=True,exist_ok=True)
     mpq_write(path,data,archive)
-    return {'map':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'template':str(source),'template_sha256':hashlib.sha256(source.read_bytes()).hexdigest()}
+    result = {'map':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'template':str(source),'template_sha256':hashlib.sha256(source.read_bytes()).hexdigest()}
+    return result
 
 def runtime():
     target=OUT/'runtime'; target.mkdir(parents=True,exist_ok=True)
@@ -243,7 +338,14 @@ def runtime():
     return target
 
 if __name__=='__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--output', default='build/audit-validation-20260926',
+                        help='isolated build/ directory for generated maps and runtime')
+    output = (ROOT / parser.parse_args().output).resolve()
+    if not output.is_relative_to((ROOT / 'build').resolve()):
+        raise ValueError('audit fixture output must stay under build/')
+    OUT = output
     OUT.mkdir(parents=True,exist_ok=True)
-    receipt=[make_map(name) for name in ['storm-allies','storm-clear','producer','producer-pair','cannon-blocker','resource-overlap','build-cancel','worker-issuer','worker-local-defense','worker-mining','racebot-worker-defense','racebot-combat','command-suppression','observer-safety','pylon-loss','prerequisite','power-recovery','combat','load']]
+    receipt=[make_map(name) for name in ['storm-allies','storm-clear','producer','producer-pair','cannon-blocker','resource-overlap','build-cancel','worker-issuer','worker-local-defense','worker-mining','racebot-worker-defense','racebot-combat','command-suppression','observer-safety','pylon-loss','prerequisite','power-recovery','combat','combat-corpus','combat-corpus-elevation','unit-memory','footprint-native','dynamic-navigation','load','load-t118']]
     (OUT/'map-receipt.json').write_text(json.dumps(receipt,indent=2))
     print(runtime())

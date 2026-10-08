@@ -5,6 +5,7 @@ $runtimePath = (Resolve-Path -LiteralPath $Runtime).Path
 $executable = Join-Path $runtimePath 'StarCraft.exe'
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw 'Missing runtime executable' }
 $records = @()
+$record = $null
 $recordPath = Join-Path $runtimePath 'arena-owned-processes.json'
 if (Test-Path -LiteralPath $recordPath) {
     $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
@@ -23,6 +24,22 @@ foreach ($process in Get-CimInstance Win32_Process -Filter "Name='StarCraft.exe'
         }
     }
     if ($isOwned) {
+        if ($record -and $record.PSObject.Properties.Name -contains 'headless' -and $record.headless) {
+            # The persistent monitor closes only its own live process handles
+            # on its private desktop. No foreground app receives input.
+            $requestPath=Join-Path $runtimePath 'headless-close-request.json'
+            $temporaryRequest=$requestPath+'.'+[Guid]::NewGuid().ToString('N')+'.tmp'
+            [ordered]@{process_ids=@([int]$process.ProcessId)} | ConvertTo-Json |
+                Set-Content -LiteralPath $temporaryRequest
+            Move-Item -LiteralPath $temporaryRequest -Destination $requestPath -Force
+            $closeDeadline=[DateTime]::UtcNow.AddSeconds(15)
+            do {
+                Start-Sleep -Milliseconds 100
+                $stillLive=Get-CimInstance Win32_Process -Filter "ProcessId=$($process.ProcessId)"
+            } while($stillLive -and $stillLive.CreationDate -eq $process.CreationDate -and
+                    [DateTime]::UtcNow -lt $closeDeadline)
+            if(!$stillLive -or $stillLive.CreationDate -ne $process.CreationDate) { continue }
+        }
         try {
             Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
         } catch {

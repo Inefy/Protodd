@@ -7,6 +7,7 @@ $script:SourceFiles = @(
 $script:SourceScripts = @(
     'scripts/direct-match.ps1',
     'scripts/build-tournament.ps1',
+    'scripts/build-trained-controller.ps1',
     'scripts/build-opening-comparison.ps1',
     'scripts/build-bwapi-runtime.ps1',
     'scripts/package-tournament.ps1',
@@ -19,7 +20,17 @@ $script:SourceScripts = @(
     'scripts/verify.ps1',
     'scripts/TournamentManifest.psm1',
     'scripts/RuntimeProfiles.psm1',
-    'scripts/MatchProvenance.psm1'
+    'scripts/MatchProvenance.psm1',
+    'scripts/MatchProcessOwnership.psm1',
+    'scripts/MatchResourceBudget.psm1',
+    'scripts/HeadlessStarCraft.psm1',
+    'scripts/HeadlessStarCraft.cs',
+    'scripts/run-headless-starcraft.ps1',
+    'scripts/run-audit-load.ps1',
+    'scripts/run-audit-scenarios.ps1',
+    'scripts/start-arena.ps1',
+    'scripts/start-strength-experiment.ps1',
+    'scripts/HeadlessCampaign.psm1'
 )
 
 function Test-TournamentSourcePath {
@@ -196,6 +207,85 @@ function Assert-TournamentDllMatchesManifest {
     }
 }
 
+function Assert-TournamentFeatureManifest {
+    param(
+        [Parameter(Mandatory)][object]$Manifest,
+        [Parameter(Mandatory)][string]$RepositoryRoot
+    )
+
+    $root = [IO.Path]::GetFullPath($RepositoryRoot)
+    $registryPath = Join-Path $root 'docs/feature-registry.json'
+    if (-not (Test-Path -LiteralPath $registryPath -PathType Leaf)) {
+        throw 'The registered feature inventory is missing from the source tree'
+    }
+    $registryHash = (Get-FileHash -LiteralPath $registryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $registry = Get-Content -LiteralPath $registryPath -Raw | ConvertFrom-Json
+    if ($registry.schema -ne 'protodd-feature-registry-v1' -or
+        $Manifest.feature_registry_sha256 -ne $registryHash) {
+        throw 'Build manifest is not bound to the current feature registry'
+    }
+    $active = $Manifest.registered_feature_manifest
+    if (-not $active -or $active.schema -ne 'protodd-active-features-v1' -or
+        $active.registry_sha256 -ne $registryHash) {
+        throw 'Build manifest has no complete registered feature snapshot'
+    }
+
+    foreach ($entry in $registry.options) {
+        $matches = @($active.build_options | Where-Object { $_.id -ceq $entry.id })
+        if ($matches.Count -ne 1 -or
+            [string]$matches[0].value -cne [string]$entry.tournament_value -or
+            [string]$matches[0].tournament_value -cne [string]$entry.tournament_value) {
+            throw "Tournament package contains an unapproved or unregistered build feature: $($entry.id)"
+        }
+    }
+    if (@($active.build_options).Count -ne @($registry.options).Count) {
+        throw 'Build manifest has missing or extra registered CMake options'
+    }
+
+    foreach ($entry in $registry.build_inputs) {
+        $matches = @($active.build_inputs | Where-Object { $_.id -ceq $entry.id })
+        if ($matches.Count -ne 1 -or
+            [string]$matches[0].value -cne [string]$entry.tournament_value -or
+            [string]$matches[0].tournament_value -cne [string]$entry.tournament_value) {
+            throw "Tournament package contains an unapproved or unregistered build input: $($entry.id)"
+        }
+    }
+    if (@($active.build_inputs).Count -ne @($registry.build_inputs).Count) {
+        throw 'Build manifest has missing or extra registered CMake inputs'
+    }
+
+    foreach ($entry in $registry.runtime_controls) {
+        $matches = @($active.runtime_controls | Where-Object { $_.id -ceq $entry.id })
+        if ($matches.Count -ne 1 -or [string]$matches[0].file -cne [string]$entry.file -or
+            @($matches[0].allowed_values).Count -ne @($entry.allowed_values).Count) {
+            throw "Build manifest has an incomplete runtime feature contract: $($entry.id)"
+        }
+        foreach ($value in $entry.allowed_values) {
+            if (@($matches[0].allowed_values) -cnotcontains $value) {
+                throw "Build manifest has a stale runtime feature contract: $($entry.id)"
+            }
+        }
+    }
+    if (@($active.runtime_controls).Count -ne @($registry.runtime_controls).Count) {
+        throw 'Build manifest has missing or extra runtime feature controls'
+    }
+}
+
+function Assert-TournamentFeatureRegistry {
+    param([Parameter(Mandatory)][string]$RepositoryRoot)
+
+    $validator = Join-Path ([IO.Path]::GetFullPath($RepositoryRoot)) 'tools/feature_registry.py'
+    if (-not (Test-Path -LiteralPath $validator -PathType Leaf)) {
+        throw 'The feature registry validator is missing from the source tree'
+    }
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) { throw 'Python is required to validate the tournament feature registry' }
+    $output = & $python.Source $validator 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "The tournament feature registry is stale or invalid:`n$output"
+    }
+}
+
 Export-ModuleMember -Function @(
     'Test-TournamentSourcePath',
     'Get-TournamentSourceInventory',
@@ -203,5 +293,7 @@ Export-ModuleMember -Function @(
     'Get-TournamentSourceCommit',
     'Test-TournamentManifestPath',
     'Assert-TournamentSourceMatchesManifest',
-    'Assert-TournamentDllMatchesManifest'
+    'Assert-TournamentDllMatchesManifest',
+    'Assert-TournamentFeatureManifest',
+    'Assert-TournamentFeatureRegistry'
 )

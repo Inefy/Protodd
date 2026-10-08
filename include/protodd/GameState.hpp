@@ -176,11 +176,12 @@ struct WeaponSnapshot {
     bool targetsAir{};
     bool targetsGround{};
     int hits{1};
-    // Enemy-only radial splash. Friendly-fire/line/bounce weapons need their
-    // own geometry and are deliberately not represented as this shape.
+    // Radial splash bands are copied from BWAPI when supported. Radial_Splash
+    // weapons can also damage the attacker's side; Enemy_Splash cannot.
     int splashInner{};
     int splashMiddle{};
     int splashOuter{};
+    bool splashFriendlyFire{};
 };
 
 struct UnitSnapshot {
@@ -239,17 +240,40 @@ struct UnitSnapshot {
     double incomingDamage{};
     // Own production only; never query hidden opponent training timers.
     int remainingTrainFrames{};
-    // A just-issued, in-range own attack is turning/winding up before the
-    // engine's single attack frame. Never inferred for enemy units.
+    // An own attack may still launch, based on a fresh in-range order or an
+    // observed Reaver attack animation. Never inferred for enemy units.
     bool attackWindup{};
+    // Own-unit damage observed during the short tactical reaction window.
+    bool recentlyDamaged{};
+    // Confidence is kept separate from the last observed fields above. A
+    // remembered unit can still be known to exist after its last location or
+    // health sample has become uncertain.
+    double existenceConfidence{1.0};
+    double locationConfidence{1.0};
+    double healthConfidence{1.0};
+    int footprintWidthTiles{1};
+    int footprintHeightTiles{1};
+    // True while BWAPI reports an active Shield Battery recharge order.
+    bool recharging{};
 
     void inheritObservationHistory(const UnitSnapshot& previous) noexcept;
+    void updateMemoryConfidence(Frame currentFrame) noexcept;
+
+    // Fog reconciliation clears detected even for ordinary units. Only a
+    // current undetected contact or an observed cloak/burrow threat needs a
+    // detector; this does not grant visibility or legal attack targeting.
+    [[nodiscard]] bool requiresDetection() const noexcept {
+        return cloaked || burrowed || (visible && !detected) ||
+               kind == UnitKind::darkTemplar || kind == UnitKind::lurker ||
+               kind == UnitKind::spiderMine;
+    }
 
     [[nodiscard]] int durability() const noexcept {
         return hitPoints + shields;
     }
 
     [[nodiscard]] double healthFraction() const noexcept;
+    [[nodiscard]] double estimatedHealthFraction() const noexcept;
     [[nodiscard]] bool canAttack(const UnitSnapshot& target) const noexcept;
 };
 
@@ -272,6 +296,14 @@ struct BaseSnapshot {
     // can cross cliffs and makes some map fourths appear closer than the
     // natural. -1 means the bridge has not calculated a route yet.
     int groundDistanceFromMain{-1};
+    // Enemy-side route data is known only after the enemy main is legally
+    // located. Known=false means uncertain; known=true and distance<0 means
+    // the static ground path is unreachable.
+    int enemyGroundDistanceFromMain{-1};
+    bool enemyGroundReachabilityKnown{};
+    // False when BWAPI's static placement search found no legal depot tile.
+    // Hand-authored states keep the default available until they model tiles.
+    bool depotFootprintAvailable{true};
 };
 
 struct TechnologySnapshot {
@@ -322,6 +354,10 @@ struct GameState {
     // anchor. BWAPI supplies a route-aware estimate; portable callers use the
     // conservative default.
     int pylonBuilderTravelFrames{144};
+    // Rolling observed gathering rates. -1 means the adapter has not yet
+    // collected enough samples; portable planners may estimate from workers.
+    int estimatedMineralIncomePerMinute{-1};
+    int estimatedGasIncomePerMinute{-1};
     int mapWidthPixels{};
     int mapHeightPixels{};
     std::string mapName;
@@ -330,6 +366,8 @@ struct GameState {
     std::vector<BaseSnapshot> bases;
     // Currently visible area spells, including friendly Storms (friendly fire).
     std::vector<Position> storms;
+    // Currently visible Scanner Sweep fields. Their sight radius is 320 pixels.
+    std::vector<Position> scannerSweeps;
 
     [[nodiscard]] std::span<const UnitSnapshot> ourUnits() const noexcept {
         return self.units;

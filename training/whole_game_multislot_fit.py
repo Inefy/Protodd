@@ -19,6 +19,7 @@ import torch
 
 from .whole_game_encoding_cache import ObservationCache
 from .whole_game_fit import MATCHUPS, choose_games, validate_release_pair
+from .whole_game_fit_gate import verify_pre_fit_gate
 from .whole_game_multislot_batch import multislot_minibatch_loss
 from .whole_game_multislot_collect import collect_multislot_windows
 from .whole_game_multislot_model import MultiSlotWholeGameModel
@@ -31,6 +32,7 @@ from .whole_game_stream_fit import plan_chunks, verify_chunks
 SCHEMA = "protodd-whole-game-multislot-fit-v1"
 SOURCE_FILES = (
     "whole_game_multislot_fit.py", "whole_game_multislot_model.py",
+    "whole_game_fit_gate.py",
     "whole_game_multislot_batch.py", "whole_game_multislot_collect.py",
     "whole_game_cadence_sequences.py", "whole_game_model.py",
     "whole_game_features.py", "whole_game_batch.py", "whole_game_structured_loss.py",
@@ -127,6 +129,9 @@ def _pick_samples(buckets, counts, step, batch_size, rng):
 
 
 def fit(args):
+    pre_fit_gate = verify_pre_fit_gate(
+        args.release, args.validation_release,
+        args.representation_audit, args.native_parity_report)
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA unavailable")
     if (args.games_per_matchup < 1 or args.chunk_games_per_matchup < 1 or
@@ -175,6 +180,7 @@ def fit(args):
     spec = dict(schema=SCHEMA, training_identity_sha256=train_sha,
                 validation_identity_sha256=validation_sha, groups=groups,
                 validation_group=validation_group, source_code_sha256=sources,
+                pre_fit_gate=pre_fit_gate,
                 init_checkpoint_sha256=_digest(args.init_checkpoint)
                 if args.init_checkpoint else None,
                 quality_index_sha256=_digest(args.quality_index)
@@ -298,6 +304,7 @@ def fit(args):
                                             loss=float(loss.detach()), **details))
     report = dict(schema=SCHEMA, training_ready=False,
                   strength_validated=False, deployment="none",
+                  pre_fit_gate=pre_fit_gate,
                   spec_digest=digest, training_identity_sha256=train_sha,
                   validation_identity_sha256=validation_sha,
                   source_code_sha256=sources, total_groups=total_groups,
@@ -320,6 +327,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("release", "validation_release", "output"):
         parser.add_argument("--" + name.replace("_", "-"), type=Path, required=True)
+    parser.add_argument("--representation-audit", type=Path, required=True,
+                        help="Pre-fit, split-matched whole-game representation audit")
+    parser.add_argument("--native-parity-report", type=Path, required=True,
+                        help="Passing native export parity report for all three matchups")
     parser.add_argument("--quality-index", type=Path)
     parser.add_argument("--selection-from", type=Path)
     parser.add_argument("--init-checkpoint", type=Path)

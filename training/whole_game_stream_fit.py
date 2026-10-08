@@ -22,6 +22,7 @@ import torch
 
 from .whole_game_batch import minibatch_loss
 from .whole_game_encoding_cache import ObservationCache
+from .whole_game_fit_gate import verify_pre_fit_gate
 from .whole_game_fit import (SCHEMA as FIT_SCHEMA, MATCHUPS, choose_games, collect,
                              initialize_model, sample_loss, summarize_validation,
                              validate_release_pair)
@@ -33,7 +34,7 @@ from .whole_game_release import key
 SCHEMA = "protodd-whole-game-stream-fit-v1"
 SOURCE_FILES = ("whole_game_stream_fit.py", "whole_game_fit.py", "whole_game_batch.py",
                 "whole_game_model.py", "whole_game_features.py", "whole_game_quality.py",
-                "whole_game_encoding_cache.py")
+                "whole_game_encoding_cache.py", "whole_game_fit_gate.py")
 
 
 def _digest(path):
@@ -160,6 +161,9 @@ def _atomic_save(path, value):
 
 
 def fit(args):
+    pre_fit_gate = verify_pre_fit_gate(
+        args.release, args.validation_release,
+        args.representation_audit, args.native_parity_report)
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
@@ -204,6 +208,7 @@ def fit(args):
         raise ValueError("schedule must cover action, event and forecast")
     spec = dict(schema=SCHEMA, source_identity_sha256=train_identity_sha,
                 validation_identity_sha256=validation_identity_sha,
+                pre_fit_gate=pre_fit_gate,
                 quality_index_sha256=_digest(args.quality_index),
                 validation_quality_index_sha256=_digest(args.validation_quality_index),
                 source_code_sha256=sources, groups=groups,
@@ -323,6 +328,7 @@ def fit(args):
                                             game_id=sample[4]["game_id"],
                                             quality_band=sample[4]["quality_band"], **metrics))
     report = dict(schema=SCHEMA, training_ready=False, strength_validated=False,
+                  pre_fit_gate=pre_fit_gate,
                   deployment="none", source_identity_sha256=train_identity_sha,
                   validation_identity_sha256=validation_identity_sha,
                   source_code_sha256=sources, spec_digest=spec_digest,
@@ -346,6 +352,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release", type=Path, required=True)
     parser.add_argument("--validation-release", type=Path, required=True)
+    parser.add_argument("--representation-audit", type=Path, required=True,
+                        help="Pre-fit, split-matched whole-game representation audit")
+    parser.add_argument("--native-parity-report", type=Path, required=True,
+                        help="Passing native export parity report for all three matchups")
     parser.add_argument("--quality-index", type=Path, required=True)
     parser.add_argument("--validation-quality-index", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

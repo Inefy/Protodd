@@ -1,4 +1,5 @@
 #include "protodd/UrgentEvents.hpp"
+#include "protodd/FrameSchedule.hpp"
 
 #include <array>
 #include <iostream>
@@ -41,6 +42,24 @@ int main() {
     passed &= check(areaWork.updateWorkers && areaWork.updateCombat &&
                         !areaWork.updateMacro,
                     "area damage requests immediate evasion and combat safety");
+
+    constexpr Frame afterScheduledUpdate = 23;
+    const auto macroScheduled = frame_schedule::macroCadenceDue(afterScheduledUpdate);
+    const auto workersScheduled = frame_schedule::workersDue(afterScheduledUpdate);
+    const auto combatScheduled = afterScheduledUpdate % 12 == 0;
+    passed &= check(!macroScheduled && !workersScheduled && !combatScheduled,
+                    "event fixture arrives after scheduled work and before the next periodic pass");
+    queue.enqueue(UrgentEvent::areaDamage);
+    const auto nextDecision = frameWorkFor(queue.consume(), macroScheduled, false,
+                                           workersScheduled, combatScheduled);
+    passed &= check(nextDecision.updateWorkers && nextDecision.updateCombat &&
+                        !nextDecision.updateMacro,
+                    "area damage bypasses the remaining worker and combat cadence on the next frame");
+    queue.enqueue(UrgentEvent::builderLost);
+    const auto lostBuilderDispatch = frameWorkFor(queue.consume(), false, false,
+                                                  false, false);
+    passed &= check(lostBuilderDispatch.updateMacro && lostBuilderDispatch.updateWorkers,
+                    "builder loss bypasses the macro cadence at its next decision opportunity");
 
     const std::array current{Position{400, 400}};
     const std::array none{Position{-1, -1}};

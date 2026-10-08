@@ -10,6 +10,13 @@
 
 namespace protodd {
 
+struct HarassmentRouteBudget {
+    static constexpr int maximumPathSearches = 8;
+    static constexpr int maximumPathExpansions = 2048;
+    int pathSearches{};
+    int deferredChecks{};
+};
+
 struct HarassmentOpportunity {
     Position target{-1, -1};
     double score{};
@@ -22,9 +29,10 @@ struct HarassmentOpportunity {
 // Flying transport routes still need a safe ground drop.
 [[nodiscard]] HarassmentOpportunity harassmentOpportunity(
     const GameState& state, const UnitSnapshot& raider, bool flyingRoute = false,
-    const NavigationGrid* navigation = nullptr);
+    const NavigationGrid* navigation = nullptr, HarassmentRouteBudget* routeBudget = nullptr);
 [[nodiscard]] bool harassmentRouteSafe(const GameState& state,
-    const UnitSnapshot& raider, Position target, bool flyingRoute = false);
+    const UnitSnapshot& raider, Position target, bool flyingRoute = false,
+    const NavigationGrid* navigation = nullptr, HarassmentRouteBudget* routeBudget = nullptr);
 
 struct RaidMission {
     std::vector<UnitId> members;
@@ -39,7 +47,8 @@ class HarassmentPlanner {
 public:
     [[nodiscard]] RaidMission update(const GameState& state,
         std::span<const UnitSnapshot> available, const StrategicPlan& plan,
-        Position home, bool baseThreat, const NavigationGrid* navigation = nullptr);
+        Position home, bool baseThreat, const NavigationGrid* navigation = nullptr,
+        HarassmentRouteBudget* routeBudget = nullptr);
     void forgetUnit(UnitId id);
     void reset();
 private:

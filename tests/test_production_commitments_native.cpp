@@ -29,5 +29,10 @@ int main(){
     check(producer.reserve({{0,9,50,0,true,false,true}}).empty(),"busy producer reused");
     check(producer.reserve({{0,9,50,0}}).size()==1,"available queue slot not released after product binding");
     check(producer.ticket(1).phase==C::Phase::accepted,"queue slot release completed product early");
+    C observedComplete;observedComplete.observe({0,100,0,{9}});observedComplete.submit({1,1,1,240});
+    observedComplete.reserve({{1,9,100,0}});observedComplete.accepted(1);
+    observedComplete.observe({1,0,0,{9,10},{1},{1},{},{1}});
+    check(observedComplete.ticket(1).phase==C::Phase::completed&&observedComplete.ticket(1).spent&&
+        observedComplete.reservations()[0]==0,"late first observation did not reconcile completed construction");
     return errors?1:0;
 }

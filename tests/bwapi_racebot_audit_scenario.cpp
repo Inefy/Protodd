@@ -76,7 +76,6 @@ public:
         bot.onEnd(won);
         log_ << "END," << BWAPI::Broodwar->getFrameCount() << ',' << won << '\n';
         log_.flush();
-        ExitProcess(0);
     }
 
     void onFrame() override {

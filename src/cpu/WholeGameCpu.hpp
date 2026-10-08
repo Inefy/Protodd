@@ -33,6 +33,9 @@ struct SlotOutput {
     std::vector<Output> slots;
 };
 
+[[nodiscard]] bool safeWholeGameOutput(const Output& output) noexcept;
+[[nodiscard]] bool safeWholeGameOutput(const SlotOutput& output) noexcept;
+
 class WholeGameCpu {
 public:
     static constexpr std::size_t maximumParameterCount = 16'000'000;

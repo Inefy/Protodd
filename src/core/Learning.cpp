@@ -56,7 +56,9 @@ bool decodeField(const std::string_view encoded, std::string& value) {
         value.push_back(character);
         if (value.size() > OpponentHistory::maximumFieldBytes) return false;
     }
-    return true;
+    // Only accept the canonical spelling emitted by encodeField. Otherwise
+    // an unnecessary escape such as `%41` aliases the distinct plain value `A`.
+    return encodeField(value) == encoded;
 }
 
 OpeningStyle parseStyle(const std::string_view value) {

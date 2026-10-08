@@ -4,6 +4,10 @@ $repo = Split-Path -Parent $PSScriptRoot
 if ($Label -notmatch '^[A-Za-z0-9_-]+$') { throw 'Invalid label' }
 $run = Join-Path $repo "build/strength-20260918/$Label"
 if (-not (Test-Path -LiteralPath "$run/manifest.json")) { throw 'Prepare experiment first' }
+Import-Module (Join-Path $PSScriptRoot 'HeadlessCampaign.psm1') -Force
+foreach ($clientName in @('client1','client2')) {
+    Assert-HeadlessArenaClient -ClientDirectory (Join-Path $run $clientName)
+}
 if (Get-Process StarCraft -ErrorAction SilentlyContinue) { throw 'A StarCraft game is already running' }
 if (Test-Path -LiteralPath "$run/server/results.jsonl") { throw 'Existing results: prepare an explicit resume before relaunching' }
 if (Get-NetTCPConnection -LocalPort 1347 -State Listen -ErrorAction SilentlyContinue) { throw 'Experiment server port is already in use' }
@@ -14,10 +18,10 @@ $processes = @()
 foreach ($component in @('server','client1','client2')) {
     $dir = Join-Path $run $component
     $kind = if ($component -eq 'server') { 'server' } else { 'client' }
-    # The user requested headed games; Java's tournament GUI remains visible.
+    # All game launches must use the current headless client bundle.
     $process = Start-Process -FilePath $java -ArgumentList @('-jar',"$kind.jar", "${kind}_settings.json") `
         -WorkingDirectory $dir -RedirectStandardOutput "$dir/stdout.log" `
-        -RedirectStandardError "$dir/stderr.log" -PassThru
+        -RedirectStandardError "$dir/stderr.log" -WindowStyle Hidden -PassThru
     $processes += [ordered]@{component=$component; pid=$process.Id; started=$process.StartTime.ToString('o')}
     if ($component -eq 'server') { Start-Sleep -Seconds 3 }
 }

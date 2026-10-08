@@ -1,7 +1,11 @@
 #include "WholeGameCpu.hpp"
 
 #include <cstdint>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <limits>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -57,6 +61,17 @@ std::vector<std::uint8_t> oversizedModelHeader() {
     return bytes;
 }
 
+std::vector<std::uint8_t> nonfiniteModelParameter() {
+    auto bytes = validModel();
+    constexpr std::string_view name = "memory.weight_hh";
+    const auto valueOffset = 8 + 4 * 4 + 2 + 1 + name.size() + 2 * 4;
+    bytes[valueOffset] = 0;
+    bytes[valueOffset + 1] = 0;
+    bytes[valueOffset + 2] = 0xc0;
+    bytes[valueOffset + 3] = 0x7f; // quiet NaN
+    return bytes;
+}
+
 }  // namespace
 
 int main() {
@@ -65,6 +80,56 @@ int main() {
     if (model.parameterCount() == 0 ||
         model.parameterCount() > protodd::cpu::WholeGameCpu::maximumParameterCount) {
         std::cerr << "valid model fixture did not load within the configured limit\n";
+        return 1;
+    }
+
+    const auto directory = std::filesystem::temp_directory_path() /
+        ("protodd-whole-game-model-limit-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(directory);
+    const auto validPath = directory / "valid.bin";
+    const auto oversizedPath = directory / "oversized.bin";
+    const auto trailingPath = directory / "trailing.bin";
+    const auto writeBytes = [](const std::filesystem::path& path,
+                               const std::vector<std::uint8_t>& bytes) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char*>(bytes.data()),
+                     static_cast<std::streamsize>(bytes.size()));
+        return static_cast<bool>(output);
+    };
+    if (!writeBytes(validPath, valid) || !writeBytes(oversizedPath, oversizedModelHeader()) ||
+        !writeBytes(trailingPath, valid)) {
+        std::cerr << "could not write whole-game model path fixtures\n";
+        std::filesystem::remove_all(directory);
+        return 1;
+    }
+    bool fileModelLoaded = false;
+    try {
+        const protodd::cpu::WholeGameCpu fileModel{validPath};
+        fileModelLoaded = fileModel.parameterCount() == model.parameterCount();
+    } catch (const std::exception&) {
+    }
+    {
+        std::ofstream output(trailingPath, std::ios::binary | std::ios::app);
+        output.put('\0');
+    }
+    bool pathOversizeRejected = false;
+    try {
+        const protodd::cpu::WholeGameCpu invalid{oversizedPath};
+    } catch (const std::runtime_error& error) {
+        pathOversizeRejected = std::string_view(error.what()).find("parameter limit") !=
+                               std::string_view::npos;
+    }
+    bool trailingDataRejected = false;
+    try {
+        const protodd::cpu::WholeGameCpu invalid{trailingPath};
+    } catch (const std::runtime_error& error) {
+        trailingDataRejected = std::string_view(error.what()).find("trailing") !=
+                               std::string_view::npos;
+    }
+    std::filesystem::remove_all(directory);
+    if (!fileModelLoaded || !pathOversizeRejected || !trailingDataRejected) {
+        std::cerr << "file-backed whole-game model bounds failed\n";
         return 1;
     }
 
@@ -77,6 +142,43 @@ int main() {
     }
     if (!rejected) {
         std::cerr << "oversized tensor header was accepted\n";
+        return 1;
+    }
+
+    rejected = false;
+    try {
+        const auto invalid = nonfiniteModelParameter();
+        protodd::cpu::WholeGameCpu modelWithNan{std::span<const std::uint8_t>(invalid)};
+    } catch (const std::runtime_error& error) {
+        rejected = std::string_view(error.what()).find("nonfinite") != std::string_view::npos;
+    }
+    if (!rejected) {
+        std::cerr << "non-finite model parameter was accepted\n";
+        return 1;
+    }
+
+    protodd::cpu::Output safeOutput;
+    safeOutput.memory = {0.0F, -1.0F};
+    safeOutput.heads["kind"] = {2.0F, -3.0F};
+    if (!protodd::cpu::safeWholeGameOutput(safeOutput)) {
+        std::cerr << "finite model output was rejected\n";
+        return 1;
+    }
+    safeOutput.heads["kind"][0] = std::numeric_limits<float>::infinity();
+    if (protodd::cpu::safeWholeGameOutput(safeOutput)) {
+        std::cerr << "non-finite model output was accepted\n";
+        return 1;
+    }
+    protodd::cpu::SlotOutput safeSlots;
+    safeSlots.memory = {0.0F};
+    safeSlots.slots = {protodd::cpu::Output{.heads = {{"stop", {0.0F, 1.0F}}}}};
+    if (!protodd::cpu::safeWholeGameOutput(safeSlots)) {
+        std::cerr << "finite slot output was rejected\n";
+        return 1;
+    }
+    safeSlots.slots.front().heads["stop"][0] = std::numeric_limits<float>::quiet_NaN();
+    if (protodd::cpu::safeWholeGameOutput(safeSlots)) {
+        std::cerr << "non-finite slot output was accepted\n";
         return 1;
     }
     return 0;

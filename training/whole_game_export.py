@@ -15,6 +15,7 @@ import struct
 import torch
 
 from .whole_game_model import WholeGameModel
+from .whole_game_contract import model_contract
 
 
 MAGIC = b"PWGM1\0\0\0"
@@ -46,6 +47,8 @@ def package(checkpoint_path, output):
         ordered = sorted(state.items())
         stream.write(struct.pack("<I", len(ordered)))
         for name, tensor in ordered:
+            if not bool(torch.isfinite(tensor).all()) or bool((tensor.abs() > 1000.0).any()):
+                raise ValueError(f"non-finite or excessive parameter: {name}")
             data = tensor.detach().cpu().contiguous().float().numpy().astype("<f4", copy=False)
             encoded = name.encode("ascii")
             if len(encoded) > 65535 or data.ndim > 4:
@@ -60,6 +63,7 @@ def package(checkpoint_path, output):
                     weights_sha256=digest(binary), source_identity_sha256=checkpoint["source_identity_sha256"],
                     width=width, mixture_components=components,
                     parameters=sum(row["elements"] for row in rows), tensors=rows,
+                    model_contract=model_contract(weights_schema=SCHEMA),
                     inference_validated=False, tournament_ready=False)
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf8")
     return manifest
@@ -73,6 +77,8 @@ def read_package(path):
                         "protodd-whole-game-multislot-weights-v2": 2}.get(manifest["schema"])
     if expected_version is None or digest(binary) != manifest["weights_sha256"]:
         raise ValueError("weight package integrity failure")
+    if manifest.get("model_contract") != model_contract(weights_schema=manifest["schema"]):
+        raise ValueError("weight package encoder/decoder contract mismatch")
     with binary.open("rb") as stream:
         if stream.read(8) != MAGIC:
             raise ValueError("weight package magic mismatch")
@@ -91,7 +97,10 @@ def read_package(path):
             raw = stream.read(count * 4)
             if len(raw) != count * 4:
                 raise ValueError("truncated weight tensor")
-            state[name] = torch.frombuffer(bytearray(raw), dtype=torch.float32).clone().reshape(shape)
+            tensor = torch.frombuffer(bytearray(raw), dtype=torch.float32).clone().reshape(shape)
+            if not bool(torch.isfinite(tensor).all()) or bool((tensor.abs() > 1000.0).any()):
+                raise ValueError(f"non-finite or excessive parameter: {name}")
+            state[name] = tensor
         if stream.read(1):
             raise ValueError("trailing weight bytes")
     return manifest, state

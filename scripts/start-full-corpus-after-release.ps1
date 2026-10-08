@@ -15,6 +15,9 @@ Set-Location $workspaceRoot
 $python = Join-Path $workspaceRoot 'build/model-venv/Scripts/python.exe'
 $release = 'artifacts/replay-learning/whole-game-release-v32d-20260923'
 $validation = 'artifacts/replay-learning/whole-game-release-validation8-v32c-20260923'
+$representationAuditDir = 'artifacts/replay-learning/whole-game-full-pre-fit-audit-v32d-v32c-20261007'
+$representationAudit = Join-Path $representationAuditDir 'report.json'
+$nativeParityReport = 'artifacts/goal-20261005/t108-target-representation-audit-20261007/native-parity/report.json'
 $quality = 'artifacts/replay-learning/whole-game-quality-v2-v32d-20260923.json'
 $smoke = 'artifacts/replay-learning/whole-game-multislot-full-smoke-20260923'
 $output = 'artifacts/replay-learning/whole-game-multislot-full-2400x3-width512-20260923'
@@ -24,6 +27,7 @@ $lockPath = 'build/robust-training-20260922/whole-game-multislot-full.lock'
 $smokeLog = 'build/robust-training-20260922/whole-game-multislot-full-smoke.log'
 $fitLog = 'build/robust-training-20260922/whole-game-multislot-full-fit.log'
 $auditLog = 'build/robust-training-20260922/whole-game-multislot-full-audit.log'
+$fitGateLog = 'build/robust-training-20260922/whole-game-multislot-full-pre-fit-gate.log'
 
 function Write-Status($stage, $detail, $code) {
     @{ stage = $stage; detail = $detail; exit_code = $code;
@@ -74,6 +78,24 @@ try {
         Start-Sleep -Seconds 30
     }
 
+    if (-not (Test-Path -LiteralPath $representationAudit)) {
+        if (Test-Path -LiteralPath $representationAuditDir) {
+            throw "Incomplete pre-fit representation audit exists: $representationAuditDir"
+        }
+        New-Item -ItemType Directory -Path $representationAuditDir | Out-Null
+        Write-Status 'pre_fit_representation_audit' 'Bounded label-preserving audit for the exact fit releases' $null
+        & $python -m training.whole_game_representation_audit $release $validation `
+            --games-per-matchup 2 --maximum-frame 3600 --output $representationAudit *>> $fitGateLog
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $representationAudit)) {
+            throw "Pre-fit representation audit failed; inspect $fitGateLog"
+        }
+    }
+    Write-Status 'pre_fit_gate' 'Checking release readiness, split provenance, representation metrics and native parity' $null
+    & $python -m training.whole_game_fit_gate $release $validation $representationAudit $nativeParityReport *>> $fitGateLog
+    if ($LASTEXITCODE -ne 0) {
+        throw "Pre-fit gate failed; no optimizer will run. Inspect $fitGateLog"
+    }
+
     Write-Status 'waiting_for_gpu_slot' 'Waiting for current fit, audit, and offline gates' $null
     while ((Test-OwnedProcess $MultislotLauncherProcessId 'start-multislot-after-focal.ps1') -or
            (Test-OwnedProcess $OfflineGatesProcessId 'start-multislot-offline-gates-after-fit.ps1') -or
@@ -84,6 +106,8 @@ try {
     $smokeArgs = @(
         '-m', 'training.whole_game_multislot_fit',
         '--release', $release, '--validation-release', $validation,
+        '--representation-audit', $representationAudit,
+        '--native-parity-report', $nativeParityReport,
         '--quality-index', $quality, '--output', $smoke, '--device', 'cuda',
         '--games-per-matchup', '1', '--chunk-games-per-matchup', '1',
         '--validation-games-per-matchup', '1', '--epochs', '1',
@@ -103,6 +127,8 @@ try {
     $fitArgs = @(
         '-m', 'training.whole_game_multislot_fit',
         '--release', $release, '--validation-release', $validation,
+        '--representation-audit', $representationAudit,
+        '--native-parity-report', $nativeParityReport,
         '--quality-index', $quality, '--output', $output, '--device', 'cuda',
         '--games-per-matchup', '2400', '--chunk-games-per-matchup', '8',
         '--validation-games-per-matchup', '8', '--epochs', '1',

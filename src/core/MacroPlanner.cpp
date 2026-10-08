@@ -374,11 +374,20 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     const auto blockedBuild = [&state, buildBlockers](
                                   const UnitKind target,
                                   const ConstructionTaskSite& constructionSite) {
-        return std::ranges::find_if(buildBlockers,
+        const auto found = std::ranges::find_if(buildBlockers,
             [&state, target, &constructionSite](const BuildBlockerFeedback& feedback) {
-                return feedback.target == target && feedback.retryAt > state.frame &&
-                       sameConstructionTask(feedback.constructionSite, constructionSite);
+                if (feedback.target != target || feedback.retryAt <= state.frame ||
+                    !sameConstructionTask(feedback.constructionSite, constructionSite)) {
+                    return false;
+                }
+                // A missing-prerequisite report is only actionable while the
+                // prerequisite is still absent. Once a repaired prerequisite
+                // appears, retry the target immediately instead of waiting out
+                // the generic blocker cooldown with its bank reservation off.
+                return feedback.reason != BuildBlockerReason::missingPrerequisite ||
+                       !prerequisitesMet(state, target);
             });
+        return found;
     };
     // A blocking Pylon is a supply deadline, not a license to idle the
     // Nexus.  Before the game is within four supply of the cap, let a Probe
@@ -567,8 +576,33 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             // reserving its 400 minerals first can leave every Gateway idle
             // while both goals wait. Fund the supply deadline first.
             const auto priority = remaining <= 4 ? 130 : 110;
-            goals.push_back({GoalKind::build, UnitKind::pylon, pylons + 1, priority, true,
-                             "operational supply invariant"});
+            ProductionGoal supplyGoal{
+                GoalKind::build, UnitKind::pylon, pylons + 1, priority, true,
+                "operational supply invariant"};
+            if (forecast > 0) {
+                const auto timeToSupplyBlock = std::max<Frame>(1,
+                    (static_cast<Frame>(std::max(1, remaining)) * horizon + forecast - 1) /
+                    forecast);
+                supplyGoal.timing.requiredByFrame = state.frame + timeToSupplyBlock;
+                supplyGoal.timing.expectedReadyFrame = state.frame + horizon;
+                supplyGoal.timing.slackFrames =
+                    supplyGoal.timing.requiredByFrame -
+                    supplyGoal.timing.expectedReadyFrame;
+                supplyGoal.timing.feasible =
+                    supplyGoal.timing.slackFrames >= 0 &&
+                    countExisting(state, UnitKind::probe) > 0;
+                supplyGoal.timing.reservationReason =
+                    CriticalReservationReason::supply;
+                for (auto& candidate : goals) {
+                    if (candidate.goal == GoalKind::build &&
+                        candidate.target == UnitKind::pylon &&
+                        (candidate.reason == "maintain a supply buffer" ||
+                         candidate.reason == "operational supply invariant")) {
+                        candidate.timing = supplyGoal.timing;
+                    }
+                }
+            }
+            goals.push_back(std::move(supplyGoal));
         }
     }
     if (plan.prioritizeReinforcements) {
@@ -670,6 +704,27 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             countExisting(state, UnitKind::zealot) + 1, openingScreen == 0 ? 127 : 119, true,
             "deliver the first mobile screen before opening infrastructure"});
     }
+    for (auto& goal : goals) {
+        if (!goal.timing.active()) continue;
+        if (!goal.timing.feasible) {
+            // A missed checkpoint must not keep its original blocking tier
+            // when its own estimate proves the deadline cannot be met. The
+            // strategic plan is rebuilt each frame, so a changed threat can
+            // restore the request without stale priority memory.
+            // Even a missed supply deadline should start its Pylon as soon as
+            // it is affordable. Keep its current-pass priority, but skip the
+            // shortfall reservation below so a missed timing estimate cannot
+            // consume the next worker cycle. Detection/range chains can lose
+            // both their blocking tier and urgency when the checkpoint is no
+            // longer attainable.
+            if (goal.timing.reservationReason != CriticalReservationReason::supply) {
+                goal.blocking = false;
+                goal.priority = std::min(goal.priority, 90);
+            }
+        } else {
+            goal.priority += criticalDeadlinePriorityAdjustment(goal.timing, state.frame);
+        }
+    }
     std::ranges::stable_sort(goals, std::greater{}, &ProductionGoal::priority);
 
     for (auto goal : goals) {
@@ -743,6 +798,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                         "unlock " + std::string(stats.name), TechnologyKind::none,
                         goal.blocking,
                     };
+                    action.timing = goal.timing;
                     action.reserved = !blockerActive && ledger.reserve(unit.minerals, unit.gas);
                     action.executable = !blockerActive;
                     actions.push_back(std::move(action));
@@ -758,6 +814,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                         UnitKind::unknown, goal.priority, minerals, gas, false,
                         goal.reason, goal.technology, true,
                     };
+                    waiting.timing = goal.timing;
                     waiting.reserved = ledger.reserve(minerals, gas);
                     waiting.executable = false;
                     actions.push_back(std::move(waiting));
@@ -779,6 +836,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                 UnitKind::unknown, goal.priority, minerals, gas, false,
                 goal.reason, goal.technology, goal.blocking,
             };
+            action.timing = goal.timing;
             action.reserved = ledger.reserve(minerals, gas);
             if (action.reserved || goal.blocking) ++committedProducers[stats.producer];
             if (action.reserved || goal.blocking) actions.push_back(std::move(action));
@@ -824,6 +882,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                     "unlock " + std::string(unitStats(goal.target).name),
                     TechnologyKind::none, goal.blocking,
                 };
+                action.timing = goal.timing;
                 action.reserved = !blockerActive && ledger.reserve(stats.minerals, stats.gas);
                 action.executable = !blockerActive;
                 if (action.reserved || goal.blocking) {
@@ -846,6 +905,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                     target.minerals, target.gas, false, goal.reason,
                     TechnologyKind::none, true,
                 };
+                waiting.timing = goal.timing;
                 waiting.constructionSite = goal.constructionSite;
                 waiting.reserved = !blockerActive &&
                                    ledger.reserve(target.minerals, target.gas);
@@ -872,6 +932,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             stats.minerals, stats.gas, false, goal.reason,
             TechnologyKind::none, goal.blocking,
         };
+        action.timing = goal.timing;
         action.constructionSite = goal.constructionSite;
         const auto isConstructionGoal = goal.goal == GoalKind::build ||
                                         goal.goal == GoalKind::expand;
@@ -890,7 +951,10 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         // Protect each resource independently. A gas-starved upgrade can keep
         // its mineral bank without freezing probes or other mineral-only work
         // paid for from the true surplus.
-        if (goal.blocking && !actions.back().reserved) {
+        const auto missedSupplyDeadline = goal.timing.active() &&
+            goal.timing.reservationReason == CriticalReservationReason::supply &&
+            !goal.timing.feasible;
+        if (goal.blocking && !actions.back().reserved && !missedSupplyDeadline) {
             protectBlocking(goal.target, stats.minerals, stats.gas,
                             goal.priority, goal.constructionSite);
             // One future unit can reserve its mineral cost while gas arrives.
@@ -1022,11 +1086,15 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         }
     }
 
-    std::ranges::stable_sort(actions, [](const MacroAction& left, const MacroAction& right) {
+    std::ranges::stable_sort(actions, [&state](const MacroAction& left, const MacroAction& right) {
         if (left.reserved != right.reserved) {
             return left.reserved > right.reserved;
         }
-        return left.priority > right.priority;
+        const auto leftPriority = left.priority +
+            criticalDeadlinePriorityAdjustment(left.timing, state.frame);
+        const auto rightPriority = right.priority +
+            criticalDeadlinePriorityAdjustment(right.timing, state.frame);
+        return leftPriority > rightPriority;
     });
 
     // Record blocking structure demands that still need a future pass.  This

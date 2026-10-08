@@ -36,6 +36,7 @@
 #include <fstream>
 #include <map>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -122,7 +123,6 @@ private:
     TransportController transports_;
     FrameBudget frameBudget_;
     CommandBus commands_;
-    CommandBus scoutCommands_;
     StrategicPlan plan_;
     CombatEstimate fight_;
     GameState state_;
@@ -157,17 +157,43 @@ private:
     std::string historyMapIdentity_;
     std::string gameOutcomeId_;
     std::vector<UnitId> detectorEscorts_;
+    int requiredDetectorCount_{};
     std::vector<UnitId> leasedScouts_;
+    std::vector<ScoutOrder> pendingScoutOrders_;
+    bool scoutingDispatchPending_{};
     std::vector<Position> advanceWaypoints_;
     std::vector<std::uint64_t> navigationSignatures_;
+    struct CachedNavigationRoute {
+        std::vector<Position> points;
+        Position from{-1, -1};
+        Position to{-1, -1};
+        MovementFootprint footprint{};
+        std::uint64_t obstacleVersion{};
+        NavigationStatus status{NavigationStatus::invalidInput};
+        bool computed{};
+    };
+    std::vector<CachedNavigationRoute> advanceRoutes_;
     Frame navigationRefresh_{-1};
     struct StalledAdvance {
         Position destination{-1, -1};
         Position waypoint{-1, -1};
         Frame waypointSince{-1};
         Frame lastSeen{-1};
+        CachedNavigationRoute route;
+        Position searchTarget{-1, -1};
+        Position searchWaypoint{-1, -1};
+        Frame searchWaypointSince{-1};
+        CachedNavigationRoute searchRoute;
     };
     std::map<std::uint64_t, StalledAdvance> stalledAdvances_;
+    struct RetreatRouteCheck {
+        Position startTile{-1, -1};
+        Position destinationTile{-1, -1};
+        Frame lastSeen{-1};
+        bool failed{};
+        CachedNavigationRoute route;
+    };
+    std::unordered_map<std::uint64_t, RetreatRouteCheck> retreatRouteChecks_;
     Frame firstCounterattackFrame_{-1};
     Frame firstEnemyContactFrame_{-1};
     Frame firstBaseBreachFrame_{-1};
@@ -213,6 +239,9 @@ private:
     FrameIntegral supplyDeliberateOpeningPauseFrames_;
     FrameIntegral idleGatewayFrames_;
     FrameIntegral idleWorkerFrames_;
+    FrameIntegral idleTrainingProducerFrames_;
+    FrameIntegral affordableProducerIdleFrames_;
+    FrameIntegral supplyCappedFrames_;
     std::map<std::string, PhaseTiming> phases_;
     std::map<std::string, Frame> deferredOptionalPhases_;
     PhaseFailurePolicy phaseFailurePolicy_;
@@ -227,6 +256,7 @@ private:
     std::uint64_t commandsRedundant_{};
     std::uint64_t commandsDeferred_{};
     std::map<std::string, std::uint64_t> actionTotals_;
+    std::map<std::string, std::uint64_t> spellAttemptTotals_;
     struct LastAction { Frame frame{-1}; std::string source; std::string type; UnitId target{-1}; };
     std::map<UnitId, LastAction> lastActions_;
     std::map<UnitId, UnitSnapshot> damageSamples_;
@@ -236,6 +266,18 @@ private:
     const char* activePhase_{"startup"};
     std::uint64_t caughtErrors_{};
     std::uint64_t loggingErrors_{};
+    struct PendingSpellEffect {
+        Command command;
+        Frame acceptedFrame{};
+        Frame observationWindow{};
+        Position actorPosition{-1, -1};
+        int baselineActorEnergy{};
+        std::map<UnitId, UnitSnapshot> subjects;
+        std::vector<UnitId> existingArchons;
+        bool baselineComplete{true};
+    };
+    std::vector<PendingSpellEffect> pendingSpellEffects_;
+    std::map<std::string, std::uint64_t> spellEffectTotals_;
 #ifdef PROTODD_ENGINE_FAULT_INJECTION
     std::string auditFaultKind_;
     std::string auditFaultTarget_;
@@ -272,20 +314,27 @@ private:
     void logAction(const ActionDiagnostic& action) noexcept;
     void logBuildLease(const BuildLeaseDiagnostic& lease) noexcept;
     void logBuildSelection(const BuildSelectionDiagnostic& selection) noexcept;
+    void logBuildRoute(const BuildRouteDiagnostic& route) noexcept;
     void logLifecycle(BWAPI::Unit unit, std::string_view event);
     void logDamage();
+    void observeSpellEffectCommand(const Command& command);
+    void reconcileSpellEffects();
     void incident(std::string_view kind, UnitId unit, bool active, Frame threshold,
                   std::string_view evidence);
 
     void runFrame(CallbackBudget& callbackBudget,
                   CallbackBudget::Clock::time_point callbackStarted);
     void updateStrategy();
-    void updateMacro();
+    void updateMacro(std::int64_t planningBudgetUs);
     void updateWorkers();
     void updateScouting();
+    void dispatchScoutingOrders();
+    void reconcileCommandEffects();
+    void dispatchFrameCommands();
+    void releaseScoutLeaseForPreemption(UnitId actor, std::string_view newOwner,
+                                        std::string_view reason);
     void updateScoutMicro();
-    void updateCombat(bool runSimulation, int navigationInterval,
-                      std::size_t commandLimit);
+    void updateCombat(bool runSimulation, int navigationInterval);
     [[nodiscard]] std::vector<UnitSnapshot> combatUnits(bool ours) const;
     [[nodiscard]] Position retreatPoint() const;
     void sampleTelemetry();

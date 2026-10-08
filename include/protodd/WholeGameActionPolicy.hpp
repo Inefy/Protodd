@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 namespace protodd {
 
@@ -10,6 +11,26 @@ inline constexpr std::size_t wholeGameResearchAction = 15;
 inline constexpr std::size_t wholeGameUpgradeAction = 16;
 inline constexpr std::size_t wholeGameCancelResearchAction = 20;
 inline constexpr std::size_t wholeGameCancelUpgradeAction = 21;
+
+enum class WholeGameEntityTargetStatus : std::uint8_t {
+    notRequired,
+    available,
+    missingId,
+    notInObservation,
+    notVisible,
+    noLongerExists,
+};
+
+[[nodiscard]] constexpr WholeGameEntityTargetStatus wholeGameEntityTargetStatus(
+    const bool required, const bool hasId, const bool observed,
+    const bool visible, const bool existsNow) noexcept {
+    if (!required) return WholeGameEntityTargetStatus::notRequired;
+    if (!hasId) return WholeGameEntityTargetStatus::missingId;
+    if (!observed) return WholeGameEntityTargetStatus::notInObservation;
+    if (!visible) return WholeGameEntityTargetStatus::notVisible;
+    if (!existsNow) return WholeGameEntityTargetStatus::noLongerExists;
+    return WholeGameEntityTargetStatus::available;
+}
 
 #ifdef PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY
 inline constexpr bool learnedWholeGameResearchAuthorityEnabled = true;

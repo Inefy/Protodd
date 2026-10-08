@@ -8,9 +8,12 @@
 #include "WholeGameAction.hpp"
 #include <BWAPI.h>
 #include <fstream>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <set>
+#include <string_view>
+#include <vector>
 
 namespace protodd::bwapi {
 
@@ -19,6 +22,8 @@ class WholeGameRuntime {
 public:
     void start();
     [[nodiscard]] std::vector<LegalWholeGameCommand> observe();
+    void recordApiResult(const LegalWholeGameCommand& action, bool accepted,
+                         int frame, std::string_view reason);
     void end();
     [[nodiscard]] bool enabled() const noexcept { return enabled_; }
     [[nodiscard]] bool modelLoaded() const noexcept { return model_ != nullptr; }
@@ -39,6 +44,7 @@ private:
     std::ofstream output_;
     std::ofstream inferenceOutput_;
     std::ofstream intentOutput_;
+    std::ofstream actionAuditOutput_;
     std::unique_ptr<cpu::WholeGameCpu> model_;
     cpu::Terrain terrain_;
     std::vector<float> memory_;
@@ -47,7 +53,17 @@ private:
     std::map<int, whole_observation::Entity> entities_;
     std::set<int> published_;
     int nextId_{}, sequence_{}, lastFrame_{-1};
+    std::uint64_t nextActionAttemptId_{};
+    struct PendingExecution {
+        LegalWholeGameCommand action;
+        int acceptedFrame{};
+    };
+    std::vector<PendingExecution> pendingExecutions_;
     int known(BWAPI::Unit unit) const;
+    void logActionAudit(const WholeGameActionIdentity& identity, int frame,
+                        int actorToken, std::string_view stage,
+                        std::string_view outcome, std::string_view reason);
+    void reconcileActionExecutions(int frame);
     [[nodiscard]] std::vector<LegalWholeGameCommand> dispatchDue(
         int frame, const std::vector<BWAPI::Unit>& current);
 };

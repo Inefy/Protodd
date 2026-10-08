@@ -15,6 +15,7 @@ import random
 
 import torch
 
+from .whole_game_fit_gate import verify_pre_fit_gate
 from .whole_game_fit import collect, validate_release_pair
 from .whole_game_model import WholeGameModel
 from .whole_game_quality import load_index
@@ -27,7 +28,8 @@ SCHEMA = "protodd-whole-game-spatial-stream-v1"
 SOURCES = ("whole_game_spatial_stream_fit.py", "whole_game_spatial_probe.py",
            "whole_game_action_schema.py",
            "whole_game_spatial_head.py", "whole_game_fit.py", "whole_game_features.py",
-           "whole_game_model.py", "whole_game_quality.py", "whole_game_stream_fit.py")
+           "whole_game_model.py", "whole_game_quality.py", "whole_game_stream_fit.py",
+           "whole_game_fit_gate.py")
 
 
 def _sha(path):
@@ -55,6 +57,9 @@ def _spec(args, train_sha, validation_sha, selection):
 
 
 def fit(args):
+    pre_fit_gate = verify_pre_fit_gate(
+        args.release, args.validation_release,
+        args.representation_audit, args.native_parity_report)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU required")
     if (args.grid < 2 or args.key_width < 1 or args.steps_per_group < 1 or
@@ -71,6 +76,7 @@ def fit(args):
     if source.get("source_identity_sha256") != train_sha:
         raise ValueError("teacher and training release differ")
     spec = _spec(args, train_sha, validation_sha, selection)
+    spec["pre_fit_gate"] = pre_fit_gate
     digest = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
     args.output.mkdir(parents=True, exist_ok=args.resume)
     spec_path = args.output / "run.json"
@@ -191,8 +197,9 @@ def fit(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("teacher", "release", "validation_release", "quality_index",
-                 "validation_quality_index", "selection", "output"):
+    for name in ("teacher", "release", "validation_release", "representation_audit",
+                 "native_parity_report", "quality_index", "validation_quality_index",
+                 "selection", "output"):
         parser.add_argument("--" + name.replace("_", "-"), type=Path, required=True)
     parser.add_argument("--grid", type=int, default=16)
     parser.add_argument("--key-width", type=int, default=64)

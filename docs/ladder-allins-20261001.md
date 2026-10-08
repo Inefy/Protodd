@@ -101,14 +101,18 @@ opponent investigation records the tested DLLs and results in
   --replays artifacts/cwal-dataset --parser build/replay-tools/screp.exe `
   --output artifacts/replay-learning/allin-requests-NEW --workers 4
 
-./scripts/build-trained-controller.ps1 -BuildDirectory build/trained-allins
+./scripts/build-trained-controller.ps1 `
+  -Weights 'path/to/export-package/weights.bin' `
+  -BuildDirectory build/trained-allins
 ```
 
 `training.arena prepare --all-in-opening PROFILE` freezes the local profile,
 read files and DLL. The all-in CMake flag defaults OFF and requires the weighted
 local hybrid evaluation controller. The trained-controller script enables it;
 `-StandardOpenings` disables it and `-Exclusive` restores research-only model
-control. Neither the repertoire nor weights are promoted to tournament use.
+control. This optional evaluation build requires a separately retained weights
+export and Python dependencies; neither is bundled with the tournament source
+archive. Neither the repertoire nor weights are promoted to tournament use.
 
 ## Retained Evidence
 

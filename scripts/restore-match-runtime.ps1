@@ -1,13 +1,15 @@
 param(
     [Parameter(Mandatory=$true)][string]$Runtime,
     [ValidateSet('patched-diagnostic', 'stock-certification')]
-    [string]$Profile = 'patched-diagnostic'
+    [string]$Profile = 'patched-diagnostic',
+    [object]$RuntimeLock = $null
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $runtimeProfiles = Join-Path $PSScriptRoot 'RuntimeProfiles.psm1'
 Import-Module $runtimeProfiles -Force
+Import-Module (Join-Path $PSScriptRoot 'MatchProcessOwnership.psm1') -Force
 $buildPrefix = [System.IO.Path]::GetFullPath((Join-Path $repo 'build')).TrimEnd('\') + '\'
 $runtimePath = [System.IO.Path]::GetFullPath($Runtime)
 if (-not $runtimePath.StartsWith($buildPrefix, [StringComparison]::OrdinalIgnoreCase)) {
@@ -25,6 +27,19 @@ if ($Profile -eq 'patched-diagnostic' -and
 if (Get-Process StarCraft -ErrorAction SilentlyContinue) {
     throw 'Cannot restore runtime files while StarCraft is running'
 }
+$runtimeRoot = Split-Path -Parent $runtimePath
+$expectedLockPath = [IO.Path]::GetFullPath((Join-Path $runtimeRoot '.protodd-match.lock'))
+$ownedRuntimeLock = $null
+if ($null -ne $RuntimeLock) {
+    if ($null -eq $RuntimeLock.stream -or -not $RuntimeLock.stream.CanWrite -or
+        [IO.Path]::GetFullPath([string]$RuntimeLock.path) -ine $expectedLockPath) {
+        throw 'The supplied runtime lock does not own the requested runtime root'
+    }
+} else {
+    $ownedRuntimeLock = Enter-MatchRuntimeLock -RuntimeRoot $runtimeRoot -Label 'restore-match-runtime'
+    $RuntimeLock = $ownedRuntimeLock
+}
+try {
 $profileInfo = Get-RuntimeProfileInfo -Profile $Profile -RepositoryRoot $repo
 $markerPath = Join-Path $runtimePath '.protodd-runtime-profile.json'
 $priorMarker = $null
@@ -111,6 +126,9 @@ $profileManifest = [ordered]@{
 [IO.File]::WriteAllText($markerPath, ($profileManifest | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
 "RUNTIME_PROFILE=$Profile"
 "BWAPI_DLL_SHA256=$verifiedEngineHash"
+} finally {
+    Exit-MatchRuntimeLock -Lock $ownedRuntimeLock
+}
 
 $archivePath = Join-Path $repo 'ladder/maps/maps.zip'
 if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {

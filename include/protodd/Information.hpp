@@ -22,6 +22,22 @@ enum class EnemyPlan : std::uint8_t {
     count,
 };
 
+enum class ThreatEvidenceFamily : std::uint8_t {
+    localWorkers,
+    forwardStructures,
+    rushCombat,
+    technology,
+    air,
+    cloak,
+    expansion,
+    count,
+};
+
+struct ThreatEvidenceStamp {
+    Frame latestFrame{-1};
+    int observedSources{};
+};
+
 struct ThreatAssessment {
     double immediateGround{};
     double workerRush{};
@@ -40,6 +56,27 @@ struct ThreatAssessment {
     int approachingCombatEnemies{};
     EnemyPlan mostLikely{EnemyPlan::unknown};
     bool enemyNaturalCheckedEmpty{};
+    double enemyNaturalConfidence{};
+    int enemyNaturalCandidateCount{};
+    // Current legal evidence grouped by coarse family. A source is counted
+    // once per snapshot, regardless of callback repetition; family membership
+    // is diagnostic and does not multiply the posterior.
+    std::array<ThreatEvidenceStamp,
+               static_cast<std::size_t>(ThreatEvidenceFamily::count)> evidence{};
+    Frame latestEvidenceFrame{-1};
+    Frame earliestProductionReadyFrame{-1};
+    // A travel-only envelope for a visibly approaching combat unit. The
+    // upper end assumes continued movement and a broad route/speed margin.
+    Frame earliestApproachArrivalFrame{-1};
+    Frame latestApproachArrivalFrame{-1};
+    int evidenceFamiliesPresent{};
+};
+
+struct EnemyNaturalEstimate {
+    const BaseSnapshot* candidate{};
+    double confidence{};
+    int candidateCount{};
+    bool enemyMainKnown{};
 };
 
 class OpponentModel {
@@ -65,6 +102,7 @@ private:
 };
 
 [[nodiscard]] std::string_view enemyPlanName(EnemyPlan plan) noexcept;
+[[nodiscard]] EnemyNaturalEstimate enemyNaturalEstimate(const GameState& state) noexcept;
 [[nodiscard]] const BaseSnapshot* enemyNatural(const GameState& state) noexcept;
 
 }  // namespace protodd

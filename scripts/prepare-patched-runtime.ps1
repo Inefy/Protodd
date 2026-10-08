@@ -1,13 +1,15 @@
 param(
     [Parameter(Mandatory=$true)][string]$RuntimeSet,
     [string]$HostRuntime = 'build/match-runtime-a',
-    [string]$OpponentRuntime = 'build/match-runtime-b'
+    [string]$OpponentRuntime = 'build/match-runtime-b',
+    [object]$RuntimeLock = $null
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $buildPrefix = [IO.Path]::GetFullPath((Join-Path $repo 'build')).TrimEnd('\') + '\'
 Import-Module (Join-Path $PSScriptRoot 'RuntimeProfiles.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MatchProcessOwnership.psm1') -Force
 $runtimeRoot = Resolve-MatchRuntimeRoot -Profile 'patched-diagnostic' -RepositoryRoot $repo -RuntimeSet $RuntimeSet
 $profileRoot = [IO.Path]::GetFullPath((Join-Path $repo 'build/patched-diagnostic'))
 if (Get-Process StarCraft -ErrorAction SilentlyContinue) {
@@ -47,6 +49,25 @@ foreach ($target in $targetPaths) {
 }
 
 New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
+$ownedRuntimeLock = $null
+if ($null -ne $RuntimeLock) {
+    $expectedLockPath = [IO.Path]::GetFullPath((Join-Path $runtimeRoot '.protodd-match.lock'))
+    if ($null -eq $RuntimeLock.stream -or -not $RuntimeLock.stream.CanWrite -or
+        [IO.Path]::GetFullPath([string]$RuntimeLock.path) -ine $expectedLockPath) {
+        throw 'The supplied runtime lock does not own the patched runtime set'
+    }
+    $runtimeLock = $RuntimeLock
+} else {
+    $runtimeLock = Enter-MatchRuntimeLock -RuntimeRoot $runtimeRoot -Label 'prepare-patched-runtime'
+    $ownedRuntimeLock = $runtimeLock
+}
+try {
+foreach ($target in $targetPaths) {
+    $resolved = [IO.Path]::GetFullPath($target)
+    if (Test-Path -LiteralPath $resolved) {
+        throw "Patched runtime destination already exists; refusing to merge runtime state: $resolved"
+    }
+}
 $excludedDirectories = @('bwapi-data', 'characters', 'maps', 'Errors', 'Replays')
 for ($index = 0; $index -lt $sourcePaths.Count; $index++) {
     $source = $sourcePaths[$index]
@@ -59,7 +80,10 @@ for ($index = 0; $index -lt $sourcePaths.Count; $index++) {
     & robocopy @robocopyArgs | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "Runtime copy failed with robocopy exit code $LASTEXITCODE" }
     & (Join-Path $PSScriptRoot 'restore-match-runtime.ps1') `
-        -Runtime $target -Profile 'patched-diagnostic'
+        -Runtime $target -Profile 'patched-diagnostic' -RuntimeLock $runtimeLock
 }
 Write-Output "Prepared isolated patched-diagnostic runtimes under $runtimeRoot"
 Write-Output "Patched BWAPI DLL SHA256: $($patchedProfile.dll_sha256)"
+} finally {
+    Exit-MatchRuntimeLock -Lock $ownedRuntimeLock
+}

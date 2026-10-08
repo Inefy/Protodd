@@ -13,6 +13,7 @@ import struct
 import torch
 
 from .whole_game_export import MAGIC, digest
+from .whole_game_contract import model_contract
 from .whole_game_multislot_model import MultiSlotWholeGameModel
 
 
@@ -50,8 +51,9 @@ def package(checkpoint_path, output):
         stream.write(struct.pack("<I", len(ordered)))
         for name, tensor in ordered:
             data = tensor.detach().cpu().contiguous().float().numpy().astype("<f4", copy=False)
-            if not bool(torch.isfinite(tensor).all()):
-                raise ValueError(f"non-finite parameter: {name}")
+            if (not bool(torch.isfinite(tensor).all()) or
+                    bool((tensor.abs() > 1000.0).any())):
+                raise ValueError(f"non-finite or excessive parameter: {name}")
             encoded = name.encode("ascii")
             if len(encoded) > 128 or data.ndim > 4:
                 raise ValueError("unsupported parameter name or rank")
@@ -67,6 +69,7 @@ def package(checkpoint_path, output):
                     source_identity_sha256=saved["source_identity_sha256"],
                     width=width, mixture_components=components, maximum_slots=6,
                     parameters=sum(row["elements"] for row in rows), tensors=rows,
+                    model_contract=model_contract(),
                     inference_validated=False, tournament_ready=False)
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n",
                                            encoding="utf8")

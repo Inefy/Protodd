@@ -2,6 +2,10 @@ param([Parameter(Mandatory=$true)][string]$Run)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $arenaRun = (Resolve-Path -LiteralPath $Run).Path
+Import-Module (Join-Path $PSScriptRoot 'HeadlessCampaign.psm1') -Force
+foreach ($clientName in @('client1','client2')) {
+    Assert-HeadlessArenaClient -ClientDirectory (Join-Path $arenaRun $clientName)
+}
 if (Get-Process StarCraft -ErrorAction SilentlyContinue) { throw 'A StarCraft game is already running; leave its runtimes untouched' }
 if (Test-Path -LiteralPath (Join-Path $arenaRun 'processes.json')) { throw 'Existing launch record; inspect its process handles before recovery' }
 if (Test-Path -LiteralPath (Join-Path $arenaRun 'server/results.jsonl')) { throw 'Existing results; an explicit continuation must preserve completed games' }

@@ -3,6 +3,11 @@ $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 Import-Module (Join-Path $repo 'scripts/RuntimeProfiles.psm1') -Force
 $stock = Get-StockRuntimeProfile -RepositoryRoot $repo
 $patched = Get-PatchedRuntimeProfile -RepositoryRoot $repo
+$perLabelSet = Resolve-MatchRuntimeSet -Label 'unique-match-001'
+$explicitSet = Resolve-MatchRuntimeSet -Label 'unique-match-002' -RuntimeSet 'campaign-paired'
+if ($perLabelSet -ne 'unique-match-001' -or $explicitSet -ne 'campaign-paired') {
+    throw 'Direct matches do not default to a per-label runtime set or preserve explicit campaign sets'
+}
 if ($stock.dll_sha256 -eq $patched.dll_sha256) {
     throw 'Stock certification and patched diagnostic profiles must use distinct engine DLLs'
 }

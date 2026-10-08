@@ -6,12 +6,16 @@
 #include "protodd/Harassment.hpp"
 #include "protodd/Strategy.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
 #include <vector>
 
 namespace protodd {
+
+inline constexpr int maximumDefensiveArrivalPathSearches = 8;
+inline constexpr int maximumDefensiveArrivalPathExpansions = 1024;
 
 enum class SquadRole : std::uint8_t { mainArmy, baseDefense, harassment };
 
@@ -24,6 +28,7 @@ struct Squad {
     // routing still uses the complete signature above.
     std::uint64_t engagementKey{};
     SquadRole role{SquadRole::mainArmy};
+    FightMission fightMission{FightMission::advance};
     std::vector<UnitSnapshot> units;
     std::vector<UnitSnapshot> enemies;
     Position center{-1, -1};
@@ -37,6 +42,24 @@ struct Squad {
     std::string missionReason;
 };
 
+struct DetectorAssignment {
+    UnitId observerId{-1};
+    int squadId{-1};
+    Position anchor{-1, -1};
+    Frame estimatedArrivalFrames{};
+    bool safeToRendezvous{};
+};
+
+struct DetectorAllocation {
+    std::vector<Command> commands;
+    std::vector<DetectorAssignment> assignments;
+    std::vector<UnitId> reservedObservers;
+    std::size_t requiredObservers{};
+    std::size_t availableObservers{};
+    std::size_t unmetDetectionDemands{};
+    Frame maximumArrivalFrames{};
+};
+
 enum class MainArmyTravelMode : std::uint8_t {
     assemble,
     joinVanguard,
@@ -45,7 +68,10 @@ enum class MainArmyTravelMode : std::uint8_t {
 
 class SquadPlanner {
 public:
-    void reset() { harassment_.reset(); }
+    void reset() { harassment_.reset(); harassmentRoutingStats_ = {}; }
+    [[nodiscard]] const HarassmentRouteBudget& harassmentRoutingStats() const noexcept {
+        return harassmentRoutingStats_;
+    }
     void forgetUnit(UnitId id) { harassment_.forgetUnit(id); }
     [[nodiscard]] static std::optional<Position> threatenedNaturalRally(
         const GameState& state, const StrategicPlan& plan);
@@ -55,8 +81,7 @@ public:
         std::span<const UnitSnapshot> enemy,
         const StrategicPlan& plan,
         Position fallbackRetreat, const NavigationGrid* navigation = nullptr,
-        bool emergencyConsolidation = false,
-        bool limitStaticCoverage = false) const;
+        bool emergencyConsolidation = false) const;
 
     [[nodiscard]] std::vector<Command> detectorEscorts(
         const GameState& state,
@@ -66,6 +91,16 @@ public:
         bool centerBlockedMainEscort = false,
         bool mobilizeContestedReserve = false,
         bool directSafeRendezvous = false) const;
+    [[nodiscard]] DetectorAllocation allocateDetectors(
+        const GameState& state,
+        std::span<const Squad> squads,
+        const InfluenceMap& influence,
+        bool mobilizeReserveAgainstLurkers = false,
+        bool centerBlockedMainEscort = false,
+        bool mobilizeContestedReserve = false,
+        bool directSafeRendezvous = false) const;
+    static void requireDetectorCount(StrategicPlan& plan,
+                                     std::size_t requiredObservers);
 
     [[nodiscard]] static const Squad* selectVanguard(
         std::span<const Squad> squads,
@@ -82,6 +117,8 @@ public:
     [[nodiscard]] static bool mustHoldDefensiveScreen(
         const Squad& squad) noexcept;
     [[nodiscard]] static bool mobileDetectionReady(
+        const GameState& state, const Squad& squad) noexcept;
+    [[nodiscard]] static FightMission fightMissionFor(
         const GameState& state, const Squad& squad) noexcept;
 
     [[nodiscard]] static DefenseArea defensiveArea(
@@ -114,6 +151,7 @@ public:
 
 private:
     mutable HarassmentPlanner harassment_;
+    mutable HarassmentRouteBudget harassmentRoutingStats_;
     [[nodiscard]] static Position centroid(std::span<const UnitSnapshot> units) noexcept;
     [[nodiscard]] static std::vector<std::vector<UnitSnapshot>> connectedGroups(
         std::span<const UnitSnapshot> units,

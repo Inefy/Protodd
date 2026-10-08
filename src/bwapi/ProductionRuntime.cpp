@@ -1,5 +1,6 @@
 #include "ProductionRuntime.hpp"
 #include "BoundedFile.hpp"
+#include "protodd/ProductionEffectFeedback.hpp"
 #include <algorithm>
 #include <chrono>
 #include "protodd/MacroPlanner.hpp"
@@ -63,7 +64,8 @@ bool ProductionRuntime::command(const BWAPI::UnitCommand& c,bool before,bool acc
         if(!enabled_)return !control_;
         if(pending_.contains(id)){fail("ambiguous-overlapping-command",log);return !control_;}
         pending_[id]={action,c.extra,frame,queued(u,c.extra),u->getOrder().getID(),u->getBuildType().getID(),
-            u->getOrderTargetPosition(),c.getTargetTilePosition(),false};
+            u->getOrderTargetPosition(),c.getTargetTilePosition(),
+            u->isTraining()||u->getRemainingTrainTime()>0,false};
         pending_[id].ticket=feedback_.reserve(c,action,log);
         if(control_&&(action==0||action==5||action==6)&&pending_[id].ticket<0){pending_.erase(id);return false;}
     } else {
@@ -116,7 +118,12 @@ void ProductionRuntime::reconcile(Frame frame,std::ostream& log) {
         const bool exists=u&&u->exists()&&u->getPlayer()==BWAPI::Broodwar->self();
         bool confirmed=false;
         if(exists) {
-            if(!BWAPI::UnitType(p.type).isBuilding()) confirmed=queued(u,p.type)>p.queueBefore;
+            if(!BWAPI::UnitType(p.type).isBuilding()) {
+                const auto activeTypeMatches=u->getBuildType().getID()==p.type;
+                const auto trainingNow=u->isTraining()||u->getRemainingTrainTime()>0;
+                confirmed=trainingEffectObserved(p.queueBefore,queued(u,p.type),p.trainingBefore,
+                    trainingNow,activeTypeMatches);
+            }
             else {
                 const bool changed=u->getOrder().getID()!=p.orderBefore || u->getBuildType().getID()!=p.buildBefore ||
                     u->getOrderTargetPosition()!=p.orderPositionBefore;

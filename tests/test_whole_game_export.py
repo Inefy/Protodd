@@ -31,6 +31,19 @@ class WholeGameExportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "integrity"):
                 read_package(output)
 
+    def test_nonfinite_parameters_are_rejected_before_export(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = WholeGameModel(width=64, mixture_components=3)
+            with torch.no_grad():
+                model.event.weight[0, 0] = float("nan")
+            source = root / "teacher.pt"
+            torch.save(dict(schema="protodd-whole-game-fit-v1",
+                            source_identity_sha256="b" * 64,
+                            state_dict=model.state_dict()), source)
+            with self.assertRaisesRegex(ValueError, "non-finite or excessive parameter"):
+                package(source, root / "export")
+
 
 if __name__ == "__main__":
     unittest.main()

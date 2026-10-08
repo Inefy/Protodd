@@ -1,0 +1,1548 @@
+{
+  "schema": "protodd-feature-registry-v1",
+  "options": [
+    {
+      "id": "PROTODD_BUILD_TESTS",
+      "kind": "cmake-option",
+      "description": "Build deterministic core tests",
+      "default": "ON",
+      "tournament_value": "ON",
+      "scope": "build configuration",
+      "owner": "build and release configuration",
+      "baseline": "ON",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "scripts/build-opening-comparison.ps1",
+          "scripts/build-trained-controller.ps1",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": [
+          "tests/test_build_profiles.ps1"
+        ]
+      },
+      "promotion_status": "infrastructure"
+    },
+    {
+      "id": "PROTODD_BUILD_BWAPI_MODULE",
+      "kind": "cmake-option",
+      "description": "Build the 32-bit BWAPI tournament DLL",
+      "default": "OFF",
+      "tournament_value": "ON",
+      "scope": "build configuration",
+      "owner": "build and release configuration",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "scripts/build-opening-comparison.ps1",
+          "scripts/build-tournament.ps1",
+          "scripts/build-trained-controller.ps1",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": [
+          "tests/test_build_profiles.ps1",
+          "tests/test_feature_registry.py"
+        ]
+      },
+      "promotion_status": "infrastructure"
+    },
+    {
+      "id": "PROTODD_TOURNAMENT_PROFILE",
+      "kind": "cmake-option",
+      "description": "Disable interactive debug tools and learned research authority",
+      "default": "ON",
+      "tournament_value": "ON",
+      "scope": "release and developer profiles",
+      "owner": "build and release configuration",
+      "baseline": "ON",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "scripts/build-opening-comparison.ps1",
+          "scripts/build-tournament.ps1",
+          "src/bwapi/ProtoddModule.cpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": [
+          "tests/test_build_profiles.ps1",
+          "tests/test_feature_registry.py"
+        ]
+      },
+      "promotion_status": "release-default"
+    },
+    {
+      "id": "PROTODD_DEVELOPER_PROFILE",
+      "kind": "cmake-option",
+      "description": "Enable interactive debug tools for local development",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "release and developer profiles",
+      "owner": "build and release configuration",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "scripts/build-opening-comparison.ps1",
+          "scripts/build-tournament.ps1",
+          "src/bwapi/ProtoddModule.cpp",
+          "tools/feature_registry.py",
+          "training/whole_game_multislot_promotion.py"
+        ],
+        "test_refs": [
+          "tests/test_build_profiles.ps1",
+          "tests/test_feature_registry.py",
+          "tests/test_whole_game_multislot_promotion.py"
+        ]
+      },
+      "promotion_status": "release-default"
+    },
+    {
+      "id": "PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY",
+      "kind": "cmake-option",
+      "description": "Allow learned policies to start/cancel research and upgrades",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "release and developer profiles",
+      "owner": "build and release configuration",
+      "baseline": "OFF",
+      "dependencies": {
+        "requires_all": [
+          "PROTODD_DEVELOPER_PROFILE"
+        ]
+      },
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "include/protodd/WholeGameActionPolicy.hpp",
+          "scripts/build-opening-comparison.ps1",
+          "scripts/build-tournament.ps1",
+          "src/bwapi/ProtoddModule.cpp",
+          "tools/feature_registry.py",
+          "training/whole_game_multislot_promotion.py"
+        ],
+        "test_refs": [
+          "tests/test_build_profiles.ps1"
+        ]
+      },
+      "promotion_status": "release-default"
+    },
+    {
+      "id": "PROTODD_PRODUCTION_LOCAL_EVALUATION",
+      "kind": "cmake-option",
+      "description": "Enable opt-in early train-unit control in isolated local evaluations",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "local evaluation unless explicitly promoted",
+      "owner": "learned and experimental controllers",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProductionRuntime.cpp",
+          "src/bwapi/ProtoddModule.cpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": [
+          "tests/test_arena.py"
+        ]
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_TACTICAL_LOCAL_EVALUATION",
+      "kind": "cmake-option",
+      "description": "Enable opt-in replay-trained target selection in isolated local evaluations",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "local evaluation unless explicitly promoted",
+      "owner": "learned and experimental controllers",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.cpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": [
+          "tests/test_arena.py"
+        ]
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_PVZ_GATEWAY_OPENING",
+      "kind": "cmake-option",
+      "description": "Evaluate a gateway-first PvZ opening in isolated local games",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "StrategyEngine",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.hpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": [
+          "tests/test_build_profiles.ps1",
+          "tests/test_feature_registry.py",
+          "tests/test_tournament_package.ps1",
+          "tests/test_whole_game_multislot_promotion.py"
+        ]
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_PVZ_EARLY_SPLASH",
+      "kind": "cmake-option",
+      "description": "Evaluate an early evidence-triggered PvZ Reaver transition in isolated local games",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "StrategyEngine",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.hpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_PVP_FOG_DETECTION",
+      "kind": "cmake-option",
+      "description": "Evaluate an early Observer against a poorly scouted PvP two-Gateway opening",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "StrategyEngine",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.hpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_PVP_SCOUTED_TWO_GATE_ANCHOR",
+      "kind": "cmake-option",
+      "description": "Evaluate an earlier Forge after scouting two PvP Gateways",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "StrategyEngine",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.hpp"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_PVP_COVERED_RANGED_NATURAL",
+      "kind": "cmake-option",
+      "description": "Evaluate economic growth behind a covered PvP ranged screen",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "StrategyEngine",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.hpp"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_THREATENED_NATURAL_RALLY",
+      "kind": "cmake-option",
+      "description": "Evaluate reinforcement rally for a threatened outer base",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "SquadPlanner and tactical coordination",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.cpp"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_COVERED_PRESSURE_RELEASE",
+      "kind": "cmake-option",
+      "description": "Evaluate releasing a large covered PvT army from an empty policy defend override",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "SquadPlanner and tactical coordination",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.cpp"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_PVT_CONTAIN_BREAK",
+      "kind": "cmake-option",
+      "description": "Evaluate detector-covered PvT breakout against a reachable enemy economy",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "core gameplay",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.cpp"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_FORWARD_DETECTOR_ESCORT",
+      "kind": "cmake-option",
+      "description": "Evaluate centering blocked main-army Observers for immediate detection coverage",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "SquadPlanner and tactical coordination",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.cpp"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_DIRECT_DETECTOR_RENDEZVOUS",
+      "kind": "cmake-option",
+      "description": "Evaluate direct Observer rendezvous through a safe air corridor",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "SquadPlanner and tactical coordination",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.cpp"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_CONTESTED_DETECTOR_RESERVE",
+      "kind": "cmake-option",
+      "description": "Evaluate using the scout Observer when multiple main squads need detection",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "SquadPlanner and tactical coordination",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.cpp"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_FORWARD_THIRD_SCREEN",
+      "kind": "cmake-option",
+      "description": "Evaluate escorting a forward PvT third Nexus with the field army",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "SquadPlanner and tactical coordination",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.cpp"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_BASE_THREAT_EXPANSION_GUARD",
+      "kind": "cmake-option",
+      "description": "Evaluate keeping the field army near a threatened surviving base",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "Workers and expansion planning",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.cpp"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_ABANDONED_BASE_WORKER_EVACUATION",
+      "kind": "cmake-option",
+      "description": "Evaluate evacuating workers from a threatened lost base",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "Workers and expansion planning",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.cpp"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_SAFE_REMOTE_MINING",
+      "kind": "cmake-option",
+      "description": "Evaluate staging up to eight workers per update at a completed planned expansion",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "Workers and expansion planning",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.cpp"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_BASE_DEFENSE_CONSOLIDATION",
+      "kind": "cmake-option",
+      "description": "Evaluate committing the field army to a heavily threatened economy",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "Workers and expansion planning",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.cpp"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_PVZ_REPLAY_OPENING",
+      "kind": "cmake-option",
+      "description": "Evaluate a replay-derived economic PvZ opening",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "StrategyEngine",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.hpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": [
+          "tests/test_build_profiles.ps1",
+          "tests/test_feature_registry.py"
+        ]
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_PVZ_ARCHIVES_FIRST",
+      "kind": "cmake-option",
+      "description": "Evaluate replay-derived PvZ Archives before optional Reaver drops",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "StrategyEngine",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.hpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_LATE_ECONOMY_RECOVERY",
+      "kind": "cmake-option",
+      "description": "Evaluate protected late worker and expansion recovery",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "Workers and expansion planning",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.hpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_STALLED_ARMY_ROUTING",
+      "kind": "cmake-option",
+      "description": "Route a stalled attacking army and search reachable cleanup objectives",
+      "default": "ON",
+      "tournament_value": "ON",
+      "scope": "production-default gameplay",
+      "owner": "OperationsManager",
+      "baseline": "ON",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.cpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": [
+          "tests/test_feature_registry.py"
+        ]
+      },
+      "promotion_status": "release-default"
+    },
+    {
+      "id": "PROTODD_PVZ_MINERAL_FALLBACK",
+      "kind": "cmake-option",
+      "description": "Evaluate Zealot spending from otherwise idle midgame Gateways",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "StrategyEngine",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.cpp",
+          "src/bwapi/ProtoddModule.hpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_PVZ_EARLY_MINERAL_FALLBACK",
+      "kind": "cmake-option",
+      "description": "Evaluate the mineral fallback before the midgame Hydra attack",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "StrategyEngine",
+      "baseline": "OFF",
+      "dependencies": {
+        "requires_all": [
+          "PROTODD_PVZ_REPLAY_OPENING",
+          "PROTODD_PVZ_MINERAL_FALLBACK"
+        ]
+      },
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.cpp",
+          "src/bwapi/ProtoddModule.hpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_PVZ_POWERED_CANNON_SCREEN",
+      "kind": "cmake-option",
+      "description": "Evaluate powered natural Cannons after the first two complete",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "StrategyEngine",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.hpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": [
+          "tests/test_build_profiles.ps1",
+          "tests/test_feature_registry.py"
+        ]
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_PVZ_PROACTIVE_REAVER",
+      "kind": "cmake-option",
+      "description": "Evaluate first Reaver behind the completed natural Cannon screen",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "StrategyEngine",
+      "baseline": "OFF",
+      "dependencies": {
+        "requires_all": [
+          "PROTODD_PVZ_POWERED_CANNON_SCREEN"
+        ]
+      },
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.hpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_PVZ_ARMY_FLOOR",
+      "kind": "cmake-option",
+      "description": "Evaluate a two-base PvZ ground army floor before further expansion",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "StrategyEngine",
+      "baseline": "OFF",
+      "dependencies": {
+        "requires_all": [
+          "PROTODD_PVZ_POWERED_CANNON_SCREEN"
+        ]
+      },
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.hpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_PVZ_DETECTOR_SURGE",
+      "kind": "cmake-option",
+      "description": "Evaluate using the scout Observer as an emergency Lurker escort",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "opt-in gameplay experiment",
+      "owner": "StrategyEngine",
+      "baseline": "OFF",
+      "dependencies": {
+        "requires_all": [
+          "PROTODD_PVZ_ARMY_FLOOR"
+        ]
+      },
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "src/bwapi/ProtoddModule.cpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_WHOLE_GAME_CONTROL",
+      "kind": "cmake-option",
+      "description": "Allow the embedded whole-game policy to issue BWAPI commands",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "local evaluation unless explicitly promoted",
+      "owner": "learned and experimental controllers",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "scripts/build-opening-comparison.ps1",
+          "scripts/build-tournament.ps1",
+          "scripts/build-trained-controller.ps1",
+          "src/bwapi/ProtoddModule.cpp",
+          "src/bwapi/WholeGameRuntime.cpp",
+          "src/bwapi/WholeGameRuntime.hpp",
+          "tools/feature_registry.py",
+          "training/whole_game_multislot_promotion.py"
+        ],
+        "test_refs": [
+          "tests/test_arena.py",
+          "tests/test_build_profiles.ps1",
+          "tests/test_feature_registry.py",
+          "tests/test_whole_game_multislot_promotion.py"
+        ]
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_WHOLE_GAME_HYBRID",
+      "kind": "cmake-option",
+      "description": "Retain native systems and arbitrate learned combat targets in local evaluation",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "local evaluation unless explicitly promoted",
+      "owner": "learned and experimental controllers",
+      "baseline": "OFF",
+      "dependencies": {
+        "requires_all": [
+          "PROTODD_WHOLE_GAME_CONTROL",
+          "PROTODD_WHOLE_GAME_EVALUATION_BUILD"
+        ]
+      },
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "scripts/build-opening-comparison.ps1",
+          "scripts/build-tournament.ps1",
+          "scripts/build-trained-controller.ps1",
+          "src/bwapi/ProtoddModule.cpp",
+          "tools/feature_registry.py",
+          "training/whole_game_multislot_promotion.py"
+        ],
+        "test_refs": [
+          "tests/test_build_profiles.ps1",
+          "tests/test_feature_registry.py",
+          "tests/test_whole_game_multislot_promotion.py"
+        ]
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_NATIVE_ALLIN_OPENING",
+      "kind": "cmake-option",
+      "description": "Enable replay-derived native aggressive openings",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "local evaluation unless explicitly promoted",
+      "owner": "learned and experimental controllers",
+      "baseline": "OFF",
+      "dependencies": {},
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "scripts/build-opening-comparison.ps1",
+          "scripts/build-tournament.ps1",
+          "scripts/build-trained-controller.ps1",
+          "src/bwapi/ProtoddModule.cpp",
+          "tools/feature_registry.py"
+        ],
+        "test_refs": [
+          "tests/test_arena.py",
+          "tests/test_build_profiles.ps1"
+        ]
+      },
+      "promotion_status": "unpromoted-opt-in"
+    },
+    {
+      "id": "PROTODD_WHOLE_GAME_EVALUATION_BUILD",
+      "kind": "cmake-option",
+      "description": "Build a six-slot controller for local evaluation before it has a promotion receipt",
+      "default": "OFF",
+      "tournament_value": "OFF",
+      "scope": "local evaluation unless explicitly promoted",
+      "owner": "learned and experimental controllers",
+      "baseline": "OFF",
+      "dependencies": {
+        "requires_all": [
+          "PROTODD_WHOLE_GAME_CONTROL"
+        ]
+      },
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt",
+          "scripts/build-opening-comparison.ps1",
+          "scripts/build-trained-controller.ps1",
+          "tools/feature_registry.py",
+          "training/whole_game_multislot_promotion.py"
+        ],
+        "test_refs": [
+          "tests/test_arena.py",
+          "tests/test_build_profiles.ps1",
+          "tests/test_whole_game_multislot_promotion.py"
+        ]
+      },
+      "promotion_status": "unpromoted-opt-in"
+    }
+  ],
+  "build_inputs": [
+    {
+      "id": "PROTODD_WHOLE_GAME_WEIGHTS",
+      "kind": "cmake-input",
+      "description": "Whole-game model weights to embed in Protodd.dll",
+      "tournament_value": "",
+      "scope": "build provenance; cleared for tournament builds",
+      "owner": "build and release configuration",
+      "baseline": "unset",
+      "dependencies": [],
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "not-authority-by-itself"
+    },
+    {
+      "id": "PROTODD_WHOLE_GAME_PROMOTION_RECEIPT",
+      "kind": "cmake-input",
+      "description": "Promotion receipt binding a six-slot tournament policy to its exact weights",
+      "tournament_value": "",
+      "scope": "build provenance; cleared for tournament builds",
+      "owner": "build and release configuration",
+      "baseline": "unset",
+      "dependencies": [],
+      "evidence": {
+        "source_refs": [
+          "CMakeLists.txt"
+        ],
+        "test_refs": []
+      },
+      "promotion_status": "not-authority-by-itself"
+    }
+  ],
+  "runtime_controls": [
+    {
+      "id": "learned_macro_mode",
+      "file": "LearnedMacro-mode.txt",
+      "kind": "mode",
+      "owner": "ModelRuntime",
+      "description": "Optional replay-trained macro policy observation.",
+      "allowed_values": [
+        "unset",
+        "off",
+        "shadow"
+      ],
+      "default_value": "off",
+      "tournament_values": [
+        "unset",
+        "off"
+      ],
+      "purpose_values": {
+        "training": [
+          "unset",
+          "off",
+          "shadow"
+        ],
+        "development": [
+          "unset",
+          "off",
+          "shadow"
+        ],
+        "final-test": [
+          "unset",
+          "off"
+        ]
+      },
+      "dependencies": [],
+      "baseline": "off",
+      "evidence": [
+        "src/bwapi/ModelRuntime.cpp"
+      ],
+      "promotion_status": "shadow-only; no command authority",
+      "scope": "diagnostic shadow only; disabled in final-test campaigns"
+    },
+    {
+      "id": "policy_mode",
+      "file": "Policy-mode.txt",
+      "kind": "mode",
+      "owner": "PolicyRuntime",
+      "description": "Offline-trained matchup policy selection mode.",
+      "allowed_values": [
+        "unset",
+        "off",
+        "train",
+        "frozen"
+      ],
+      "default_value": "off",
+      "tournament_values": [
+        "unset",
+        "off",
+        "frozen"
+      ],
+      "purpose_values": {
+        "training": [
+          "unset",
+          "off",
+          "train",
+          "frozen"
+        ],
+        "development": [
+          "unset",
+          "off",
+          "frozen"
+        ],
+        "final-test": [
+          "unset",
+          "frozen"
+        ]
+      },
+      "dependencies": [],
+      "baseline": "off",
+      "evidence": [
+        "src/bwapi/PolicyRuntime.cpp",
+        "tests/test_policy_learning.cpp"
+      ],
+      "promotion_status": "frozen only outside training",
+      "scope": "training or frozen policy evaluation"
+    },
+    {
+      "id": "production_demand_mode",
+      "file": "ProductionDemand-mode.txt",
+      "kind": "mode",
+      "owner": "ProductionRuntime",
+      "description": "Production model off, shadow, or local train-unit control.",
+      "allowed_values": [
+        "unset",
+        "off",
+        "shadow",
+        "local-train-units"
+      ],
+      "default_value": "off",
+      "tournament_values": [
+        "unset",
+        "off",
+        "shadow"
+      ],
+      "purpose_values": {
+        "training": [
+          "unset",
+          "off",
+          "shadow"
+        ],
+        "development": [
+          "unset",
+          "off",
+          "shadow",
+          "local-train-units"
+        ],
+        "final-test": [
+          "unset",
+          "off",
+          "shadow"
+        ]
+      },
+      "dependencies": [],
+      "dependencies_by_value": {
+        "local-train-units": [
+          "PROTODD_PRODUCTION_LOCAL_EVALUATION"
+        ]
+      },
+      "baseline": "off",
+      "evidence": [
+        "src/bwapi/ProductionRuntime.cpp"
+      ],
+      "promotion_status": "shadow-only in release; command control is development-gated",
+      "scope": "shadow observation; local command control only in development"
+    },
+    {
+      "id": "protodd_learning_mode",
+      "file": "Protodd-learning-mode.txt",
+      "kind": "mode",
+      "owner": "ProtoddModule",
+      "description": "Per-alias opening history update policy.",
+      "allowed_values": [
+        "unset",
+        "frozen",
+        "validated-train"
+      ],
+      "default_value": "frozen",
+      "tournament_values": [
+        "unset",
+        "frozen"
+      ],
+      "purpose_values": {
+        "training": [
+          "unset",
+          "frozen",
+          "validated-train"
+        ],
+        "development": [
+          "unset",
+          "frozen"
+        ],
+        "final-test": [
+          "unset",
+          "frozen"
+        ]
+      },
+      "dependencies": [],
+      "baseline": "frozen",
+      "evidence": [
+        "src/bwapi/ProtoddModule.cpp",
+        "tests/test_main.cpp"
+      ],
+      "promotion_status": "validated-train is training-only",
+      "scope": "validated opening learning only in training"
+    },
+    {
+      "id": "worker_training_mode",
+      "file": "WorkerTraining-mode.txt",
+      "kind": "mode",
+      "owner": "ProtoddModule",
+      "description": "Local worker-production intervention.",
+      "allowed_values": [
+        "unset",
+        "baseline",
+        "plus-one",
+        "plus-two"
+      ],
+      "default_value": "unset",
+      "tournament_values": [
+        "unset"
+      ],
+      "purpose_values": {
+        "training": [
+          "unset",
+          "baseline",
+          "plus-one",
+          "plus-two"
+        ],
+        "development": [
+          "unset"
+        ],
+        "final-test": [
+          "unset"
+        ]
+      },
+      "dependencies": [],
+      "dependencies_by_value": {
+        "baseline": [
+          "PROTODD_PRODUCTION_LOCAL_EVALUATION"
+        ],
+        "plus-one": [
+          "PROTODD_PRODUCTION_LOCAL_EVALUATION"
+        ],
+        "plus-two": [
+          "PROTODD_PRODUCTION_LOCAL_EVALUATION"
+        ]
+      },
+      "baseline": "unset",
+      "evidence": [
+        "src/bwapi/ProtoddModule.cpp",
+        "training/arena.py",
+        "tests/test_arena.py"
+      ],
+      "promotion_status": "isolated training only",
+      "scope": "isolated Protoss training only"
+    },
+    {
+      "id": "tactical_target_mode",
+      "file": "TacticalTarget-mode.txt",
+      "kind": "mode",
+      "owner": "ProtoddModule",
+      "description": "Replay-trained tactical target evaluation mode.",
+      "allowed_values": [
+        "unset",
+        "local-target"
+      ],
+      "default_value": "unset",
+      "tournament_values": [
+        "unset"
+      ],
+      "purpose_values": {
+        "training": [
+          "unset"
+        ],
+        "development": [
+          "unset",
+          "local-target"
+        ],
+        "final-test": [
+          "unset"
+        ]
+      },
+      "dependencies": [],
+      "dependencies_by_value": {
+        "local-target": [
+          "PROTODD_TACTICAL_LOCAL_EVALUATION"
+        ]
+      },
+      "baseline": "unset",
+      "evidence": [
+        "src/bwapi/ProtoddModule.cpp",
+        "tests/test_arena.py"
+      ],
+      "promotion_status": "local evaluation only",
+      "scope": "local Protoss development only"
+    },
+    {
+      "id": "callback_audit_mode",
+      "file": "CallbackAudit-mode.txt",
+      "kind": "mode",
+      "owner": "ProtoddModule",
+      "description": "Optional callback timing audit.",
+      "allowed_values": [
+        "unset",
+        "on"
+      ],
+      "default_value": "unset",
+      "tournament_values": [
+        "unset"
+      ],
+      "purpose_values": {
+        "training": [
+          "unset",
+          "on"
+        ],
+        "development": [
+          "unset",
+          "on"
+        ],
+        "final-test": [
+          "unset"
+        ]
+      },
+      "dependencies": [],
+      "baseline": "unset",
+      "evidence": [
+        "src/bwapi/ProtoddModule.cpp"
+      ],
+      "promotion_status": "diagnostic-only",
+      "scope": "training and development diagnostics"
+    },
+    {
+      "id": "allin_opening",
+      "file": "AllIn-opening.txt",
+      "kind": "mode",
+      "owner": "ProtoddModule",
+      "description": "Native replay-derived opening profile.",
+      "allowed_values": [
+        "unset",
+        "auto",
+        "standard",
+        "two-gate-zealot",
+        "three-gate-dragoon",
+        "four-gate-dragoon",
+        "dt-pressure"
+      ],
+      "default_value": "auto",
+      "tournament_values": [
+        "unset"
+      ],
+      "purpose_values": {
+        "training": [
+          "unset"
+        ],
+        "development": [
+          "unset",
+          "auto",
+          "standard",
+          "two-gate-zealot",
+          "three-gate-dragoon",
+          "four-gate-dragoon",
+          "dt-pressure"
+        ],
+        "final-test": [
+          "unset"
+        ]
+      },
+      "dependencies": [],
+      "dependencies_by_value": {
+        "auto": [
+          "PROTODD_NATIVE_ALLIN_OPENING"
+        ],
+        "standard": [
+          "PROTODD_NATIVE_ALLIN_OPENING"
+        ],
+        "two-gate-zealot": [
+          "PROTODD_NATIVE_ALLIN_OPENING"
+        ],
+        "three-gate-dragoon": [
+          "PROTODD_NATIVE_ALLIN_OPENING"
+        ],
+        "four-gate-dragoon": [
+          "PROTODD_NATIVE_ALLIN_OPENING"
+        ],
+        "dt-pressure": [
+          "PROTODD_NATIVE_ALLIN_OPENING"
+        ]
+      },
+      "baseline": "auto",
+      "evidence": [
+        "src/bwapi/ProtoddModule.cpp",
+        "tests/test_arena.py"
+      ],
+      "promotion_status": "development-only pending matchup qualification",
+      "scope": "local Protoss development only"
+    },
+    {
+      "id": "whole_game_hybrid_mode",
+      "file": "WholeGame-hybrid-mode.txt",
+      "kind": "mode",
+      "owner": "WholeGameRuntime",
+      "description": "Shadow or target command arbitration mode.",
+      "allowed_values": [
+        "unset",
+        "shadow",
+        "target"
+      ],
+      "default_value": "unset",
+      "tournament_values": [
+        "unset",
+        "shadow"
+      ],
+      "purpose_values": {
+        "training": [
+          "unset"
+        ],
+        "development": [
+          "unset",
+          "shadow",
+          "target"
+        ],
+        "final-test": [
+          "unset"
+        ]
+      },
+      "dependencies": [],
+      "dependencies_by_value": {
+        "shadow": [
+          "PROTODD_WHOLE_GAME_CONTROL",
+          "PROTODD_WHOLE_GAME_EVALUATION_BUILD"
+        ],
+        "target": [
+          "PROTODD_WHOLE_GAME_CONTROL",
+          "PROTODD_WHOLE_GAME_EVALUATION_BUILD"
+        ]
+      },
+      "baseline": "unset",
+      "evidence": [
+        "src/bwapi/ProtoddModule.cpp",
+        "training/arena.py",
+        "tests/test_arena.py"
+      ],
+      "promotion_status": "target authority requires exact weight promotion receipt",
+      "scope": "local Protoss development only"
+    },
+    {
+      "id": "whole_game_observe",
+      "file": "WholeGame-observe.txt",
+      "kind": "presence",
+      "owner": "WholeGameRuntime",
+      "description": "Emit optional live whole-game observations.",
+      "allowed_values": [
+        "absent",
+        "present"
+      ],
+      "default_value": "absent",
+      "tournament_values": [
+        "absent"
+      ],
+      "purpose_values": {
+        "training": [
+          "absent",
+          "present"
+        ],
+        "development": [
+          "absent",
+          "present"
+        ],
+        "final-test": [
+          "absent"
+        ]
+      },
+      "dependencies": [],
+      "baseline": "absent",
+      "evidence": [
+        "src/bwapi/WholeGameRuntime.cpp",
+        "training/arena.py"
+      ],
+      "promotion_status": "diagnostic-only",
+      "scope": "training and development diagnostics"
+    }
+  ],
+  "configuration_rules": [
+    {
+      "id": "profiles-exclusive",
+      "when": "PROTODD_TOURNAMENT_PROFILE",
+      "requires_all": [],
+      "requires_any": [],
+      "conflicts": [
+        "PROTODD_DEVELOPER_PROFILE"
+      ],
+      "message": "Choose either the tournament profile or the developer profile",
+      "evidence": [
+        "tests/test_build_profiles.ps1"
+      ]
+    },
+    {
+      "id": "tournament-research-disabled",
+      "when": "PROTODD_TOURNAMENT_PROFILE",
+      "requires_all": [],
+      "requires_any": [],
+      "conflicts": [
+        "PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY"
+      ],
+      "message": "The tournament profile cannot enable learned research authority",
+      "evidence": [
+        "tests/test_build_profiles.ps1"
+      ]
+    },
+    {
+      "id": "research-needs-developer",
+      "when": "PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY",
+      "requires_all": [
+        "PROTODD_DEVELOPER_PROFILE"
+      ],
+      "requires_any": [],
+      "conflicts": [],
+      "message": "Learned research authority requires the developer profile",
+      "evidence": [
+        "tests/test_build_profiles.ps1"
+      ]
+    },
+    {
+      "id": "module-profile-required",
+      "when": "PROTODD_BUILD_BWAPI_MODULE",
+      "requires_all": [],
+      "requires_any": [
+        "PROTODD_TOURNAMENT_PROFILE",
+        "PROTODD_DEVELOPER_PROFILE"
+      ],
+      "conflicts": [],
+      "message": "BWAPI modules require an explicit tournament or developer profile",
+      "evidence": [
+        "tests/test_build_profiles.ps1"
+      ]
+    },
+    {
+      "id": "pvz-gateway-conflicts",
+      "when": "PROTODD_PVZ_GATEWAY_OPENING",
+      "requires_all": [],
+      "requires_any": [],
+      "conflicts": [
+        "PROTODD_PVZ_EARLY_SPLASH",
+        "PROTODD_PVZ_REPLAY_OPENING",
+        "PROTODD_PVZ_ARCHIVES_FIRST"
+      ],
+      "message": "Unsupported combination of PvZ strategy interventions",
+      "evidence": [
+        "tests/test_build_profiles.ps1"
+      ]
+    },
+    {
+      "id": "pvz-splash-conflicts",
+      "when": "PROTODD_PVZ_EARLY_SPLASH",
+      "requires_all": [],
+      "requires_any": [],
+      "conflicts": [
+        "PROTODD_PVZ_REPLAY_OPENING",
+        "PROTODD_PVZ_ARCHIVES_FIRST"
+      ],
+      "message": "Unsupported combination of PvZ strategy interventions",
+      "evidence": [
+        "tests/test_build_profiles.ps1"
+      ]
+    },
+    {
+      "id": "pvp-fog-isolated",
+      "when": "PROTODD_PVP_FOG_DETECTION",
+      "requires_all": [],
+      "requires_any": [],
+      "conflicts": [
+        "PROTODD_PVZ_GATEWAY_OPENING",
+        "PROTODD_PVZ_EARLY_SPLASH",
+        "PROTODD_PVZ_REPLAY_OPENING",
+        "PROTODD_PVZ_ARCHIVES_FIRST"
+      ],
+      "message": "Evaluate one opt-in strategy intervention at a time",
+      "evidence": [
+        "tests/test_build_profiles.ps1"
+      ]
+    },
+    {
+      "id": "late-economy-isolated",
+      "when": "PROTODD_LATE_ECONOMY_RECOVERY",
+      "requires_all": [],
+      "requires_any": [],
+      "conflicts": [
+        "PROTODD_PVZ_GATEWAY_OPENING",
+        "PROTODD_PVZ_EARLY_SPLASH",
+        "PROTODD_PVP_FOG_DETECTION"
+      ],
+      "message": "Unsupported combination with late economy recovery",
+      "evidence": [
+        "tests/test_build_profiles.ps1"
+      ]
+    },
+    {
+      "id": "cannon-screen-base",
+      "when": "PROTODD_PVZ_POWERED_CANNON_SCREEN",
+      "requires_all": [
+        "PROTODD_PVZ_REPLAY_OPENING"
+      ],
+      "requires_any": [],
+      "conflicts": [
+        "PROTODD_PVZ_ARCHIVES_FIRST",
+        "PROTODD_LATE_ECONOMY_RECOVERY",
+        "PROTODD_PVZ_GATEWAY_OPENING",
+        "PROTODD_PVZ_EARLY_SPLASH",
+        "PROTODD_PVP_FOG_DETECTION",
+        "PROTODD_STALLED_ARMY_ROUTING"
+      ],
+      "message": "Powered Cannon screen requires the replay PvZ opening",
+      "evidence": [
+        "tests/test_build_profiles.ps1"
+      ]
+    },
+    {
+      "id": "early-mineral-prerequisites",
+      "when": "PROTODD_PVZ_EARLY_MINERAL_FALLBACK",
+      "requires_all": [
+        "PROTODD_PVZ_REPLAY_OPENING",
+        "PROTODD_PVZ_MINERAL_FALLBACK"
+      ],
+      "requires_any": [],
+      "conflicts": [
+        "PROTODD_PVZ_POWERED_CANNON_SCREEN"
+      ],
+      "message": "Early mineral fallback requires its base flag and replay PvZ opening",
+      "evidence": [
+        "tests/test_build_profiles.ps1"
+      ]
+    },
+    {
+      "id": "proactive-reaver-prerequisite",
+      "when": "PROTODD_PVZ_PROACTIVE_REAVER",
+      "requires_all": [
+        "PROTODD_PVZ_POWERED_CANNON_SCREEN"
+      ],
+      "requires_any": [],
+      "conflicts": [
+        "PROTODD_PVZ_MINERAL_FALLBACK"
+      ],
+      "message": "Proactive Reaver requires the isolated powered Cannon screen",
+      "evidence": [
+        "tests/test_build_profiles.ps1"
+      ]
+    },
+    {
+      "id": "army-floor-prerequisite",
+      "when": "PROTODD_PVZ_ARMY_FLOOR",
+      "requires_all": [
+        "PROTODD_PVZ_POWERED_CANNON_SCREEN"
+      ],
+      "requires_any": [],
+      "conflicts": [
+        "PROTODD_PVZ_MINERAL_FALLBACK",
+        "PROTODD_PVZ_PROACTIVE_REAVER"
+      ],
+      "message": "PvZ army floor requires the isolated powered Cannon screen",
+      "evidence": [
+        "tests/test_build_profiles.ps1"
+      ]
+    },
+    {
+      "id": "detector-surge-prerequisite",
+      "when": "PROTODD_PVZ_DETECTOR_SURGE",
+      "requires_all": [
+        "PROTODD_PVZ_ARMY_FLOOR"
+      ],
+      "requires_any": [],
+      "conflicts": [],
+      "message": "PvZ detector surge requires the frozen army-floor reference",
+      "evidence": [
+        "tests/test_build_profiles.ps1"
+      ]
+    },
+    {
+      "id": "whole-game-evaluation-needs-control",
+      "when": "PROTODD_WHOLE_GAME_EVALUATION_BUILD",
+      "requires_all": [
+        "PROTODD_WHOLE_GAME_CONTROL"
+      ],
+      "requires_any": [],
+      "conflicts": [],
+      "message": "Evaluation build requires whole-game control",
+      "evidence": [
+        "tests/test_build_profiles.ps1"
+      ]
+    },
+    {
+      "id": "hybrid-needs-evaluation",
+      "when": "PROTODD_WHOLE_GAME_HYBRID",
+      "requires_all": [
+        "PROTODD_WHOLE_GAME_CONTROL",
+        "PROTODD_WHOLE_GAME_EVALUATION_BUILD"
+      ],
+      "requires_any": [],
+      "conflicts": [],
+      "message": "Hybrid control requires a weighted local evaluation controller",
+      "evidence": [
+        "tests/test_build_profiles.ps1"
+      ]
+    }
+  ]
+}

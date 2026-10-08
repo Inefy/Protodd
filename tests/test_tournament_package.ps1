@@ -36,9 +36,11 @@ try {
 
     foreach ($path in @(
         "CMakeLists.txt", "include/protodd/sample.hpp", "src/core/sample.cpp",
-        "scripts/build-tournament.ps1", "scripts/TournamentManifest.psm1",
+        "scripts/build-tournament.ps1", "scripts/build-trained-controller.ps1",
+        "scripts/TournamentManifest.psm1",
         "scripts/MatchProvenance.psm1", "scripts/prepare-patched-runtime.ps1",
         "scripts/start-owned-starcraft.ps1", "scripts/stop-owned-starcraft.ps1",
+        "scripts/HeadlessStarCraft.psm1", "scripts/HeadlessStarCraft.cs", "scripts/run-headless-starcraft.ps1",
         "training/compare_replay.mjs",
         "bwapi-data/read/WholeGame-mode.txt",
         "bwapi-data/write/Protodd-private.csv", "tools/__pycache__/ignored.pyc",
@@ -59,8 +61,12 @@ try {
     }
     if ($paths -notcontains "include/protodd/sample.hpp" -or
         $paths -notcontains "scripts/build-tournament.ps1" -or
+        $paths -notcontains "scripts/build-trained-controller.ps1" -or
         $paths -notcontains "scripts/start-owned-starcraft.ps1" -or
         $paths -notcontains "scripts/stop-owned-starcraft.ps1" -or
+        $paths -notcontains "scripts/HeadlessStarCraft.cs" -or
+        $paths -notcontains "scripts/HeadlessStarCraft.psm1" -or
+        $paths -notcontains "scripts/run-headless-starcraft.ps1" -or
         $paths -notcontains "scripts/prepare-patched-runtime.ps1" -or
         $paths -notcontains "scripts/MatchProvenance.psm1" -or
         $paths -notcontains "training/compare_replay.mjs") {
@@ -91,6 +97,65 @@ try {
         (Test-TournamentManifestPath -Path "C:/outside") -or
         (-not (Test-TournamentManifestPath -Path "src/core/sample.cpp"))) {
         throw "Manifest path validation accepted an unsafe path or rejected a source path"
+    }
+
+    $registryPath = Join-Path $repositoryRoot 'docs/feature-registry.json'
+    Assert-TournamentFeatureRegistry -RepositoryRoot $repositoryRoot
+    $registry = Get-Content -LiteralPath $registryPath -Raw | ConvertFrom-Json
+    $registryHash = (Get-FileHash -LiteralPath $registryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $activeFeatureManifest = [pscustomobject]@{
+        schema = 'protodd-active-features-v1'
+        registry_sha256 = $registryHash
+        build_options = @($registry.options | ForEach-Object {
+            [pscustomobject]@{ id=$_.id; value=$_.tournament_value; tournament_value=$_.tournament_value }
+        })
+        build_inputs = @($registry.build_inputs | ForEach-Object {
+            [pscustomobject]@{ id=$_.id; value=$_.tournament_value; tournament_value=$_.tournament_value }
+        })
+        runtime_controls = @($registry.runtime_controls)
+    }
+    $featureBoundManifest = [pscustomobject]@{
+        feature_registry_sha256 = $registryHash
+        registered_feature_manifest = $activeFeatureManifest
+    }
+    Assert-TournamentFeatureManifest -Manifest $featureBoundManifest -RepositoryRoot $repositoryRoot
+
+    $unsafeFeatureManifest = [pscustomobject]@{
+        feature_registry_sha256 = $registryHash
+        registered_feature_manifest = [pscustomobject]@{
+            schema = $activeFeatureManifest.schema
+            registry_sha256 = $registryHash
+            build_options = @($activeFeatureManifest.build_options | ForEach-Object {
+                [pscustomobject]@{ id=$_.id; value=$_.value; tournament_value=$_.tournament_value }
+            })
+            build_inputs = @($activeFeatureManifest.build_inputs)
+            runtime_controls = @($activeFeatureManifest.runtime_controls)
+        }
+    }
+    ($unsafeFeatureManifest.registered_feature_manifest.build_options |
+        Where-Object { $_.id -eq 'PROTODD_PVZ_GATEWAY_OPENING' }).value = 'ON'
+    $unapprovedFeatureRejected = $false
+    try { Assert-TournamentFeatureManifest -Manifest $unsafeFeatureManifest -RepositoryRoot $repositoryRoot }
+    catch { $unapprovedFeatureRejected = $true }
+    if (-not $unapprovedFeatureRejected) {
+        throw 'Release feature validation accepted an unpromoted gameplay option'
+    }
+
+    $unregisteredModeManifest = [pscustomobject]@{
+        feature_registry_sha256 = $registryHash
+        registered_feature_manifest = [pscustomobject]@{
+            schema = $activeFeatureManifest.schema
+            registry_sha256 = $registryHash
+            build_options = @($activeFeatureManifest.build_options)
+            build_inputs = @($activeFeatureManifest.build_inputs)
+            runtime_controls = @($activeFeatureManifest.runtime_controls | Select-Object -Skip 1)
+        }
+    }
+    $unregisteredModeRejected = $false
+    try { Assert-TournamentFeatureManifest -Manifest $unregisteredModeManifest -RepositoryRoot $repositoryRoot }
+    catch { $unregisteredModeRejected = $true }
+    if (-not $unregisteredModeRejected) {
+        throw 'Release feature validation accepted an incomplete runtime feature contract'
     }
     Write-Output "Tournament package provenance checks passed"
 } finally {

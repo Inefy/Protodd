@@ -9,6 +9,7 @@ import torch
 
 from training.whole_game_cpu_parity import read_output, write_input
 from training.whole_game_export import read_package
+from training.whole_game_contract import model_contract
 from training.whole_game_multislot_export import package
 from training.whole_game_multislot_model import MultiSlotWholeGameModel
 
@@ -55,6 +56,7 @@ class MultiSlotExportTest(unittest.TestCase):
             self.assertEqual(loaded["schema"], manifest["schema"])
             self.assertEqual(set(state), set(model.state_dict()))
             self.assertEqual(manifest["maximum_slots"], 6)
+            self.assertEqual(manifest["model_contract"], model_contract())
             if not PROBE.exists():
                 self.skipTest("compiled CPU probe has not been built")
             fixture, output = root / "input.bin", root / "output.bin"
@@ -76,6 +78,23 @@ class MultiSlotExportTest(unittest.TestCase):
                                                slot[name].numpy().reshape(-1),
                                                atol=3e-4, rtol=3e-4,
                                                err_msg=f"slot {index} head {name}")
+
+    def test_nonfinite_parameters_are_rejected_before_export(self):
+        torch.manual_seed(21)
+        model = MultiSlotWholeGameModel(width=64, mixture_components=3).eval()
+        with torch.no_grad():
+            model.slot_stop.bias[0] = float("nan")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "teacher.pt"
+            torch.save(dict(schema="protodd-whole-game-multislot-fit-v1",
+                            source_identity_sha256="c" * 64,
+                            state_dict=model.state_dict()), checkpoint)
+            (root / "run.json").write_text(json.dumps(dict(
+                schema="protodd-whole-game-multislot-fit-v1",
+                maximum_slots=6, training_identity_sha256="c" * 64)))
+            with self.assertRaisesRegex(ValueError, "non-finite or excessive parameter"):
+                package(checkpoint, root / "package")
 
 
 if __name__ == "__main__":

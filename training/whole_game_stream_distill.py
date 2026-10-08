@@ -26,6 +26,7 @@ from .whole_game_distill import (checkpoint_model, distillation_loss, paired_for
                                  supervised_output_loss)
 from .whole_game_encoding_cache import ObservationCache
 from .whole_game_event_sampling import natural_event_schedule
+from .whole_game_fit_gate import verify_pre_fit_gate
 from .whole_game_fit import MATCHUPS, collect, sample_loss, summarize_validation, validate_release_pair
 from .whole_game_model import WholeGameModel
 from .whole_game_quality import load_index
@@ -40,7 +41,8 @@ SOURCE_FILES = ("whole_game_stream_distill.py", "whole_game_distill.py",
                 "whole_game_cadence_collect.py", "whole_game_action_sampling.py",
                 "whole_game_event_sampling.py", "whole_game_quality.py",
                 "whole_game_release.py", "whole_game_shards.py",
-                "whole_game_sequences.py", "whole_game_future.py")
+                "whole_game_sequences.py", "whole_game_future.py",
+                "whole_game_fit_gate.py")
 TASKS = ("action", "action", "event", "forecast")
 
 
@@ -92,6 +94,9 @@ def category_schedule(buckets, cadence_info, group, steps):
 
 
 def fit(args):
+    pre_fit_gate = verify_pre_fit_gate(
+        args.release, args.validation_release,
+        args.representation_audit, args.native_parity_report)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU required for streaming distillation")
     if (args.games_per_matchup < 1 or args.chunk_games_per_matchup < 1 or
@@ -149,7 +154,8 @@ def fit(args):
                 collect_workers=args.collect_workers,
                 high_mmr_threshold=args.high_mmr_threshold,
                 high_mmr_share=args.high_mmr_share,
-                bf16_amp=not args.no_amp)
+                bf16_amp=not args.no_amp,
+                pre_fit_gate=pre_fit_gate)
     spec_digest = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
     if args.resume:
         if previous != spec:
@@ -287,7 +293,8 @@ def fit(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("teacher", "release", "validation_release", "quality_index",
-                 "validation_quality_index", "output"):
+                 "validation_quality_index", "representation_audit",
+                 "native_parity_report", "output"):
         parser.add_argument("--" + name.replace("_", "-"), required=True, type=Path)
     parser.add_argument("--games-per-matchup", type=int, default=160)
     parser.add_argument("--chunk-games-per-matchup", type=int, default=8)

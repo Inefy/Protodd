@@ -2,16 +2,19 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <map>
 #include <ostream>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace protodd::whole_observation {
 
 inline constexpr auto schema = "protodd-whole-game-pilot-v3.2";
 inline constexpr auto terrainSchema = "protodd-terrain-v2";
+inline constexpr std::size_t maximumRememberedEntities = 4096;
 
 // IDs are local, causal tokens. Adapters must never place engine IDs in these
 // fields or populate an enemy's private state.
@@ -29,6 +32,49 @@ struct Snapshot {
     std::vector<int> technologyCompleted, technologyInProgress, upgradeLevels, upgradeInProgress;
     std::map<int, Entity> entities;
 };
+
+struct EntityPruneResult {
+    bool withinLimit{true};
+    std::vector<int> removedIds;
+};
+
+// Keep recent and currently observed entities. Forgotten own actors must be
+// removed by the adapter's lifecycle reconciliation; this cap only evicts
+// stale non-own observations when the learned runtime's retained history grows.
+inline EntityPruneResult pruneStaleEntities(
+    std::map<int, Entity>& entities,
+    const std::size_t maximumSize = maximumRememberedEntities) {
+    EntityPruneResult result;
+    if (entities.size() <= maximumSize) return result;
+
+    std::vector<std::pair<int, int>> stale;
+    stale.reserve(entities.size());
+    for (const auto& [id, entity] : entities) {
+        if (entity.relation != 0 && !entity.visible)
+            stale.emplace_back(entity.lastSeen, id);
+    }
+    std::ranges::sort(stale);
+    for (const auto& [lastSeen, id] : stale) {
+        static_cast<void>(lastSeen);
+        if (entities.size() <= maximumSize) break;
+        entities.erase(id);
+        result.removedIds.push_back(id);
+    }
+    result.withinLimit = entities.size() <= maximumSize;
+    return result;
+}
+
+inline void forgetUnretainedTokens(
+    std::map<int, int>& engineIds,
+    std::set<int>& published,
+    const std::map<int, Entity>& entities) {
+    std::erase_if(engineIds, [&entities](const auto& entry) {
+        return !entities.contains(entry.second);
+    });
+    std::erase_if(published, [&entities](const int id) {
+        return !entities.contains(id);
+    });
+}
 
 inline void maskUnpublishedReferences(Snapshot& view, const std::set<int>& published) {
     // Observation adapters update memory every frame, but publish only on

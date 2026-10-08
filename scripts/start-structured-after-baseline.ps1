@@ -10,6 +10,11 @@ $baseline = Join-Path $workspaceRoot 'artifacts/replay-learning/whole-game-strea
 $structured = Join-Path $workspaceRoot 'artifacts/replay-learning/whole-game-stream-fit-structured-160x3-width512-20260922'
 $statusFile = Join-Path $workspaceRoot 'build/robust-training-20260922/whole-game-structured-160.status.json'
 $python = Join-Path $workspaceRoot 'build/model-venv/Scripts/python.exe'
+$trainRelease = 'artifacts/replay-learning/whole-game-release-v32c-20260922'
+$validationRelease = 'artifacts/replay-learning/whole-game-release-fullprefix-benchmark-v32-20260922'
+$preFitAudit = 'artifacts/replay-learning/whole-game-stream-v32c-benchmark-pre-fit-audit-20261007'
+$representationAudit = Join-Path $preFitAudit 'report.json'
+$nativeParityReport = 'artifacts/goal-20261005/t108-target-representation-audit-20261007/native-parity/report.json'
 
 function Write-Status($stage, $detail, $code) {
     @{ stage = $stage; detail = $detail; exit_code = $code;
@@ -18,6 +23,9 @@ function Write-Status($stage, $detail, $code) {
 }
 
 try {
+    & (Join-Path $PSScriptRoot 'verify-whole-game-fit-preflight.ps1') `
+        -TrainRelease $trainRelease -ValidationRelease $validationRelease `
+        -AuditDirectory $preFitAudit -NativeParityReport $nativeParityReport
     Write-Status 'waiting_for_baseline' "PID $BaselineProcessId" $null
     if (Get-Process -Id $BaselineProcessId -ErrorAction SilentlyContinue) {
         Wait-Process -Id $BaselineProcessId
@@ -31,8 +39,8 @@ try {
     }
     Write-Status 'fitting' 'Structured objective on frozen 160x3 baseline cohort' $null
     & $python -m training.whole_game_stream_fit_structured `
-        --release artifacts/replay-learning/whole-game-release-v32c-20260922 `
-        --validation-release artifacts/replay-learning/whole-game-release-fullprefix-benchmark-v32-20260922 `
+        --release $trainRelease --validation-release $validationRelease `
+        --representation-audit $representationAudit --native-parity-report $nativeParityReport `
         --quality-index artifacts/replay-learning/whole-game-quality-v2-v32c-20260922.json `
         --validation-quality-index artifacts/replay-learning/whole-game-quality-v2-benchmark-v32-20260922.json `
         --output artifacts/replay-learning/whole-game-stream-fit-structured-160x3-width512-20260922 `

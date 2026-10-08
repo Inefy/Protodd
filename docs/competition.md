@@ -84,6 +84,10 @@ The direct-match helper preserves a raw trace and archives the pre-cleanup
 trace separately. Its default resets Protodd's learning; `-PreserveLearning`
 retains it. Opponent read/write data is preserved, so repeated tests may face
 different learned openings even with the same opponent package and seed.
+For repeatable cross-invocation aggregation, pass a campaign-specific
+`--ingestion-index` path. Identical manifest/trace evidence is counted once;
+changed evidence under an existing preflight identity is rejected. Keep the
+index with that campaign's archive and retain the source manifests and traces.
 Direct matches have no wall-clock cutoff by default and run until a terminal
 result or the one-hour in-game limit (`-FrameLimit 86400`); use a positive
 `-TimeoutSeconds` only as an explicit local emergency failsafe.

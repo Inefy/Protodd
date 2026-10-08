@@ -21,6 +21,7 @@ from torch.nn import functional as F
 from .whole_game_features import encode_label, encode_observation, static_grid
 from .whole_game_batch import minibatch_loss
 from .whole_game_encoding_cache import ObservationCache
+from .whole_game_fit_gate import verify_pre_fit_gate
 from .whole_game_future import derive
 from .whole_game_model import (DOMAINS, FORECAST_BINARY_TARGETS, FORECAST_HORIZONS,
                                WholeGameModel, masked_action_loss)
@@ -319,6 +320,10 @@ def initialize_model(model, checkpoint_path, train_identity_sha):
 
 
 def fit(args):
+    validation_release = args.validation_release or args.release
+    pre_fit_gate = verify_pre_fit_gate(
+        args.release, validation_release,
+        args.representation_audit, args.native_parity_report)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU required for this experimental teacher fit")
     if args.output.exists():
@@ -326,8 +331,7 @@ def fit(args):
     source_hashes = {name: hashlib.sha256((Path(__file__).parent / name).read_bytes()).hexdigest()
                      for name in ("whole_game_fit.py", "whole_game_batch.py", "whole_game_model.py",
                                   "whole_game_features.py", "whole_game_quality.py",
-                                  "whole_game_encoding_cache.py")}
-    validation_release = args.validation_release or args.release
+                                  "whole_game_encoding_cache.py", "whole_game_fit_gate.py")}
     train_identity_sha, validation_identity_sha = validate_release_pair(args.release, validation_release)
     quality_index = load_index(args.quality_index, args.release / "identity.json") if args.quality_index else None
     validation_quality_path = args.validation_quality_index or (
@@ -426,6 +430,7 @@ def fit(args):
         raise ValueError("empty held-out validation sample")
     report = dict(schema=SCHEMA, experimental=True, training_ready=False,
                   strength_validated=False, deployment="none",
+                  pre_fit_gate=pre_fit_gate,
                   source_release=str(args.release.resolve()),
                   source_code_sha256=source_hashes,
                   source_identity_sha256=train_identity_sha,
@@ -467,6 +472,10 @@ def main():
     parser.add_argument("--release", type=Path, required=True)
     parser.add_argument("--validation-release", type=Path,
                         help="Separate frozen held-out release for an interim training fit")
+    parser.add_argument("--representation-audit", type=Path, required=True,
+                        help="Pre-fit, split-matched whole-game representation audit")
+    parser.add_argument("--native-parity-report", type=Path, required=True,
+                        help="Passing native export parity report for all three matchups")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--games-per-matchup", type=int, default=128)
     parser.add_argument("--history", type=int, default=8)

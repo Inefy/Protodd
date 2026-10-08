@@ -28,6 +28,29 @@ struct ConstructionTaskSite {
     }
 };
 
+enum class CriticalReservationReason : std::uint8_t {
+    none,
+    supply,
+    detection,
+    range,
+};
+
+struct CriticalGoalTiming {
+    Frame requiredByFrame{-1};
+    Frame expectedReadyFrame{-1};
+    Frame slackFrames{-1};
+    bool feasible{};
+    CriticalReservationReason reservationReason{CriticalReservationReason::none};
+
+    [[nodiscard]] constexpr bool active() const noexcept {
+        return reservationReason != CriticalReservationReason::none &&
+               requiredByFrame >= 0;
+    }
+};
+
+[[nodiscard]] int criticalDeadlinePriorityAdjustment(
+    const CriticalGoalTiming& timing, Frame currentFrame) noexcept;
+
 struct ProductionGoal {
     GoalKind goal{GoalKind::train};
     UnitKind target{UnitKind::unknown};
@@ -39,7 +62,12 @@ struct ProductionGoal {
     bool allowMineralFallback{};
     bool harassmentOnly{};
     ConstructionTaskSite constructionSite{};
+    CriticalGoalTiming timing{};
 };
+
+[[nodiscard]] CriticalGoalTiming assessCriticalGoalTiming(
+    const GameState& state, const ProductionGoal& goal, Frame requiredByFrame,
+    CriticalReservationReason reason);
 
 struct CompositionTarget {
     UnitKind kind{UnitKind::unknown};
@@ -69,6 +97,9 @@ struct StrategicPlan {
     Position expansionTarget{-1, -1};
     // Temporarily release expansion savings while a failed builder recovers.
     bool deferExpansion{};
+    // Keep mobile cover assigned while securing an expansion route or when a
+    // started Nexus is locally threatened, even during an offensive posture.
+    bool expansionProtectionRequired{};
     int harassmentDrops{};
     // Stop supply/production fallback spending while a lost last Nexus has no
     // legal mineral drop-off and recovery is awaiting a viable rebuild.
@@ -109,6 +140,7 @@ public:
         const GameState& state,
         const ThreatAssessment& threat,
         OpeningStyle style = OpeningStyle::standard) const;
+    void reset() noexcept;
 
 private:
     bool pvzGatewayOpening_{};
@@ -122,6 +154,13 @@ private:
     bool pvzArmyFloor_{};
     bool pvpScoutedTwoGateAnchor_{};
     bool pvpCoveredRangedNatural_{};
+    mutable bool pvpCoveredRangedNaturalActive_{};
+    mutable Frame pvpCoveredRangedNaturalLastFrame_{-1};
+    // Midfield pressure is based on mobile enemy sightings. Keep its rally
+    // anchor until the observed front moves materially, rather than tracking
+    // every small unit-position change at strategy-tick cadence.
+    mutable Position pvpMidfieldRally_{-1, -1};
+    mutable Frame pvpMidfieldRallyLastFrame_{-1};
     [[nodiscard]] StrategicPlan planPvT(
         const GameState& state,
         const ThreatAssessment& threat) const;
@@ -167,6 +206,9 @@ private:
     Posture posture_{Posture::hold};
     Frame lastEmergencyFrame_{-1};
     bool initialized_{};
+    Position expansionCommitment_{-1, -1};
+    Frame lastExpansionRequestFrame_{-1};
+    int committedExpansionBases_{};
 };
 
 [[nodiscard]] std::string_view postureName(Posture posture) noexcept;

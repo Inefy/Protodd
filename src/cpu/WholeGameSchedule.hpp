@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -13,12 +15,18 @@ namespace protodd::cpu {
 struct PlannedIntent {
     int delayFrames{};
     Intent intent;
+    std::uint64_t attemptId{};
+    std::optional<std::size_t> slotOrdinal;
 };
 
 struct ScheduledIntent {
     int dueFrame{};
     std::size_t slot{};
     Intent intent;
+    std::uint64_t attemptId{};
+    int proposalFrame{};
+    std::size_t originalActorCount{};
+    std::vector<std::size_t> actorOrdinals;
 };
 
 // One cadence prediction owns at most the following 24 frames. A replacement
@@ -42,8 +50,15 @@ public:
             if (plans[index].delayFrames < 0 || plans[index].delayFrames >= 24) {
                 throw std::invalid_argument("whole-game dispatch delay outside cadence");
             }
-            next.push_back({origin + plans[index].delayFrames, index,
-                            std::move(plans[index].intent)});
+            const auto originalActorCount = plans[index].intent.actorIds.size();
+            std::vector<std::size_t> actorOrdinals;
+            actorOrdinals.reserve(originalActorCount);
+            for (std::size_t actor = 0; actor < originalActorCount; ++actor)
+                actorOrdinals.push_back(actor);
+            next.push_back({origin + plans[index].delayFrames,
+                            plans[index].slotOrdinal.value_or(index),
+                            std::move(plans[index].intent), plans[index].attemptId,
+                            origin, originalActorCount, std::move(actorOrdinals)});
         }
         std::stable_sort(next.begin(), next.end(), [](const auto& left, const auto& right) {
             return left.dueFrame < right.dueFrame;

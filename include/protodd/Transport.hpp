@@ -33,6 +33,18 @@ private:
         Frame transitionFrame{};
         Position target{-1, -1};
         Position waypoint{-1, -1};
+        int observedAmmo{-1};
+        int observedVolleys{};
+        int pendingShotAmmo{-1};
+        Frame pendingShotSince{-1};
+        Frame loadRequestFrame{-1};
+        int failedLoadAttempts{};
+        Frame unloadRequestFrame{-1};
+        int failedUnloadAttempts{};
+        bool pendingUnload{};
+        bool pendingUnloadForReturn{};
+        bool waitingForScarabLaunch{};
+        bool scarabWaitExpired{};
     };
 
     std::unordered_map<UnitId, Mission> missions_;

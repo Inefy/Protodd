@@ -79,6 +79,16 @@ int main() {
     pressure.combatEnemiesNearMain = 3; pressure.immediateGround = 0.8;
     pressure.approachingArmyValue = 5.0;
     check(covered(state, pressure), "a covered perimeter wave was treated as an economic all-in");
+    auto marginalPressure = state;
+    for (int i = 0; i < 2; ++i) {
+        auto enemy = unit(315 + i, UnitKind::dragoon, {1120, 500 + i * 32});
+        enemy.visible = true;
+        marginalPressure.enemy.units.push_back(enemy);
+    }
+    plan = strategy.plan(marginalPressure, pressure);
+    check(plan.desiredBases == 2 && plan.expansionTarget == natural.center &&
+          plan.rallyPoint == natural.center,
+          "a small increase in observed perimeter pressure reversed a covered natural commitment");
     auto unsafe = state;
     for (int i = 0; i < 4; ++i) {
         auto enemy = unit(320 + i, UnitKind::dragoon, {1120, 400 + i * 32});

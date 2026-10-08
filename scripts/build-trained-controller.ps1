@@ -1,8 +1,8 @@
 param(
-    [string]$Weights = "artifacts/replay-learning/whole-game-opening-continuation-20260930/package/weights.bin",
+    [string]$Weights = "",
     [string]$BuildDirectory = "build/trained-controller",
     [string]$BwapiRoot = "build/_deps/bwapi-src",
-    [string]$Python = "build/model-venv/Scripts/python.exe",
+    [string]$Python = "",
     [switch]$Exclusive,
     [switch]$StandardOpenings
 )
@@ -15,7 +15,15 @@ function Resolve-RepoPath([string]$Path) {
 $weightsPath = Resolve-RepoPath $Weights
 $buildPath = Resolve-RepoPath $BuildDirectory
 $bwapiPath = Resolve-RepoPath $BwapiRoot
-$pythonPath = Resolve-RepoPath $Python
+if ([string]::IsNullOrWhiteSpace($Weights)) {
+    throw "Trained weights are not included in the source archive; pass -Weights with an exported weights.bin"
+}
+$pythonPath = if ([string]::IsNullOrWhiteSpace($Python)) {
+    (Get-Command python -CommandType Application -ErrorAction Stop).Source
+} else { Resolve-RepoPath $Python }
+if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
+    throw "Python executable was not found: $pythonPath"
+}
 $manifestPath = Join-Path (Split-Path -Parent $weightsPath) "manifest.json"
 $hybrid = if ($Exclusive) { "OFF" } else { "ON" }
 $allin = if ($StandardOpenings) { "OFF" } else { "ON" }

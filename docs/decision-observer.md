@@ -32,6 +32,7 @@ The timeline slider and event timestamps select historical strategy, squads,
 economy, production and enemy hypotheses together. The map shows observed unit
 coordinates; click a unit for HP, shields, cooldown, target and last issued order.
 Use the timeline filter for Probe harassment, fight decisions, losses or commands.
+The full-trace operating metrics and their denominator/censoring rules are documented in [operating-metrics.md](operating-metrics.md).
 The in-game compact/detailed overlay also includes the current mission, health
 metrics, scouting action and squad explanations.
 

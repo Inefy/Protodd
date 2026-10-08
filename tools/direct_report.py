@@ -5,10 +5,16 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from contextlib import contextmanager
 import hashlib
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
+import uuid
 
 from log_analyzer import analyze, wilson_interval
 from decision_report import analyze_decisions
@@ -125,6 +131,37 @@ def diagnose_states(lines: list[str]) -> dict:
     return result
 
 
+def parse_match_identity(lines: list[str]) -> dict | None:
+    """Read the single MATCH header, including the realized Protodd start tile."""
+    rows = [line.strip().split(",") for line in lines if line.startswith("MATCH,")]
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise ValueError("trace must contain exactly one MATCH header")
+    fields = {}
+    for item in rows[0][1:]:
+        if "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        if key in fields:
+            raise ValueError(f"duplicate MATCH field: {key}")
+        fields[key] = value
+    try:
+        identity = {
+            "seed": int(fields["seed"]),
+            "map_hash": fields["map_hash"],
+            "width": int(fields["width"]),
+            "height": int(fields["height"]),
+        }
+    except (KeyError, ValueError) as error:
+        raise ValueError("MATCH header lacks a valid seed, map hash, or dimensions") from error
+    start_x, start_y = fields.get("self_start_tile_x"), fields.get("self_start_tile_y")
+    if (start_x is None) != (start_y is None):
+        raise ValueError("MATCH header has incomplete self start-tile coordinates")
+    identity["self_start_tile"] = None if start_x is None else [int(start_x), int(start_y)]
+    return identity
+
+
 def summarize(records: list[dict]) -> dict:
     completed = [r for r in records if r.get("status") == "completed"
                  and str(r.get("result", "")).startswith(("END,win,", "END,loss,"))]
@@ -177,7 +214,173 @@ def summarize(records: list[dict]) -> dict:
     }
 
 
+def ingest_manifests(paths: list[Path]) -> tuple[list[dict], int]:
+    """Load immutable match evidence once; reject changed copies of one run."""
+    ordered_paths = sorted((Path(path).resolve(strict=True) for path in paths), key=str)
+    records: list[dict] = []
+    seen: dict[str, tuple[str, str | None]] = {}
+    duplicates = 0
+    for path in ordered_paths:
+        manifest_bytes = path.read_bytes()
+        manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+        record = json.loads(manifest_bytes.decode("utf-8-sig"))
+        if not isinstance(record, dict):
+            raise ValueError(f"match manifest must be a JSON object: {path}")
+        preflight_sha256 = record.get("preflight_manifest_sha256")
+        if preflight_sha256:
+            identity = f"preflight:{str(preflight_sha256).lower()}"
+        elif record.get("label") and record.get("started_utc"):
+            identity = f"legacy:{record['label']}:{record['started_utc']}"
+        else:
+            identity = f"manifest:{manifest_sha256}"
+
+        trace_path = path.with_suffix(".log")
+        trace_bytes = trace_path.read_bytes() if trace_path.exists() else None
+        trace_sha256 = hashlib.sha256(trace_bytes).hexdigest() if trace_bytes is not None else None
+        fingerprint = (manifest_sha256, trace_sha256)
+        previous = seen.get(identity)
+        if previous is not None:
+            if previous != fingerprint:
+                raise ValueError(f"conflicting evidence for match identity {identity}")
+            duplicates += 1
+            continue
+
+        record["source_manifest_path"] = str(path)
+        record["source_manifest_sha256"] = manifest_sha256
+        record["ingestion_identity"] = identity
+        if trace_bytes is not None:
+            lines = trace_bytes.decode("utf-8-sig").splitlines()
+            record["source_trace_sha256"] = trace_sha256
+            record["match_identity"] = parse_match_identity(lines)
+            record["build_diagnostics"] = diagnose_states(lines)
+            if record.get("status") == "completed":
+                record["telemetry"] = analyze(lines)
+        records.append(record)
+        seen[identity] = fingerprint
+    return records, duplicates
+
+
+@contextmanager
+def _exclusive_index_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as stream:
+        if os.name == "nt":
+            import msvcrt
+
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                stream.write(b"\0")
+                stream.flush()
+            stream.seek(0)
+            try:
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as error:
+                raise RuntimeError(f"campaign ingestion index is already locked: {path}") from error
+            try:
+                yield
+            finally:
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _atomic_replace_json(path: Path, value: dict) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    encoded = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def update_ingestion_index(path: Path, incoming: list[dict]) -> tuple[list[dict], int, int]:
+    """Atomically add immutable runs to a cross-invocation campaign index."""
+    path = Path(path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    with _exclusive_index_lock(lock_path):
+        if path.exists():
+            index = json.loads(path.read_text(encoding="utf-8"))
+            if index.get("schema") != "protodd-direct-ingestion-v1" or not isinstance(index.get("matches"), list):
+                raise ValueError(f"unsupported direct-report ingestion index: {path}")
+            records = index["matches"]
+        else:
+            records = []
+
+        by_identity: dict[str, dict] = {}
+        for record in records:
+            identity = str(record.get("ingestion_identity", ""))
+            if not identity or identity in by_identity:
+                raise ValueError(f"ingestion index has a missing or duplicate identity: {path}")
+            by_identity[identity] = record
+
+        newly_ingested = 0
+        already_ingested = 0
+        changed = False
+        for record in incoming:
+            identity = str(record.get("ingestion_identity", ""))
+            if not identity:
+                raise ValueError("incoming match evidence has no stable ingestion identity")
+            previous = by_identity.get(identity)
+            if previous is not None:
+                old_fingerprint = (previous.get("source_manifest_sha256"), previous.get("source_trace_sha256"))
+                new_fingerprint = (record.get("source_manifest_sha256"), record.get("source_trace_sha256"))
+                if old_fingerprint != new_fingerprint:
+                    raise ValueError(f"conflicting evidence for already-ingested match identity {identity}")
+                already_ingested += 1
+                continue
+            by_identity[identity] = record
+            newly_ingested += 1
+            changed = True
+
+        if changed or not path.exists():
+            ordered_records = [by_identity[key] for key in sorted(by_identity)]
+            _atomic_replace_json(path, {
+                "schema": "protodd-direct-ingestion-v1",
+                "matches": ordered_records,
+            })
+        else:
+            ordered_records = [by_identity[key] for key in sorted(by_identity)]
+        return ordered_records, newly_ingested, already_ingested
+
+
 class DirectReportTests(unittest.TestCase):
+    def test_match_identity_includes_realized_start_tile(self):
+        identity = parse_match_identity([
+            "MATCH,seed=20261101,map_hash=abc123,width=4096,height=3072,"
+            "self_start_tile_x=14,self_start_tile_y=22"
+        ])
+        self.assertEqual(identity, {
+            "seed": 20261101, "map_hash": "abc123", "width": 4096,
+            "height": 3072, "self_start_tile": [14, 22],
+        })
+
+    def test_match_identity_rejects_incomplete_start_tile(self):
+        with self.assertRaisesRegex(ValueError, "incomplete self start-tile"):
+            parse_match_identity([
+                "MATCH,seed=1,map_hash=abc,width=4096,height=3072,self_start_tile_x=14"
+            ])
+
+    def test_legacy_match_identity_marks_spawn_unavailable(self):
+        identity = parse_match_identity([
+            "MATCH,seed=1,map_hash=abc,width=4096,height=3072"
+        ])
+        self.assertIsNone(identity["self_start_tile"])
+
     def test_runtime_openings_and_learning_are_separate_conditions(self):
         base = {"status": "completed", "result": "END,loss,12000",
                 "bot_sha256": "same", "opponent": "BananaBrain",
@@ -259,10 +462,103 @@ class DirectReportTests(unittest.TestCase):
                   "opponent_runtime_strategy_configuration_sha256": "two"}
         self.assertEqual(len(summarize([first, second])["segments"]), 2)
 
+    def test_manifest_ingestion_deduplicates_identical_copies(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record = {"label": "paired-001", "preflight_manifest_sha256": "a" * 64,
+                      "started_utc": "2026-10-07T00:00:00Z", "status": "completed",
+                      "result": "END,win,20000"}
+            encoded = json.dumps(record, sort_keys=True).encode("utf-8")
+            first = root / "first.json"
+            copy = root / "copy.json"
+            first.write_bytes(encoded)
+            copy.write_bytes(encoded)
+
+            ingested, duplicates = ingest_manifests([copy, first, first])
+
+            self.assertEqual((len(ingested), duplicates), (1, 2))
+            self.assertEqual(summarize(ingested)["completed"], 1)
+            self.assertEqual(ingested[0]["source_manifest_sha256"], hashlib.sha256(encoded).hexdigest())
+
+    def test_manifest_ingestion_rejects_conflicting_copy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first.json"
+            changed = root / "changed.json"
+            common = {"label": "paired-002", "preflight_manifest_sha256": "b" * 64,
+                      "started_utc": "2026-10-07T00:01:00Z", "status": "completed"}
+            first.write_text(json.dumps({**common, "result": "END,win,20000"}), encoding="utf-8")
+            changed.write_text(json.dumps({**common, "result": "END,loss,20000"}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "conflicting evidence"):
+                ingest_manifests([first, changed])
+
+    def test_manifest_ingestion_rejects_changed_trace(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record = {"label": "paired-003", "preflight_manifest_sha256": "c" * 64,
+                      "started_utc": "2026-10-07T00:02:00Z", "status": "incomplete"}
+            encoded = json.dumps(record, sort_keys=True).encode("utf-8")
+            first = root / "first.json"
+            changed = root / "changed.json"
+            first.write_bytes(encoded)
+            changed.write_bytes(encoded)
+            first.with_suffix(".log").write_text("TRACE,first\n", encoding="utf-8")
+            changed.with_suffix(".log").write_text("TRACE,changed\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "conflicting evidence"):
+                ingest_manifests([first, changed])
+
+    def test_cli_counts_identical_manifest_copies_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record = {"label": "cli-duplicate", "preflight_manifest_sha256": "d" * 64,
+                      "status": "completed", "result": "END,win,1200"}
+            encoded = json.dumps(record, sort_keys=True)
+            first = root / "first.json"
+            copy = root / "copy.json"
+            index = root / "campaign-index.json"
+            first.write_text(encoded, encoding="utf-8")
+            copy.write_text(encoded, encoding="utf-8")
+            command = [sys.executable, str(Path(__file__).resolve()),
+                       "--ingestion-index", str(index), str(first), str(copy)]
+            process = subprocess.run(
+                command,
+                capture_output=True, text=True, check=False,
+            )
+
+            self.assertEqual(process.returncode, 0, process.stderr)
+            report = json.loads(process.stdout)
+            self.assertEqual((report["attempts"], report["completed"]), (1, 1))
+            self.assertEqual(report["ingestion"]["duplicates_skipped"], 1)
+            self.assertEqual(report["ingestion"]["newly_ingested"], 1)
+            original_index = index.read_bytes()
+
+            repeated = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            repeated_report = json.loads(repeated.stdout)
+            self.assertEqual(repeated_report["attempts"], 1)
+            self.assertEqual(repeated_report["ingestion"]["already_ingested"], 1)
+            self.assertEqual(repeated_report["ingestion"]["newly_ingested"], 0)
+            self.assertEqual(index.read_bytes(), original_index)
+
+            conflicting = root / "conflicting.json"
+            conflicting.write_text(json.dumps({**record, "result": "END,loss,1200"}), encoding="utf-8")
+            conflict = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()),
+                 "--ingestion-index", str(index), str(conflicting)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(conflict.returncode, 0)
+            self.assertIn("conflicting evidence", conflict.stderr)
+            self.assertEqual(index.read_bytes(), original_index)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifests", nargs="*", type=Path)
+    parser.add_argument("--ingestion-index", type=Path,
+                        help="atomically retain campaign evidence across repeated report invocations")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
@@ -271,17 +567,28 @@ def main() -> None:
         raise SystemExit(0 if result.wasSuccessful() else 1)
     if not args.manifests:
         parser.error("provide direct-match .json manifests")
-    records = []
-    for path in args.manifests:
-        record = json.loads(path.read_text(encoding="utf-8-sig"))
-        trace = path.with_suffix(".log")
-        if trace.exists():
-            lines = trace.read_text(encoding="utf-8-sig").splitlines()
-            record["build_diagnostics"] = diagnose_states(lines)
-            if record.get("status") == "completed":
-                record["telemetry"] = analyze(lines)
-        records.append(record)
-    print(json.dumps({**summarize(records), "matches": records}, indent=2))
+    incoming, batch_duplicates = ingest_manifests(args.manifests)
+    if args.ingestion_index:
+        records, newly_ingested, already_ingested = update_ingestion_index(args.ingestion_index, incoming)
+        index_path = str(args.ingestion_index.resolve())
+    else:
+        records = incoming
+        newly_ingested = len(incoming)
+        already_ingested = 0
+        index_path = None
+    print(json.dumps({
+        **summarize(records),
+        "ingestion": {
+            "input_manifests": len(args.manifests),
+            "unique_input_manifests": len(incoming),
+            "duplicates_skipped": batch_duplicates + already_ingested,
+            "newly_ingested": newly_ingested,
+            "already_ingested": already_ingested,
+            "total_indexed_manifests": len(records),
+            "index_path": index_path,
+        },
+        "matches": records,
+    }, indent=2))
 
 
 if __name__ == "__main__":

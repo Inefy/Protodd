@@ -82,6 +82,35 @@ function Assert-MatchInputManifest {
     return $true
 }
 
+function Write-MatchAtomicCreateNew {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][byte[]]$Bytes
+    )
+
+    $destination = [IO.Path]::GetFullPath($Path)
+    $temporary = Join-Path (Split-Path -Parent $destination) (
+        '.' + (Split-Path -Leaf $destination) + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    )
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $stream.Write($Bytes, 0, $Bytes.Length)
+        $stream.Flush($true)
+        $stream.Dispose()
+        $stream = $null
+        # Same-directory rename publishes a complete file and refuses to
+        # replace an artifact already ingested under this identity.
+        [IO.File]::Move($temporary, $destination)
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if (Test-Path -LiteralPath $temporary -PathType Leaf) {
+            Remove-Item -LiteralPath $temporary -Force
+        }
+    }
+}
+
 function Write-MatchInputManifest {
     param(
         [Parameter(Mandatory)][System.Collections.IDictionary]$Manifest,
@@ -92,13 +121,23 @@ function Write-MatchInputManifest {
     $destination = [IO.Path]::GetFullPath($Path)
     $json = (ConvertTo-Json -InputObject $Manifest -Depth 100) + [Environment]::NewLine
     $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
-    $stream = [IO.File]::Open($destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
-    try {
-        $stream.Write($bytes, 0, $bytes.Length)
-        $stream.Flush($true)
-    } finally {
-        $stream.Dispose()
+    Write-MatchAtomicCreateNew -Path $destination -Bytes $bytes
+    return [pscustomobject]@{
+        path = $destination
+        sha256 = Get-MatchProvenanceSha256 -Bytes $bytes
     }
+}
+
+function Write-MatchRecordImmutable {
+    param(
+        [Parameter(Mandatory)][object]$Record,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $destination = [IO.Path]::GetFullPath($Path)
+    $json = (ConvertTo-Json -InputObject $Record -Depth 100) + [Environment]::NewLine
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+    Write-MatchAtomicCreateNew -Path $destination -Bytes $bytes
     return [pscustomobject]@{
         path = $destination
         sha256 = Get-MatchProvenanceSha256 -Bytes $bytes
@@ -108,5 +147,6 @@ function Write-MatchInputManifest {
 Export-ModuleMember -Function @(
     'New-MatchInputManifest',
     'Assert-MatchInputManifest',
-    'Write-MatchInputManifest'
+    'Write-MatchInputManifest',
+    'Write-MatchRecordImmutable'
 )

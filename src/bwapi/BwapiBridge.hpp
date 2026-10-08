@@ -3,18 +3,21 @@
 #include "protodd/Combat.hpp"
 #include "protodd/BuildCancellation.hpp"
 #include "protodd/BuildTaskProgress.hpp"
+#include "protodd/CommandBudget.hpp"
 #include "protodd/CommandBus.hpp"
 #include "protodd/GameState.hpp"
 #include "protodd/InfluenceMap.hpp"
 #include "protodd/MacroPlanner.hpp"
 #include "protodd/Navigation.hpp"
 #include "protodd/Operations.hpp"
+#include "protodd/ResourceIncome.hpp"
 #include "protodd/Scouting.hpp"
 #include "protodd/Strategy.hpp"
 #include "protodd/Workers.hpp"
 
 #include <BWAPI.h>
 
+#include <cstddef>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -54,6 +57,8 @@ struct MacroExecution {
     MacroAction action;
     std::string outcome;
     bool accepted{};
+    std::int64_t elapsedUs{};
+    std::uint64_t navigationSearches{};
 };
 
 struct ActionDiagnostic {
@@ -76,6 +81,9 @@ struct BuildLeaseDiagnostic {
     Frame issued{};
     Frame frame{};
     Frame lastProgress{};
+    Frame travelDeadline{};
+    Frame hardTravelDeadline{};
+    int bestDistanceToTarget{};
     std::string reason;
     std::string order;
     bool commandedBuild{};
@@ -98,6 +106,22 @@ struct BuildSelectionDiagnostic {
     bool candidateHasPath{};
 };
 
+struct BuildRouteDiagnostic {
+    Frame frame{};
+    UnitId builder{-1};
+    Position from{-1, -1};
+    Position anchor{-1, -1};
+    Position destination{-1, -1};
+    std::string stage;
+    bool reachable{};
+    double peakThreat{};
+    double anchorThreat{};
+    bool fromWalkable{};
+    bool destinationWalkable{};
+    bool nativeHasPath{};
+    std::uint64_t searches{};
+};
+
 class BwapiBridge {
 public:
     BwapiBridge() = default;
@@ -105,14 +129,19 @@ public:
     std::function<void(const ActionDiagnostic&)> actionDiagnostic;
     std::function<void(const BuildLeaseDiagnostic&)> buildLeaseDiagnostic;
     std::function<void(const BuildSelectionDiagnostic&)> buildSelectionDiagnostic;
+    std::function<void(const BuildRouteDiagnostic&)> buildRouteDiagnostic;
     std::function<bool(const BWAPI::UnitCommand&, bool, bool)> productionDiagnostic;
     std::function<bool(const BWAPI::UnitCommand&, std::string_view)> productionPermission;
     [[nodiscard]] std::uint64_t diagnosticErrors() const noexcept { return diagnosticErrors_; }
+    [[nodiscard]] BWAPI::Error lastIssueError() const noexcept { return lastIssueError_; }
 
     void onStart();
     void setSpendingLedger(ResourceLedger* ledger) noexcept { spendingLedger_ = ledger; }
     [[nodiscard]] GameState observe();
     [[nodiscard]] NavigationGrid navigationGrid() const;
+    void initializeNavigationObstacles(NavigationGrid& navigation);
+    void updateNavigationObstacle(NavigationGrid& navigation, BWAPI::Unit unit);
+    void removeNavigationObstacle(NavigationGrid& navigation, BWAPI::Unit unit) const;
     void remember(BWAPI::Unit unit);
     void forget(BWAPI::Unit unit);
     [[nodiscard]] std::vector<UnitId> reservedBuilders() const;
@@ -122,12 +151,24 @@ public:
         return lastMacroStatus_;
     }
 
-    [[nodiscard]] bool execute(const Command& command);
+    [[nodiscard]] bool execute(const Command& command, bool* resourcesPaid = nullptr);
+    void beginCommandBudget(Frame frame, std::size_t maximumCommands) noexcept;
+    [[nodiscard]] std::size_t commandBudgetRemaining() const noexcept {
+        return commandBudget_.remaining();
+    }
+    [[nodiscard]] std::size_t directCommandBudgetRemaining() const noexcept {
+        return commandBudget_.directRemaining();
+    }
+    void beginFrameCommands(CommandBus& commands, Frame frame);
+    void endFrameCommands() noexcept;
+    [[nodiscard]] bool executeFrameCommand(const Command& command,
+                                          bool* resourcesPaid = nullptr);
     [[nodiscard]] bool executeProduction(const BWAPI::UnitCommand& command) { return issue(command, "production-demand"); }
     [[nodiscard]] bool executeWholeGame(const BWAPI::UnitCommand& command,
                                         Frame leaseFrames = 24);
     [[nodiscard]] bool commandActive(const Command& command) const;
-    [[nodiscard]] ExpansionFeedback expansionFeedback() const;
+    [[nodiscard]] std::vector<Position> reservedStormZones(Frame currentFrame) const;
+    [[nodiscard]] ExpansionFeedback expansionFeedback(Position plannedSite) const;
     [[nodiscard]] bool cancelExpansion();
     [[nodiscard]] const std::vector<MacroExecution>& macroExecutions() const noexcept {
         return macroExecutions_;
@@ -137,10 +178,15 @@ public:
         const StrategicPlan& plan,
         const InfluenceMap& influence,
         std::span<const UnitId> unavailableBuilders = {},
-        int maximumCommands = 8);
-    void executeWorkers(std::span<const WorkerAssignment> assignments);
-    void executeScouts(std::span<const ScoutOrder> orders);
-    void runMaintenance();
+        int maximumCommands = 8,
+        NavigationGrid* navigation = nullptr,
+        std::int64_t planningBudgetUs = 32'000);
+    [[nodiscard]] std::size_t submitWorkerCommands(
+        std::span<const WorkerAssignment> assignments, CommandBus& commands);
+    [[nodiscard]] std::uint64_t releaseWorkerCommandLease(UnitId actor) noexcept;
+    [[nodiscard]] std::vector<ScoutCommandFeedback> submitScouts(
+        std::span<const ScoutOrder> orders, CommandBus& commands);
+    void runMaintenance(const StrategicPlan& plan, CommandBus& commands);
     void drawDebug(
         const GameState& state,
         const StrategicPlan& plan,
@@ -156,9 +202,11 @@ private:
     struct SpellZone {
         Position center{-1, -1};
         Frame expires{};
+        bool psionicStorm{};
     };
 
     struct PendingBuild {
+        std::uint64_t taskId{};
         UnitKind kind{UnitKind::unknown};
         ConstructionTaskSite constructionSite{};
         bool resourcesPaid{};
@@ -167,15 +215,25 @@ private:
         Frame issued{};
         Frame commandIssued{-1};
         Frame travelDeadline{-1};
+        Frame hardTravelDeadline{-1};
+        int bestDistanceToTarget{-1};
         Frame commandAcknowledged{-1};
         // Pixel coordinates of the exact top-left build tile for every type.
         Position target{-1, -1};
+        Position routeWaypoint{-1, -1};
+        Position travelWaypoint{-1, -1};
         bool prepositioned{};
         Position lastPosition{-1, -1};
         Frame lastRouteProgress{-1};
+        bool unsafeRoute{};
         bool footprintAccessible{};
         bool plannedRemotePower{};
         BuildCancellation cancellation{};
+    };
+
+    struct ConstructionCommandProposal {
+        Command command;
+        std::function<void(bool accepted, bool resourcesPaid)> feedback;
     };
 
     struct FailedBuildSite {
@@ -190,6 +248,13 @@ private:
         BWAPI::TilePosition laneFallback{BWAPI::TilePositions::None};
     };
 
+    struct WorkerCommandLease {
+        WorkerJob job{WorkerJob::idle};
+        int baseId{-1};
+        UnitId targetUnit{-1};
+        std::uint64_t generation{};
+    };
+
     struct ResourceSite {
         Position resourceCenter{-1, -1};
         Position depotCenter{-1, -1};
@@ -197,9 +262,32 @@ private:
         BWAPI::TilePosition depotTile{BWAPI::TilePositions::None};
         std::vector<DefensivePosition> defenses{};
         int groundDistanceFromStart{-1};
+        int enemyGroundDistanceFromMain{-1};
+        bool enemyGroundReachabilityKnown{};
     };
 
+    struct UnitLifetime {
+        UnitKind kind{UnitKind::unknown};
+        Frame firstSeen{};
+        int lastHitPoints{};
+        int lastShields{};
+        Frame lastDamageFrame{-1};
+    };
+
+    struct TrackedProjectile {
+        IncomingProjectileFamily family{IncomingProjectileFamily::unknown};
+        UnitId source{-1};
+        UnitId target{-1};
+        Frame sourceFirstSeen{-1};
+        Frame targetFirstSeen{-1};
+        WeaponSnapshot groundWeapon{};
+        WeaponSnapshot airWeapon{};
+    };
+
+    std::unordered_map<UnitId, UnitLifetime> selfUnitLifetimes_;
     std::unordered_map<UnitId, UnitSnapshot> enemyMemory_;
+    std::unordered_map<int, TrackedProjectile> incomingProjectileMemory_;
+    ResourceIncomeTracker resourceIncomeTracker_;
     MineralAllocator mineralAllocator_;
     std::unordered_map<int, Frame> baseLastScouted_;
     std::unordered_map<int, Frame> baseLastConfirmedEmpty_;
@@ -211,12 +299,25 @@ private:
     std::unordered_map<std::uint64_t, PlacementSearchState> placementSearches_;
     std::unordered_map<UnitId, Frame> unitCommandLocks_;
     std::unordered_map<UnitId, Frame> learnedCommandLeases_;
+    std::unordered_map<UnitId, WorkerCommandLease> workerCommandLeases_;
+    std::unordered_map<UnitId, std::unordered_map<CommandOwner, std::uint64_t>>
+        issuedCommandLeaseGenerations_;
+    FrameCommandClaims frameCommandClaims_;
+    CommandBus* frameCommandBus_{};
+    FrameCommandBudget commandBudget_;
+    bool dispatchingFrameCommand_{};
+    Frame constructionProposalFrame_{-1};
+    std::vector<ConstructionCommandProposal> constructionCommandProposals_;
+    bool constructionCommandQueuedThisAction_{};
     std::vector<ResourceSite> resourceSites_;
+    Position enemyMainRouteSource_{-1, -1};
+    bool enemyRoutesInitialized_{};
     bool defensesInitialized_{};
     std::vector<SpellZone> recentAreaSpells_;
     std::string lastMacroStatus_{"idle"};
     std::vector<MacroExecution> macroExecutions_;
     ResourceLedger* spendingLedger_{};
+    NavigationGrid* activeNavigation_{};
     BWAPI::Error lastIssueError_{BWAPI::Errors::None};
     std::uint64_t diagnosticErrors_{};
 
@@ -224,9 +325,24 @@ private:
     bool issue(const BWAPI::UnitCommand& command, std::string_view source,
                ResourceUse resourceUse = ResourceUse::available,
                bool* resourcesPaid = nullptr);
+    bool executeOwnedCommand(UnitId actor, CommandOwner owner, CommandType type,
+                             UnitId targetUnit, Position targetPosition,
+                             UnitKind targetKind, TechnologyKind technology,
+                             int urgency, std::string_view source,
+                             bool* resourcesPaid = nullptr);
+    bool submitOwnedCommand(CommandBus& commands, UnitId actor, CommandOwner owner,
+                            CommandType type, UnitId targetUnit, Position targetPosition,
+                            UnitKind targetKind, TechnologyKind technology,
+                            int urgency, std::string_view source);
+    bool executeConstructionCommand(UnitId actor, CommandType type, UnitKind targetKind,
+                                    Position targetPosition, int urgency,
+                                    std::string_view source, bool* resourcesPaid = nullptr,
+                                    std::function<void(bool accepted, bool resourcesPaid)> feedback = {});
     bool requestBuildCancellation(PendingBuild& pending, BWAPI::Unit builder,
                                  std::string_view source);
     bool reject(const Command& command, std::string_view reason);
+    [[nodiscard]] bool psionicStormUsefulNow(Position center) const;
+    [[nodiscard]] bool executeUnchecked(const Command& command, bool* resourcesPaid);
 
     [[nodiscard]] static Race toRace(BWAPI::Race race) noexcept;
     [[nodiscard]] static DamageType toDamageType(BWAPI::DamageType type) noexcept;
@@ -243,7 +359,11 @@ private:
         BWAPI::Position near,
         const InfluenceMap& influence,
         std::span<const UnitId> unavailableBuilders,
-        bool requireCanBuild = true) const;
+        bool requireCanBuild = true,
+        bool* rejectedForUnsafeRoute = nullptr);
+    void reportBuildRoute(BWAPI::Unit builder, Position anchor, Position destination,
+                          std::string_view stage, bool reachable, double peakThreat,
+                          const InfluenceMap& influence, std::uint64_t searches) noexcept;
     void recordBuildBlocker(const MacroAction& action, BuildBlockerReason reason,
                             Frame retryFrames);
     void inspectUnfundedBuild(const MacroAction& action, const StrategicPlan& plan,
@@ -264,7 +384,8 @@ private:
         const MacroAction& action,
         const StrategicPlan& plan,
         const InfluenceMap& influence,
-        std::span<const UnitId> unavailableBuilders);
+        std::span<const UnitId> unavailableBuilders,
+        NavigationGrid* navigation);
     [[nodiscard]] bool train(const MacroAction& action);
     [[nodiscard]] bool executeTechnology(const MacroAction& action);
     [[nodiscard]] static BWAPI::Position toBwapiPosition(Position position) noexcept;

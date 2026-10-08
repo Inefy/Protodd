@@ -30,17 +30,22 @@ be credited as evidence that the full learned model passed its gates.
 ## Build And Replay
 
 ```powershell
-./scripts/build-trained-controller.ps1 -BuildDirectory build/hybrid-win32-20261001
+./scripts/build-trained-controller.ps1 `
+  -Weights 'path/to/export-package/weights.bin' `
+  -BuildDirectory build/hybrid-win32-20261001
 ```
 
-The script verifies the six-slot export manifest and weights digest, embeds those
-weights, builds the Win32 `ProtoddEvaluation.dll`, runs tests and prints digests.
+The script requires a separately retained exported weights file and matching
+manifest; model artifacts are not included in the source archive. It uses the
+system `python` on PATH by default (or an explicit `-Python` path), verifies the
+six-slot export manifest and weights digest, embeds those weights, builds the
+Win32 `ProtoddEvaluation.dll`, runs tests and prints digests. This is an optional
+local evaluation build, not part of the tournament clean-build path.
 Its all-in opening switch changes only the native opening repertoire; it does
 not select the learned controller mode. Use `scripts/build-opening-comparison.ps1`
 to build the complete native/hybrid by standard/all-in matrix with separate manifests.
-Default weights are the opening continuation below. `-Weights` selects another
-intact export; `-Exclusive` reproduces the research controller without the hybrid.
-Model checkpoints and game artifacts are local ignored files, not Git payloads.
+`-Exclusive` reproduces the research controller without the hybrid. Model
+checkpoints and game artifacts are local ignored files, not Git payloads.
 
 Arena comparisons use `--whole-game-hybrid-mode shadow` or `target`. Both modes
 run the same model, weights and native systems; shadow mode gives proposals no

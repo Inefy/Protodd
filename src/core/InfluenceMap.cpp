@@ -133,16 +133,19 @@ std::size_t InfluenceMap::offset(const int x, const int y) const noexcept {
 }
 
 void InfluenceMap::addThreat(const UnitSnapshot& unit, const Frame currentFrame) {
-    const auto age = std::max(0, currentFrame - unit.lastSeen);
-    const auto memoryConfidence = unit.visible || isBuilding(unit.kind)
+    auto observation = unit;
+    observation.updateMemoryConfidence(currentFrame);
+    const auto memoryConfidence = observation.visible
                                       ? 1.0
-                                      : std::exp(-static_cast<double>(age) / (24.0 * 12.0));
+                                      : std::clamp(observation.existenceConfidence, 0.0, 1.0) *
+                                            std::clamp(observation.locationConfidence, 0.0, 1.0);
     if (memoryConfidence < 0.02) return;
 
     // As in CombatEvaluator, BWAPI's zero HP for an undetected enemy means
     // unavailable health. Preserve the observed snapshot and targetability.
-    const auto vitality = !unit.ours && !unit.detected && unit.durability() == 0
-        ? 1.0 : unit.healthFraction();
+    const auto vitality = !observation.ours && !observation.detected &&
+                                  observation.durability() == 0
+        ? 1.0 : observation.estimatedHealthFraction();
     const auto addWeapon = [this, &unit, memoryConfidence, vitality](
                                const WeaponSnapshot& weapon,
                                const bool air) {

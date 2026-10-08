@@ -7,17 +7,36 @@ import tempfile
 import unittest
 import zipfile
 
-from training.arena import prepare, inspect, verify
+from training.arena import prepare, inspect, verify, feature_registry_sha256, read_feature_registry
+from training.schema import sha256
 
 
 class ArenaTests(unittest.TestCase):
+    def test_missing_campaign_template_is_an_explicit_non_start(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            args = self.fixture(root / "absent-template")
+            args["template"] = root / "absent-template" / "missing-template"
+            with self.assertRaisesRegex(ValueError, "campaign template is missing"):
+                prepare(**args)
+            self.assertFalse(args["output"].exists())
+
+            args = self.fixture(root / "missing-settings")
+            (args["template"] / "server/server_settings.json").unlink()
+            with self.assertRaisesRegex(ValueError, "campaign template lacks server settings"):
+                prepare(**args)
+            self.assertFalse(args["output"].exists())
+
     def test_allin_profile_is_development_only_and_frozen(self):
         with tempfile.TemporaryDirectory() as temp:
-            args = self.fixture(Path(temp))
-            for opening, purpose in [('bad', 'development'), ('two-gate-zealot', 'final-test')]:
+            args = self.fixture(Path(temp), {"PROTODD_NATIVE_ALLIN_OPENING": "ON"})
+            for opening, purpose in [('bad', 'development')]:
                 with self.assertRaisesRegex(ValueError, 'all-in opening requires'):
                     prepare(**args, purpose=purpose, all_in_opening=opening)
                 self.assertFalse(args['output'].exists())
+            safe_args = self.fixture(Path(temp) / 'safe-release')
+            with self.assertRaisesRegex(ValueError, 'all-in opening requires'):
+                prepare(**safe_args, purpose='final-test', all_in_opening='two-gate-zealot')
             prepare(**args, all_in_opening='two-gate-zealot')
             path = args['output'] / 'server/bots/Protodd/read/AllIn-opening.txt'
             self.assertEqual(path.read_text(), 'two-gate-zealot\n')
@@ -28,11 +47,17 @@ class ArenaTests(unittest.TestCase):
 
     def test_hybrid_authority_is_development_only_and_frozen(self):
         with tempfile.TemporaryDirectory() as temp:
-            args = self.fixture(Path(temp))
-            for mode, purpose in [('invalid', 'development'), ('target', 'final-test'), ('shadow', 'training')]:
+            args = self.fixture(Path(temp), {
+                "PROTODD_WHOLE_GAME_CONTROL": "ON",
+                "PROTODD_WHOLE_GAME_EVALUATION_BUILD": "ON",
+            })
+            for mode, purpose in [('invalid', 'development'), ('shadow', 'training')]:
                 with self.assertRaisesRegex(ValueError, 'hybrid comparison requires'):
                     prepare(**args, purpose=purpose, whole_game_hybrid_mode=mode)
                 self.assertFalse(args['output'].exists())
+            safe_args = self.fixture(Path(temp) / 'safe-release')
+            with self.assertRaisesRegex(ValueError, 'hybrid comparison requires'):
+                prepare(**safe_args, purpose='final-test', whole_game_hybrid_mode='shadow')
             prepare(**args, whole_game_hybrid_mode='shadow')
             path = args['output'] / 'server/bots/Protodd/read/WholeGame-hybrid-mode.txt'
             self.assertEqual(path.read_text(), 'shadow\n')
@@ -74,7 +99,7 @@ class ArenaTests(unittest.TestCase):
 
     def test_worker_intervention_is_training_only_and_frozen(self):
         with tempfile.TemporaryDirectory() as temp:
-            args=self.fixture(Path(temp))
+            args=self.fixture(Path(temp), {"PROTODD_PRODUCTION_LOCAL_EVALUATION": "ON"})
             with self.assertRaisesRegex(ValueError,'worker interventions require'):
                 prepare(**args,worker_training_intervention='plus-one')
             self.assertFalse(args['output'].exists())
@@ -109,7 +134,7 @@ class ArenaTests(unittest.TestCase):
 
     def test_tactical_target_weights_are_frozen_local_inputs(self):
         with tempfile.TemporaryDirectory() as temp:
-            args = self.fixture(Path(temp))
+            args = self.fixture(Path(temp), {"PROTODD_TACTICAL_LOCAL_EVALUATION": "ON"})
             weights = Path(temp) / 'target.bin'
             weights.write_bytes(b'frozen target weights')
             with self.assertRaisesRegex(ValueError, 'tactical target control needs'):
@@ -164,13 +189,16 @@ if (($global:arenaStopped -join ',') -ne '1,4') { throw 'peer ownership or PID-r
             shutil.copy2(args['template'] / 'client1/client.jar', bundle / 'client.jar')
             (bundle / 'stop-owned-starcraft.ps1').write_text('fixture')
             (bundle / 'start-owned-starcraft.ps1').write_text('fixture')
+            for helper in ('HeadlessStarCraft.psm1', 'HeadlessStarCraft.cs', 'run-headless-starcraft.ps1',
+                           'MatchProcessOwnership.psm1'):
+                (bundle / helper).write_text('fixture')
             prepare(**args, client_bundle=bundle)
             self.assertTrue(verify(args['output'])['verified'])
             (args['output'] / 'client1/stop-owned-starcraft.ps1').write_text('changed')
             with self.assertRaises(ValueError):
                 verify(args['output'])
 
-    def fixture(self, root):
+    def fixture(self, root, build_overrides=None):
         template = root / "template"
         server = template / "server"
         (server / "required").mkdir(parents=True)
@@ -197,7 +225,66 @@ if (($global:arenaStopped -join ',') -ne '1,4') { throw 'peer ownership or PID-r
                 z.writestr("fixture", "fixture")
         dll = root / "candidate.dll"
         dll.write_bytes(b"candidate")
+        registry = read_feature_registry()
+        overrides = build_overrides or {}
+        active_options = [
+            dict(id=entry["id"], value=overrides.get(entry["id"], entry["tournament_value"]),
+                 tournament_value=entry["tournament_value"], owner=entry["owner"], scope=entry["scope"],
+                 baseline=entry["baseline"], dependencies=entry["dependencies"],
+                 evidence=entry["evidence"], promotion_status=entry["promotion_status"])
+            for entry in registry["options"]
+        ]
+        active_inputs = [dict(id=entry["id"], value=entry["tournament_value"],
+                              tournament_value=entry["tournament_value"], owner=entry["owner"],
+                              scope=entry["scope"], baseline=entry["baseline"],
+                              dependencies=entry["dependencies"], evidence=entry["evidence"],
+                              promotion_status=entry["promotion_status"])
+                         for entry in registry["build_inputs"]]
+        runtime_contract = [dict(
+            id=entry["id"], file=entry["file"], kind=entry["kind"],
+            default_value=entry["default_value"], allowed_values=entry["allowed_values"],
+            tournament_values=entry["tournament_values"], dependencies=entry["dependencies"],
+            scope=entry["scope"], owner=entry["owner"], baseline=entry["baseline"],
+            evidence=entry["evidence"], promotion_status=entry["promotion_status"])
+            for entry in registry["runtime_controls"]]
+        registry_hash = feature_registry_sha256()
+        build_manifest = dict(
+            schema="protodd-build-v1", feature_registry_sha256=registry_hash,
+            dll_sha256=sha256(dll), registered_feature_manifest=dict(
+                schema="protodd-active-features-v1", registry_sha256=registry_hash,
+                build_options=active_options, build_inputs=active_inputs,
+                runtime_controls=runtime_contract))
+        (root / "Protodd.build-manifest.json").write_text(json.dumps(build_manifest))
         return dict(template=template, output=root / "run", dll=dll, opponents=["Enemy"], maps=["maps/fixture.scx"])
+
+    def test_training_requires_registered_build_and_final_test_requires_tournament_values(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = self.fixture(Path(temp))
+            sidecar = args["dll"].parent / "Protodd.build-manifest.json"
+            sidecar.unlink()
+            with self.assertRaisesRegex(ValueError, "feature-bound build manifest"):
+                prepare(**args, purpose="training")
+            self.assertFalse(args["output"].exists())
+
+            args = self.fixture(Path(temp) / 'incomplete-runtime')
+            sidecar = args["dll"].parent / "Protodd.build-manifest.json"
+            build_manifest = json.loads(sidecar.read_text())
+            build_manifest["registered_feature_manifest"]["runtime_controls"] = []
+            sidecar.write_text(json.dumps(build_manifest))
+            with self.assertRaisesRegex(ValueError, "incomplete runtime feature coverage"):
+                prepare(**args, purpose="training")
+            self.assertFalse(args["output"].exists())
+
+            args = self.fixture(Path(temp) / "release")
+            prepare(**args, purpose="final-test")
+            self.assertTrue(verify(args["output"])["verified"])
+
+    def test_final_test_rejects_non_tournament_compile_features(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = self.fixture(Path(temp), {"PROTODD_NATIVE_ALLIN_OPENING": "ON"})
+            with self.assertRaisesRegex(ValueError, "non-tournament feature enabled"):
+                prepare(**args, purpose="final-test")
+            self.assertFalse(args["output"].exists())
 
     def test_frozen_purpose_hashes_and_both_host_sides(self):
         with tempfile.TemporaryDirectory() as temp:

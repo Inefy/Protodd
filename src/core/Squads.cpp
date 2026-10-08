@@ -17,9 +17,7 @@ bool harassmentUnit(const UnitSnapshot& unit) {
 }
 
 bool detectionThreat(const UnitSnapshot& unit) {
-    return unit.cloaked || unit.burrowed || !unit.detected ||
-           unit.kind == UnitKind::darkTemplar || unit.kind == UnitKind::lurker ||
-           unit.kind == UnitKind::spiderMine;
+    return unit.requiresDetection();
 }
 
 const BaseSnapshot* nearestOwnedBase(const GameState& state, const Position position) {
@@ -43,6 +41,83 @@ double allocationPower(const UnitSnapshot& unit) {
         ? 1.0 : unit.healthFraction();
     return unitStats(unit.kind).combatValue *
            std::clamp(vitality, 0.15, 1.0);
+}
+
+bool staticDefenseCovers(const UnitSnapshot& defender,
+                         const UnitSnapshot& threat) noexcept {
+    const auto cannonDetection = defender.kind == UnitKind::photonCannon &&
+        (threat.cloaked || threat.burrowed) &&
+        distanceSquared(defender.position, threat.position) <= 224 * 224;
+    if (!threat.visible || (!threat.detected && !cannonDetection) ||
+        threat.invincible || threat.loaded ||
+        threat.hallucination || defender.disabled ||
+        (unitStats(defender.kind).requiresPsi && !defender.powered) ||
+        !defender.canAttack(threat)) return false;
+    const auto& weapon = threat.flying ? defender.airWeapon : defender.groundWeapon;
+    const auto separation = weaponDistance(defender, threat);
+    return separation >= weapon.minRange && separation <= weapon.maxRange;
+}
+
+struct DefensiveArrival {
+    double frames{};
+    bool routeValidated{};
+};
+
+std::optional<DefensiveArrival> defensiveArrival(
+    const UnitSnapshot& unit,
+    const Position destination,
+    const NavigationGrid* navigation,
+    int& remainingPathSearches) {
+    if (!unit.position.valid() || !destination.valid()) return std::nullopt;
+
+    auto travelDistance = distance(unit.position, destination);
+    auto routeValidated = unit.flying;
+    if (!unit.flying && navigation != nullptr && !navigation->empty()) {
+        // A complete A* route is the best estimate. Proven-unreachable ground
+        // units are left free for other missions; bounded partial paths remain
+        // a lower-confidence fallback behind fully reachable responders.
+        const MovementFootprint footprint{
+            unit.dimensionLeft, unit.dimensionRight,
+            unit.dimensionUp, unit.dimensionDown};
+        if (navigation->lineWalkable(unit.position, destination, footprint)) {
+            const auto speed = std::isfinite(unit.topSpeed) && unit.topSpeed > 0.1
+                ? unit.topSpeed : 1.0;
+            return DefensiveArrival{travelDistance / speed, true};
+        }
+        // Bound aggregate routing work, not just each unit's search. A large
+        // army otherwise runs dozens of 12,000-node searches in one callback.
+        // Unproven routes retain the existing lower-confidence arrival estimate.
+        if (remainingPathSearches <= 0) {
+            const auto speed = std::isfinite(unit.topSpeed) && unit.topSpeed > 0.1
+                ? unit.topSpeed : 1.0;
+            return DefensiveArrival{travelDistance / speed, false};
+        }
+        --remainingPathSearches;
+        const auto path = navigation->findPath(unit.position, destination,
+            maximumDefensiveArrivalPathExpansions, footprint);
+        if (path.status == NavigationStatus::unreachable) return std::nullopt;
+        if (path.reached()) {
+            travelDistance = 0.0;
+            auto previous = unit.position;
+            for (const auto point : path.points) {
+                travelDistance += distance(previous, point);
+                previous = point;
+            }
+            routeValidated = true;
+        } else if (!path.points.empty()) {
+            travelDistance = 0.0;
+            auto previous = unit.position;
+            for (const auto point : path.points) {
+                travelDistance += distance(previous, point);
+                previous = point;
+            }
+            travelDistance += distance(previous, destination);
+        }
+    }
+
+    const auto speed = std::isfinite(unit.topSpeed) && unit.topSpeed > 0.1
+        ? unit.topSpeed : 1.0;
+    return DefensiveArrival{travelDistance / speed, routeValidated};
 }
 
 Position defensiveScreen(const GameState& state, const BaseSnapshot& base) {
@@ -96,10 +171,13 @@ std::vector<Squad> SquadPlanner::form(
     const std::span<const UnitSnapshot> enemy,
     const StrategicPlan& plan,
     const Position fallbackRetreat, const NavigationGrid* navigation,
-    const bool emergencyConsolidation, const bool limitStaticCoverage) const {
+    const bool emergencyConsolidation) const {
     std::vector<Squad> result;
     std::unordered_set<UnitId> assigned;
     auto nextId = 1;
+    auto remainingArrivalPathSearches = maximumDefensiveArrivalPathSearches;
+    harassmentRoutingStats_ = {};
+    auto& harassmentRouteBudget = harassmentRoutingStats_;
 
     // Size economic defense by recently observed combat value. Briefly losing
     // sight of a ranged contain must not release its defenders across the map.
@@ -169,7 +247,22 @@ std::vector<Squad> SquadPlanner::form(
         const auto highestThreat = baseThreat.power;
         std::vector<UnitSnapshot> candidates;
         std::vector<UnitSnapshot> staticSupport;
-        for (const auto& unit : friendly) {
+        std::unordered_map<UnitId, DefensiveArrival> arrivalByUnit;
+        const auto responsePoint = defensiveScreen(state, *threatenedBase);
+        std::vector<const UnitSnapshot*> arrivalOrder;
+        arrivalOrder.reserve(friendly.size());
+        for (const auto& unit : friendly) arrivalOrder.push_back(&unit);
+        std::ranges::sort(arrivalOrder, [responsePoint](const auto* left, const auto* right) {
+            const auto lowerBound = [responsePoint](const auto* unit) {
+                const auto speed = std::isfinite(unit->topSpeed) && unit->topSpeed > 0.1
+                    ? unit->topSpeed : 1.0;
+                return distance(unit->position, responsePoint) / speed;
+            };
+            const auto first = lowerBound(left), second = lowerBound(right);
+            return first != second ? first < second : left->id < right->id;
+        });
+        for (const auto* candidate : arrivalOrder) {
+            const auto& unit = *candidate;
             if (assigned.contains(unit.id) || !unit.completed || unit.disabled ||
                 (unitStats(unit.kind).requiresPsi && !unit.powered)) continue;
             if (isStaticDefense(unit.kind)) {
@@ -177,7 +270,7 @@ std::vector<Squad> SquadPlanner::form(
                                         576 * 576 &&
                                     std::ranges::any_of(
                                         baseThreats, [&unit](const UnitSnapshot& threat) {
-                                            return unit.canAttack(threat);
+                                            return staticDefenseCovers(unit, threat);
                                         });
                 if (useful) staticSupport.push_back(unit);
             } else if (isCombatUnit(unit.kind)) {
@@ -188,10 +281,14 @@ std::vector<Squad> SquadPlanner::form(
                     distanceSquared(unit.position, threatenedBase->center) > 960 * 960 &&
                     std::ranges::all_of(baseThreats, [](const UnitSnapshot& threat) { return !threat.detected; }))
                     continue;
+                const auto arrival = defensiveArrival(unit, responsePoint, navigation,
+                    remainingArrivalPathSearches);
+                if (!arrival.has_value()) continue;
+                arrivalByUnit.emplace(unit.id, *arrival);
                 candidates.push_back(unit);
             }
         }
-        std::ranges::sort(candidates, [threatenedBase, &baseThreats](
+        std::ranges::sort(candidates, [&baseThreats, &arrivalByUnit](
                                           const UnitSnapshot& left,
                                           const UnitSnapshot& right) {
             const auto contributes = [&baseThreats](const UnitSnapshot& unit) {
@@ -202,9 +299,12 @@ std::vector<Squad> SquadPlanner::form(
             const auto leftContributes = contributes(left);
             const auto rightContributes = contributes(right);
             if (leftContributes != rightContributes) return leftContributes > rightContributes;
-            const auto leftDistance = distanceSquared(left.position, threatenedBase->center);
-            const auto rightDistance = distanceSquared(right.position, threatenedBase->center);
-            if (leftDistance != rightDistance) return leftDistance < rightDistance;
+            const auto& leftArrival = arrivalByUnit.at(left.id);
+            const auto& rightArrival = arrivalByUnit.at(right.id);
+            if (leftArrival.routeValidated != rightArrival.routeValidated)
+                return leftArrival.routeValidated > rightArrival.routeValidated;
+            if (leftArrival.frames != rightArrival.frames)
+                return leftArrival.frames < rightArrival.frames;
             return left.id < right.id;
         });
         Squad defense;
@@ -235,30 +335,25 @@ std::vector<Squad> SquadPlanner::form(
         } else if (breached && threatenedBase->defense.valid()) {
             defense.retreat = threatenedBase->center;
         }
-        defense.requiredRatio = 0.55;
+        defense.requiredRatio = plan.posture == Posture::defend ? 1.25 : 1.05;
         defense.units = std::move(staticSupport);
         const auto defenseMargin = plan.posture == Posture::defend ? 1.45 : 1.30;
         const auto targetPower = highestThreat * defenseMargin + 0.35;
         auto committedPower = 0.0;
         for (const auto& unit : defense.units) committedPower += allocationPower(unit);
-        if (limitStaticCoverage) {
-            // The isolated coverage experiment limits static credit to the
-            // attackers in range, leaving mobile units for uncovered threats.
-            auto coveredThreatPower = 0.0;
-            for (const auto& threat : baseThreats) {
-                if (!threat.visible || !threat.detected || threat.invincible ||
-                    threat.loaded || threat.hallucination) continue;
-                const auto covered = std::ranges::any_of(defense.units,
-                    [&threat](const UnitSnapshot& defender) {
-                        const auto& weapon = threat.flying ? defender.airWeapon : defender.groundWeapon;
-                        const auto separation = weaponDistance(defender, threat);
-                        return defender.canAttack(threat) && separation >= weapon.minRange &&
-                            separation <= weapon.maxRange;
-                    });
-                if (covered) coveredThreatPower += allocationPower(threat);
-            }
-            committedPower = std::min(committedPower, coveredThreatPower * defenseMargin);
+        // Static buildings count only against visible, targetable attackers
+        // currently within their weapon range. Overlapping Cannons cannot
+        // multiply credit for the same attacker; mobile units cover the rest.
+        auto coveredThreatPower = 0.0;
+        for (const auto& threat : baseThreats) {
+            const auto covered = std::ranges::any_of(defense.units,
+                [&threat](const UnitSnapshot& defender) {
+                    return isStaticDefense(defender.kind) &&
+                           staticDefenseCovers(defender, threat);
+                });
+            if (covered) coveredThreatPower += allocationPower(threat);
         }
+        committedPower = std::min(committedPower, coveredThreatPower * defenseMargin);
         const auto minimumMobile = std::min<std::size_t>(2, candidates.size());
         const auto visibleAttackers = std::ranges::count_if(baseThreats,
             [](const UnitSnapshot& threat) {
@@ -341,7 +436,7 @@ std::vector<Squad> SquadPlanner::form(
                 if (homeBase->defense.valid())
                     guard.defense = {homeBase->defense.anchor, 256, homeBase->center,
                                      homeBase->defense.entrance};
-                guard.requiredRatio = 1.15;
+                guard.requiredRatio = plan.posture == Posture::defend ? 1.25 : 1.05;
                 guard.units.assign(candidates.begin(), candidates.begin() +
                     static_cast<std::ptrdiff_t>(guardCount));
                 for (const auto& unit : guard.units) assigned.insert(unit.id);
@@ -358,7 +453,8 @@ std::vector<Squad> SquadPlanner::form(
     for (const auto& unit : friendly)
         if (!assigned.contains(unit.id) && isCombatUnit(unit.kind) && !unit.loaded && !unit.disabled)
             raidCandidates.push_back(unit);
-    const auto raid = harassment_.update(state, raidCandidates, plan, fallbackRetreat, !threats.empty(), navigation);
+    const auto raid = harassment_.update(state, raidCandidates, plan, fallbackRetreat,
+                                         !threats.empty(), navigation, &harassmentRouteBudget);
     if (!raid.members.empty()) {
         Squad squad;
         squad.id = nextId++;
@@ -372,7 +468,7 @@ std::vector<Squad> SquadPlanner::form(
         squad.retreat = fallbackRetreat;
         squad.withdrawing = raid.withdrawing;
         squad.missionReason = raid.reason;
-        squad.requiredRatio = 1.50;
+        squad.requiredRatio = plan.attackThreshold;
         squad.enemies = localEnemies(enemy, squad.units, squad.objective, 720, state.frame);
         squad.needsDetection = std::ranges::any_of(squad.enemies, detectionThreat);
         finishSquad(squad);
@@ -400,7 +496,8 @@ std::vector<Squad> SquadPlanner::form(
         squad.id = nextId++;
         squad.role = SquadRole::harassment;
         squad.units = std::move(group);
-        const auto opportunity = harassmentOpportunity(state, squad.units.front(), false, navigation);
+        const auto opportunity = harassmentOpportunity(state, squad.units.front(), false,
+                                                       navigation, &harassmentRouteBudget);
         squad.objective = opportunity.target.valid() ? opportunity.waypoint : fallbackRetreat;
         squad.withdrawing = !opportunity.target.valid();
         squad.missionReason = opportunity.target.valid() ?
@@ -409,7 +506,7 @@ std::vector<Squad> SquadPlanner::form(
         squad.center = centroid(squad.units);
         const auto home = nearestOwnedBase(state, squad.center);
         squad.retreat = home != nullptr ? defensiveScreen(state, *home) : fallbackRetreat;
-        squad.requiredRatio = 1.38;
+        squad.requiredRatio = plan.attackThreshold;
         finishSquad(squad);
         squad.enemies = localEnemies(enemy, squad.units, squad.objective, 720, state.frame);
         squad.needsDetection = std::ranges::any_of(squad.enemies, detectionThreat);
@@ -457,7 +554,9 @@ std::vector<Squad> SquadPlanner::form(
                 // coarse origin is unavailable, retain the visible danger.
                 return navigation == nullptr || navigation->empty() ||
                     !navigation->walkable(worker.position) || !navigation->walkable(member.position) ||
-                    navigation->lineWalkable(worker.position, member.position);
+                    navigation->lineWalkable(worker.position, member.position,
+                        {member.dimensionLeft, member.dimensionRight,
+                         member.dimensionUp, member.dimensionDown});
             });
             if (defending) squad.enemies.push_back(worker);
         }
@@ -466,8 +565,11 @@ std::vector<Squad> SquadPlanner::form(
 
     // Strategic cloak risk should accelerate Observer production, not tether
     // every ground squad to one. A squad requests an escort only after its own
-    // local contact list contains a cloaked, burrowed, or undetected threat.
+    // local contact list contains a detection threat. Ordinary fog memory
+    // remains in the fight estimate without creating an Observer demand.
     std::ranges::sort(result, {}, &Squad::id);
+    for (auto& squad : result)
+        squad.fightMission = fightMissionFor(state, squad);
     return result;
 }
 
@@ -518,7 +620,38 @@ bool SquadPlanner::mobileDetectionReady(const GameState& state, const Squad& squ
     });
 }
 
-std::vector<Command> SquadPlanner::detectorEscorts(
+FightMission SquadPlanner::fightMissionFor(const GameState& state,
+                                           const Squad& squad) noexcept {
+    if (squad.role == SquadRole::harassment) return FightMission::harassment;
+    if (squad.enemies.empty()) return FightMission::advance;
+    if (squad.role == SquadRole::baseDefense) {
+        const auto completedNexuses = std::ranges::count_if(
+            state.self.units, [](const UnitSnapshot& unit) {
+                return unit.kind == UnitKind::nexus && unit.completed && !unit.disabled;
+            });
+        return completedNexuses <= 1 ? FightMission::lastBaseDefense
+                                     : FightMission::delay;
+    }
+
+    const auto carriesValuableAsset = std::ranges::any_of(
+        squad.units, [](const UnitSnapshot& unit) {
+            return unitStats(unit.kind).combatValue >= 2.7 ||
+                   unit.kind == UnitKind::highTemplar ||
+                   (unit.role == UnitRole::spellcaster && unit.energy >= 50);
+        });
+    if (carriesValuableAsset) return FightMission::preserveValuable;
+
+    const auto cleanupRemainder = squad.role == SquadRole::mainArmy &&
+        squad.enemies.size() <= 3 &&
+        std::ranges::all_of(squad.enemies, [](const UnitSnapshot& enemy) {
+            return !isStaticDefense(enemy.kind) &&
+                   (isWorker(enemy.kind) || !isCombatUnit(enemy.kind) ||
+                    unitStats(enemy.kind).combatValue <= 0.85);
+        });
+    return cleanupRemainder ? FightMission::cleanup : FightMission::advance;
+}
+
+DetectorAllocation SquadPlanner::allocateDetectors(
     const GameState& state,
     const std::span<const Squad> squads,
     const InfluenceMap& influence,
@@ -526,14 +659,17 @@ std::vector<Command> SquadPlanner::detectorEscorts(
     const bool centerBlockedMainEscort,
     const bool mobilizeContestedReserve,
     const bool directSafeRendezvous) const {
+    DetectorAllocation allocation;
     std::vector<const UnitSnapshot*> observers;
     for (const auto& unit : state.self.units) {
         if (unit.kind == UnitKind::observer && unit.completed && !unit.loaded &&
             !unit.disabled && !unit.hallucination && unit.position.valid() &&
+            unit.healthFraction() >= 0.25 &&
             !ScoutManager::observerInDanger(state, unit, influence))
             observers.push_back(&unit);
     }
     std::ranges::sort(observers, {}, [](const UnitSnapshot* unit) { return unit->id; });
+    allocation.availableObservers = observers.size();
 
     const auto lurkerAtHome = mobilizeReserveAgainstLurkers &&
         std::ranges::any_of(state.enemy.units, [&state](const UnitSnapshot& enemy) {
@@ -549,9 +685,8 @@ std::vector<Command> SquadPlanner::detectorEscorts(
 
     std::vector<const Squad*> priorities;
     for (const auto& squad : squads) {
-        if (squad.role == SquadRole::baseDefense && squad.enemies.empty() &&
-            !squad.needsDetection) continue;
-        if (!squad.units.empty()) priorities.push_back(&squad);
+        if (squad.needsDetection && !squad.units.empty() && squad.center.valid())
+            priorities.push_back(&squad);
     }
     std::ranges::sort(priorities, [lurkerAtHome](const Squad* left, const Squad* right) {
         if (left->needsDetection != right->needsDetection)
@@ -567,48 +702,61 @@ std::vector<Command> SquadPlanner::detectorEscorts(
         return left->units.size() > right->units.size();
     });
 
-    std::vector<Command> result;
-    // Once a second Observer exists, keep one available for strategic
-    // scouting. Fragmented armies can otherwise lease every Observer as an
-    // escort, leaving no unit to watch a siege push before it reaches a base.
     const auto detectionDemand = static_cast<std::size_t>(std::ranges::count_if(
         priorities, [](const Squad* squad) { return squad->needsDetection; }));
-    const auto blockedMainGroups = std::ranges::count_if(priorities, [](const Squad* squad) {
-        return squad->role == SquadRole::mainArmy && squad->needsDetection &&
-               !squad->enemies.empty();
-    });
-    // A scout reserve has less value than two active main groups unable to
-    // fire through mines or cloak. Keep the reserve when one escort suffices.
-    const auto contestedReserve = mobilizeContestedReserve &&
-        blockedMainGroups >= 2 && detectionDemand >= observers.size();
-    const auto escortCapacity = lurkerAtHome || contestedReserve
-        ? std::min(observers.size(), detectionDemand)
-        : (observers.size() > 1 ? observers.size() - 1 : observers.size());
-    const auto count = std::min(escortCapacity, priorities.size());
-    result.reserve(count);
-    for (std::size_t i = 0; i < count; ++i) {
-        const auto* squad = priorities[i];
+    allocation.requiredObservers = detectionDemand;
+    allocation.commands.reserve(std::min(observers.size(), detectionDemand));
+    allocation.assignments.reserve(std::min(observers.size(), detectionDemand));
+    allocation.reservedObservers.reserve(std::min(observers.size(), detectionDemand));
+    // Assign every available healthy Observer up to active local demand. A
+    // scout reserve exists only when there is supply beyond those assignments;
+    // otherwise scouting must not consume the army's last required detector.
+    // The legacy opt-in is retained for call-site compatibility; shortage
+    // handling is now unconditional because it is a safety invariant.
+    (void)mobilizeContestedReserve;
+    std::vector<const UnitSnapshot*> unassigned = observers;
+    std::size_t coveredDemands = 0;
+    for (const auto* squad : priorities) {
         // A blocked main army needs the Observer to cover its next 128px step.
         // Parking 96px behind the center can leave that step just outside the
         // conservative sight radius and hold the army under enemy fire.
         const auto anchor = centerBlockedMainEscort &&
                             squad->role == SquadRole::mainArmy && squad->needsDetection
             ? squad->center : moveToward(squad->center, squad->retreat, 96.0);
-        auto atAnchor = *observers.front();
-        atAnchor.position = anchor;
-        if (!anchor.valid() ||
-            ScoutManager::observerInDanger(state, atAnchor, influence)) continue;
-        const auto closest = std::min_element(observers.begin() + static_cast<std::ptrdiff_t>(i),
-            observers.end(), [anchor](const UnitSnapshot* left, const UnitSnapshot* right) {
-                const auto leftReady = left->healthFraction() >= 0.25;
-                const auto rightReady = right->healthFraction() >= 0.25;
-                if (leftReady != rightReady) return leftReady;
-                const auto a = distanceSquared(left->position, anchor);
-                const auto b = distanceSquared(right->position, anchor);
-                return a != b ? a < b : left->id < right->id;
-            });
-        std::iter_swap(observers.begin() + static_cast<std::ptrdiff_t>(i), closest);
-        const auto* observer = observers[i];
+        if (!anchor.valid() || unassigned.empty()) continue;
+        const auto arrivalFrames = [anchor](const UnitSnapshot* observer) {
+            const auto speed = observer->topSpeed > 0.0
+                ? observer->topSpeed : 3.0;
+            return static_cast<Frame>(std::ceil(
+                distance(observer->position, anchor) / speed));
+        };
+        const auto byArrival = [&arrivalFrames](const UnitSnapshot* left,
+                                                const UnitSnapshot* right) {
+            const auto leftFrames = arrivalFrames(left);
+            const auto rightFrames = arrivalFrames(right);
+            return leftFrames != rightFrames ? leftFrames < rightFrames
+                                             : left->id < right->id;
+        };
+        std::ranges::sort(unassigned, byArrival);
+        auto chosen = unassigned.begin();
+        for (; chosen != unassigned.end(); ++chosen) {
+            auto atAnchor = **chosen;
+            atAnchor.position = anchor;
+            if (!ScoutManager::observerInDanger(state, atAnchor, influence)) break;
+        }
+        // Even when every rendezvous is unsafe, reserve the nearest suitable
+        // Observer from scouting and report the uncovered demand explicitly.
+        const auto safeToRendezvous = chosen != unassigned.end();
+        if (!safeToRendezvous) chosen = unassigned.begin();
+        const auto* observer = *chosen;
+        const auto eta = arrivalFrames(observer);
+        allocation.assignments.push_back({observer->id, squad->id, anchor, eta,
+                                          safeToRendezvous});
+        allocation.reservedObservers.push_back(observer->id);
+        allocation.maximumArrivalFrames = std::max(allocation.maximumArrivalFrames, eta);
+        unassigned.erase(chosen);
+        if (!safeToRendezvous) continue;
+        ++coveredDemands;
         auto destination = influence.safestStep(
             observer->position, anchor, true, directSafeRendezvous);
         // A local gradient can keep a cloaked Observer circling just outside
@@ -637,11 +785,44 @@ std::vector<Command> SquadPlanner::detectorEscorts(
             }
             if (clearCorridor) destination = anchor;
         }
-        result.push_back({observer->id, CommandType::move, -1, destination,
-                          UnitKind::unknown, squad->needsDetection ? 96 : 72, 0,
-                          "detector-escort"});
+        if (destination.valid())
+            allocation.commands.push_back({observer->id, CommandType::move, -1, destination,
+                UnitKind::unknown, 96, 0, "detector-escort"});
     }
-    return result;
+    allocation.unmetDetectionDemands = detectionDemand - coveredDemands;
+    return allocation;
+}
+
+std::vector<Command> SquadPlanner::detectorEscorts(
+    const GameState& state,
+    const std::span<const Squad> squads,
+    const InfluenceMap& influence,
+    const bool mobilizeReserveAgainstLurkers,
+    const bool centerBlockedMainEscort,
+    const bool mobilizeContestedReserve,
+    const bool directSafeRendezvous) const {
+    return allocateDetectors(state, squads, influence, mobilizeReserveAgainstLurkers,
+                             centerBlockedMainEscort, mobilizeContestedReserve,
+                             directSafeRendezvous).commands;
+}
+
+void SquadPlanner::requireDetectorCount(StrategicPlan& plan,
+                                        const std::size_t requiredObservers) {
+    if (requiredObservers == 0) return;
+    const auto desiredCount = static_cast<int>(std::min<std::size_t>(requiredObservers,
+        static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    const auto detectorGoal = std::ranges::find_if(plan.goals, [](const ProductionGoal& goal) {
+        return goal.goal == GoalKind::train && goal.target == UnitKind::observer;
+    });
+    if (detectorGoal == plan.goals.end()) {
+        plan.goals.push_back({GoalKind::train, UnitKind::observer, desiredCount, 120, true,
+                              "replace and allocate mobile detection for active threats"});
+        return;
+    }
+    detectorGoal->desiredCount = std::max(detectorGoal->desiredCount, desiredCount);
+    detectorGoal->priority = std::max(detectorGoal->priority, 120);
+    detectorGoal->blocking = true;
+    detectorGoal->reason = "replace and allocate mobile detection for active threats";
 }
 
 const Squad* SquadPlanner::selectVanguard(
@@ -887,7 +1068,9 @@ std::vector<UnitSnapshot> SquadPlanner::combatSupport(
         const auto nearby = std::ranges::any_of(squad.units, [&ally, navigation](const UnitSnapshot& member) {
             return distanceSquared(ally.position, member.position) <= 384 * 384 &&
                 (ally.flying || navigation == nullptr || navigation->empty() ||
-                 navigation->lineWalkable(ally.position, member.position));
+                 navigation->lineWalkable(ally.position, member.position,
+                    {ally.dimensionLeft, ally.dimensionRight,
+                     ally.dimensionUp, ally.dimensionDown}));
         });
         if (!nearby) continue;
         const auto supportsFight = std::ranges::any_of(squad.enemies, [&ally](const UnitSnapshot& enemy) {
@@ -903,11 +1086,15 @@ std::vector<UnitSnapshot> SquadPlanner::combatSupport(
 bool SquadPlanner::shouldCoverExpansion(
     const GameState& state, const StrategicPlan& plan,
     const bool coverForwardThird) noexcept {
+    if (!plan.expansionTarget.valid() || plan.deferExpansion) return false;
+    // Explicit protection can mean either an unsafe Probe route or a Nexus
+    // already under construction. In both cases, hold the army on this site
+    // even if the broader strategy has an offensive posture.
+    if (plan.expansionProtectionRequired) return true;
     // Establishing the natural moves the whole defensive line out of the main.
     // Subsequent economic requests must not recall that field army, especially
     // to an unbuilt third behind an already secured front.
-    if (!plan.expansionTarget.valid() || plan.posture == Posture::attack)
-        return false;
+    if (plan.posture == Posture::attack) return false;
     const auto completedNexuses = std::ranges::count_if(
         state.self.units, [](const UnitSnapshot& unit) {
             return unit.kind == UnitKind::nexus && unit.completed;

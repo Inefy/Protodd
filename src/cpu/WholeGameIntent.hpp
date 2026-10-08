@@ -14,6 +14,8 @@
 
 namespace protodd::cpu {
 
+inline constexpr auto actionSchema = "protodd-whole-game-actions-v1";
+
 // Index order is part of the exported model's action schema. Keep this in
 // exact sync with training.whole_game_model and test it before using weights.
 inline constexpr auto kindNames = std::to_array<std::string_view>({

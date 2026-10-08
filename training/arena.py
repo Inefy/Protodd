@@ -14,6 +14,133 @@ import zipfile
 from .schema import sha256
 
 
+FEATURE_REGISTRY_PATH = Path(__file__).resolve().parents[1] / "docs" / "feature-registry.json"
+
+
+def read_feature_registry():
+    return json.loads(FEATURE_REGISTRY_PATH.read_text(encoding="utf-8"))
+
+
+def feature_registry_sha256():
+    return sha256(FEATURE_REGISTRY_PATH)
+
+
+def load_build_feature_snapshot(dll):
+    """Bind campaign inputs to the exact active compile features when available."""
+    candidates = [dll.parent / "Protodd.build-manifest.json", dll.parent / "manifest.json"]
+    source_path = next((path for path in candidates if path.is_file()), None)
+    if source_path is None:
+        return {"status": "unknown", "dll_sha256": sha256(dll), "source_manifest_sha256": None,
+                "registry_sha256": feature_registry_sha256(), "build_options": [], "build_inputs": []}
+
+    data = json.loads(source_path.read_text(encoding="utf-8"))
+    manifest = data.get("build_manifest", data)
+    registry_hash = feature_registry_sha256()
+    active = manifest.get("registered_feature_manifest")
+    if (manifest.get("schema") != "protodd-build-v1" or
+            manifest.get("feature_registry_sha256") != registry_hash or
+            not active or active.get("schema") != "protodd-active-features-v1" or
+            active.get("registry_sha256") != registry_hash):
+        raise ValueError("candidate build manifest is not bound to the current feature registry")
+    binary_hash = sha256(dll)
+    if manifest.get("dll_sha256", "").lower() != binary_hash.lower():
+        raise ValueError("candidate DLL differs from its feature-bound build manifest")
+
+    registry = read_feature_registry()
+    option_rows = active.get("build_options", [])
+    input_rows = active.get("build_inputs", [])
+    runtime_rows = active.get("runtime_controls", [])
+    options = {item.get("id"): item for item in option_rows}
+    inputs = {item.get("id"): item for item in input_rows}
+    runtime = {item.get("id"): item for item in runtime_rows}
+    if (len(option_rows) != len(registry["options"]) or
+            set(options) != {item["id"] for item in registry["options"]}):
+        raise ValueError("candidate build manifest has incomplete CMake option coverage")
+    if (len(input_rows) != len(registry["build_inputs"]) or
+            set(inputs) != {item["id"] for item in registry["build_inputs"]}):
+        raise ValueError("candidate build manifest has incomplete CMake input coverage")
+    if (len(runtime_rows) != len(registry["runtime_controls"]) or
+            set(runtime) != {item["id"] for item in registry["runtime_controls"]}):
+        raise ValueError("candidate build manifest has incomplete runtime feature coverage")
+    manifest_fields = ("tournament_value", "owner", "scope", "baseline", "dependencies",
+                       "evidence", "promotion_status")
+    for entry in registry["options"]:
+        if options[entry["id"]].get("value") not in ("ON", "OFF"):
+            raise ValueError(f"candidate has an invalid CMake option value: {entry['id']}")
+        if any(options[entry["id"]].get(field) != entry.get(field) for field in manifest_fields):
+            raise ValueError(f"candidate CMake feature metadata differs from registry: {entry['id']}")
+    for entry in registry["build_inputs"]:
+        if not isinstance(inputs[entry["id"]].get("value"), str):
+            raise ValueError(f"candidate has an invalid CMake input value: {entry['id']}")
+        if any(inputs[entry["id"]].get(field) != entry.get(field) for field in manifest_fields):
+            raise ValueError(f"candidate build input metadata differs from registry: {entry['id']}")
+    runtime_fields = ("file", "kind", "default_value", "allowed_values", "tournament_values",
+                      "dependencies", "scope", "owner", "baseline", "evidence", "promotion_status")
+    for entry in registry["runtime_controls"]:
+        if any(runtime[entry["id"]].get(field) != entry.get(field) for field in runtime_fields):
+            raise ValueError(f"candidate runtime feature contract differs from registry: {entry['id']}")
+    return {
+        "status": "verified",
+        "dll_sha256": binary_hash,
+        "source_manifest_sha256": sha256(source_path),
+        "registry_sha256": registry_hash,
+        "build_options": [dict(id=name, value=options[name]["value"]) for name in sorted(options)],
+        "build_inputs": [dict(id=name, value=inputs[name]["value"]) for name in sorted(inputs)],
+    }
+
+
+def runtime_feature_snapshot(read_dir, purpose, build_features):
+    registry = read_feature_registry()
+    build_options = {entry["id"]: entry["value"] for entry in build_features.get("build_options", [])}
+    features = []
+    for control in registry["runtime_controls"]:
+        path = Path(read_dir) / control["file"]
+        if control["kind"] == "presence":
+            value = "present" if path.exists() else "absent"
+        elif not path.exists():
+            value = "unset"
+        else:
+            value = path.read_text(encoding="utf-8").strip()
+        if value not in control["allowed_values"]:
+            raise ValueError(f"unsupported runtime feature value for {control['file']}: {value!r}")
+        purpose_values = control["purpose_values"].get(purpose, [])
+        if value not in purpose_values:
+            raise ValueError(f"runtime feature {control['file']}={value} is not permitted for {purpose}")
+        if purpose == "final-test" and value not in control["tournament_values"]:
+            raise ValueError(f"runtime feature {control['file']}={value} is not approved for tournament use")
+        dependencies = list(control["dependencies"])
+        dependencies.extend(control.get("dependencies_by_value", {}).get(value, []))
+        for dependency in dependencies:
+            if build_features.get("status") != "verified" or build_options.get(dependency) != "ON":
+                raise ValueError(f"runtime feature {control['file']}={value} requires build option {dependency}")
+        features.append({
+            "id": control["id"],
+            "file": control["file"],
+            "configured_value": value,
+            "effective_value": control["default_value"] if value == "unset" else value,
+            "owner": control["owner"],
+            "scope": control["scope"],
+            "baseline": control["baseline"],
+            "dependencies": dependencies,
+            "promotion_status": control["promotion_status"],
+        })
+    return features
+
+
+def require_tournament_build_features(build_features):
+    if build_features.get("status") != "verified":
+        raise ValueError("training and final-test campaigns require a feature-bound build manifest")
+    registry = read_feature_registry()
+    options = {entry["id"]: entry["value"] for entry in build_features["build_options"]}
+    inputs = {entry["id"]: entry["value"] for entry in build_features["build_inputs"]}
+    for entry in registry["options"]:
+        if options.get(entry["id"]) != entry["tournament_value"]:
+            raise ValueError(f"final-test build has a non-tournament feature enabled: {entry['id']}")
+    for entry in registry["build_inputs"]:
+        if inputs.get(entry["id"]) != entry["tournament_value"]:
+            raise ValueError(f"final-test build has a non-tournament build input: {entry['id']}")
+
+
 # The manager rewrites its HTML result dashboard during each campaign. These
 # files are outputs even when present in the copied template.
 MUTABLE_OUTPUT_PREFIX = "server/html/results/"
@@ -31,6 +158,11 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
     template, output, dll = map(lambda p: Path(p).resolve(), (template, output, dll))
     if purpose not in ("training", "development", "final-test"):
         raise ValueError("unknown campaign purpose")
+    build_features = load_build_feature_snapshot(dll)
+    if purpose in ("training", "final-test") and build_features["status"] != "verified":
+        raise ValueError("training and final-test campaigns require a feature-bound build manifest")
+    if purpose == "final-test":
+        require_tournament_build_features(build_features)
     if policy_mode not in ("frozen", "off") or (policy_mode != "frozen" and purpose != "development"):
         raise ValueError("policy-off comparison requires a development campaign")
     if race not in ("Protoss", "Terran", "Zerg") or type(rounds) is not int or rounds < 2 or rounds % 2:
@@ -83,7 +215,12 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
             verify(candidate_campaign)
             if sha256(candidate_campaign/'server/bots/Protodd/read/ProductionDemand.bin')!=sha256(production_shadow):
                 raise ValueError('screen model differs')
-    settings = json.loads((template / "server/server_settings.json").read_text())
+    settings_path = template / "server/server_settings.json"
+    if not template.is_dir():
+        raise ValueError(f"campaign template is missing: {template}")
+    if not settings_path.is_file():
+        raise ValueError(f"campaign template lacks server settings: {settings_path}")
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
     if slow_frame_allowance is not None:
         limits = settings["tournamentModuleSettings"]["timeoutLimits"]
         if not limits or limits[0].get("timeInMS") != 55:
@@ -118,7 +255,9 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
     if client_bundle is not None:
         client_bundle = Path(client_bundle).resolve()
         if (not zipfile.is_zipfile(client_bundle / "client.jar") or
-                not all((client_bundle / name).is_file() for name in ('stop-owned-starcraft.ps1', 'start-owned-starcraft.ps1'))):
+                not all((client_bundle / name).is_file() for name in ('stop-owned-starcraft.ps1', 'start-owned-starcraft.ps1',
+                    'HeadlessStarCraft.psm1', 'HeadlessStarCraft.cs', 'run-headless-starcraft.ps1',
+                    'MatchProcessOwnership.psm1'))):
             raise ValueError("invalid local client bundle")
     with zipfile.ZipFile(template / "server/required" / settings["mapsFile"]) as archive:
         if not set(maps) <= set(archive.namelist()):
@@ -146,6 +285,11 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
     for name in ("AI", "read", "write"):
         (target / name).mkdir(parents=True)
     shutil.copy2(dll, target / "AI" / (bot + ".dll"))
+    buildFeaturePath = None
+    if build_features["status"] == "verified":
+        feature_path = target / "AI" / "Protodd.feature-manifest.json"
+        write_json(feature_path, build_features)
+        buildFeaturePath = feature_path.relative_to(output).as_posix()
     (target / "read/Protodd-learning-mode.txt").write_text("validated-train\n" if purpose == "training" and worker_training_intervention is None else "frozen\n")
     (target / "read/Policy-mode.txt").write_text(
         "train\n" if purpose == "training" and worker_training_intervention is None
@@ -169,6 +313,7 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
     if tactical_target_weights:
         shutil.copy2(tactical_target_weights, target / "read/TacticalTarget-weights.bin")
         (target / "read/TacticalTarget-mode.txt").write_text("local-target\n")
+    runtime_features = runtime_feature_snapshot(target / "read", purpose, build_features)
     settings["bots"] = [dict(BotName=bot, Race=race, BotType="dll", BWAPIVersion="BWAPI_440")] + [available[n] for n in opponents]
     settings.update(clearResults="no", gamesListFile="games.jsonl", resultsFile="results.jsonl",
                     maps=maps, serverPort=port, enableBotFileIO=False, lobbyGameSpeed="Fastest")
@@ -191,7 +336,9 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
         destination.mkdir()
         shutil.copy2((client_bundle or client) / "client.jar", destination / "client.jar")
         if client_bundle:
-            for helper in ('start-owned-starcraft.ps1', 'stop-owned-starcraft.ps1'):
+            for helper in ('start-owned-starcraft.ps1', 'stop-owned-starcraft.ps1',
+                           'HeadlessStarCraft.psm1', 'HeadlessStarCraft.cs', 'run-headless-starcraft.ps1',
+                           'MatchProcessOwnership.psm1'):
                 shutil.copy2(client_bundle / helper, destination / helper)
         cfg["ServerAddress"] = f"127.0.0.1:{port}"
         write_json(destination / "client_settings.json", cfg)
@@ -199,6 +346,9 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
               if p.is_file() and not p.relative_to(output).as_posix().startswith(MUTABLE_OUTPUT_PREFIX)}
     manifest = dict(format="protodd-arena-v1", complete=True, label=output.name, bot=bot, race=race,
                     purpose=purpose, games=len(schedule), template=str(template), components=hashes,
+                    active_feature_manifest=dict(schema="protodd-campaign-features-v1",
+                        registry_sha256=feature_registry_sha256(), build=build_features,
+                        build_snapshot_path=buildFeaturePath, runtime_controls=runtime_features),
                     reward_requires="two consistent normal healthy reports plus reviewed opponent activity",
                     pairing="same maps/opponents with both host sides; actual seeds must be verified",
                     strength_validated=False)
@@ -219,6 +369,29 @@ def verify(run):
         path = (run / name).resolve()
         if not path.is_relative_to(run) or sha256(path) != digest:
             raise ValueError(f"campaign artifact changed: {name}")
+    active_features = manifest.get("active_feature_manifest")
+    if active_features is not None:
+        registry_hash = feature_registry_sha256()
+        if (active_features.get("schema") != "protodd-campaign-features-v1" or
+                active_features.get("registry_sha256") != registry_hash or
+                active_features.get("build", {}).get("registry_sha256") != registry_hash):
+            raise ValueError("campaign feature manifest differs from the registered feature set")
+        build_features = active_features["build"]
+        if build_features.get("status") == "verified":
+            snapshot_path = (run / active_features.get("build_snapshot_path", "")).resolve()
+            if (not snapshot_path.is_relative_to(run) or not snapshot_path.is_file() or
+                    json.loads(snapshot_path.read_text(encoding="utf-8")) != build_features):
+                raise ValueError("campaign build feature snapshot is missing or changed")
+            dll_path = run / "server" / "bots" / manifest["bot"] / "AI" / (manifest["bot"] + ".dll")
+            if sha256(dll_path) != build_features.get("dll_sha256"):
+                raise ValueError("campaign feature snapshot does not identify its candidate DLL")
+        elif manifest.get("purpose") in ("training", "final-test"):
+            raise ValueError("training/final-test campaign has no verified build feature snapshot")
+        expected_runtime = runtime_feature_snapshot(
+            run / "server" / "bots" / manifest["bot"] / "read",
+            manifest["purpose"], build_features)
+        if expected_runtime != active_features.get("runtime_controls"):
+            raise ValueError("campaign runtime feature settings differ from their manifest")
     return dict(verified=True, games=manifest["games"], purpose=manifest["purpose"])
 
 

@@ -7,6 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $repoPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 Import-Module (Join-Path $PSScriptRoot "TournamentManifest.psm1") -Force
+Assert-TournamentFeatureRegistry -RepositoryRoot $repoPath
 $artifactRoot = [IO.Path]::GetFullPath((Join-Path $repoPath "artifacts"))
 $resolvedDll = if ([IO.Path]::IsPathRooted($DllPath)) {
     [IO.Path]::GetFullPath($DllPath)
@@ -39,6 +40,7 @@ if ($buildManifest.schema -ne "protodd-build-v1") {
 }
 Assert-TournamentDllMatchesManifest -Manifest $buildManifest -DllPath $resolvedDll
 Assert-TournamentSourceMatchesManifest -Manifest $buildManifest -RepositoryRoot $repoPath
+Assert-TournamentFeatureManifest -Manifest $buildManifest -RepositoryRoot $repoPath
 
 $stagingParent = Join-Path $artifactRoot "staging"
 $stagingRoot = Join-Path $stagingParent ("Protodd-" + [Guid]::NewGuid().ToString("N"))

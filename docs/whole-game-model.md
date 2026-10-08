@@ -137,6 +137,31 @@ excluded, and actor/target availability at the decision frame is explicit.
 It also emits delay targets and an explicit STOP target; windows longer than
 six commands report overflow instead of teaching a false STOP.
 
+Before another full fit, run
+`python -m training.whole_game_representation_audit <train-release> <validation-release> --games-per-matchup 2 --maximum-frame 3600 --output <audit.json>`.
+The report preselects a bounded, label-independent cohort and separately
+reports action/WAIT windows, STOP slots, actor/target availability, chronological
+slot counts, delay bins, position-label map bounds and censored final windows.
+It verifies train/validation game and replay disjointness, reads no final-test
+split and never changes labels. A release marked `training_ready: false` remains
+diagnostic-only even when these representation metrics and export parity pass.
+
+Every full-corpus whole-game fit path requires `--representation-audit` and
+`--native-parity-report`: the base, streaming and six-slot teachers, the
+streamed position head, and both student-distillation paths. Before checking
+the accelerator, collecting shards, creating an output directory, or
+constructing an optimizer, the fit verifies that both exact releases are
+complete and marked `training_ready`, the audit matches their identity-file
+hashes and current audit-source hashes, the predeclared game IDs match the
+release manifests, all selected train/validation game and replay identities
+are disjoint, every required representation metric is present, and native
+export parity passes its numeric tolerance on PvP, PvT and PvZ. The fit report
+or resumable run specification retains hashes of both gate reports. Queued
+PowerShell training launchers run this gate before waiting for GPU slots. The
+current v32d/v32c releases fail closed because their receipts are not
+`training_ready`; this gate does not turn the retrospective audit into
+permission to train.
+
 `training.whole_game_multislot_model` now implements the shared-encoder,
 six-slot decoder. Later slots receive only earlier command tokens, including
 actor, kind, mode, target, position, unit type and relative dispatch time.
@@ -620,6 +645,19 @@ from 1,201 decoded smoke-student intents; only 255 had a compatible action and
 target shape. This verifies that the adapter rejects bad actions while the
 existing bot plays. It is not evidence that the learned policy can control a
 game. The separately frozen staggered-inference build is being tested next.
+
+The control-capable runtime writes `WholeGame-actions.csv` when it loads whole-
+game weights. Each actor attempt is keyed by attempt ID, actor token and
+original actor ordinal, and records proposal, legality, arbitration, API
+acceptance and a later native-command observation. The
+`training.whole_game_execution_audit` report separates proposals that were
+legal from orders that BWAPI accepted and commands later visible in
+`getLastCommand`; it groups rejection, arbitration and execution-loss reasons.
+Run it against a captured match with
+`python -m training.whole_game_execution_audit <run>/bwapi-data/write/WholeGame-actions.csv --output <run>/action-execution.json`.
+An observed `getLastCommand` match confirms that BWAPI retained the order, not
+that the order achieved its in-game objective. Live command-outcome calibration
+is still required before treating this stream as an effect measure.
 
 That staggered build (`development-11-staggered-intent-shadow`) passed both
 host sides with normal reports, no model errors or timeout frames, and peak

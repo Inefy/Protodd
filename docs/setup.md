@@ -50,6 +50,9 @@ developer evaluation. Never package a developer DLL.
 
 ## Run a local game
 
+See [runtime resource bounds](resource-bounds.md) for persisted-input limits
+and the enforced stock-engine process-memory budget.
+
 1. Install BWAPI 4.4.0 into the StarCraft 1.16.1 directory.
 2. Copy `Protodd.dll` to `bwapi-data/AI/Protodd.dll`.
 3. Merge `bwapi-data/bwapi.ini.example` from this repository into the local
@@ -94,18 +97,24 @@ For example, after building the tournament DLL:
 ./scripts/direct-match.ps1 -OpponentRace Protoss -Map 'maps/aiide/(4)Python.scx' -Label uab-protoss-check
 ```
 
+When `-RuntimeSet` is omitted, the match label is the runtime-set name. The
+runner prepares a separate host/opponent pair on first use and stores that
+run's package/read-state files and results under the same label. A used label
+is not reused; choose a new label for each run. An explicit `-RuntimeSet` is
+available for intentionally paired campaigns that share a prepared set, with
+the runtime lock still serializing access.
+
 Use `-OpponentRace Terran` or `Zerg` for the other race-fixed UAlbertaBot
 packages. Match records and decision reports are saved under
 `build/direct-logs`. `scripts/restore-match-runtime.ps1 -Runtime <absolute-path>`
 also restores an idle runtime before launching it manually.
 
-To qualify against the unmodified release engine, run
-`./scripts/prepare-stock-runtime.ps1` once while StarCraft is stopped. It makes
-separate host/opponent runtime copies under `build/stock-certification`, omits
+To qualify against the unmodified release engine, pass
+`-RuntimeProfile stock-certification` to `direct-match.ps1`. The runner makes
+separate per-label host/opponent copies from the local runtime pair, omits
 mutable game data, and installs the engine DLL from the preserved official
-BWAPI archive only after checking its archive and DLL hashes. Then pass
-`-RuntimeProfile stock-certification` to `direct-match.ps1`. The stock and
-patched profiles use separate runtimes and result folders; a profile marker
+BWAPI archive only after checking its archive and DLL hashes. The stock and
+patched profiles use separate runtime and result roots; a profile marker
 prevents later restoration from silently switching a runtime's engine.
 
 For a named paired evaluation, prepare each profile from the existing local

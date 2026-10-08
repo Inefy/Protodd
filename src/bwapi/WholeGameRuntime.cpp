@@ -10,10 +10,99 @@
 #endif
 
 namespace protodd::bwapi {
+namespace {
+
+bool nativeCommandObserved(const BWAPI::UnitCommand expected) {
+    const auto actor = expected.getUnit();
+    if (actor == nullptr || !actor->exists()) return false;
+    const auto observed = actor->getLastCommand();
+    if (observed.getType() != expected.getType()) return false;
+    const auto expectedTarget = expected.getTarget();
+    if (expectedTarget != nullptr && observed.getTarget() != expectedTarget) return false;
+    const auto expectedPosition = expected.getTargetPosition();
+    if (expectedPosition.isValid() && observed.getTargetPosition() != expectedPosition) return false;
+    if (expected.getUnitType() != BWAPI::UnitTypes::None &&
+        observed.getUnitType() != expected.getUnitType()) return false;
+    if (expected.getTechType() != BWAPI::TechTypes::None &&
+        observed.getTechType() != expected.getTechType()) return false;
+    if (expected.getUpgradeType() != BWAPI::UpgradeTypes::None &&
+        observed.getUpgradeType() != expected.getUpgradeType()) return false;
+    return true;
+}
+
+}  // namespace
 
 #ifdef PROTODD_EMBED_WHOLE_GAME_WEIGHTS
 extern HINSTANCE moduleInstance;
 #endif
+
+void WholeGameRuntime::logActionAudit(
+    const WholeGameActionIdentity& identity, const int frame, const int actorToken,
+    const std::string_view stage, const std::string_view outcome,
+    const std::string_view reason) {
+    if (!actionAuditOutput_) return;
+    actionAuditOutput_ << identity.attemptId << ',' << identity.proposalFrame << ','
+                       << identity.slot << ',' << identity.dueFrame << ',' << frame << ','
+                       << actorToken << ',' << identity.actorOrdinal << ','
+                       << identity.actorCount << ',' << identity.intentKind << ','
+                       << identity.targetMode << ',' << identity.targetEntity << ','
+                       << identity.targetX << ',' << identity.targetY << ',' << stage << ','
+                       << outcome << ',';
+    for (const auto character : reason)
+        if (character != ',' && character != '\r' && character != '\n')
+            actionAuditOutput_ << character;
+    actionAuditOutput_ << '\n';
+}
+
+void WholeGameRuntime::recordApiResult(
+    const LegalWholeGameCommand& action, const bool accepted, const int frame,
+    const std::string_view reason) {
+    logActionAudit(action.identity, frame, action.actorToken, "api",
+                   accepted ? "accepted" : "rejected", reason);
+    if (!accepted) return;
+    constexpr auto maximumPendingExecutions = std::size_t{256};
+    if (pendingExecutions_.size() >= maximumPendingExecutions) {
+        logActionAudit(action.identity, frame, action.actorToken, "execution",
+                       "censored", "pending-observation-limit");
+        return;
+    }
+    pendingExecutions_.push_back({action, frame});
+}
+
+void WholeGameRuntime::reconcileActionExecutions(const int frame) {
+    constexpr auto observationWindow = 24;
+    for (auto pending = pendingExecutions_.begin(); pending != pendingExecutions_.end();) {
+        const auto actor = pending->action.command.getUnit();
+        const auto identity = pending->action.identity;
+        const auto actorToken = pending->action.actorToken;
+        if (actor == nullptr || !actor->exists()) {
+            logActionAudit(identity, frame, actorToken, "execution", "censored",
+                           "actor-no-longer-exists");
+            pending = pendingExecutions_.erase(pending);
+            continue;
+        }
+        if (nativeCommandObserved(pending->action.command)) {
+            logActionAudit(identity, frame, actorToken, "execution", "observed",
+                           "native-last-command-matched");
+            pending = pendingExecutions_.erase(pending);
+            continue;
+        }
+        const auto target = pending->action.command.getTarget();
+        if (target != nullptr && !target->exists()) {
+            logActionAudit(identity, frame, actorToken, "execution", "censored",
+                           "target-no-longer-exists");
+            pending = pendingExecutions_.erase(pending);
+            continue;
+        }
+        if (frame - pending->acceptedFrame >= observationWindow) {
+            logActionAudit(identity, frame, actorToken, "execution", "unobserved",
+                           "native-last-command-not-matched-within-window");
+            pending = pendingExecutions_.erase(pending);
+            continue;
+        }
+        ++pending;
+    }
+}
 
 int WholeGameRuntime::known(const BWAPI::Unit unit) const {
     if (!unit) return -1;
@@ -35,33 +124,98 @@ std::vector<LegalWholeGameCommand> WholeGameRuntime::dispatchDue(
     live.entities = entities_;
     std::set<int> issuedActors;
     for (auto& item : due) {
+        const auto identityFor = [&item](const std::size_t ordinal) {
+            const auto& intent = item.intent;
+            return WholeGameActionIdentity{
+                .attemptId = item.attemptId,
+                .proposalFrame = item.proposalFrame,
+                .dueFrame = item.dueFrame,
+                .slot = item.slot,
+                .actorOrdinal = item.actorOrdinals.size() > ordinal
+                    ? item.actorOrdinals[ordinal] : ordinal,
+                .actorCount = item.originalActorCount,
+                .intentKind = intent.kind,
+                .targetMode = intent.targetMode,
+                .targetEntity = intent.targetEntityId.value_or(-1),
+                .targetX = intent.targetPixel ? intent.targetPixel->first : -1,
+                .targetY = intent.targetPixel ? intent.targetPixel->second : -1,
+            };
+        };
         if (selected.size() >= 8) {
-            static_cast<void>(schedule_.defer(std::move(item), frame + 1));
+            for (std::size_t index = 0; index < item.intent.actorIds.size(); ++index)
+                logActionAudit(identityFor(index), frame, item.intent.actorIds[index],
+                               "dispatch", "deferred", "frame-command-capacity");
+            const auto identity = identityFor(0);
+            const auto actors = item.intent.actorIds;
+            if (!schedule_.defer(std::move(item), frame + 1))
+                for (std::size_t index = 0; index < actors.size(); ++index)
+                    logActionAudit(identity, frame, actors[index], "dispatch", "canceled",
+                                   "cadence-window-expired");
             continue;
         }
-        const auto legal = legalWholeGameCommands(
-            item.intent, live, currentByToken, BWAPI::BroodwarPtr, 8 - selected.size());
+        const auto assessments = assessWholeGameCommands(
+            item.intent, live, currentByToken, BWAPI::BroodwarPtr);
         std::vector<int> deferredActors;
-        for (const auto& command : legal) {
-            if (issuedActors.insert(command.actorToken).second)
-                selected.push_back(command);
-            else
-                deferredActors.push_back(command.actorToken);
+        std::vector<std::size_t> deferredOrdinals;
+        for (std::size_t index = 0; index < assessments.size(); ++index) {
+            const auto& assessment = assessments[index];
+            const auto identity = identityFor(index);
+            if (!assessment.legal()) {
+                logActionAudit(identity, frame, assessment.actorToken, "legality",
+                               "rejected", assessment.reason);
+                continue;
+            }
+            logActionAudit(identity, frame, assessment.actorToken, "legality",
+                           "legal", "all-checks-passed");
+            if (selected.size() >= 8) {
+                deferredActors.push_back(assessment.actorToken);
+                if (index < item.actorOrdinals.size())
+                    deferredOrdinals.push_back(item.actorOrdinals[index]);
+                logActionAudit(identity, frame, assessment.actorToken, "dispatch",
+                               "deferred", "frame-command-capacity");
+            } else if (!issuedActors.insert(assessment.actorToken).second) {
+                deferredActors.push_back(assessment.actorToken);
+                if (index < item.actorOrdinals.size())
+                    deferredOrdinals.push_back(item.actorOrdinals[index]);
+                logActionAudit(identity, frame, assessment.actorToken, "arbitration",
+                               "deferred", "actor-already-claimed-by-earlier-slot");
+            } else {
+                auto actionIdentity = identity;
+                actionIdentity.dueFrame = item.dueFrame;
+                selected.push_back({assessment.actorToken, *assessment.command,
+                                    actionIdentity});
+                logActionAudit(actionIdentity, frame, assessment.actorToken, "arbitration",
+                               "selected", "first-eligible-slot-for-actor");
+            }
         }
         if (!deferredActors.empty()) {
             item.intent.actorIds = std::move(deferredActors);
-            static_cast<void>(schedule_.defer(std::move(item), frame + 1));
+            item.actorOrdinals = std::move(deferredOrdinals);
+            const auto identity = identityFor(0);
+            const auto actors = item.intent.actorIds;
+            if (!schedule_.defer(std::move(item), frame + 1))
+                for (std::size_t index = 0; index < actors.size(); ++index)
+                    logActionAudit(identity, frame, actors[index], "dispatch", "canceled",
+                                   "cadence-window-expired");
+        }
+        if (assessments.empty()) {
+            const auto identity = identityFor(0);
+            logActionAudit(identity, frame, -1, "legality", "rejected", "empty-actor-set");
         }
     }
     return selected;
 }
 
 void WholeGameRuntime::start() {
-    output_.close(); inferenceOutput_.close(); intentOutput_.close(); model_.reset(); memory_.clear();
+    output_.close(); inferenceOutput_.close(); intentOutput_.close();
+    actionAuditOutput_.close(); model_.reset(); memory_.clear();
     schedule_.clear();
     enabled_ = false; terrain_ = {};
     ids_.clear(); entities_.clear(); published_.clear();
-    nextId_ = sequence_ = 0; lastFrame_ = -1;
+    nextId_ = sequence_ = 0;
+    lastFrame_ = -1;
+    nextActionAttemptId_ = 0;
+    pendingExecutions_.clear();
     const bool trace = std::filesystem::exists("bwapi-data/read/WholeGame-observe.txt");
     const auto weights = std::filesystem::path("bwapi-data/read/WholeGame-weights.bin");
 #ifdef PROTODD_EMBED_WHOLE_GAME_WEIGHTS
@@ -91,6 +245,9 @@ void WholeGameRuntime::start() {
             inferenceOutput_.open("bwapi-data/write/WholeGame-shadow.csv", std::ios::trunc);
 #endif
             intentOutput_.open("bwapi-data/write/WholeGame-intents.csv", std::ios::trunc);
+            actionAuditOutput_.open("bwapi-data/write/WholeGame-actions.csv", std::ios::trunc);
+            if (actionAuditOutput_)
+                actionAuditOutput_ << "attempt_id,proposal_frame,slot,due_frame,frame,actor_token,actor_ordinal,actor_count,intent_kind,target_mode,target_entity,target_x,target_y,stage,outcome,reason\n";
         } catch (const std::exception& error) {
             std::ofstream failure("bwapi-data/write/WholeGame-model-error.txt", std::ios::trunc);
             failure << error.what() << '\n';
@@ -136,6 +293,7 @@ std::vector<LegalWholeGameCommand> WholeGameRuntime::observe() {
     auto* enemy = game->enemy();
     if (!self || !enemy || game->isReplay() || game->isPaused()) return selectedCommands;
     const int frame = game->getFrameCount();
+    reconcileActionExecutions(frame);
     const bool cadence = frame % 24 == 7;
 #ifdef PROTODD_WHOLE_GAME_CONTROL
     if (!cadence && (!controlling() || !schedule_.hasDue(frame)))
@@ -198,6 +356,20 @@ std::vector<LegalWholeGameCommand> WholeGameRuntime::observe() {
         return !e.visible && e.building && e.x >= 0 && e.y >= 0 &&
             game->isVisible(BWAPI::TilePosition(e.x / 32, e.y / 32));
     });
+    const auto prunedEntities = whole_observation::pruneStaleEntities(entities_);
+    if (!prunedEntities.withinLimit) {
+        // The learned observer/controller is optional. If the currently live
+        // set alone exceeds its bounded memory, stop it and leave native
+        // control in charge instead of growing retained state indefinitely.
+        std::ofstream failure("bwapi-data/write/WholeGame-model-error.txt", std::ios::app);
+        if (failure) failure << "frame=" << frame << ",reason=entity-memory-limit\n";
+        end();
+        return selectedCommands;
+    }
+    // Keep the engine-ID registry and published-token set in step with entity
+    // memory so destroyed or evicted units do not accumulate for the match and
+    // freed engine IDs can be assigned a fresh local token if reused.
+    whole_observation::forgetUnretainedTokens(ids_, published_, entities_);
     // Strategy, diagnostics and several other costly legacy phases run on
     // frame 0 of each 24-frame window. Stagger the learned policy so the
     // total BWAPI callback remains below the tournament frame budget.
@@ -250,6 +422,9 @@ std::vector<LegalWholeGameCommand> WholeGameRuntime::observe() {
                 if (!slotPrediction->slots.empty())
                     prediction.heads = slotPrediction->slots.front().heads;
             } else prediction = model_->infer(encoded.input, memory_);
+            if (slotPrediction ? !cpu::safeWholeGameOutput(*slotPrediction)
+                               : !cpu::safeWholeGameOutput(prediction))
+                throw std::runtime_error("nonfinite or out-of-range whole-game inference output");
             const auto elapsed = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - began).count();
             memory_ = prediction.memory;
@@ -260,16 +435,52 @@ std::vector<LegalWholeGameCommand> WholeGameRuntime::observe() {
                     const auto token = known(unit);
                     if (token >= 0) currentByToken.emplace(token, unit);
                 }
-                for (const auto& slot : slotPrediction->slots) {
+                for (std::size_t slotOrdinal = 0;
+                     slotOrdinal < slotPrediction->slots.size(); ++slotOrdinal) {
+                    const auto& slot = slotPrediction->slots[slotOrdinal];
                     const auto intent = cpu::decodeIntent(slot, encoded, row,
                         {.eventProbability = 0.0f, .actorLogit = -1e8f, .maxActors = 1});
                     if (!intent) continue;
                     const auto& delay = slot.heads.at("delay");
                     const auto delayFrames = static_cast<int>(std::distance(
                         delay.begin(), std::max_element(delay.begin(), delay.end())));
-                    plans.push_back({delayFrames, *intent});
-                    const auto legal = legalWholeGameCommands(
-                        *intent, row, currentByToken, BWAPI::BroodwarPtr, 8);
+                    const auto attemptId = nextActionAttemptId_++;
+                    plans.push_back({delayFrames, *intent, attemptId, slotOrdinal});
+                    const auto assessments = assessWholeGameCommands(
+                        *intent, row, currentByToken, BWAPI::BroodwarPtr);
+                    const auto legalCount = std::ranges::count_if(
+                        assessments, [](const WholeGameActorAssessment& item) {
+                            return item.legal();
+                        });
+                    for (std::size_t actorOrdinal = 0;
+                         actorOrdinal < intent->actorIds.size(); ++actorOrdinal) {
+                        const auto& target = intent->targetEntityId;
+                        const auto& pixel = intent->targetPixel;
+                        WholeGameActionIdentity identity{
+                            .attemptId = attemptId,
+                            .proposalFrame = frame,
+                            .dueFrame = frame + delayFrames,
+                            .slot = slotOrdinal,
+                            .actorOrdinal = actorOrdinal,
+                            .actorCount = intent->actorIds.size(),
+                            .intentKind = intent->kind,
+                            .targetMode = intent->targetMode,
+                            .targetEntity = target.value_or(-1),
+                            .targetX = pixel ? pixel->first : -1,
+                            .targetY = pixel ? pixel->second : -1,
+                        };
+                        logActionAudit(identity, frame, intent->actorIds[actorOrdinal],
+                                       "proposal", "emitted", "model-decoded-slot");
+#ifndef PROTODD_WHOLE_GAME_CONTROL
+                        const auto assessment = actorOrdinal < assessments.size()
+                            ? assessments[actorOrdinal]
+                            : WholeGameActorAssessment{intent->actorIds[actorOrdinal],
+                                                       std::nullopt, "missing-legality-result"};
+                        logActionAudit(identity, frame, assessment.actorToken, "legality",
+                                       assessment.legal() ? "legal" : "rejected",
+                                       assessment.legal() ? "all-checks-passed" : assessment.reason);
+#endif
+                    }
                     if (intentOutput_) {
                         const auto target = intent->targetEntityId.value_or(-1);
                         const auto x = intent->targetPixel ? intent->targetPixel->first : -1;
@@ -281,7 +492,7 @@ std::vector<LegalWholeGameCommand> WholeGameRuntime::observe() {
                                       << intent->actorIds.size() << ',' << intent->actorIds.front() << ','
                                       << target << ',' << x << ',' << y << ',' << intent->unitType << ','
                                       << intent->technology << ',' << intent->upgrade << ','
-                                      << intent->queued << ',' << legal.size() << '\n';
+                                      << intent->queued << ',' << legalCount << '\n';
                     }
                 }
 #ifdef PROTODD_WHOLE_GAME_CONTROL
@@ -302,10 +513,39 @@ std::vector<LegalWholeGameCommand> WholeGameRuntime::observe() {
                         const auto token = known(unit);
                         if (token >= 0) currentByToken.emplace(token, unit);
                     }
-                    const auto legal = legalWholeGameCommands(
-                        *intent, row, currentByToken, BWAPI::BroodwarPtr, 8);
+                    const auto attemptId = nextActionAttemptId_++;
+                    const auto assessments = assessWholeGameCommands(
+                        *intent, row, currentByToken, BWAPI::BroodwarPtr);
+                    const auto legalCount = std::ranges::count_if(
+                        assessments, [](const WholeGameActorAssessment& item) {
+                            return item.legal();
+                        });
+                    for (std::size_t actorOrdinal = 0;
+                         actorOrdinal < intent->actorIds.size(); ++actorOrdinal) {
+                        WholeGameActionIdentity identity{
+                            .attemptId = attemptId,
+                            .proposalFrame = frame,
+                            .dueFrame = frame,
+                            .slot = 0,
+                            .actorOrdinal = actorOrdinal,
+                            .actorCount = intent->actorIds.size(),
+                            .intentKind = intent->kind,
+                            .targetMode = intent->targetMode,
+                            .targetEntity = intent->targetEntityId.value_or(-1),
+                            .targetX = intent->targetPixel ? intent->targetPixel->first : -1,
+                            .targetY = intent->targetPixel ? intent->targetPixel->second : -1,
+                        };
+                        logActionAudit(identity, frame, intent->actorIds[actorOrdinal],
+                                       "proposal", "emitted", "model-decoded-action");
+#ifndef PROTODD_WHOLE_GAME_CONTROL
+                        const auto& assessment = assessments[actorOrdinal];
+                        logActionAudit(identity, frame, assessment.actorToken, "legality",
+                                       assessment.legal() ? "legal" : "rejected",
+                                       assessment.legal() ? "all-checks-passed" : assessment.reason);
+#endif
+                    }
 #ifdef PROTODD_WHOLE_GAME_CONTROL
-                    schedule_.replace(frame, {{0, *intent}});
+                    schedule_.replace(frame, {{0, *intent, attemptId}});
                     selectedCommands = dispatchDue(frame, current);
 #endif
                     const auto target = intent->targetEntityId.value_or(-1);
@@ -319,7 +559,7 @@ std::vector<LegalWholeGameCommand> WholeGameRuntime::observe() {
                                       << intent->actorIds.size() << ',' << intent->actorIds.front() << ','
                                       << target << ',' << x << ',' << y << ',' << intent->unitType << ','
                                       << intent->technology << ',' << intent->upgrade << ','
-                                      << intent->queued << ',' << legal.size() << '\n';
+                                      << intent->queued << ',' << legalCount << '\n';
                 }
             }
             }
@@ -344,16 +584,25 @@ std::vector<LegalWholeGameCommand> WholeGameRuntime::observe() {
         if (output_) output_.flush();
         if (inferenceOutput_) inferenceOutput_.flush();
         if (intentOutput_) intentOutput_.flush();
+        if (actionAuditOutput_) actionAuditOutput_.flush();
     }
     return selectedCommands;
 }
 
 void WholeGameRuntime::end() {
+    const auto frame = BWAPI::Broodwar->getFrameCount();
+    for (const auto& pending : pendingExecutions_)
+        logActionAudit(pending.action.identity, frame, pending.action.actorToken,
+                       "execution", "censored", "game-ended-before-observation");
+    pendingExecutions_.clear();
     if (output_) { output_.flush(); output_.close(); }
     if (inferenceOutput_) { inferenceOutput_.flush(); inferenceOutput_.close(); }
     if (intentOutput_) { intentOutput_.flush(); intentOutput_.close(); }
+    if (actionAuditOutput_) { actionAuditOutput_.flush(); actionAuditOutput_.close(); }
     model_.reset(); memory_.clear(); enabled_ = false;
     schedule_.clear();
+    ids_.clear(); entities_.clear(); published_.clear(); terrain_ = {};
+    nextId_ = sequence_ = 0; lastFrame_ = -1;
 }
 
 }  // namespace protodd::bwapi

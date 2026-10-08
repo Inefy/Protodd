@@ -51,10 +51,12 @@ struct MacroAction {
     bool blocksLowerPriority{};
     bool executable{true};
     ConstructionTaskSite constructionSite{};
+    CriticalGoalTiming timing{};
 };
 
 enum class BuildBlockerReason : std::uint8_t {
     noBuilder,
+    unsafeRoute,
     missingPrerequisite,
     noPlacement,
     noPower,

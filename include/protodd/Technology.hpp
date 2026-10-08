@@ -15,6 +15,7 @@ struct TechnologyStats {
     int maximumLevel{1};
     UnitKind producer{UnitKind::unknown};
     bool research{};
+    int durationFrames{};
 
     [[nodiscard]] int mineralCost(int level) const noexcept;
     [[nodiscard]] int gasCost(int level) const noexcept;

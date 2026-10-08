@@ -32,6 +32,7 @@ private:
         int action{}, type{}, issued{}, queueBefore{}, orderBefore{}, buildBefore{};
         BWAPI::Position orderPositionBefore;
         BWAPI::TilePosition tile;
+        bool trainingBefore{};
         bool accepted{};
         int ticket{-1};
     };

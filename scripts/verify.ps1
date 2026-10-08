@@ -33,6 +33,9 @@ try {
     python tools/direct_report.py --self-test
     if ($LASTEXITCODE -ne 0) { throw "Direct-match report tests failed" }
 
+    python -m unittest discover -s tests -p test_t114_evaluate.py
+    if ($LASTEXITCODE -ne 0) { throw "T114 matched-schedule evaluator tests failed" }
+
     python tools/decision_report.py --self-test
     if ($LASTEXITCODE -ne 0) { throw "Decision observer tests failed" }
 

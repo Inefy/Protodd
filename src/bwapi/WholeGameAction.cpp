@@ -121,45 +121,131 @@ std::optional<BWAPI::UnitCommand> makeCommand(
 
 }  // namespace
 
-std::vector<LegalWholeGameCommand> legalWholeGameCommands(
+std::vector<WholeGameActorAssessment> assessWholeGameCommands(
     const cpu::Intent& intent, const whole_observation::Snapshot& observation,
-    const std::map<int, BWAPI::Unit>& unitByToken, BWAPI::Game* game,
-    std::size_t maximumCommands) {
-    std::vector<LegalWholeGameCommand> accepted;
-    if (!game || maximumCommands == 0 || intent.kind >= cpu::kindNames.size()) return accepted;
-    if (!protodd::wholeGameActionAuthorityAllowed(intent.kind))
-        return accepted;
+    const std::map<int, BWAPI::Unit>& unitByToken, BWAPI::Game* game) {
+    std::vector<WholeGameActorAssessment> results;
+    results.reserve(intent.actorIds.size());
+    std::string globalRejection;
+    if (!game) globalRejection = "game-unavailable";
+    else if (intent.kind >= cpu::kindNames.size()) globalRejection = "invalid-action-kind";
+    else if (!protodd::wholeGameActionAuthorityAllowed(intent.kind))
+        globalRejection = "action-authority-disabled";
     BWAPI::Unit target = nullptr;
-    if (intent.targetEntityId) {
-        const auto entity = observation.entities.find(*intent.targetEntityId);
-        const auto unit = unitByToken.find(*intent.targetEntityId);
-        if (entity != observation.entities.end() && entity->second.visible &&
-            unit != unitByToken.end() && unit->second && unit->second->exists())
-            target = unit->second;
+    if (globalRejection.empty()) {
+        const auto entity = intent.targetEntityId
+            ? observation.entities.find(*intent.targetEntityId) : observation.entities.end();
+        const auto unit = intent.targetEntityId
+            ? unitByToken.find(*intent.targetEntityId) : unitByToken.end();
+        const auto entityStatus = protodd::wholeGameEntityTargetStatus(
+            intent.targetMode == 1, intent.targetEntityId.has_value(),
+            entity != observation.entities.end(),
+            entity != observation.entities.end() && entity->second.visible,
+            unit != unitByToken.end() && unit->second && unit->second->exists());
+        switch (entityStatus) {
+            case protodd::WholeGameEntityTargetStatus::notRequired:
+            case protodd::WholeGameEntityTargetStatus::available:
+                if (entityStatus == protodd::WholeGameEntityTargetStatus::available)
+                    target = unit->second;
+                break;
+            case protodd::WholeGameEntityTargetStatus::missingId:
+                globalRejection = "missing-target-entity";
+                break;
+            case protodd::WholeGameEntityTargetStatus::notInObservation:
+                globalRejection = "target-not-in-observation";
+                break;
+            case protodd::WholeGameEntityTargetStatus::notVisible:
+                globalRejection = "target-not-visible";
+                break;
+            case protodd::WholeGameEntityTargetStatus::noLongerExists:
+                globalRejection = "target-no-longer-exists";
+                break;
+        }
     }
     BWAPI::Position position = BWAPI::Positions::Invalid;
-    if (intent.targetPixel) {
+    if (globalRejection.empty() && intent.targetMode == 2) {
+        if (!intent.targetPixel) globalRejection = "missing-target-position";
+        else {
         position = BWAPI::Position(intent.targetPixel->first, intent.targetPixel->second);
         if (position.x < 0 || position.y < 0 || position.x >= game->mapWidth() * 32 ||
             position.y >= game->mapHeight() * 32)
-            position = BWAPI::Positions::Invalid;
+                globalRejection = "target-position-out-of-map";
+        }
     }
+    if (globalRejection.empty() && intent.targetMode > 2)
+        globalRejection = "invalid-target-mode";
     for (const auto token : intent.actorIds) {
-        if (accepted.size() >= maximumCommands) break;
+        auto& result = results.emplace_back();
+        result.actorToken = token;
+        if (!globalRejection.empty()) {
+            result.reason = globalRejection;
+            continue;
+        }
         const auto entity = observation.entities.find(token);
         const auto lookup = unitByToken.find(token);
-        if (entity == observation.entities.end() || entity->second.relation != 0 ||
-            lookup == unitByToken.end()) continue;
+        if (entity == observation.entities.end()) {
+            result.reason = "actor-not-in-observation";
+            continue;
+        }
+        if (entity->second.relation != 0) {
+            result.reason = "actor-not-owned";
+            continue;
+        }
+        if (lookup == unitByToken.end()) {
+            result.reason = "actor-not-current";
+            continue;
+        }
         const auto actor = lookup->second;
-        if (!actor || !actor->exists() || actor->getPlayer() != game->self() ||
-            actor->isLoaded() || actor->isLockedDown() ||
-            actor->isMaelstrommed() || actor->isStasised()) continue;
+        if (!actor || !actor->exists()) {
+            result.reason = "actor-no-longer-exists";
+            continue;
+        }
+        if (actor->getPlayer() != game->self()) {
+            result.reason = "actor-not-self";
+            continue;
+        }
+        if (actor->isLoaded()) {
+            result.reason = "actor-loaded";
+            continue;
+        }
+        if (actor->isLockedDown() || actor->isMaelstrommed() || actor->isStasised()) {
+            result.reason = "actor-disabled";
+            continue;
+        }
         if (!wholeGameActorEligible(intent.kind, intent.targetMode, actor->isCompleted(),
-                                    actor->getType().isBuilding(),
-                                    actor->isBeingConstructed())) continue;
+                                    actor->getType().isBuilding(), actor->isBeingConstructed())) {
+            result.reason = intent.kind == 18 && !actor->getType().isBuilding()
+                ? "cancel-build-actor-not-building"
+                : intent.kind == 18 && !actor->isBeingConstructed()
+                    ? "cancel-build-not-under-construction"
+                    : "actor-incomplete";
+            continue;
+        }
         const auto command = makeCommand(intent, actor, target, position);
-        if (command && actor->canIssueCommand(*command))
-            accepted.push_back({token, *command});
+        if (!command) {
+            result.reason = "unsupported-or-invalid-action-arguments";
+            continue;
+        }
+        if (!actor->canIssueCommand(*command)) {
+            result.reason = "bwapi-can-issue-command-false";
+            continue;
+        }
+        result.command = *command;
+    }
+    return results;
+}
+
+std::vector<LegalWholeGameCommand> legalWholeGameCommands(
+    const cpu::Intent& intent, const whole_observation::Snapshot& observation,
+    const std::map<int, BWAPI::Unit>& unitByToken, BWAPI::Game* game,
+    const std::size_t maximumCommands) {
+    std::vector<LegalWholeGameCommand> accepted;
+    if (maximumCommands == 0) return accepted;
+    for (const auto& assessment : assessWholeGameCommands(
+             intent, observation, unitByToken, game)) {
+        if (accepted.size() >= maximumCommands) break;
+        if (assessment.command)
+            accepted.push_back({assessment.actorToken, *assessment.command, {}});
     }
     return accepted;
 }

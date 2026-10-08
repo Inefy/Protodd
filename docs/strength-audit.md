@@ -224,7 +224,9 @@ Use the direct-match manifest as the outcome authority:
 ```powershell
 ./scripts/direct-match.ps1 -OpponentRace Protoss -Map 'maps/aiide/(4)Python.scx' `
     -Label unique-candidate-label -FrameLimit 86400
-python tools/direct_report.py build/direct-logs/unique-candidate-label.json
+python tools/direct_report.py `
+    --ingestion-index build/direct-logs/patched-diagnostic/campaign-01/index.json `
+    build/direct-logs/patched-diagnostic/unique-candidate-label/unique-candidate-label.json
 ```
 
 The default direct match clears Protodd learning files for an independent

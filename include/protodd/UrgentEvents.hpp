@@ -95,6 +95,20 @@ struct UrgentWork {
     };
 }
 
+[[nodiscard]] constexpr UrgentWork frameWorkFor(
+    const std::uint8_t events,
+    const bool macroScheduled,
+    const bool strategyUpdated,
+    const bool workersScheduled,
+    const bool combatScheduled) noexcept {
+    const auto urgent = urgentWorkFor(events);
+    return {
+        .updateMacro = macroScheduled || strategyUpdated || urgent.updateMacro,
+        .updateWorkers = workersScheduled || urgent.updateWorkers,
+        .updateCombat = combatScheduled || urgent.updateCombat,
+    };
+}
+
 [[nodiscard]] inline bool hasNewAreaDamageNearFriendlies(
     const std::span<const Position> current,
     const std::span<const Position> previous,

@@ -13,6 +13,7 @@ param(
     [ValidateSet('', 'Terran_MarineRush', 'Terran_TankPush', 'Terran_4RaxMarines', 'Terran_VultureRush')]
     [string]$OpponentStrategy = "",
     [string]$Map = "maps/aiide/(2)Benzene.scx",
+    [string]$MapSourcePath = "",
     [string]$Label = "direct-match",
     # Retained as an explicit opt-in emergency failsafe for local debugging.
     # Zero means no wall-clock cutoff.
@@ -30,6 +31,8 @@ param(
     [ValidateSet("Protoss", "Terran", "Zerg", "Random")]
     [string]$HostRace = "Protoss",
     [string]$BotDll = "build/tournament/Release/Protodd.dll",
+    [switch]$MeasureFullCallbacks,
+    [string]$AuditLoadDll = "build/tournament/Release/AuditLoad.dll",
     [ValidateSet("Protodd.log", "RaceBot.log")]
     [string]$BotLogName = "Protodd.log",
     [ValidateSet("patched-diagnostic", "stock-certification")]
@@ -37,6 +40,9 @@ param(
     [string]$RuntimeSet = "",
     [switch]$AllowUnmanifestedDll,
     [switch]$PreserveLearning,
+    [switch]$SaveReplay,
+    # Retained only to reproduce the old double-window-hook crash path.
+    [switch]$LegacyWindowPlugin,
     [switch]$NoObserver
 )
 
@@ -45,10 +51,66 @@ $repoPath = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 Import-Module (Join-Path $PSScriptRoot 'RuntimeProfiles.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'TournamentManifest.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MatchProvenance.psm1') -Force
-$runtimeRoot = Resolve-MatchRuntimeRoot -Profile $RuntimeProfile -RepositoryRoot $repoPath -RuntimeSet $RuntimeSet
+Import-Module (Join-Path $PSScriptRoot 'MatchProcessOwnership.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'HeadlessStarCraft.psm1') -Force
+
+function Resolve-MatchMapPath {
+    param(
+        [Parameter(Mandatory)][string]$RuntimeRoot,
+        [Parameter(Mandatory)][string]$RelativePath,
+        [string]$SourcePath = ""
+    )
+
+    if ([System.IO.Path]::IsPathRooted($RelativePath) -or
+        $RelativePath.Replace('\', '/').Split('/') -contains '..' -or
+        [string]::IsNullOrWhiteSpace($RelativePath)) {
+        throw "Map must be a relative path inside the host runtime: $RelativePath"
+    }
+    $runtimePath = [System.IO.Path]::GetFullPath($RuntimeRoot)
+    $mapPath = [System.IO.Path]::GetFullPath((Join-Path $runtimePath $RelativePath))
+    $runtimePrefix = $runtimePath.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $mapPath.StartsWith($runtimePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Map must be a relative path inside the host runtime: $RelativePath"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($SourcePath)) {
+        $source = [System.IO.Path]::GetFullPath($SourcePath)
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Map source file not found: $source"
+        }
+        $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+        if (Test-Path -LiteralPath $mapPath) {
+            if (-not (Test-Path -LiteralPath $mapPath -PathType Leaf)) {
+                throw "Map destination exists but is not a file: $mapPath"
+            }
+            $existingHash = (Get-FileHash -LiteralPath $mapPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($existingHash -ne $sourceHash) {
+                throw "Map already exists in the runtime with different bytes: $mapPath"
+            }
+        } else {
+            New-Item -ItemType Directory -Path (Split-Path -Parent $mapPath) -Force | Out-Null
+            Copy-Item -LiteralPath $source -Destination $mapPath
+            $copiedHash = (Get-FileHash -LiteralPath $mapPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($copiedHash -ne $sourceHash) {
+                throw "Copied map does not match its source file: $mapPath"
+            }
+        }
+    }
+    if (-not (Test-Path -LiteralPath $mapPath -PathType Leaf)) {
+        throw "Map must exist inside the host runtime: $mapPath"
+    }
+    return $mapPath
+}
+
+if ($Label -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+    throw "Label may contain only letters, digits, dots, underscores, and hyphens"
+}
+$matchRuntimeSet = Resolve-MatchRuntimeSet -Label $Label -RuntimeSet $RuntimeSet
+$autoRuntimeSet = [string]::IsNullOrWhiteSpace($RuntimeSet)
+$runtimeRoot = Resolve-MatchRuntimeRoot -Profile $RuntimeProfile -RepositoryRoot $repoPath -RuntimeSet $matchRuntimeSet
 $runtimeA = [System.IO.Path]::GetFullPath((Join-Path $runtimeRoot "match-runtime-a"))
 $runtimeB = [System.IO.Path]::GetFullPath((Join-Path $runtimeRoot "match-runtime-b"))
-$archiveRoot = Resolve-MatchArchiveRoot -Profile $RuntimeProfile -RepositoryRoot $repoPath -RuntimeSet $RuntimeSet
+$archiveRoot = Resolve-MatchArchiveRoot -Profile $RuntimeProfile -RepositoryRoot $repoPath -RuntimeSet $matchRuntimeSet
 $buildPrefix = [System.IO.Path]::GetFullPath((Join-Path $repoPath "build")).TrimEnd('\') + '\'
 
 foreach ($path in @($runtimeA, $runtimeB, $archiveRoot)) {
@@ -61,9 +123,22 @@ $baselineStarCraftIds = @(Get-Process -Name StarCraft -ErrorAction SilentlyConti
 if ($baselineStarCraftIds.Count -gt 0) {
     throw "Refusing to start: a StarCraft process is already running"
 }
-if ($Label -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
-    throw "Label may contain only letters, digits, dots, underscores, and hyphens"
+foreach ($existingArtifact in @(
+    (Join-Path $archiveRoot "$Label.json"),
+    (Join-Path $archiveRoot "$Label.preflight.json")
+)) {
+    if (Test-Path -LiteralPath $existingArtifact -PathType Leaf) {
+        throw "A match artifact already exists for label '$Label'; choose a new label"
+    }
 }
+if ($autoRuntimeSet -and
+    ((Test-Path -LiteralPath $runtimeA -PathType Container) -or
+     (Test-Path -LiteralPath $runtimeB -PathType Container))) {
+    throw "The label-scoped runtime set already exists without a fresh match label: $runtimeRoot"
+}
+New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
+$runtimeLock = Enter-MatchRuntimeLock -RuntimeRoot $runtimeRoot -Label $Label
+try {
 
 $resolvedDll = if ([System.IO.Path]::IsPathRooted($BotDll)) {
     [System.IO.Path]::GetFullPath($BotDll)
@@ -72,6 +147,22 @@ $resolvedDll = if ([System.IO.Path]::IsPathRooted($BotDll)) {
 }
 if (-not (Test-Path -LiteralPath $resolvedDll -PathType Leaf)) {
     throw "Bot DLL not found: $resolvedDll"
+}
+$resolvedAuditLoadDll = $null
+$auditLoadDllHash = $null
+if ($MeasureFullCallbacks) {
+    if ($RuntimeProfile -ne 'stock-certification') {
+        throw 'Full callback measurement requires the stock-certification runtime profile'
+    }
+    $resolvedAuditLoadDll = if ([System.IO.Path]::IsPathRooted($AuditLoadDll)) {
+        [System.IO.Path]::GetFullPath($AuditLoadDll)
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path $repoPath $AuditLoadDll))
+    }
+    if (-not (Test-Path -LiteralPath $resolvedAuditLoadDll -PathType Leaf)) {
+        throw "AuditLoad wrapper DLL not found: $resolvedAuditLoadDll"
+    }
+    $auditLoadDllHash = (Get-FileHash -LiteralPath $resolvedAuditLoadDll -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 $buildManifestPath = Join-Path (Split-Path -Parent $resolvedDll) "Protodd.build-manifest.json"
 $buildManifest = $null
@@ -97,17 +188,31 @@ if (Test-Path -LiteralPath $buildManifestPath -PathType Leaf) {
 $buildManifestSha256 = if ($buildManifest) {
     (Get-FileHash -LiteralPath $buildManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
 } else { $null }
-if ((-not [string]::IsNullOrWhiteSpace($RuntimeSet) -or $RuntimeProfile -eq "stock-certification") -and
-    (-not (Test-Path -LiteralPath $runtimeA -PathType Container) -or
-     -not (Test-Path -LiteralPath $runtimeB -PathType Container))) {
+$runtimeAExists = Test-Path -LiteralPath $runtimeA -PathType Container
+$runtimeBExists = Test-Path -LiteralPath $runtimeB -PathType Container
+if ($runtimeAExists -ne $runtimeBExists) {
+    throw "Runtime set has only one client directory; refusing partial campaign state: $runtimeRoot"
+}
+if (-not $runtimeAExists) {
+    if (-not $autoRuntimeSet) {
+        throw "Prepare isolated $RuntimeProfile runtimes first with -RuntimeSet $matchRuntimeSet"
+    }
     $prepareScript = if ($RuntimeProfile -eq 'stock-certification') {
-        './scripts/prepare-stock-runtime.ps1'
-    } else { './scripts/prepare-patched-runtime.ps1' }
-    throw "Prepare isolated $RuntimeProfile runtimes first with $prepareScript -RuntimeSet <name>"
+        Join-Path $PSScriptRoot 'prepare-stock-runtime.ps1'
+    } else {
+        Join-Path $PSScriptRoot 'prepare-patched-runtime.ps1'
+    }
+    & $prepareScript -RuntimeSet $matchRuntimeSet -RuntimeLock $runtimeLock
 }
 foreach ($runtime in @($runtimeA, $runtimeB)) {
     & (Join-Path $PSScriptRoot 'restore-match-runtime.ps1') `
-        -Runtime $runtime -Profile $RuntimeProfile
+        -Runtime $runtime -Profile $RuntimeProfile -RuntimeLock $runtimeLock
+}
+$auditMaxFramePath = Join-Path $runtimeA 'bwapi-data/read/AuditLoad-max-frame.txt'
+if ($MeasureFullCallbacks) {
+    # Zero disables AuditLoad's fixture stop so the outer runner observes a
+    # naturally completed competitive match.
+    [System.IO.File]::WriteAllText($auditMaxFramePath, '0', [System.Text.Encoding]::ASCII)
 }
 $runtimeProfileInfo = Get-RuntimeProfileInfo -Profile $RuntimeProfile -RepositoryRoot $repoPath
 $hostEngineHash = (Get-FileHash -LiteralPath (Join-Path $runtimeA 'bwapi-data/BWAPI.dll') -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -116,10 +221,16 @@ if ($hostEngineHash -ne $runtimeProfileInfo.dll_sha256 -or
     $opponentEngineHash -ne $runtimeProfileInfo.dll_sha256) {
     throw "Both match clients must use the verified $RuntimeProfile engine"
 }
-$mapPath = [System.IO.Path]::GetFullPath((Join-Path $runtimeA $Map))
-$runtimePrefix = $runtimeA.TrimEnd('\') + '\'
-if (-not $mapPath.StartsWith($runtimePrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
-    -not (Test-Path -LiteralPath $mapPath -PathType Leaf)) {
+$resolvedMapSourcePath = if ([string]::IsNullOrWhiteSpace($MapSourcePath)) {
+    ""
+} elseif ([System.IO.Path]::IsPathRooted($MapSourcePath)) {
+    [System.IO.Path]::GetFullPath($MapSourcePath)
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path $repoPath $MapSourcePath))
+}
+$mapPath = Resolve-MatchMapPath -RuntimeRoot $runtimeA -RelativePath $Map `
+    -SourcePath $resolvedMapSourcePath
+if (-not (Test-Path -LiteralPath $mapPath -PathType Leaf)) {
     throw "Map must exist inside the host runtime: $mapPath"
 }
 
@@ -198,6 +309,7 @@ function Get-LearningStateInventory {
     }
     return @($items.ToArray())
 }
+
 $hostLearningBefore = @(Get-LearningStateInventory -RuntimePath $runtimeA)
 $opponentLearningBefore = @(Get-LearningStateInventory -RuntimePath $runtimeB)
 
@@ -213,6 +325,13 @@ $archiveFiles = @(
     (Join-Path $writeRoot "Protodd.log"),
     (Join-Path $writeRoot "RaceBot.log")
 ) | Sort-Object -Unique
+if ($MeasureFullCallbacks) {
+    $archiveFiles += @(
+        (Join-Path $writeRoot 'load-scenario.csv'),
+        (Join-Path $writeRoot 'callback-timing.csv'),
+        (Join-Path $writeRoot 'full-callback-us.bin')
+    )
+}
 if (-not $PreserveLearning) {
     foreach ($dataDirectory in @($writeRoot, (Join-Path $runtimeA "bwapi-data/read"))) {
         $archiveFiles += @(Get-ChildItem -LiteralPath $dataDirectory -Filter 'Protodd*.csv' -File |
@@ -257,6 +376,16 @@ if ($sourceDllHash -ne $deployedDllHash) {
 }
 "MATCH_DLL=$resolvedDll"
 "DLL_SHA256=$sourceDllHash"
+$deployedAuditLoadDll = $null
+$deployedAuditLoadDllHash = $null
+if ($MeasureFullCallbacks) {
+    $deployedAuditLoadDll = Join-Path $runtimeA 'bwapi-data/AI/AuditLoad.dll'
+    Copy-Item -LiteralPath $resolvedAuditLoadDll -Destination $deployedAuditLoadDll -Force
+    $deployedAuditLoadDllHash = (Get-FileHash -LiteralPath $deployedAuditLoadDll -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($auditLoadDllHash -ne $deployedAuditLoadDllHash) {
+        throw 'Deployed AuditLoad wrapper does not match the requested DLL'
+    }
+}
 foreach ($file in $opponentFiles) {
     $relative = $file.FullName.Substring($opponentRoot.Length).TrimStart('\', '/')
     $destination = Join-Path $runtimeB "bwapi-data/AI/$relative"
@@ -321,10 +450,12 @@ $runtimeStrategyConfigurationHash = if (Test-Path -LiteralPath $runtimeStrategyC
 } else { $null }
 
 $seedConfiguration = if ($Seed -ge 0) { "seed_override = $Seed" } else { "" }
+$replayConfiguration = if ($SaveReplay) { "save_replay = Replays/$Label.rep" } else { "save_replay =" }
+$hostAiPath = if ($MeasureFullCallbacks) { 'bwapi-data/AI/AuditLoad.dll' } else { 'bwapi-data/AI/Protodd.dll' }
 $hostIni = @"
 [ai]
-ai = bwapi-data/AI/Protodd.dll
-ai_dbg = bwapi-data/AI/Protodd.dll
+ai = $hostAiPath
+ai_dbg = $hostAiPath
 tournament =
 
 [auto_menu]
@@ -340,6 +471,7 @@ race = $HostRace
 enemy_count = 1
 enemy_race = $OpponentRace
 game_type = MELEE
+$replayConfiguration
 wait_for_min_players = 2
 wait_for_max_players = 2
 wait_for_time = 1000
@@ -423,6 +555,8 @@ $hostRuntimeIniHash = (Get-FileHash -LiteralPath $hostIniPath -Algorithm SHA256)
 $opponentRuntimeIniHash = (Get-FileHash -LiteralPath $opponentIniPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
 $preflightFiles = [ordered]@{
+    headless_launcher = Join-Path $PSScriptRoot 'HeadlessStarCraft.psm1'
+    headless_native_monitor = Join-Path $PSScriptRoot 'HeadlessStarCraft.cs'
     protodd_source_dll = $resolvedDll
     protodd_deployed_dll = $deployedDll
     host_bwapi_dll = Join-Path $runtimeA 'bwapi-data/BWAPI.dll'
@@ -436,6 +570,11 @@ $preflightFiles = [ordered]@{
     map = $mapPath
     host_bwapi_ini = $hostIniPath
     opponent_bwapi_ini = $opponentIniPath
+}
+if ($MeasureFullCallbacks) {
+    $preflightFiles['audit_load_source_dll'] = $resolvedAuditLoadDll
+    $preflightFiles['audit_load_deployed_dll'] = $deployedAuditLoadDll
+    $preflightFiles['audit_load_frame_limit'] = $auditMaxFramePath
 }
 if ($buildManifest) {
     $preflightFiles['build_manifest'] = $buildManifestPath
@@ -492,9 +631,12 @@ if (Test-Path -LiteralPath $runtimeOpponentMetadataPath -PathType Leaf) {
     $preflightFiles['opponent_runtime_metadata'] = $runtimeOpponentMetadataPath
 }
 $preflightConfiguration = [ordered]@{
+    headless = $true
+    legacy_window_plugin = [bool]$LegacyWindowPlugin
     label = $Label
     runtime_profile = $RuntimeProfile
-    runtime_set = $RuntimeSet
+    runtime_set = $matchRuntimeSet
+    runtime_set_mode = if ($autoRuntimeSet) { 'per-label' } else { 'explicit-campaign-set' }
     runtime_profile_info = $runtimeProfileInfo
     source_dll = $resolvedDll
     build_manifest_sha256 = $buildManifestSha256
@@ -529,8 +671,12 @@ $preflightConfiguration = [ordered]@{
         frame_milliseconds = $FrameMilliseconds
         timeout_seconds = if ($TimeoutSeconds -gt 0) { $TimeoutSeconds } else { $null }
         seed_requested = if ($Seed -ge 0) { $Seed } else { $null }
+        save_replay = if ($SaveReplay) { "Replays/$Label.rep" } else { $null }
         bot_log_name = $BotLogName
         observer_enabled = -not [bool]$NoObserver
+        full_callback_measurement = [bool]$MeasureFullCallbacks
+        audit_load_dll_sha256 = $auditLoadDllHash
+        audit_load_forced_frame_limit = if ($MeasureFullCallbacks) { 0 } else { $null }
     }
     learning = [ordered]@{
         preserve = [bool]$PreserveLearning
@@ -545,52 +691,122 @@ $preflightPath = Join-Path $archiveRoot "$Label.preflight.json"
 $preflightInfo = Write-MatchInputManifest -Manifest $preflightManifest -Path $preflightPath
 
 $launched = @()
+$hostLauncher = $null
+$opponentLauncher = $null
 $proxyLaunched = @()
+$script:launcherPids = @()
+$script:ownedStarCraftIds = [Collections.Generic.HashSet[int]]::new()
+$script:ownedProcessRecords = [Collections.Generic.Dictionary[int, object]]::new()
+function Get-TrackedStarCraftProcesses {
+    $processSnapshot = @(Get-CimInstance Win32_Process -Filter "Name='StarCraft.exe'")
+    $records = @(Get-OwnedStarCraftProcesses -Processes $processSnapshot `
+        -RootProcessIds @($script:launcherPids) `
+        -KnownProcessIds @($script:ownedStarCraftIds) `
+        -BaselineProcessIds $script:baselineStarCraftIds `
+        -StartedAtUtc $script:startedAtUtc)
+    foreach ($record in $records) {
+        $id = [int]$record.process_id
+        [void]$script:ownedStarCraftIds.Add($id)
+        $script:ownedProcessRecords[$id] = $record
+    }
+    return @($records)
+}
 function Get-TrackedStarCraftIds {
-    $ids = @($script:launched)
-    # StarCraft can fork a child after the injection wrapper was sampled. Only
-    # include processes created after this match started and never touch a
-    # pre-existing game owned by the user.
-    $ids += @(Get-Process -Name StarCraft -ErrorAction SilentlyContinue |
-        Where-Object {
-            $fresh = $false
-            try {
-                $startTime = $_.StartTime
-                $fresh = $null -ne $startTime -and
-                         $startTime.ToUniversalTime() -ge $script:startedAtUtc
-            } catch {
-                $fresh = $false
-            }
-            $script:baselineStarCraftIds -notcontains $_.Id -and $fresh
-        } |
-        Select-Object -ExpandProperty Id)
+    $ids = @(Get-TrackedStarCraftProcesses | Select-Object -ExpandProperty process_id)
     @($ids | Sort-Object -Unique)
 }
 function Close-LaunchedStarCraft {
     # Never use AppActivate or SendKeys here: focus can change while a game
     # exits, sending Alt+F4/Enter to an unrelated application or Windows.
-    foreach ($id in @(Get-TrackedStarCraftIds)) {
+    $closeRequests = [Collections.Generic.List[object]]::new()
+    $forceStopFailures = [Collections.Generic.List[object]]::new()
+    $cleanupErrors = [Collections.Generic.List[string]]::new()
+    $initialIds = @()
+    try {
+        $initialIds = @(Get-TrackedStarCraftIds)
+    } catch {
+        $cleanupErrors.Add("Could not inventory owned StarCraft processes: $($_.Exception.Message)")
+        return [ordered]@{
+            cleanup_complete = $false
+            launcher_pids = @($script:launcherPids | Sort-Object -Unique)
+            owned_processes = @($script:ownedProcessRecords.Values | Sort-Object { [int]$_.process_id })
+            close_requests = @()
+            force_stop_failures = @()
+            cleanup_errors = @($cleanupErrors.ToArray())
+            remaining_pids = @($script:ownedStarCraftIds | Sort-Object)
+        }
+    }
+    foreach ($id in $initialIds) {
         $process = Get-Process -Id $id -ErrorAction SilentlyContinue
         if (-not $process -or $process.ProcessName -ne 'StarCraft') { continue }
-        [void]$process.CloseMainWindow()
+        try {
+            $headlessCloseRequested = $false
+            foreach ($launcher in @($hostLauncher, $opponentLauncher)) {
+                if ($launcher -and $launcher.Monitor) {
+                    $launcher.Monitor.RequestClose([uint32]$id)
+                    $headlessCloseRequested = $true
+                }
+            }
+            $closeRequests.Add([ordered]@{
+                pid = $id
+                close_requested = if ($headlessCloseRequested) { $true } else { [bool]$process.CloseMainWindow() }
+                close_method = if ($headlessCloseRequested) { 'owned-headless-async' } else { 'main-window' }
+            })
+        } catch {
+            $cleanupErrors.Add("Could not request graceful close for PID ${id}: $($_.Exception.Message)")
+        }
     }
 
-    $gracePeriod = [DateTime]::UtcNow.AddSeconds(3)
-    while ([DateTime]::UtcNow -lt $gracePeriod) {
-        $remaining = @(
-            foreach ($id in @(Get-TrackedStarCraftIds)) {
-                $process = Get-Process -Id $id -ErrorAction SilentlyContinue
-                if ($process -and $process.ProcessName -eq 'StarCraft') { $process }
+    $gracePeriod = [DateTime]::UtcNow.AddSeconds(15)
+    $remaining = $initialIds
+    while ($true) {
+        try {
+            $remaining = @(Get-TrackedStarCraftIds)
+        } catch {
+            $cleanupErrors.Add("Could not verify StarCraft process exit: $($_.Exception.Message)")
+            break
+        }
+        if ($remaining.Count -eq 0) {
+            return [ordered]@{
+                cleanup_complete = $true
+                launcher_pids = @($script:launcherPids | Sort-Object -Unique)
+                owned_processes = @($script:ownedProcessRecords.Values | Sort-Object { [int]$_.process_id })
+                close_requests = @($closeRequests.ToArray())
+                force_stop_failures = @()
+                cleanup_errors = @($cleanupErrors.ToArray())
+                remaining_pids = @()
             }
-        )
-        if ($remaining.Count -eq 0) { return }
+        }
+        if ([DateTime]::UtcNow -ge $gracePeriod) { break }
         Start-Sleep -Milliseconds 200
     }
 
-    foreach ($id in @(Get-TrackedStarCraftIds)) {
+    foreach ($id in $remaining) {
         $process = Get-Process -Id $id -ErrorAction SilentlyContinue
         if (-not $process -or $process.ProcessName -ne 'StarCraft') { continue }
-        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+        try {
+            Stop-Process -Id $id -Force -ErrorAction Stop
+        } catch {
+            $forceStopFailures.Add([ordered]@{pid=$id; error=$_.Exception.Message})
+        }
+    }
+    Start-Sleep -Milliseconds 250
+    $finalInventoryVerified = $false
+    $remainingIds = @($remaining)
+    try {
+        $remainingIds = @(Get-TrackedStarCraftIds)
+        $finalInventoryVerified = $true
+    } catch {
+        $cleanupErrors.Add("Could not verify final StarCraft process state: $($_.Exception.Message)")
+    }
+    return [ordered]@{
+        cleanup_complete = ($finalInventoryVerified -and $remainingIds.Count -eq 0)
+        launcher_pids = @($script:launcherPids | Sort-Object -Unique)
+        owned_processes = @($script:ownedProcessRecords.Values | Sort-Object { [int]$_.process_id })
+        close_requests = @($closeRequests.ToArray())
+        force_stop_failures = @($forceStopFailures.ToArray())
+        cleanup_errors = @($cleanupErrors.ToArray())
+        remaining_pids = $remainingIds
     }
 }
 function Close-LaunchedProxy {
@@ -634,6 +850,7 @@ $traceBeforeCleanup = ""
 $runtimeCrashes = @()
 $script:startedAtUtc = [DateTime]::UtcNow
 $startedUtc = $script:startedAtUtc.ToString('o')
+$cleanupStatus = $null
 $observerProcess = $null
 try {
     [void](Assert-MatchInputManifest -Manifest $preflightManifest)
@@ -662,9 +879,8 @@ try {
     if ($buildManifest) {
         Assert-TournamentSourceMatchesManifest -Manifest $buildManifest -RepositoryRoot $repoPath
     }
-    Start-Process -FilePath (Join-Path $runtimeA "injectory_x86.exe") `
-        -ArgumentList '--launch','StarCraft.exe','--inject','bwapi-data\BWAPI.dll','wmode.dll' `
-        -WorkingDirectory $runtimeA -WindowStyle Hidden
+    $hostLauncher = Start-HeadlessStarCraftLauncher -Runtime $runtimeA -LegacyWindowPlugin:$LegacyWindowPlugin
+    $script:launcherPids += $hostLauncher.Id
     if ($resolvedOpponentType -eq "Proxy") {
         $proxy = Start-Process -FilePath $env:ComSpec `
             -ArgumentList @('/c', 'call', 'bwapi-data\AI\run_proxy.bat') `
@@ -673,13 +889,22 @@ try {
         Start-Sleep -Seconds 2
     }
     Start-Sleep -Seconds 3
-    $launched += @(Get-Process -Name StarCraft -ErrorAction Stop | Select-Object -ExpandProperty Id)
-    Start-Process -FilePath (Join-Path $runtimeB "injectory_x86.exe") `
-        -ArgumentList '--launch','StarCraft.exe','--inject','bwapi-data\BWAPI.dll','wmode.dll' `
-        -WorkingDirectory $runtimeB -WindowStyle Hidden
+    $hostProcesses = @(Get-TrackedStarCraftProcesses |
+        Where-Object parent_process_id -eq $hostLauncher.Id)
+    if ($hostProcesses.Count -eq 0) {
+        throw 'Could not establish ownership of the launched host StarCraft process'
+    }
+    $launched += @($hostProcesses | Select-Object -ExpandProperty process_id)
+    $opponentLauncher = Start-HeadlessStarCraftLauncher -Runtime $runtimeB -LegacyWindowPlugin:$LegacyWindowPlugin
+    $script:launcherPids += $opponentLauncher.Id
     Start-Sleep -Seconds 3
-    $launched += @(Get-Process -Name StarCraft -ErrorAction Stop | Select-Object -ExpandProperty Id)
-    $launched = @($launched | Sort-Object -Unique)
+    $opponentProcesses = @(Get-TrackedStarCraftProcesses |
+        Where-Object parent_process_id -eq $opponentLauncher.Id)
+    if ($opponentProcesses.Count -eq 0) {
+        throw 'Could not establish ownership of the launched opponent StarCraft process'
+    }
+    $launched += @($opponentProcesses | Select-Object -ExpandProperty process_id)
+    $launched = @(Get-TrackedStarCraftIds | Sort-Object -Unique)
 
     $deadline = if ($TimeoutSeconds -gt 0) {
         [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -754,6 +979,27 @@ try {
     } else {
         'runner-stopped'
     }
+    $cleanupStatus = Close-LaunchedStarCraft
+    Close-LaunchedProxy
+    # Shutdown can fault after onEnd and after the first report scan. Preserve
+    # the terminal callback as an observation, but never certify that run.
+    foreach ($crash in @(Get-MatchCrashReports)) {
+        $saved = Join-Path $archiveRoot "$Label-$($crash.side)-crash-$($crash.file.Name)"
+        if (@($runtimeCrashes | Where-Object report -eq $saved).Count -gt 0) { continue }
+        Copy-Item -LiteralPath $crash.file.FullName -Destination $saved
+        $runtimeCrashes += [ordered]@{side=$crash.side; report=$saved; sha256=(Get-FileHash -LiteralPath $saved).Hash}
+    }
+    if ($runtimeCrashes.Count -gt 0) { $result=$null; $terminationReason='runtime-crash' }
+    $nativeDiagnostics = @()
+    foreach($side in @(@('protodd',$runtimeA),@('opponent',$runtimeB))) {
+        $errorRoot=Join-Path $side[1] 'Errors'
+        foreach($file in @(Get-ChildItem -LiteralPath $errorRoot -File -ErrorAction SilentlyContinue)) {
+            if($file.LastWriteTimeUtc -lt $script:startedAtUtc) { continue }
+            $saved=Join-Path $archiveRoot "$Label-$($side[0])-native-$($file.Name)"
+            Copy-Item -LiteralPath $file.FullName -Destination $saved
+            $nativeDiagnostics += [ordered]@{side=$side[0];path=$saved;sha256=(Get-FileHash -LiteralPath $saved).Hash}
+        }
+    }
     $traceRecords = @($traceBeforeCleanup -split "`r?`n" |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $traceLines = $traceRecords.Count
@@ -764,13 +1010,22 @@ try {
         result = $result
         observed_terminal_result = $observedTerminalResult
         runtime_crashes = $runtimeCrashes
+        native_diagnostics = $nativeDiagnostics
+        headless = $true
+        legacy_window_plugin = [bool]$LegacyWindowPlugin
         runtime_profile = $RuntimeProfile
         runtime_profile_source = $runtimeProfileInfo.source
+        process_cleanup = $cleanupStatus
         runtime_profile_archive_sha256 = if ($runtimeProfileInfo.PSObject.Properties.Name -contains 'archive_sha256') {
             $runtimeProfileInfo.archive_sha256
         } else { $null }
         host_bwapi_sha256 = $hostEngineHash
         opponent_bwapi_sha256 = $opponentEngineHash
+        full_callback_measurement = [bool]$MeasureFullCallbacks
+        audit_load_source_dll = $resolvedAuditLoadDll
+        audit_load_source_sha256 = $auditLoadDllHash
+        audit_load_deployed_sha256 = $deployedAuditLoadDllHash
+        audit_load_frame_limit = if ($MeasureFullCallbacks) { 0 } else { $null }
         build_manifest_sha256 = $buildManifestSha256
         preflight_manifest_path = $preflightInfo.path
         preflight_manifest_sha256 = $preflightInfo.sha256
@@ -825,8 +1080,38 @@ try {
         seed_observed = $observedSeed
         learning_preserved = [bool]$PreserveLearning
     }
-    Close-LaunchedStarCraft
-    Close-LaunchedProxy
+    $auditLoadArtifacts = @()
+    if ($MeasureFullCallbacks) {
+        foreach ($name in @('load-scenario.csv', 'callback-timing.csv', 'full-callback-us.bin')) {
+            $source = Join-Path $writeRoot $name
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { continue }
+            $saved = Join-Path $archiveRoot "$Label.$name"
+            Move-Item -LiteralPath $source -Destination $saved -Force
+            $auditLoadArtifacts += [ordered]@{
+                path = $saved
+                sha256 = (Get-FileHash -LiteralPath $saved -Algorithm SHA256).Hash.ToLowerInvariant()
+                size_bytes = (Get-Item -LiteralPath $saved).Length
+            }
+        }
+        $record.audit_load_artifacts = $auditLoadArtifacts
+        $record.audit_load_artifacts_complete = ($auditLoadArtifacts.Count -eq 3)
+    }
+    $replaySavedPath = $null
+    $replayHash = $null
+    $replayBytes = 0
+    if ($SaveReplay) {
+        $runtimeReplay = Join-Path $runtimeA "Replays/$Label.rep"
+        if (Test-Path -LiteralPath $runtimeReplay -PathType Leaf) {
+            $replaySavedPath = Join-Path $archiveRoot "$Label.rep"
+            Copy-Item -LiteralPath $runtimeReplay -Destination $replaySavedPath -Force
+            $replayHash = (Get-FileHash -LiteralPath $replaySavedPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $replayBytes = (Get-Item -LiteralPath $replaySavedPath).Length
+        }
+        $record.replay_saved = [bool]$replaySavedPath
+        $record.replay_path = $replaySavedPath
+        $record.replay_sha256 = $replayHash
+        $record.replay_bytes = $replayBytes
+    }
     if (-not $result -and (Test-Path -LiteralPath $logPath)) {
         $cleanupLines = @(Get-Content -LiteralPath $logPath -Tail 24 -ErrorAction SilentlyContinue)
         $cleanupTerminal = Get-MatchTerminalResult -Lines $cleanupLines -LogName $BotLogName
@@ -845,7 +1130,7 @@ try {
             if ($fields.Length -eq 13) { $record.opponent_opening_observed = $fields[5] }
         }
     }
-    $record | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $archiveRoot "$Label.json") -Encoding utf8
+    Write-MatchRecordImmutable -Record $record -Path (Join-Path $archiveRoot "$Label.json") | Out-Null
 }
 
 if (Test-Path -LiteralPath $logPath) {
@@ -857,6 +1142,10 @@ if (Test-Path -LiteralPath $logPath) {
     python (Join-Path $repoPath "tools/decision_report.py") $archive --output $decisionReport | Out-Null
     if ($LASTEXITCODE -eq 0) { "DECISION_REPORT=$decisionReport" }
     else { Write-Warning "Decision report generation failed; the archived match trace is intact" }
+}
+if ($null -eq $cleanupStatus -or -not $cleanupStatus.cleanup_complete) {
+    $remaining = if ($cleanupStatus) { @($cleanupStatus.remaining_pids) -join ',' } else { 'unknown' }
+    throw "Match cleanup is incomplete for '$Label'; remaining owned StarCraft PIDs: $remaining. See the archived match manifest."
 }
 if (-not $result) {
     if ($runtimeCrashes.Count -gt 0) {
@@ -871,3 +1160,6 @@ if (-not $result) {
     throw "Match did not produce a terminal result before the game process exited"
 }
 "RESULT=$result"
+} finally {
+    Exit-MatchRuntimeLock -Lock $runtimeLock
+}

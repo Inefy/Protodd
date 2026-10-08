@@ -24,7 +24,7 @@ const TechnologyStats& technologyStats(const TechnologyKind kind) noexcept {
     static constexpr std::array table{
         unknown,
         TechnologyStats{"Singularity Charge", 150, 150, 0, 0, 1,
-                        UnitKind::cyberneticsCore, false},
+                        UnitKind::cyberneticsCore, false, 2500},
         TechnologyStats{"Leg Enhancements", 150, 150, 0, 0, 1,
                         UnitKind::citadelOfAdun, false},
         TechnologyStats{"Psionic Storm", 200, 200, 0, 0, 1,

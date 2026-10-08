@@ -155,6 +155,17 @@ int main() {
                "main defense does not pull workers across the map from the natural")) {
         return 1;
     }
+    const auto naturalScreenKeepsEvacuationLocal = std::ranges::all_of(
+        naturalScreenAssignments, [&swappedState](const WorkerAssignment& assignment) {
+            if (assignment.job != WorkerJob::evacuate) return true;
+            const auto worker = std::ranges::find(swappedState.self.units, assignment.worker,
+                                                  &UnitSnapshot::id);
+            return worker != swappedState.self.units.end() && worker->position.x < 1000;
+        });
+    if (!check(naturalScreenKeepsEvacuationLocal,
+               "moving the screen to the natural keeps evacuation decisions local to the main")) {
+        return 1;
+    }
 
     if (!impairedScreenStillRequestsMilitia(
             "a wounded unit cannot erase the natural emergency", [](UnitSnapshot& unit) {
@@ -264,6 +275,32 @@ int main() {
                "an endangered leased builder enters the emergency escape path") ||
         !check(jobFor(20) == WorkerJob::build,
                "a safe leased builder keeps construction ownership")) {
+        return 1;
+    }
+
+    auto targetedAttackState = twoBaseAttack();
+    auto attacker = unit(201, UnitKind::zergling, false, {512, 512});
+    attacker.orderTargetId = 10;
+    targetedAttackState.enemy.units = {attacker};
+    InfluenceMap targetedInfluence;
+    targetedInfluence.resize(4096, 2560);
+    targetedInfluence.update(targetedAttackState);
+    std::vector<std::uint8_t> targetedTerrain(128U * 80U, 1U);
+    const NavigationGrid targetedMap(128, 80, 32, std::move(targetedTerrain));
+    WorkerManager targetedWorkers;
+    const UnitId targetedLeases[]{10, 20};
+    const auto targetedAssignments = targetedWorkers.assign(
+        targetedAttackState, {}, targetedInfluence, targetedLeases,
+        false, false, &targetedMap);
+    const auto targetedJobFor = [&](const UnitId id) {
+        const auto found = std::ranges::find(
+            targetedAssignments, id, &WorkerAssignment::worker);
+        return found == targetedAssignments.end() ? WorkerJob::idle : found->job;
+    };
+    if (!check(targetedJobFor(10) == WorkerJob::evacuate,
+               "a hostile unit targeting a travelling leased builder triggers escape") ||
+        !check(targetedJobFor(20) == WorkerJob::build,
+               "a remote safe builder keeps its construction lease during local attack")) {
         return 1;
     }
 

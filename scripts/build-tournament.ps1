@@ -7,6 +7,28 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoPath = Split-Path -Parent $PSScriptRoot
+$featureRegistryPath = Join-Path $repoPath 'docs/feature-registry.json'
+if (-not (Test-Path -LiteralPath $featureRegistryPath -PathType Leaf)) {
+    throw "The feature registry is missing: $featureRegistryPath"
+}
+$featureRegistry = Get-Content -LiteralPath $featureRegistryPath -Raw | ConvertFrom-Json
+if ($featureRegistry.schema -ne 'protodd-feature-registry-v1') {
+    throw 'Unsupported feature registry schema'
+}
+$featureRegistryHash = (Get-FileHash -LiteralPath $featureRegistryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$registeredCmakeArguments = [Collections.Generic.List[string]]::new()
+foreach ($entry in $featureRegistry.options) {
+    if ($entry.kind -ne 'cmake-option' -or $entry.tournament_value -notin @('ON', 'OFF')) {
+        throw "Invalid tournament value in feature registry: $($entry.id)"
+    }
+    $registeredCmakeArguments.Add("-D$($entry.id)=$($entry.tournament_value)")
+}
+foreach ($entry in $featureRegistry.build_inputs) {
+    if ($entry.kind -ne 'cmake-input' -or $null -eq $entry.tournament_value) {
+        throw "Invalid tournament input in feature registry: $($entry.id)"
+    }
+    $registeredCmakeArguments.Add("-D$($entry.id)=$($entry.tournament_value)")
+}
 $buildPrefix = [System.IO.Path]::GetFullPath((Join-Path $repoPath 'build')).TrimEnd('\') + '\'
 $buildPath = if ([System.IO.Path]::IsPathRooted($BuildDirectory)) {
     [System.IO.Path]::GetFullPath($BuildDirectory)
@@ -17,6 +39,7 @@ if (-not $buildPath.StartsWith($buildPrefix, [System.StringComparison]::OrdinalI
     throw "Tournament build directory must stay inside $buildPrefix"
 }
 Import-Module (Join-Path $PSScriptRoot "TournamentManifest.psm1") -Force
+Assert-TournamentFeatureRegistry -RepositoryRoot $repoPath
 $bwapiPath = if ([System.IO.Path]::IsPathRooted($BwapiRoot)) {
     [System.IO.Path]::GetFullPath($BwapiRoot)
 } else {
@@ -62,12 +85,34 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $bwapiLibrary)) {
     throw "Official BWAPILIB Release|Win32 build failed"
 }
 
-& cmake -S $repoPath -B $buildPath -G "Visual Studio 17 2022" -A Win32 `
-    -DPROTODD_BUILD_TESTS=ON -DPROTODD_BUILD_BWAPI_MODULE=ON `
-    -DPROTODD_TOURNAMENT_PROFILE=ON -DPROTODD_DEVELOPER_PROFILE=OFF `
-    -DPROTODD_WHOLE_GAME_RESEARCH_AUTHORITY=OFF `
-    "-DBWAPI_ROOT=$bwapiPath" "-DBWAPI_LIBRARY=$bwapiLibrary"
+$configureArguments = @('-S', $repoPath, '-B', $buildPath, '-G', 'Visual Studio 17 2022', '-A', 'Win32') +
+    $registeredCmakeArguments.ToArray() + @("-DBWAPI_ROOT=$bwapiPath", "-DBWAPI_LIBRARY=$bwapiLibrary")
+& cmake @configureArguments
 if ($LASTEXITCODE -ne 0) { throw "Tournament CMake configuration failed" }
+
+# Verify the resolved cache before compiling. Explicitly setting every
+# registered option/input prevents values left in a reused build directory
+# from silently changing the tournament DLL.
+$configuredCachePath = Join-Path $buildPath 'CMakeCache.txt'
+if (-not (Test-Path -LiteralPath $configuredCachePath -PathType Leaf)) {
+    throw "CMake cache was not produced: $configuredCachePath"
+}
+$configuredCache = @{}
+foreach ($line in Get-Content -LiteralPath $configuredCachePath) {
+    if ($line -match '^([^#/:]+):[^=]*=(.*)$') { $configuredCache[$Matches[1]] = $Matches[2] }
+}
+foreach ($entry in $featureRegistry.options) {
+    if (-not $configuredCache.ContainsKey($entry.id) -or
+        $configuredCache[$entry.id] -cne $entry.tournament_value) {
+        throw "Resolved tournament feature differs from registry: $($entry.id)"
+    }
+}
+foreach ($entry in $featureRegistry.build_inputs) {
+    if (-not $configuredCache.ContainsKey($entry.id) -or
+        $configuredCache[$entry.id] -cne [string]$entry.tournament_value) {
+        throw "Resolved tournament build input differs from registry: $($entry.id)"
+    }
+}
 & cmake --build $buildPath --config $Configuration --parallel
 if ($LASTEXITCODE -ne 0) { throw "Tournament DLL build failed" }
 & ctest --test-dir $buildPath -C $Configuration --output-on-failure
@@ -101,14 +146,14 @@ $sourceCommit = Get-TournamentSourceCommit -RepositoryRoot $repoPath
 $sourceDirty = $false
 $sourceDiffHash = 'source-archive'
 if ($sourceCommit -ne 'source-archive') {
-    $sourceDiff = & git -C $repoPath diff HEAD --binary 2>$null
+    $sourceDiff = & git -c core.safecrlf=false -C $repoPath diff HEAD --binary 2>$null
     if ($LASTEXITCODE -eq 0) {
         $sourceDiffBytes = [Text.Encoding]::UTF8.GetBytes(($sourceDiff -join "`n"))
         $sourceDiffAlgorithm = [Security.Cryptography.SHA256]::Create()
         try { $sourceDiffHash = [BitConverter]::ToString($sourceDiffAlgorithm.ComputeHash($sourceDiffBytes)).Replace('-', '').ToLowerInvariant() }
         finally { $sourceDiffAlgorithm.Dispose() }
     } else { $sourceDiffHash = 'unavailable' }
-    $sourceDirty = @(& git -C $repoPath status --porcelain -- cmake include src tests tools training docs bwapi-data CMakeLists.txt CMakePresets.json README.md LICENSE SUBMISSION.md scripts 2>$null).Count -gt 0
+    $sourceDirty = @(& git -c core.safecrlf=false -C $repoPath status --porcelain -- cmake include src tests tools training docs bwapi-data CMakeLists.txt CMakePresets.json README.md LICENSE SUBMISSION.md scripts 2>$null).Count -gt 0
 }
 $cachePath = Join-Path $buildPath "CMakeCache.txt"
 if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) {
@@ -127,6 +172,54 @@ foreach ($name in @($cache.Keys | Where-Object { $_.StartsWith('PROTODD_', [Stri
     }
     $featureManifest[$name] = $value
 }
+$registeredBuildFeatures = @(
+    foreach ($entry in $featureRegistry.options) {
+        [ordered]@{
+            id = $entry.id
+            value = $cache[$entry.id]
+            tournament_value = $entry.tournament_value
+            owner = $entry.owner
+            scope = $entry.scope
+            baseline = $entry.baseline
+            dependencies = $entry.dependencies
+            evidence = $entry.evidence
+            promotion_status = $entry.promotion_status
+        }
+    }
+)
+$registeredBuildInputs = @(
+    foreach ($entry in $featureRegistry.build_inputs) {
+        [ordered]@{
+            id = $entry.id
+            value = $cache[$entry.id]
+            tournament_value = $entry.tournament_value
+            owner = $entry.owner
+            scope = $entry.scope
+            baseline = $entry.baseline
+            dependencies = $entry.dependencies
+            evidence = $entry.evidence
+            promotion_status = $entry.promotion_status
+        }
+    }
+)
+$runtimeFeatureContract = @(
+    foreach ($entry in $featureRegistry.runtime_controls) {
+        [ordered]@{
+            id = $entry.id
+            file = $entry.file
+            kind = $entry.kind
+            default_value = $entry.default_value
+            allowed_values = $entry.allowed_values
+            tournament_values = $entry.tournament_values
+            dependencies = $entry.dependencies
+            scope = $entry.scope
+            owner = $entry.owner
+            baseline = $entry.baseline
+            evidence = $entry.evidence
+            promotion_status = $entry.promotion_status
+        }
+    }
+)
 $compilerMetadataPath = Get-ChildItem -LiteralPath (Join-Path $buildPath 'CMakeFiles') `
     -Filter 'CMakeCXXCompiler.cmake' -File -Recurse | Select-Object -First 1 -ExpandProperty FullName
 $compilerMetadata = if ($compilerMetadataPath) {
@@ -163,6 +256,7 @@ $manifest = [ordered]@{
     compiler_id = $compilerId
     compiler_version = $compilerVersion
     cmake_cache_sha256 = (Get-FileHash -LiteralPath $cachePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    feature_registry_sha256 = $featureRegistryHash
     cmake_options = [ordered]@{
         build_bwapi_module = $cache["PROTODD_BUILD_BWAPI_MODULE"]
         tournament_profile = $cache["PROTODD_TOURNAMENT_PROFILE"]
@@ -176,6 +270,13 @@ $manifest = [ordered]@{
         } else { $null }
     }
     feature_manifest = $featureManifest
+    registered_feature_manifest = [ordered]@{
+        schema = "protodd-active-features-v1"
+        registry_sha256 = $featureRegistryHash
+        build_options = $registeredBuildFeatures
+        build_inputs = $registeredBuildInputs
+        runtime_controls = $runtimeFeatureContract
+    }
     bwapi_version = "4.4.0"
     bwapi_source_commit = $bwapiSourceCommit
     bwapi_source_dirty = @($bwapiStatus).Count -gt 0

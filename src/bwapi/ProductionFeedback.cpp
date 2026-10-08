@@ -12,14 +12,18 @@ void ProductionFeedback::observe(int frame,std::ostream& log) {
         if(w.product<0) {
             BWAPI::Unit product=nullptr;
             if(BWAPI::UnitType(w.type).isBuilding()) {
-                for(auto unit:self->getUnits())if(unit->exists()&&!unit->isCompleted()&&unit->getType().getID()==w.type&&unit->getTilePosition()==w.tile){product=unit;break;}
+                // A callback can miss the entire construction interval. Bind
+                // the exact footprint even when its first observation is the
+                // completed building, so API acceptance cannot leave a ticket
+                // reserved forever merely because feedback arrived late.
+                for(auto unit:self->getUnits())if(unit->exists()&&unit->getType().getID()==w.type&&unit->getTilePosition()==w.tile){product=unit;break;}
             } else {
                 const auto producer=BWAPI::Broodwar->getUnit(w.actor);
                 if(producer&&producer->exists())product=producer->getBuildUnit();
             }
             bool alreadyBound=false;
             for(const auto& [otherKey,other]:work_)if(otherKey!=key&&product&&other.product==product->getID())alreadyBound=true;
-            if(product&&product->exists()&&!product->isCompleted()&&product->getID()!=w.priorProduct&&!alreadyBound&&
+            if(product&&product->exists()&&product->getID()!=w.priorProduct&&!alreadyBound&&
                 product->getPlayer()==self&&product->getType().getID()==w.type) {
                 w.product=product->getID();snapshot.spent.insert(key);snapshot.started.insert(key);
                 log<<"PRODUCTION_SPENT,"<<frame<<",ticket="<<key<<",actor="<<w.actor<<",product="<<w.product

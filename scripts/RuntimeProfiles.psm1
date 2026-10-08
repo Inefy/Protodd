@@ -116,6 +116,19 @@ function Resolve-MatchRuntimeRoot {
     return $root
 }
 
+function Resolve-MatchRuntimeSet {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [string]$RuntimeSet = ''
+    )
+
+    $selected = if ([string]::IsNullOrWhiteSpace($RuntimeSet)) { $Label } else { $RuntimeSet }
+    if ($selected -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+        throw 'Match runtime set must contain only letters, digits, dots, underscores, and hyphens'
+    }
+    return $selected
+}
+
 function Resolve-MatchArchiveRoot {
     param(
         [Parameter(Mandatory)][ValidateSet('patched-diagnostic', 'stock-certification')][string]$Profile,
@@ -166,6 +179,7 @@ Export-ModuleMember -Function @(
     'Get-StockRuntimeProfile',
     'Get-PatchedRuntimeProfile',
     'Get-RuntimeProfileInfo',
+    'Resolve-MatchRuntimeSet',
     'Resolve-MatchRuntimeRoot',
     'Resolve-MatchArchiveRoot',
     'Export-StockRuntimeDll'

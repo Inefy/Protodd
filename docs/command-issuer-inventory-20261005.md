@@ -19,6 +19,10 @@ This inventory follows gameplay orders to their BWAPI acceptance boundary. It re
 
 The direct bridge call-site inventory is in `BwapiBridge.cpp`: `execute`, worker assignment/scouting, maintenance, macro execution, learned production and whole-game execution. There is no direct `UnitInterface::issueCommand` call elsewhere in the Protodd adapter.
 
+## Follow-up: guarded acceptance boundaries (7 October 2026)
+
+`tests/test_command_issuer_inventory.py` scans every production `.cpp` and `.hpp` file and fails if a new direct BWAPI `issueCommand` call appears outside the two recorded boundaries: `BwapiBridge::issue` and `RaceBotModule::issueCommand`. It also checks that each boundary retains its `ACTION` or `COMMAND` acceptance/error trace, and that learned production dispatches through the bridge. CMake registers this audit in the Python CTest group. This prevents a source-level bypass; it does not replace stock-engine traces for the remaining RaceBot and recovery issuers.
+
 ## Standalone RaceBot modules
 
 `RaceBotModule` is a separate baseline used by the TerranTodd/ZergTodd module targets. It does not use `CommandBus` or `BwapiBridge`. All its direct BWAPI orders now pass through `RaceBotModule::issueCommand`, which writes a `COMMAND` row with frame, actor, issuer, command type, target/position, acceptance and BWAPI error to `bwapi-data/write/RaceBot.log`.

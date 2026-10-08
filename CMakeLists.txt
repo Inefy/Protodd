@@ -25,12 +25,10 @@ option(PROTODD_BASE_THREAT_EXPANSION_GUARD "Evaluate keeping the field army near
 option(PROTODD_ABANDONED_BASE_WORKER_EVACUATION "Evaluate evacuating workers from a threatened lost base" OFF)
 option(PROTODD_SAFE_REMOTE_MINING "Evaluate staging up to eight workers per update at a completed planned expansion" OFF)
 option(PROTODD_BASE_DEFENSE_CONSOLIDATION "Evaluate committing the field army to a heavily threatened economy" OFF)
-option(PROTODD_STATIC_DEFENSE_COVERAGE "Evaluate limiting static-defense allocation credit to covered attackers" OFF)
-option(PROTODD_DETECTOR_WAIT_VOLLEY "Evaluate stationary legal shots while the main army waits for detection" OFF)
 option(PROTODD_PVZ_REPLAY_OPENING "Evaluate a replay-derived economic PvZ opening" OFF)
 option(PROTODD_PVZ_ARCHIVES_FIRST "Evaluate replay-derived PvZ Archives before optional Reaver drops" OFF)
 option(PROTODD_LATE_ECONOMY_RECOVERY "Evaluate protected late worker and expansion recovery" OFF)
-option(PROTODD_STALLED_ARMY_ROUTING "Evaluate terrain waypoints for a stalled attacking army" OFF)
+option(PROTODD_STALLED_ARMY_ROUTING "Route a stalled attacking army and search reachable cleanup objectives" ON)
 option(PROTODD_PVZ_MINERAL_FALLBACK "Evaluate Zealot spending from otherwise idle midgame Gateways" OFF)
 option(PROTODD_PVZ_EARLY_MINERAL_FALLBACK "Evaluate the mineral fallback before the midgame Hydra attack" OFF)
 option(PROTODD_PVZ_POWERED_CANNON_SCREEN "Evaluate powered natural Cannons after the first two complete" OFF)
@@ -48,30 +46,28 @@ option(PROTODD_WHOLE_GAME_EVALUATION_BUILD
 set(PROTODD_WHOLE_GAME_PROMOTION_RECEIPT "" CACHE FILEPATH
     "Promotion receipt binding a six-slot tournament policy to its exact weights")
 
-if(PROTODD_TOURNAMENT_PROFILE AND PROTODD_DEVELOPER_PROFILE)
-    message(FATAL_ERROR "Choose either the tournament profile or the developer profile")
-endif()
-if(PROTODD_TOURNAMENT_PROFILE AND PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY)
-    message(FATAL_ERROR "The tournament profile cannot enable learned research authority")
-endif()
-if(PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY AND NOT PROTODD_DEVELOPER_PROFILE)
-    message(FATAL_ERROR "Learned research authority requires the developer profile")
-endif()
-if(PROTODD_BUILD_BWAPI_MODULE AND NOT PROTODD_TOURNAMENT_PROFILE AND
-   NOT PROTODD_DEVELOPER_PROFILE)
-    message(FATAL_ERROR "BWAPI modules require an explicit tournament or developer profile")
-endif()
-
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(ProtoddFeatureRules)
+protodd_validate_feature_rules("${CMAKE_CURRENT_SOURCE_DIR}/docs/feature-registry.json")
 include(ProtoddWarnings)
 
 add_library(protodd_core OBJECT
     src/core/GameState.cpp
+    src/core/UnitMemory.cpp
     src/core/UnitCatalog.cpp
     src/core/Technology.cpp
+    src/core/ResourceIncome.cpp
+    src/core/ProductionReadiness.cpp
     src/core/Information.cpp
     src/core/InfluenceMap.cpp
     src/core/Navigation.cpp
+    src/core/PlacementSafety.cpp
+    src/core/RouteSafety.cpp
+    src/core/LocalThreatQueries.cpp
+    src/core/StrategyGoalBuilder.cpp
+    src/core/strategy/StrategyPvT.cpp
+    src/core/strategy/StrategyPvZ.cpp
+    src/core/strategy/StrategyPvP.cpp
     src/core/Strategy.cpp
     src/core/AllInOpening.cpp
     src/core/MacroPlanner.cpp
@@ -103,54 +99,6 @@ target_compile_features(protodd_core PUBLIC cxx_std_20)
 protodd_enable_warnings(protodd_core)
 
 if(PROTODD_BUILD_BWAPI_MODULE)
-    if((PROTODD_PVZ_GATEWAY_OPENING AND PROTODD_PVZ_EARLY_SPLASH) OR
-       (PROTODD_PVZ_GATEWAY_OPENING AND PROTODD_PVZ_REPLAY_OPENING) OR
-       (PROTODD_PVZ_EARLY_SPLASH AND PROTODD_PVZ_REPLAY_OPENING) OR
-       (PROTODD_PVZ_GATEWAY_OPENING AND PROTODD_PVZ_ARCHIVES_FIRST) OR
-       (PROTODD_PVZ_EARLY_SPLASH AND PROTODD_PVZ_ARCHIVES_FIRST))
-        message(FATAL_ERROR "Unsupported combination of PvZ strategy interventions")
-    endif()
-    if(PROTODD_PVP_FOG_DETECTION AND
-       (PROTODD_PVZ_GATEWAY_OPENING OR PROTODD_PVZ_EARLY_SPLASH OR
-        PROTODD_PVZ_REPLAY_OPENING OR PROTODD_PVZ_ARCHIVES_FIRST))
-        message(FATAL_ERROR "Evaluate one opt-in strategy intervention at a time")
-    endif()
-    if(PROTODD_LATE_ECONOMY_RECOVERY AND
-       (PROTODD_PVZ_GATEWAY_OPENING OR PROTODD_PVZ_EARLY_SPLASH OR
-        PROTODD_PVP_FOG_DETECTION))
-        message(FATAL_ERROR "Unsupported combination with late economy recovery")
-    endif()
-    if(PROTODD_PVZ_POWERED_CANNON_SCREEN AND
-       (NOT PROTODD_PVZ_REPLAY_OPENING OR PROTODD_PVZ_ARCHIVES_FIRST OR
-        PROTODD_LATE_ECONOMY_RECOVERY OR PROTODD_PVZ_GATEWAY_OPENING OR
-        PROTODD_PVZ_EARLY_SPLASH OR PROTODD_PVP_FOG_DETECTION OR
-        PROTODD_STALLED_ARMY_ROUTING))
-        message(FATAL_ERROR "Powered Cannon screen requires the replay PvZ opening")
-    endif()
-    if(PROTODD_PVZ_EARLY_MINERAL_FALLBACK AND
-       (NOT PROTODD_PVZ_REPLAY_OPENING OR NOT PROTODD_PVZ_MINERAL_FALLBACK OR
-        PROTODD_PVZ_POWERED_CANNON_SCREEN))
-        message(FATAL_ERROR "Early mineral fallback requires its base flag and replay PvZ opening")
-    endif()
-    if(PROTODD_PVZ_PROACTIVE_REAVER AND
-       (NOT PROTODD_PVZ_POWERED_CANNON_SCREEN OR PROTODD_PVZ_MINERAL_FALLBACK))
-        message(FATAL_ERROR "Proactive Reaver requires the isolated powered Cannon screen")
-    endif()
-    if(PROTODD_PVZ_ARMY_FLOOR AND
-       (NOT PROTODD_PVZ_POWERED_CANNON_SCREEN OR PROTODD_PVZ_MINERAL_FALLBACK OR
-        PROTODD_PVZ_PROACTIVE_REAVER))
-        message(FATAL_ERROR "PvZ army floor requires the isolated powered Cannon screen")
-    endif()
-    if(PROTODD_PVZ_DETECTOR_SURGE AND NOT PROTODD_PVZ_ARMY_FLOOR)
-        message(FATAL_ERROR "PvZ detector surge requires the frozen army-floor reference")
-    endif()
-    if(PROTODD_WHOLE_GAME_EVALUATION_BUILD AND NOT PROTODD_WHOLE_GAME_CONTROL)
-        message(FATAL_ERROR "Evaluation build requires whole-game control")
-    endif()
-    if(PROTODD_WHOLE_GAME_HYBRID AND
-       (NOT PROTODD_WHOLE_GAME_CONTROL OR NOT PROTODD_WHOLE_GAME_EVALUATION_BUILD))
-        message(FATAL_ERROR "Hybrid control requires a weighted local evaluation controller")
-    endif()
     if(NOT WIN32)
         message(FATAL_ERROR "The injected BWAPI module must be built for 32-bit Windows")
     endif()
@@ -265,9 +213,6 @@ if(PROTODD_BUILD_BWAPI_MODULE)
     if(PROTODD_BASE_DEFENSE_CONSOLIDATION)
         target_compile_definitions(protodd_bwapi PRIVATE PROTODD_BASE_DEFENSE_CONSOLIDATION=1)
     endif()
-    if(PROTODD_DETECTOR_WAIT_VOLLEY)
-        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_DETECTOR_WAIT_VOLLEY=1)
-    endif()
     if(PROTODD_PVZ_REPLAY_OPENING)
         target_compile_definitions(protodd_bwapi PRIVATE PROTODD_PVZ_REPLAY_OPENING=1)
     endif()
@@ -297,9 +242,6 @@ if(PROTODD_BUILD_BWAPI_MODULE)
     endif()
     if(PROTODD_PVZ_DETECTOR_SURGE)
         target_compile_definitions(protodd_bwapi PRIVATE PROTODD_PVZ_DETECTOR_SURGE=1)
-    endif()
-    if(PROTODD_STATIC_DEFENSE_COVERAGE)
-        target_compile_definitions(protodd_bwapi PRIVATE PROTODD_STATIC_DEFENSE_COVERAGE=1)
     endif()
     if(PROTODD_WHOLE_GAME_CONTROL)
         if(NOT PROTODD_WHOLE_GAME_WEIGHTS)
@@ -335,6 +277,7 @@ if(PROTODD_BUILD_BWAPI_MODULE)
                     COMMAND "${Python3_EXECUTABLE}" -m training.whole_game_multislot_promotion
                             verify "${PROTODD_WHOLE_GAME_PROMOTION_RECEIPT}"
                             "${PROTODD_WHOLE_GAME_WEIGHTS}"
+                            --cmake-cache "${CMAKE_BINARY_DIR}/CMakeCache.txt"
                     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
                     RESULT_VARIABLE PROTODD_PROMOTION_RESULT
                     OUTPUT_VARIABLE PROTODD_PROMOTION_OUTPUT
@@ -385,6 +328,8 @@ if(PROTODD_BUILD_BWAPI_MODULE)
             COMMAND "${Python3_EXECUTABLE}" -m training.whole_game_multislot_promotion
                     record-evaluation "$<TARGET_FILE:protodd_bwapi>"
                     "$<TARGET_FILE_DIR:protodd_bwapi>/ProtoddEvaluation.build.json"
+                    --weights "${PROTODD_WHOLE_GAME_WEIGHTS}"
+                    --cmake-cache "${CMAKE_BINARY_DIR}/CMakeCache.txt"
             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
             COMMENT "Record the evaluated DLL and frozen source fingerprint")
     endif()
@@ -423,8 +368,11 @@ if(PROTODD_BUILD_TESTS)
             COMMAND "${PROTODD_NODE_EXECUTABLE}" --test "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_replay_comparison.mjs")
     endif()
     if(PROTODD_BUILD_BWAPI_MODULE)
-        add_library(protodd_audit_scenario MODULE tests/bwapi_audit_scenario.cpp src/bwapi/BwapiBridge.cpp)
-        target_include_directories(protodd_audit_scenario PRIVATE "${BWAPI_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src/bwapi")
+        add_library(protodd_audit_scenario MODULE tests/bwapi_audit_scenario.cpp src/bwapi/BwapiBridge.cpp
+            src/bwapi/WholeGameAction.cpp)
+        target_include_directories(protodd_audit_scenario PRIVATE
+            "${BWAPI_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src/bwapi"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu")
         target_link_libraries(protodd_audit_scenario PRIVATE Protodd::Core "${BWAPI_LIBRARY}")
         target_compile_features(protodd_audit_scenario PRIVATE cxx_std_20)
         target_compile_definitions(protodd_audit_scenario PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -506,6 +454,13 @@ if(PROTODD_BUILD_TESTS)
     if(WIN32)
         find_program(PROTODD_POWERSHELL_EXECUTABLE NAMES pwsh powershell)
         if(PROTODD_POWERSHELL_EXECUTABLE)
+            add_executable(protodd_headless_runtime_fixture tests/headless_runtime_fixture.cpp)
+            target_compile_features(protodd_headless_runtime_fixture PRIVATE cxx_std_20)
+            target_compile_definitions(protodd_headless_runtime_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+            add_test(NAME protodd_headless_runtime_tests
+                COMMAND "${PROTODD_POWERSHELL_EXECUTABLE}" -NoProfile -File
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_headless_runtime.ps1"
+                    -Fixture "$<TARGET_FILE:protodd_headless_runtime_fixture>")
             add_test(NAME protodd_direct_match_runner_tests
                 COMMAND "${PROTODD_POWERSHELL_EXECUTABLE}" -NoProfile -File
                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_direct_match.ps1")
@@ -515,6 +470,9 @@ if(PROTODD_BUILD_TESTS)
             add_test(NAME protodd_build_profile_tests
                 COMMAND "${PROTODD_POWERSHELL_EXECUTABLE}" -NoProfile -File
                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_build_profiles.ps1")
+            add_test(NAME protodd_runtime_resource_budget_tests
+                COMMAND "${PROTODD_POWERSHELL_EXECUTABLE}" -NoProfile -File
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_resource_budget.ps1")
             add_test(NAME protodd_runtime_recovery_tests
                 COMMAND "${PROTODD_POWERSHELL_EXECUTABLE}" -NoProfile -File
                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_runtime_recovery.ps1")
@@ -522,7 +480,7 @@ if(PROTODD_BUILD_TESTS)
         endif()
     endif()
     if(Python3_Interpreter_FOUND)
-        foreach(PROTODD_NEW_TEST IN ITEMS data_release dataset_analysis ladder arena whole_game_pilot whole_game_labels whole_game_parity whole_game_sequences)
+        foreach(PROTODD_NEW_TEST IN ITEMS data_release dataset_analysis ladder arena feature_registry command_issuer_inventory callback_budget_wiring actor_lifecycle_wiring whole_game_pilot whole_game_labels whole_game_parity whole_game_sequences whole_game_execution_audit whole_game_representation_audit t114_evaluate)
             add_test(NAME "protodd_${PROTODD_NEW_TEST}_tests"
                 COMMAND "${Python3_EXECUTABLE}" -m unittest discover
                     -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p "test_${PROTODD_NEW_TEST}.py")
@@ -555,7 +513,7 @@ if(PROTODD_BUILD_TESTS)
         execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import torch, numpy"
             RESULT_VARIABLE PROTODD_MODEL_TRAINING_AVAILABLE OUTPUT_QUIET ERROR_QUIET)
         if(PROTODD_MODEL_TRAINING_AVAILABLE EQUAL 0)
-            foreach(PROTODD_PILOT_TEST IN ITEMS whole_game_model mine_allins hybrid_campaign_review allin_campaign_review)
+            foreach(PROTODD_PILOT_TEST IN ITEMS whole_game_fit_gate whole_game_model mine_allins hybrid_campaign_review allin_campaign_review)
                 add_test(NAME "protodd_${PROTODD_PILOT_TEST}_tests"
                     COMMAND "${Python3_EXECUTABLE}" -m unittest discover
                         -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p "test_${PROTODD_PILOT_TEST}.py")
