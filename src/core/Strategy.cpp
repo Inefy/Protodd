@@ -3,6 +3,7 @@
 #include "protodd/Combat.hpp"
 #include "protodd/Harassment.hpp"
 #include "protodd/LocalThreatQueries.hpp"
+#include "protodd/Squads.hpp"
 
 #include "protodd/ProductionReadiness.hpp"
 #include "protodd/UnitCatalog.hpp"
@@ -16,6 +17,22 @@
 
 namespace protodd {
 using namespace strategy_detail;
+
+namespace {
+
+int replacementMiningQuota(const StrategicPlan& plan) {
+    if (plan.deferExpansion || !plan.expansionTarget.valid() || plan.desiredBases <= 1)
+        return 0;
+    auto quota = 0;
+    for (const auto& demand : plan.goals) {
+        if (demand.replacementMining && demand.blocking &&
+            demand.goal == GoalKind::expand && demand.target == UnitKind::nexus &&
+            demand.desiredCount > 1) quota = std::max(quota, demand.desiredCount);
+    }
+    return quota;
+}
+
+}  // namespace
 
 int criticalDeadlinePriorityAdjustment(
     const CriticalGoalTiming& timing, const Frame currentFrame) noexcept {
@@ -535,6 +552,7 @@ StrategicPlan StrategyEngine::plan(
     // Infrastructure must follow the final intent: a safety reaction or an
     // opening style can change the economy after the matchup plan is made.
     if (result.posture == Posture::defend && !result.sustainEconomy &&
+        replacementMiningQuota(result) == 0 &&
         !defensiveExpansionWindow(state, threat)) {
         const auto existingBases = std::max(1, effectiveUnitCount(state, UnitKind::nexus, UnitCountBasis::observed));
         result.desiredBases = std::min(result.desiredBases, existingBases);
@@ -784,7 +802,12 @@ StrategicPlan StrategyEngine::plan(
             return candidate.ownerId == state.self.id && candidate.defense.valid() &&
                    withinPixelRadius(candidate.center, home, PixelRadius{320});
         });
-        if (base != state.bases.end()) result.rallyPoint = base->defense.anchor;
+        if (base != state.bases.end()) {
+            const auto stageOpening = openingScreenNeedsCover(state, *base, state.self.units);
+            if (stageOpening) result.constructionRally = base->defense.anchor;
+            result.rallyPoint = stageOpening ? moveToward(base->center, base->defense.anchor, 144.0)
+                                             : base->defense.anchor;
+        }
     }
     if (effectiveUnitCount(state, UnitKind::nexus, UnitCountBasis::completed) >= 2 && result.expansionTarget.valid() &&
         result.rallyPoint == result.expansionTarget && result.attackTarget.valid()) {
@@ -915,6 +938,14 @@ void StrategyEngine::addPostPressureTransition(
     // distant enemy army do not describe the safety of our mineral lines.
     for (const auto& base : state.bases) {
         if (base.ownerId != state.self.id) continue;
+        // A front outside the Nexus radius can still occupy the defensive
+        // entrance. Releasing its screen as units cross that radius gives
+        // the same army alternating defense and field authority.
+        const auto withinEconomyPerimeter = [&base](const Position position) {
+            return withinPixelRadius(position, base.center, PixelRadius{960}) ||
+                (base.defense.valid() && withinPixelRadius(
+                    position, base.defense.entrance, PixelRadius{640}));
+        };
         auto enemyPower = 0.0;
         auto friendlyPower = 0.0;
         std::vector<UnitSnapshot> localEnemy;
@@ -926,7 +957,7 @@ void StrategyEngine::addPostPressureTransition(
                 !enemy.position.valid() || isWorker(enemy.kind) ||
                 enemy.groundWeapon.damage <= 0) continue;
             if (enemy.visible && withinPixelRadius(enemy.position, base.center, PixelRadius{320})) return;
-            if (withinPixelRadius(enemy.position, base.center, PixelRadius{960})) {
+            if (withinEconomyPerimeter(enemy.position)) {
                 localEnemy.push_back(enemy);
                 enemyPower += unitStats(enemy.kind).combatValue *
                     std::clamp(enemy.healthFraction(), 0.15, 1.0);
@@ -936,12 +967,12 @@ void StrategyEngine::addPostPressureTransition(
             if (!friendly.completed || friendly.disabled || friendly.loaded ||
                 friendly.hallucination || !friendly.position.valid() ||
                 isBuilding(friendly.kind) || !isCombatUnit(friendly.kind) ||
-                outsidePixelRadius(friendly.position, base.center, PixelRadius{960})) continue;
+                !withinEconomyPerimeter(friendly.position)) continue;
             if (enemyPower > 0.0 && std::ranges::none_of(state.enemy.units,
-                [&friendly, &base](const UnitSnapshot& enemy) {
+                [&friendly, &withinEconomyPerimeter](const UnitSnapshot& enemy) {
                     return enemy.visible && enemy.completed && !enemy.disabled &&
                         !isWorker(enemy.kind) && enemy.groundWeapon.damage > 0 &&
-                        withinPixelRadius(enemy.position, base.center, PixelRadius{960}) &&
+                        withinEconomyPerimeter(enemy.position) &&
                         friendly.canAttack(enemy);
                 })) continue;
             friendlyPower += unitStats(friendly.kind).combatValue *
@@ -1542,6 +1573,7 @@ void StrategyEngine::addSafetyReactions(
         plan.name += " [worker-rush hold]";
         plan.posture = Posture::defend;
         plan.desiredBases = 1;
+        for (auto& demand : plan.goals) demand.replacementMining = false;
         plan.attackThreshold = std::max(plan.attackThreshold, 1.55);
         goal(plan, GoalKind::build, UnitKind::gateway, 1, 100,
              "complete the first anti-worker combat unit", true);
@@ -1555,12 +1587,17 @@ void StrategyEngine::addSafetyReactions(
                          ? " [break static contain]"
                          : " [break proxy]";
         plan.posture = Posture::defend;
-        plan.desiredBases = 1;
+        // Keep the current replacement obligation so route cover, alternative
+        // selection and Survival can run. The bridge still proves admission.
+        const auto replacementQuota = replacementMiningQuota(plan);
+        const auto replacementMining = replacementQuota > 0;
+        plan.desiredBases = std::max(1, replacementQuota);
         plan.attackThreshold = std::max(plan.attackThreshold, 1.65);
         plan.goals.erase(
             std::remove_if(plan.goals.begin(), plan.goals.end(),
-                           [](const ProductionGoal& candidate) {
-                               return candidate.goal == GoalKind::expand;
+                           [replacementMining](const ProductionGoal& candidate) {
+                               return candidate.goal == GoalKind::expand &&
+                                   (!replacementMining || !candidate.replacementMining);
                            }),
             plan.goals.end());
         goal(plan, GoalKind::build, UnitKind::gateway, 2, 100,
@@ -1692,8 +1729,15 @@ void StrategyEngine::addEconomicRecovery(
         });
     const auto terminalCloseout = plan.posture == Posture::attack &&
         state.self.supplyTotal >= 400 && state.self.supplyUsed >= 390;
+    // Productive capacity excludes small reserves, but the final patches still
+    // need protected replacement funding until a new Nexus actually starts.
+    const auto miningBases = static_cast<int>(std::ranges::count_if(
+        state.bases, [&state](const BaseSnapshot& base) {
+            return base.ownerId == state.self.id && base.mineralPatches > 0 &&
+                   base.mineralsRemaining > 0;
+        }));
     const auto replacementNeeded = workers > 0 && completedNexuses > 0 &&
-        activeBases > 0 && ownedMinerals > 0 &&
+        (ownedMinerals > 0 || replacementSite.valid()) &&
         completedNexuses < 8 && pendingNexuses == 0 &&
         plan.estimatedMiningRunwayFrames >= 0 &&
         plan.estimatedMiningRunwayFrames <= preparationRunway &&
@@ -1704,10 +1748,13 @@ void StrategyEngine::addEconomicRecovery(
             plan.desiredBases = std::max(plan.desiredBases, completedNexuses + 1);
             plan.expansionTarget = replacementSite;
             plan.sustainEconomy = plan.posture != Posture::defend;
+            const auto priorGoalCount = plan.goals.size();
             goal(plan, GoalKind::expand, UnitKind::nexus,
                  completedNexuses + 1, 114,
                  "replace mining capacity before the income runway expires", true);
-        } else if (activeBases > 0) {
+            if (plan.goals.size() > priorGoalCount)
+                plan.goals.back().replacementMining = true;
+        } else if (miningBases > 0) {
             // No ready, reachable resource site exists. Stop paying for
             // optional infrastructure and rebuild the worker pool against the
             // remaining owned patches while the map is re-scouted.
@@ -1715,14 +1762,14 @@ void StrategyEngine::addEconomicRecovery(
             if (plan.posture != Posture::defend) plan.posture = Posture::recover;
             plan.desiredGasWorkers = 0;
             plan.desiredWorkers = std::max(plan.desiredWorkers,
-                                           std::min(16, activeBases * 12));
+                                           std::min(16, miningBases * 12));
             plan.desiredBases = completedNexuses;
             plan.expansionTarget = {-1, -1};
             plan.deferExpansion = true;
             plan.sustainEconomy = true;
             plan.prioritizeReinforcements = false;
             goal(plan, GoalKind::train, UnitKind::probe,
-                 std::min(16, activeBases * 12), 118,
+                 std::min(16, miningBases * 12), 118,
                  "preserve the last mining income while searching for a legal base", true);
         }
     }
@@ -1932,8 +1979,10 @@ StrategicPlan StrategicDirector::stabilize(
     if (!initialized_) {
         initialized_ = true;
         posture_ = candidate.posture;
-        if (emergencyEvidence) lastEmergencyFrame_ = state.frame;
-    } else if (emergencyEvidence) {
+    }
+    // Current emergency evidence has the same authority on the first update
+    // as on every later update. Initializing memory cannot skip the recall.
+    if (emergencyEvidence) {
         posture_ = candidate.posture == Posture::recover
                        ? Posture::recover
                        : Posture::defend;
@@ -1948,6 +1997,13 @@ StrategicPlan StrategicDirector::stabilize(
     } else {
         posture_ = candidate.posture;
     }
+
+    // Squad allocation consumes breakout authority separately from posture.
+    // Keep that authority consistent with the stabilized defensive mission;
+    // a transient favorable observation must not release its defenders while
+    // the existing emergency-clear window still retains Defend or Recover.
+    if (candidate.posture == Posture::defend || candidate.posture == Posture::recover)
+        candidate.breakContainment = false;
 
     const auto completedBases = static_cast<int>(std::ranges::count_if(
         state.self.units, [](const UnitSnapshot& unit) {

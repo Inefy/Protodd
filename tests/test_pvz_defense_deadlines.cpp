@@ -323,9 +323,51 @@ void testExpiredTechEvidenceDoesNotReopenExperimentalChain() {
           "aged-out Hydra and air tech sightings do not restart the optional splash chain");
 }
 
+void testMandatoryStructureSurvivesOptionalQuota() {
+    auto state = establishedPvZ();
+    state.frame = 2400;
+    state.self.supplyUsed = 16;
+    state.self.supplyTotal = 100;
+    state.self.minerals = 100;
+    state.self.gas = 0;
+    state.self.units.erase(std::remove_if(state.self.units.begin(), state.self.units.end(),
+        [](const UnitSnapshot& u) {
+            return u.id != 1 && u.id != 3 && u.id != 5 && u.id != 8 &&
+                   !(u.id >= 40 && u.id < 48);
+        }), state.self.units.end());
+    for (const auto reverse : {false, true}) {
+        StrategicPlan plan;
+        plan.goals = {
+            {GoalKind::build, UnitKind::photonCannon, 1, 99, true, "mandatory first Cannon"},
+            {GoalKind::build, UnitKind::photonCannon, 2, 100, false, "optional second Cannon"},
+            {GoalKind::train, UnitKind::zealot, 4, 98, false, "mobile reinforcement"},
+        };
+        if (reverse) std::swap(plan.goals[0], plan.goals[1]);
+        ResourceLedger bank{100, 0};
+        const auto actions = MacroPlanner{}.reconcile(state, plan, bank);
+        check(std::ranges::any_of(actions, [](const MacroAction& action) {
+                  return action.target == UnitKind::photonCannon && action.blocksLowerPriority;
+              }) && !hasReservedAction(actions, UnitKind::zealot, MacroActionKind::train),
+              "optional higher-priority quota preserves the outstanding mandatory Cannon in either order");
+        auto fulfilled = state;
+        fulfilled.self.units.push_back(unit(6, UnitKind::photonCannon, true, {400, 400}));
+        ResourceLedger nextBank{100, 0};
+        const auto next = MacroPlanner{}.reconcile(fulfilled, plan, nextBank);
+        check(hasReservedAction(next, UnitKind::zealot, MacroActionKind::train),
+              "the optional second Cannon does not inherit a fulfilled first-Cannon reservation");
+        const BuildBlockerFeedback blocked{UnitKind::photonCannon, {}, BuildBlockerReason::noPlacement,
+                                          state.frame + 120, state.frame};
+        ResourceLedger blockedBank{100, 0};
+        check(hasReservedAction(MacroPlanner{}.reconcile(state, plan, blockedBank, {&blocked, 1}),
+                                UnitKind::zealot, MacroActionKind::train),
+              "unusable Cannon placement still releases spending for a mobile defender");
+    }
+}
+
 }  // namespace
 
 int main() {
+    testMandatoryStructureSurvivesOptionalQuota();
     testHydraDeadlineExcludesLurkerDetectorSpend();
     testHydraChainAdvancesThroughPoweredPrerequisites();
     testLurkerDeadlineFundsMobileDetection();

@@ -3,6 +3,7 @@
 #include "protodd/Strategy.hpp"
 #include "protodd/UnitCatalog.hpp"
 
+#include <array>
 #include <iostream>
 #include <optional>
 #include <string_view>
@@ -581,9 +582,256 @@ void testExpensiveMirrorTechWaitsForExpansionEconomy() {
           "an already-started Templar transition continues through temporary economy loss");
 }
 
+void testTimingAttackDoesNotForgetRecentFogContact() {
+    using namespace protodd;
+    auto state = quietPvp(9 * 60 * 24 + 20 * 24);
+    state.self.supplyUsed = 80;
+    state.self.supplyTotal = 100;
+    for (int id = 60; id < 70; ++id)
+        state.self.units.push_back(unit(id, UnitKind::dragoon, true, {600 + id, 440}));
+    state.self.units.push_back(unit(70, UnitKind::reaver, true, {640, 480}));
+    const auto timing = [](const StrategicPlan& plan) {
+        return plan.name.find("empty-map timing attack") != std::string::npos ||
+               plan.name.find("Reaver timing strike") != std::string::npos;
+    };
+    check(timing(StrategyEngine{}.plan(state, {})),
+          "an actually clear map retains the assembled PvP timing attack");
+    auto contact = unit(300, UnitKind::dragoon, false, {1800, 900});
+    contact.lastSeen = state.frame;
+    state.enemy.units.push_back(contact);
+    check(!timing(StrategyEngine{}.plan(state, {})),
+          "visible midfield combat prevents an empty-map timing attack");
+    state.enemy.units.back().visible = false;
+    state.enemy.units.back().lastSeen = state.frame - 24;
+    check(!timing(StrategyEngine{}.plan(state, {})),
+          "one fogged combat sample does not restart an empty-map or Reaver timing attack");
+    state.enemy.units.back().lastSeen = state.frame - 5 * 24;
+    check(!timing(StrategyEngine{}.plan(state, {})),
+          "the five-second contact-memory boundary still prevents empty-map timing");
+    state.enemy.units.back().lastSeen -= 1;
+    check(timing(StrategyEngine{}.plan(state, {})),
+          "stale combat memory releases the timing attack after five seconds");
+    state.enemy.units.back().lastSeen = 0;
+    check(timing(StrategyEngine{}.plan(state, {})),
+          "an unknown contact timestamp does not block timing indefinitely");
+    state.enemy.units.back().lastSeen = state.frame + 1;
+    check(timing(StrategyEngine{}.plan(state, {})),
+          "a future fog timestamp cannot create a recent contact");
+    state.enemy.units.clear();
+    check(timing(StrategyEngine{}.plan(state, {})),
+          "observed contact removal restores the timing opportunity");
+}
+
+void testQuietCorePrecedesUnrequestedSecondBodyguard() {
+    using namespace protodd;
+    auto state = quietPvp(3800);
+    std::erase_if(state.self.units, [](const UnitSnapshot& own) {
+        return own.id == 6 || own.id == 34 || own.id == 35;
+    });
+    state.self.units.push_back(unit(7, UnitKind::pylon, true, {480, 400}));
+    state.self.supplyUsed = 32;
+    state.self.supplyTotal = 50;
+    state.self.minerals = 200;
+    state.self.gas = 120;
+    const auto funded = [](const std::vector<MacroAction>& actions, const UnitKind target) {
+        return std::ranges::any_of(actions, [target](const MacroAction& action) {
+            return action.target == target && action.reserved && action.executable;
+        });
+    };
+    const auto quiet = StrategyEngine{}.plan(state, {});
+    ResourceLedger coreBank{200, 120};
+    const auto actions = MacroPlanner{}.reconcile(state, quiet, coreBank);
+    check(funded(actions, UnitKind::cyberneticsCore) && !funded(actions, UnitKind::zealot),
+          "quiet PvP funds its Core after the requested first bodyguard instead of an extra Zealot");
+
+    auto noScreen = state;
+    std::erase_if(noScreen.self.units, [](const UnitSnapshot& own) {
+        return own.kind == UnitKind::zealot;
+    });
+    noScreen.self.supplyUsed = 28;
+    ResourceLedger firstBank{100, 120};
+    check(funded(MacroPlanner{}.reconcile(noScreen, StrategyEngine{}.plan(noScreen, {}), firstBank),
+                 UnitKind::zealot),
+          "quiet Core opening still funds its first mobile defender");
+
+    auto rush = state;
+    // The mandatory static anchor is already paid for; test the remaining
+    // mobile response without asking it to outrank emergency construction.
+    rush.self.units.push_back(unit(8, UnitKind::forge, true, {400, 400}));
+    rush.self.units.push_back(unit(9, UnitKind::photonCannon, true, {320, 400}));
+    rush.enemy.units.push_back(unit(100, UnitKind::gateway, false, {3300, 3300}));
+    rush.enemy.units.push_back(unit(101, UnitKind::gateway, false, {3400, 3300}));
+    ThreatAssessment pressure;
+    pressure.mostLikely = EnemyPlan::fastRush;
+    const auto defense = StrategyEngine{}.plan(rush, pressure);
+    ResourceLedger defenseBank{100, 120};
+    check(funded(MacroPlanner{}.reconcile(rush, defense, defenseBank), UnitKind::zealot),
+          "scouted two-Gateway pressure restores the second mobile defender before tech");
+}
+
+void testMeleeGasPauseSurvivesTheFirstPaidEscort() {
+    using namespace protodd;
+    auto state = quietPvp(3500);
+    std::erase_if(state.self.units, [](const UnitSnapshot& own) {
+        return own.id == 6;
+    });
+    auto& escort = *std::ranges::find(state.self.units, 5, &UnitSnapshot::id);
+    escort.completed = false;
+    escort.buildProgress = 50;
+    state.enemy.units = {
+        unit(100, UnitKind::gateway, false, {3300, 3300}),
+        unit(101, UnitKind::gateway, false, {3400, 3300})};
+    for (auto& enemy : state.enemy.units) enemy.lastSeen = state.frame;
+    ThreatAssessment pressure;
+    pressure.mostLikely = EnemyPlan::fastRush;
+    const auto plan = [&](const GameState& snapshot) {
+        return StrategyEngine{}.plan(snapshot, pressure);
+    };
+    check(plan(state).desiredGasWorkers == 0,
+          "the first paid escort does not erase the melee-rush gas pause");
+    escort.completed = true;
+    escort.buildProgress = 100;
+    check(plan(state).desiredGasWorkers == 0,
+          "one completed escort keeps workers mining for the static anchor");
+
+    auto two = state;
+    two.self.units.push_back(unit(6, UnitKind::zealot, true, {340, 320}));
+    two.frame = 5000;
+    check(plan(two).desiredGasWorkers == 0,
+          "two defenders without a completed anchor retain the gas pause");
+    auto pendingAnchor = two;
+    pendingAnchor.self.units.push_back(unit(8, UnitKind::photonCannon, true, {400, 400}));
+    pendingAnchor.self.units.back().completed = false;
+    check(plan(pendingAnchor).desiredGasWorkers == 0,
+          "a warping Cannon does not release the protected gas transition");
+    pendingAnchor.self.units.back().completed = true;
+    check(plan(pendingAnchor).desiredGasWorkers >= 3,
+          "two defenders and a completed anchor still resume the gas transition");
+
+    auto four = two;
+    for (int id = 70; id < 72; ++id)
+        four.self.units.push_back(unit(id, UnitKind::zealot, true, {340 + id, 320}));
+    check(plan(four).desiredGasWorkers >= 3,
+          "a four-unit mobile screen does not postpone its ranged transition");
+    auto ranged = state;
+    ranged.self.units.push_back(unit(7, UnitKind::cyberneticsCore, true, {500, 320}));
+    ranged.self.units.push_back(unit(8, UnitKind::dragoon, true, {400, 320}));
+    check(plan(ranged).desiredGasWorkers >= 3,
+          "existing ranged defenders keep gas for their replacement cycle");
+    auto rangedEnemy = state;
+    rangedEnemy.enemy.units.push_back(unit(102, UnitKind::cyberneticsCore, false, {3500, 3300}));
+    rangedEnemy.enemy.units.push_back(unit(103, UnitKind::zealot, false, {600, 256}));
+    check(plan(rangedEnemy).desiredGasWorkers >= 3,
+          "visible ranged tech keeps gas even while a melee escort approaches home");
+    auto cloak = pressure;
+    cloak.cloak = 0.6;
+    const auto detection = StrategyEngine{}.plan(state, cloak);
+    check(detection.requireMobileDetection && detection.desiredGasWorkers >= 3,
+          "required mobile detection still overrides the melee gas pause");
+}
+
+void testScoutedMeleePairBeforeTheCrossing() {
+    using namespace protodd;
+    auto state=quietPvp(5000);
+    state.self.supplyTotal=50;state.self.minerals=150;state.self.gas=0;
+    state.self.units.push_back(unit(7,UnitKind::gateway,true,{520,256}));
+    state.self.units.push_back(unit(8,UnitKind::forge,true,{400,400}));
+    auto cannon=unit(9,UnitKind::photonCannon,true,{320,400});
+    cannon.completed=false;cannon.buildProgress=25;
+    state.self.units.push_back(cannon);
+    state.self.units.push_back(unit(10,UnitKind::shieldBattery,true,{440,400}));
+    state.self.queuedUnits={UnitKind::zealot,UnitKind::zealot};
+    state.self.busyProducers={UnitKind::gateway,UnitKind::gateway,UnitKind::nexus};
+    state.enemy.units={unit(100,UnitKind::gateway,false,{3300,3300}),
+                       unit(101,UnitKind::gateway,false,{3400,3300})};
+    for(auto& enemy:state.enemy.units)enemy.lastSeen=state.frame;
+    const auto pairGoal=[](const StrategicPlan& plan){
+        return std::ranges::any_of(plan.goals,[](const ProductionGoal& goal){
+            return goal.target==UnitKind::photonCannon && goal.desiredCount==2 &&
+                   goal.priority>=111 && goal.blocking;
+        });
+    };
+    const auto plan=StrategyEngine{}.plan(state,{});
+    check(pairGoal(plan),
+          "a paid first anchor and two defenders request paired Cannon coverage before a scouted melee crossing");
+    ResourceLedger bank{150,0};
+    const auto actions=MacroPlanner{}.reconcile(state,plan,bank);
+    check(std::ranges::any_of(actions,[](const MacroAction& action){
+              return action.target==UnitKind::photonCannon && action.reserved && action.executable;
+          }) && std::ranges::none_of(actions,[](const MacroAction& action){
+              return action.target==UnitKind::gateway && action.reserved;
+          }),"the second melee anchor receives the spare150minerals before automatic third-Gateway capacity");
+    auto oneGateway=state;oneGateway.enemy.units.pop_back();
+    check(!pairGoal(StrategyEngine{}.plan(oneGateway,{})),
+          "one observed enemy Gateway alone does not request the anticipatory Cannon pair");
+    auto scarce=state;
+    std::erase_if(scarce.self.units,[](const UnitSnapshot& own){return own.kind==UnitKind::probe && own.id>=32;});
+    check(!pairGoal(StrategyEngine{}.plan(scarce,{})),
+          "a weak worker economy retains the single-anchor opening budget");
+    for(const auto tech:std::array{UnitKind::cyberneticsCore,UnitKind::roboticsFacility,
+                                  UnitKind::citadelOfAdun,UnitKind::templarArchives}) {
+        auto knownTech=state;knownTech.enemy.units.push_back(unit(102,tech,false,{3500,3300}));
+        check(!pairGoal(StrategyEngine{}.plan(knownTech,{})),
+              "observed ranged or covert production preserves the existing tech response");
+    }
+    auto cloak=ThreatAssessment{};cloak.cloak=0.7;
+    check(!pairGoal(StrategyEngine{}.plan(state,cloak)),
+          "urgent cloak evidence does not divert its bank to an extra melee anchor");
+    auto enoughUnits=state;
+    enoughUnits.self.units.push_back(unit(80,UnitKind::zealot,true,{320,360}));
+    enoughUnits.self.units.push_back(unit(81,UnitKind::zealot,true,{360,360}));
+    check(!pairGoal(StrategyEngine{}.plan(enoughUnits,{})),
+          "an established four-unit screen keeps the existing visible-pressure Cannon rule");
+    auto expanded=state;expanded.self.units.push_back(unit(84,UnitKind::nexus,true,{1500,256}));
+    check(!pairGoal(StrategyEngine{}.plan(expanded,{})),
+          "multi-base play retains its existing Cannon allocation instead of the opening pair rule");
+    auto alreadyPaid=state;
+    auto second=cannon;second.id=11;
+    alreadyPaid.self.units.push_back(second);
+    ResourceLedger paidBank{150,0};
+    const auto paidActions=MacroPlanner{}.reconcile(alreadyPaid,StrategyEngine{}.plan(alreadyPaid,{}),paidBank);
+    check(std::ranges::none_of(paidActions,[](const MacroAction& action){
+              return action.target==UnitKind::photonCannon && action.reserved;
+          }),"a paid second Cannon consumes the pair quota without funding a third");
+}
+
+void testSingleGatewayInsuranceCanReachItsBranch() {
+    using namespace protodd;
+    auto state=quietPvp(3800);
+    state.enemy.units={unit(100,UnitKind::gateway,false,{3300,3300})};
+    state.enemy.units.front().lastSeen=state.frame;
+    state.self.minerals=150;state.self.gas=100;
+    const auto plan=StrategyEngine{}.plan(state,{});
+    check(hasGoal(plan,GoalKind::build,UnitKind::forge,118,true),
+          "one observed Gateway without advanced tech reaches the existing2:36insurance Forge branch");
+    ResourceLedger bank{150,100};
+    check(std::ranges::any_of(MacroPlanner{}.reconcile(state,plan,bank),[](const MacroAction& action){
+              return action.target==UnitKind::forge && action.reserved && action.executable;
+          }),"the quiet-return fix makes the existing insurance Forge an executable funded checkpoint");
+    auto before=state;before.frame=2*60*24+36*24-1;
+    check(!hasGoal(StrategyEngine{}.plan(before,{}),GoalKind::build,UnitKind::forge),
+          "the single-Gateway insurance fork does not trigger before its established deadline");
+    auto noEvidence=state;noEvidence.enemy.units.clear();
+    check(!hasGoal(StrategyEngine{}.plan(noEvidence,{}),GoalKind::build,UnitKind::forge),
+          "an unknown enemy without a scouted Gateway keeps the quiet opening");
+    for(const auto tech:std::array{UnitKind::cyberneticsCore,UnitKind::roboticsFacility,
+                                  UnitKind::citadelOfAdun,UnitKind::templarArchives}){
+        auto observed=state;auto enemy=unit(101,tech,false,{3400,3300});
+        enemy.completed=false;enemy.buildProgress=20;observed.enemy.units.push_back(enemy);
+        const auto techPlan=StrategyEngine{}.plan(observed,{});
+        check(!hasGoal(techPlan,GoalKind::build,UnitKind::forge) &&
+              hasGoal(techPlan,GoalKind::build,UnitKind::cyberneticsCore,119,true),
+              "observed warping advanced tech preserves the urgent ranged mirror checkpoint");
+    }
+}
+
 }  // namespace
 
 int main() {
+    testSingleGatewayInsuranceCanReachItsBranch();
+    testScoutedMeleePairBeforeTheCrossing();
+    testMeleeGasPauseSurvivesTheFirstPaidEscort();
+    testQuietCorePrecedesUnrequestedSecondBodyguard();
     testRemoteArmyDoesNotCreateHomeEmergency();
     testHomeContactRequestsHomeDefense();
     testGlobalAggressionDoesNotCreateHomeBreach();
@@ -596,6 +844,7 @@ int main() {
     testContainDefenseDetectionAndEconomicExit();
     testDestroyedCoreRecoversGasAndRangedProduction();
     testExpensiveMirrorTechWaitsForExpansionEconomy();
+    testTimingAttackDoesNotForgetRecentFogContact();
     if (failures != 0) return 1;
     std::cout << "PvP threat locality checks passed\n";
     return 0;

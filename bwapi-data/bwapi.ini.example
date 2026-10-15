@@ -5,7 +5,7 @@ tournament =
 
 [auto_menu]
 auto_menu = SINGLE_PLAYER
-character_name = FIRST
+character_name = Protodd
 pause_dbg = OFF
 auto_restart = OFF
 map = maps/(?)*.sc?

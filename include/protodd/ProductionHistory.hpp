@@ -28,13 +28,14 @@ public:
         lastSample_ = frame;
         while (!events_.empty() && events_.front().frame < frame - 2400) events_.pop_front();
         std::array<float,16> result{};
-        for (int i=8;i<16;++i) result[i]=1;
+        for (std::size_t i=8;i<16;++i) result[i]=1;
         for (const auto& event : events_) {
             if (event.frame >= frame) break;
-            if (event.frame >= frame-240) result[event.action] += .25F;
-            result[8+event.action] = static_cast<float>(frame-event.frame)/2400.F;
+            const auto action=static_cast<std::size_t>(event.action);
+            if (event.frame >= frame-240) result[action] += .25F;
+            result[8+action] = static_cast<float>(frame-event.frame)/2400.F;
         }
-        for (int i=0;i<8;++i) result[i]=std::min(1.F,result[i]);
+        for (std::size_t i=0;i<8;++i) result[i]=std::min(1.F,result[i]);
         return result;
     }
 private:

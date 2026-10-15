@@ -18,8 +18,21 @@ int wmain(int argc, wchar_t** argv) {
     output << desktopName << L'\n';
     output.flush();
     output.close();
+    if (std::wstring(argv[2]) == L"delayed-exit") {
+        // Let the parent arrange an exit-journal failure while this owned
+        // process remains live, then require its real exit event to continue.
+        Sleep(1000);
+    }
     if (std::wstring(argv[2]) == L"crash") {
         *reinterpret_cast<volatile int*>(static_cast<std::uintptr_t>(1)) = 7;
+    }
+    if (std::wstring(argv[2]) == L"threads") {
+        for (int i = 0; i < 64; ++i) {
+            auto thread = CreateThread(nullptr,0,[](LPVOID) -> DWORD { return 0; },nullptr,0,nullptr);
+            if (!thread) return 5;
+            WaitForSingleObject(thread,INFINITE);
+            CloseHandle(thread);
+        }
     }
     DestroyWindow(window);
     return 0;

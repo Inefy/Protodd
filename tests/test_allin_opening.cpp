@@ -34,6 +34,29 @@ int requested(const StrategicPlan& plan, UnitKind kind) {
 }
 }
 int main() {
+    {
+        GameState early; early.self.race = Race::protoss;
+        early.enemy.race = Race::terran; early.frame = 3000;
+        add(early, UnitKind::nexus, 1); add(early, UnitKind::probe, 12);
+        add(early, UnitKind::gateway, 2); add(early, UnitKind::zealot, 1);
+        AllInOpeningPlanner pressure;
+        pressure.reset(allInBuild("two-gate-pressure"));
+        auto earlyPlan = baseline(); pressure.apply(earlyPlan, early, {});
+        check(pressure.phase() == AllInPhase::assemble,
+              "early pressure cannot send a single Zealot");
+        add(early, UnitKind::zealot, 1); early.frame += 24;
+        earlyPlan = baseline(); pressure.apply(earlyPlan, early, {});
+        check(pressure.phase() == AllInPhase::pressure &&
+              earlyPlan.posture == Posture::attack && earlyPlan.minimumAttackSize == 2,
+              "early pressure launches two completed Zealots");
+        check(requested(earlyPlan, UnitKind::cyberneticsCore) == 0 &&
+              requested(earlyPlan, UnitKind::assimilator) == 1,
+              "early wave starts its gas transition behind the attack");
+        ThreatAssessment breach; breach.combatEnemiesNearMain = 3;
+        earlyPlan = baseline(); pressure.apply(earlyPlan, early, breach);
+        check(earlyPlan.posture == Posture::defend,
+              "early pressure still responds to an observed home breach");
+    }
     ThreatAssessment threat;
     GameState state; state.self.race = Race::protoss; state.enemy.race = Race::protoss;
     add(state, UnitKind::probe, 12); add(state, UnitKind::nexus, 1); add(state, UnitKind::gateway, 1);
@@ -131,6 +154,45 @@ int main() {
     check(opening.phase() == AllInPhase::transition &&
           opening.transitionReason() == "pressure-window",
           "the bounded pressure window ends at its contact-relative deadline");
+
+    {
+        AllInOpeningPlanner fieldPressure; fieldPressure.reset(AllInBuild::twoGateZealot);
+        GameState field; field.frame = 5000;
+        field.self.race = Race::protoss; field.enemy.race = Race::protoss;
+        add(field, UnitKind::nexus, 1); add(field, UnitKind::probe, 14);
+        add(field, UnitKind::gateway, 2); add(field, UnitKind::zealot, 4);
+        for (auto& unit : field.self.units) {
+            if (unit.kind != UnitKind::zealot) continue;
+            unit.position = {1000, 128};
+            unit.groundWeapon = {.damage = 8, .maxRange = 15, .targetsGround = true};
+        }
+        auto fieldPlan = baseline(); fieldPressure.apply(fieldPlan, field, {});
+        check(fieldPressure.departureFrame() == 5000 && fieldPressure.arrivalFrame() < 0,
+              "field combat departs before reaching its distant objective");
+        UnitSnapshot fieldEnemy; fieldEnemy.id = 1000; fieldEnemy.kind = UnitKind::zealot;
+        fieldEnemy.position = {1040, 128}; fieldEnemy.visible = fieldEnemy.completed = true;
+        fieldEnemy.hitPoints = 100; field.enemy.units = {fieldEnemy}; field.frame = 5300;
+        fieldPlan = baseline(); fieldPressure.apply(fieldPlan, field, {});
+        check(fieldPressure.contactFrame() == 5300 && fieldPressure.arrivalFrame() < 0,
+              "weapon contact can start the engagement window before objective arrival");
+        field.frame = 5000 + 90 * 24;
+        fieldPlan = baseline(); fieldPressure.apply(fieldPlan, field, {});
+        check(fieldPressure.phase() == AllInPhase::pressure,
+              "recorded field contact prevents travel timeout from preempting engagement");
+        ThreatAssessment fieldBreach; fieldBreach.combatEnemiesNearMain = 3;
+        fieldPlan = baseline(); fieldPressure.apply(fieldPlan, field, fieldBreach);
+        check(fieldPlan.posture == Posture::defend,
+              "the field engagement window preserves emergency home defense");
+        field.frame = 5300 + 120 * 24 - 1;
+        fieldPlan = baseline(); fieldPressure.apply(fieldPlan, field, {});
+        check(fieldPressure.phase() == AllInPhase::pressure,
+              "field engagement keeps its full contact-relative window");
+        field.frame += 1;
+        fieldPlan = baseline(); fieldPressure.apply(fieldPlan, field, {});
+        check(fieldPressure.phase() == AllInPhase::transition &&
+              fieldPressure.transitionReason() == "pressure-window",
+              "field contact still releases the commitment at its bounded deadline");
+    }
 
     opening.reset(AllInBuild::twoGateZealot); state = {}; state.frame = 5000;
     state.self.race = Race::protoss; state.enemy.race = Race::protoss;

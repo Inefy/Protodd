@@ -1,5 +1,63 @@
 # Tournament validation
 
+## October 14 release hardening
+
+The current source passes the strict Zig compiler/verifier, including the
+three race strategy translation units and every Win32 BWAPI adapter file.
+The verifier now includes those strategy sources and the CPU runtime headers.
+Signed conversions, optional-build lambda captures, and incomplete aggregate
+initialization warnings were corrected without changing the selected openings.
+The actor-churn fixture now uses a bounded two-dimensional layout, avoiding
+undefined signed distance overflow in its artificial test coordinates.
+
+Crowded tactical movement shares at most 16,000 expanded navigation cells per
+combat update. Each actor still requires a body-safe direct segment or a
+proved path prefix; small groups retain the existing 4,000-cell allowance.
+Construction admission reserves time for same-frame combat. Resource-depot
+discovery checks candidates in BWAPI's order and applies its exact resource
+exclusions before expensive native legality checks. A separate native test
+matched the original BWAPI 4.4.0 search in all 424 cases on the combined stress
+map, Destination, and Python, including blocked and unreachable locations.
+
+The stock-engine combined stress fixture completed 1,202 frame callbacks on
+Windows 11 with no exceptions, no callbacks above 42/55 ms, and a maximum
+frame duration of 33.163 ms. Full callback binary and CSV timings matched.
+Private memory stayed below 62 MB. This is a local timing measurement, not a
+guarantee for the competition hardware. Exact final build, game, and package
+receipts are retained in `artifacts/release-fixes-20261014` in the development
+workspace. Native Windows 10 qualification remains pending the user's run.
+
+The subsequent cold-start check found a 59.643 ms startup callback despite
+zero frame overruns. Terrain
+sampling reads each build tile's elevation once and shares it across its 16
+walk cells. Final receipts for this revision are retained in
+`artifacts/release-ready-20261014`; the earlier measurements above describe
+the preceding hardening candidate.
+
+Placement now retains endpoint templates only while both exact navigation
+geometry and the complete source-unit keys match. Route proofs and candidate
+occupancy/access checks still refresh on every use. Candidate evaluation
+defers after its time allowance and retains the untested tile for the next
+pass, rather than treating deferred work as a rejected site. Combat reserves
+use a size-based cold estimate followed by measured costs, preserving
+construction opportunities for small or uncontested armies.
+Live combat updates admit at most four expensive defender return-route
+queries in addition to the shared actor movement allowance.
+The load gate keeps zero tolerated `onFrame` overruns above 55 ms. It records
+all lifecycle/unit timings and uses a separate local one-second ceiling for
+them, matching the official rules' distinction between startup and playing
+frames. A 74 ms startup sample is retained, rather than discarded.
+
+The six-game hardening screen completed without crashes or exceptions, but
+retained two isolated playing-frame overruns (59.633 and 84.878 ms). Defender
+return searches now use 2,000 expansions per query, and global/expansion
+construction baselines use the existing retained navigation queue's shared
+2,048-work allowance. An unfinished baseline defers construction and keeps
+its frontier; it cannot grant a build or classify the site as unreachable.
+Final qualification receipts are in `artifacts/submission-final-20261014`.
+
+The older records below describe their named historical binaries.
+
 The latest [terrain defense pass](terrain-defense.md), preceded by the
 [opening tempo test](opening-tempo-review.md) and
 [containment investigation](containment-review.md), records the changes and

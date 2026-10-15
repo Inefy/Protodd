@@ -45,6 +45,19 @@ enum class CommandOwner : std::uint8_t {
     observerSafety,
 };
 
+// Routine worker collection can coexist with unleased background route planning.
+// Escape gathers, militia, staging and unknown issuers retain exclusive authority.
+enum class CommandActivity : std::uint8_t {
+    unspecified,
+    workerEconomy,
+};
+
+// Training ammunition/units does not replace a movement or construction order.
+[[nodiscard]] constexpr bool changesActorOrder(const CommandType type) noexcept {
+    return type != CommandType::train && type != CommandType::trainScarab &&
+           type != CommandType::trainInterceptor;
+}
+
 struct Command {
     UnitId actor{};
     CommandType type{CommandType::move};
@@ -65,6 +78,7 @@ struct Command {
     int urgency{std::numeric_limits<int>::min()};
     Frame deadlineFrame{-1};
     std::uint64_t leaseGeneration{};
+    CommandActivity activity{CommandActivity::unspecified};
 
     [[nodiscard]] int effectiveUrgency() const noexcept {
         return urgency == std::numeric_limits<int>::min() ? priority : urgency;
@@ -97,12 +111,13 @@ class FrameCommandClaims {
 public:
     [[nodiscard]] bool available(Frame frame, UnitId actor);
     void recordAccepted(Frame frame, UnitId actor);
+    void recordConfirmed(Frame frame, UnitId actor);
     void forgetUnit(UnitId actor) noexcept;
     void clear() noexcept;
 
 private:
     Frame frame_{-1};
-    std::unordered_set<UnitId> acceptedActors_;
+    std::unordered_set<UnitId> claimedActors_;
 
     void beginFrame(Frame frame);
 };
@@ -125,6 +140,9 @@ public:
     }
     [[nodiscard]] Frame budgetDeferralAge(UnitId actor) const noexcept;
     void markIssued(const Command& command);
+    // Release tactical waypoint suppression only after observing arrival.
+    void observePosition(UnitId actor, Position position);
+    void invalidateLease(UnitId actor, CommandOwner owner, std::uint64_t generation);
     [[nodiscard]] std::vector<CommandEffectFeedback> pendingEffectFeedback() const;
     [[nodiscard]] bool markEffectObserved(const Command& command, Frame observedFrame);
     [[nodiscard]] bool markEffectTimeoutReported(const Command& command);
@@ -140,6 +158,7 @@ private:
         bool effectObserved{};
         bool effectTimeoutReported{};
         Frame effectFrame{-1};
+        bool movementArrived{};
     };
 
     Frame frame_{};

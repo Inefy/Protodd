@@ -2,11 +2,32 @@ param(
     [string]$BwapiRoot = "build/_deps/bwapi-src",
     [string]$BuildDirectory = "build/tournament",
     [string]$Configuration = "Release",
-    [string]$PlatformToolset = "v143"
+    [string]$PlatformToolset = "v143",
+    [switch]$OpeningEvaluation,
+    [string]$PinnedBwapiLibrary,
+    [string]$PinnedBwapiLibrarySha256
 )
 
 $ErrorActionPreference = "Stop"
 $repoPath = Split-Path -Parent $PSScriptRoot
+Import-Module (Join-Path $PSScriptRoot "TournamentManifest.psm1") -Force
+# Capture inputs before configuration or compilation can consume them.
+$sourceFiles = @(Get-TournamentSourceInventory -RepositoryRoot $repoPath)
+$sourceSnapshotHash = Get-TournamentInventoryHash -Inventory $sourceFiles
+$sourceCommit = Get-TournamentSourceCommit -RepositoryRoot $repoPath
+$sourceDirty = $false
+$sourceDiffHash = 'source-archive'
+if ($sourceCommit -ne 'source-archive') {
+    $sourceDiff = & git -c core.safecrlf=false -C $repoPath diff HEAD --binary 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $sourceDiffBytes = [Text.Encoding]::UTF8.GetBytes(($sourceDiff -join "`n"))
+        $sourceDiffAlgorithm = [Security.Cryptography.SHA256]::Create()
+        try { $sourceDiffHash = [BitConverter]::ToString($sourceDiffAlgorithm.ComputeHash($sourceDiffBytes)).Replace('-', '').ToLowerInvariant() }
+        finally { $sourceDiffAlgorithm.Dispose() }
+    } else { $sourceDiffHash = 'unavailable' }
+    $sourceDirty = @(& git -c core.safecrlf=false -C $repoPath status --porcelain -- cmake include src tests tools training docs bwapi-data CMakeLists.txt CMakePresets.json README.md LICENSE SUBMISSION.md scripts 2>$null).Count -gt 0
+}
+
 $featureRegistryPath = Join-Path $repoPath 'docs/feature-registry.json'
 if (-not (Test-Path -LiteralPath $featureRegistryPath -PathType Leaf)) {
     throw "The feature registry is missing: $featureRegistryPath"
@@ -21,7 +42,8 @@ foreach ($entry in $featureRegistry.options) {
     if ($entry.kind -ne 'cmake-option' -or $entry.tournament_value -notin @('ON', 'OFF')) {
         throw "Invalid tournament value in feature registry: $($entry.id)"
     }
-    $registeredCmakeArguments.Add("-D$($entry.id)=$($entry.tournament_value)")
+    $value = if ($OpeningEvaluation -and $entry.id -eq 'PROTODD_NATIVE_ALLIN_OPENING') { 'ON' } else { $entry.tournament_value }
+    $registeredCmakeArguments.Add("-D$($entry.id)=$value")
 }
 foreach ($entry in $featureRegistry.build_inputs) {
     if ($entry.kind -ne 'cmake-input' -or $null -eq $entry.tournament_value) {
@@ -38,7 +60,6 @@ $buildPath = if ([System.IO.Path]::IsPathRooted($BuildDirectory)) {
 if (-not $buildPath.StartsWith($buildPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Tournament build directory must stay inside $buildPrefix"
 }
-Import-Module (Join-Path $PSScriptRoot "TournamentManifest.psm1") -Force
 Assert-TournamentFeatureRegistry -RepositoryRoot $repoPath
 $bwapiPath = if ([System.IO.Path]::IsPathRooted($BwapiRoot)) {
     [System.IO.Path]::GetFullPath($BwapiRoot)
@@ -71,6 +92,15 @@ if (-not (Test-Path -LiteralPath $msbuild)) {
     throw "MSBuild was not found under $vsInstall"
 }
 
+if ($PinnedBwapiLibrary) {
+    if ($PinnedBwapiLibrarySha256 -notmatch '^[0-9a-f]{64}$' -or
+        -not (Test-Path -LiteralPath $PinnedBwapiLibrary -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $PinnedBwapiLibrary -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+            $PinnedBwapiLibrarySha256) {
+        throw 'Pinned BWAPI library is missing or differs from its declared hash'
+    }
+    $bwapiLibrary = [IO.Path]::GetFullPath($PinnedBwapiLibrary)
+} else {
 Push-Location (Split-Path -Parent $revisionScript)
 try {
     & cscript //nologo (Split-Path -Leaf $revisionScript)
@@ -83,6 +113,7 @@ try {
     "/p:PlatformToolset=$PlatformToolset" /verbosity:minimal
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $bwapiLibrary)) {
     throw "Official BWAPILIB Release|Win32 build failed"
+}
 }
 
 $configureArguments = @('-S', $repoPath, '-B', $buildPath, '-G', 'Visual Studio 17 2022', '-A', 'Win32') +
@@ -102,8 +133,9 @@ foreach ($line in Get-Content -LiteralPath $configuredCachePath) {
     if ($line -match '^([^#/:]+):[^=]*=(.*)$') { $configuredCache[$Matches[1]] = $Matches[2] }
 }
 foreach ($entry in $featureRegistry.options) {
+    $expected = if ($OpeningEvaluation -and $entry.id -eq 'PROTODD_NATIVE_ALLIN_OPENING') { 'ON' } else { $entry.tournament_value }
     if (-not $configuredCache.ContainsKey($entry.id) -or
-        $configuredCache[$entry.id] -cne $entry.tournament_value) {
+        $configuredCache[$entry.id] -cne $expected) {
         throw "Resolved tournament feature differs from registry: $($entry.id)"
     }
 }
@@ -113,7 +145,9 @@ foreach ($entry in $featureRegistry.build_inputs) {
         throw "Resolved tournament build input differs from registry: $($entry.id)"
     }
 }
-& cmake --build $buildPath --config $Configuration --parallel
+# Restoring archived source can preserve old timestamps. Rebuild every object
+# so the manifest cannot certify stale outputs from a previous source tree.
+& cmake --build $buildPath --config $Configuration --parallel --clean-first
 if ($LASTEXITCODE -ne 0) { throw "Tournament DLL build failed" }
 & ctest --test-dir $buildPath -C $Configuration --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw "Tournament Release tests failed" }
@@ -140,21 +174,6 @@ if ($LASTEXITCODE -ne 0 -or $exports -notmatch "(?m)\bgameInit\b" -or
     throw "Tournament DLL is missing a required BWAPI entry point: $dllPath"
 }
 
-$sourceFiles = @(Get-TournamentSourceInventory -RepositoryRoot $repoPath)
-$sourceSnapshotHash = Get-TournamentInventoryHash -Inventory $sourceFiles
-$sourceCommit = Get-TournamentSourceCommit -RepositoryRoot $repoPath
-$sourceDirty = $false
-$sourceDiffHash = 'source-archive'
-if ($sourceCommit -ne 'source-archive') {
-    $sourceDiff = & git -c core.safecrlf=false -C $repoPath diff HEAD --binary 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        $sourceDiffBytes = [Text.Encoding]::UTF8.GetBytes(($sourceDiff -join "`n"))
-        $sourceDiffAlgorithm = [Security.Cryptography.SHA256]::Create()
-        try { $sourceDiffHash = [BitConverter]::ToString($sourceDiffAlgorithm.ComputeHash($sourceDiffBytes)).Replace('-', '').ToLowerInvariant() }
-        finally { $sourceDiffAlgorithm.Dispose() }
-    } else { $sourceDiffHash = 'unavailable' }
-    $sourceDirty = @(& git -c core.safecrlf=false -C $repoPath status --porcelain -- cmake include src tests tools training docs bwapi-data CMakeLists.txt CMakePresets.json README.md LICENSE SUBMISSION.md scripts 2>$null).Count -gt 0
-}
 $cachePath = Join-Path $buildPath "CMakeCache.txt"
 if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) {
     throw "CMake cache was not produced: $cachePath"
@@ -245,6 +264,7 @@ $dllHash = (Get-FileHash -LiteralPath $dllPath -Algorithm SHA256).Hash.ToLowerIn
 $manifestPath = Join-Path (Split-Path -Parent $dllPath) "Protodd.build-manifest.json"
 $manifest = [ordered]@{
     schema = "protodd-build-v1"
+    purpose = if ($OpeningEvaluation) { 'local-opening-evaluation' } else { 'tournament' }
     source_commit = $sourceCommit
     source_snapshot_sha256 = $sourceSnapshotHash
     source_diff_sha256 = $sourceDiffHash
@@ -287,6 +307,8 @@ $manifest = [ordered]@{
     bwapi_exports = @("gameInit", "newAIModule")
     built_utc = [DateTime]::UtcNow.ToString("o")
 }
+# A source edit during the build must not be certified as the input to its DLL.
+Assert-TournamentSourceMatchesManifest -Manifest $manifest -RepositoryRoot $repoPath
 [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
 Write-Output "Protodd tournament DLL: $dllPath"
 Write-Output "Build manifest: $manifestPath"

@@ -255,6 +255,8 @@ struct UnitSnapshot {
     int footprintHeightTiles{1};
     // True while BWAPI reports an active Shield Battery recharge order.
     bool recharging{};
+    // Includes the native mineral approach, mining and cargo-return orders.
+    bool gatheringMinerals{};
 
     void inheritObservationHistory(const UnitSnapshot& previous) noexcept;
     void updateMemoryConfidence(Frame currentFrame) noexcept;
@@ -304,6 +306,8 @@ struct BaseSnapshot {
     // False when BWAPI's static placement search found no legal depot tile.
     // Hand-authored states keep the default available until they model tiles.
     bool depotFootprintAvailable{true};
+    // Pending immutable terrain analysis remains unknown, even with distance=-1.
+    bool groundReachabilityKnown{};
 };
 
 struct TechnologySnapshot {

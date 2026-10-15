@@ -298,6 +298,12 @@ class DecisionTrace:
                 row = {"frame": frame, "target": fields[3], "technology": int(fields[4]), "status": fields[5],
                        "accepted": bool(int(fields[6])), "reason": fields[7], "minerals": int(fields[8]),
                        "gas": int(fields[9]), "reserved": bool(int(fields[10])), "executable": bool(int(fields[11]))}
+                attribution = extras(fields[12:])
+                for name in ("task", "siteId", "siteX", "siteY"):
+                    if isinstance(attribution.get(name), int):
+                        row[name] = attribution[name]
+                if row.get("task", 0) > 0:
+                    key += "/task=" + str(row["task"])
                 reservation = self.macro_reservation_totals.setdefault(row["reason"],
                     {"samples": 0, "reserved_samples": 0,
                      "reserved_cost_minerals_sample_sum": 0,
@@ -680,6 +686,27 @@ class DecisionReportTests(unittest.TestCase):
         self.assertEqual(summary["rejected_commands"][0]["count"], 20)
         self.assertEqual(summary["improvement_candidates"][0]["frame"], 10)
         self.assertEqual(summary["entity_sample_frames"], 24)
+
+    def test_macro_task_identity_prevents_cross_site_wait_attribution(self):
+        trace = DecisionTrace()
+        task_a, task_b = 9223372036854775810, 9223372036854775811
+        for frame in (24, 48):
+            trace.feed(f"MACRO,{frame},2,Nexus,0,build-pending,0,expand,400,0,1,1,task={task_a},siteId=100,siteX=600,siteY=800")
+            status, accepted = ("saving-resources", 0) if frame == 24 else ("accepted", 1)
+            trace.feed(f"MACRO,{frame},2,Nexus,0,{status},{accepted},expand,400,0,1,1,task={task_b},siteId=200,siteX=1200,siteY=800")
+        self.assertEqual(len(trace.macro), 2)
+        self.assertEqual(trace.macro_waits["Nexus: build-pending"], 24)
+        self.assertEqual(trace.macro_waits["Nexus: saving-resources"], 24)
+        by_task = {row["task"]: row for row in trace.macro.values()}
+        self.assertEqual(by_task[task_a]["since"], 24)
+        self.assertEqual(by_task[task_b]["since"], 48)
+        self.assertEqual(by_task[task_a]["siteX"], 600)
+        self.assertEqual(by_task[task_b]["siteId"], 200)
+        trace.feed("MACRO,48,0,Gateway,0,saving-resources,0,range,150,0,0,1")
+        trace.feed("MACRO,72,0,Gateway,0,saving-resources,0,range,150,0,0,1,task=0,siteId=0,siteX=-1,siteY=-1")
+        self.assertEqual(len(trace.macro), 3)
+        self.assertEqual(trace.macro_waits["Gateway: saving-resources"], 24)
+        self.assertEqual(trace.malformed, 0)
 
     def test_operating_metrics_keep_exposure_and_failure_denominators(self):
         trace = DecisionTrace()

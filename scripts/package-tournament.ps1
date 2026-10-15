@@ -69,7 +69,7 @@ try {
         New-Item -ItemType Directory -Path (Split-Path -Parent $targetFile) -Force | Out-Null
         Copy-Item -LiteralPath $sourceFile -Destination $targetFile
     }
-    Copy-Item -LiteralPath (Join-Path $repoPath "SUBMISSION.md") -Destination $stagingRoot
+    Copy-Item -LiteralPath (Join-Path $repoPath "SUBMISSION.md") -Destination (Join-Path $stagingRoot "README.md")
     $packageManifest = [ordered]@{
         schema = "protodd-tournament-package-v1"
         bot = "Protodd"

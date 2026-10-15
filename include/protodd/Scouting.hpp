@@ -9,6 +9,7 @@
 #include <span>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace protodd {
@@ -26,6 +27,7 @@ enum class ScoutGapReason : std::uint8_t {
     noAvailableScout,
     unsafeRoute,
     lowerPriority,
+    navigationPending,
 };
 
 struct ScoutInformationGap {
@@ -130,6 +132,22 @@ public:
     [[nodiscard]] const ScoutMissionMetrics& missionMetrics() const noexcept {
         return missionMetrics_;
     }
+    // All approach candidates and scouts share one resumable frame allowance.
+    // Opening/return harassment has a separate immediate escape controller.
+    static constexpr int navigationWorkPerFrame = 2048;
+    void advanceNavigation(const GameState& state, const NavigationGrid* terrain);
+    [[nodiscard]] NavigationWorkDiagnostics navigationDiagnostics() const noexcept {
+        return navigationWork_.diagnostics();
+    }
+    [[nodiscard]] bool hasRouteWork(UnitId actor) const noexcept {
+        return routeOwners_.contains(actor);
+    }
+    // This never preserves an active scout mission or grants order authority.
+    // Call only after the competing native command is confirmed.
+    [[nodiscard]] bool planningMayContinueUnder(
+        const GameState& state, const Command& confirmed) const noexcept;
+    [[nodiscard]] std::vector<UnitId> activeMissionScouts() const;
+    [[nodiscard]] std::vector<Command> pendingRouteHolds(const GameState& state) const;
     void recordCommandFeedback(const ScoutCommandFeedback& feedback, Frame frame);
     [[nodiscard]] std::optional<Command> controlWorkerScout(
         const GameState& state, const InfluenceMap& influence, const NavigationGrid* terrain = nullptr);
@@ -160,6 +178,17 @@ private:
         int bestDistance{};
         bool informationGained{};
     };
+    struct RouteOwner {
+        Frame firstSeen{};
+        UnitKind kind{UnitKind::unknown};
+        std::uint64_t token{};
+    };
+    NavigationWorkQueue navigationWork_;
+    std::unordered_map<UnitId, RouteOwner> routeOwners_;
+    std::unordered_set<UnitId> pendingRoutes_;
+    std::uint64_t nextRouteOwner_{};
+    [[nodiscard]] std::uint64_t routeOwner(const UnitSnapshot& scout);
+    void forgetRouteOwner(UnitId id) noexcept;
     std::unordered_map<UnitId, ScoutMission> previousOrders_;
     std::unordered_map<UnitId, std::uint64_t> leaseGenerations_;
     std::unordered_map<std::uint64_t, Frame> revisitAfter_;

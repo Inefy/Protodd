@@ -365,7 +365,7 @@ StrategicPlan StrategyEngine::planPvZ(
                  "sustain the anti-ling screen", true);
         }
         goal(result, GoalKind::build, UnitKind::photonCannon, 2, 100,
-             "double mineral-line cover against the ground all-in");
+             "double mineral-line cover against the ground all-in", true);
         if (effectiveUnitCount(state, UnitKind::photonCannon, UnitCountBasis::completed) >= 2 &&
             effectiveUnitCount(state, UnitKind::probe, UnitCountBasis::observed) < 10) {
             goal(result, GoalKind::train, UnitKind::probe, 10, 100,

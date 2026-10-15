@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $arenaRun = (Resolve-Path -LiteralPath $Run).Path
 Import-Module (Join-Path $PSScriptRoot 'HeadlessCampaign.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'HeadlessStarCraft.psm1') -Force
 foreach ($clientName in @('client1','client2')) {
     Assert-HeadlessArenaClient -ClientDirectory (Join-Path $arenaRun $clientName)
 }
@@ -35,8 +36,8 @@ $processes = @()
 foreach ($component in @('server','client1','client2')) {
     $directory = Join-Path $arenaRun $component
     $kind = if ($component -eq 'server') { 'server' } else { 'client' }
-    $process = Start-Process -FilePath $arenaJava -ArgumentList '-jar',"$kind.jar","${kind}_settings.json" `
-        -WorkingDirectory $directory -WindowStyle Hidden -PassThru `
+    $process = Start-ConsoleFreeProcess -FilePath $arenaJava -Arguments @('-jar',"$kind.jar","${kind}_settings.json") `
+        -WorkingDirectory $directory `
         -RedirectStandardOutput (Join-Path $directory 'stdout.log') `
         -RedirectStandardError (Join-Path $directory 'stderr.log')
     $processes += [ordered]@{component=$component; pid=$process.Id; started=$process.StartTime.ToString('o')}

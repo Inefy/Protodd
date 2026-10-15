@@ -4,6 +4,7 @@
 #include "protodd/GameState.hpp"
 #include "protodd/InfluenceMap.hpp"
 
+#include <array>
 #include <cstdint>
 #include <span>
 #include <string_view>
@@ -228,10 +229,49 @@ struct DefenseArea {
     }
 };
 
-enum class TacticalIntent : std::uint8_t { battle, raid, withdraw };
+enum class TacticalIntent : std::uint8_t { battle, raid, withdraw, raidRoutePending };
+
+// Proposal evidence from current snapshots; no ownership or acceptance claim.
+struct TacticalMovementEvidence {
+    Frame frame{-1}; UnitId actor{-1}; Frame firstSeen{-1}; UnitKind kind{UnitKind::unknown};
+    Position origin, destination, fallback, strategicRetreat, defenseCenter;
+    std::string_view source;
+    FightDecision decision{FightDecision::retreat};
+    double localThreat{}, corridorRisk{}, corridorRadius{}, corridorSeparation{}, score{};
+    UnitId corridorThreat{-1}, nearbyThreat{-1}; Position corridorThreatPosition{-1,-1};
+    int corridorWeaponRange{}, weaponCooldown{};
+    double healthFraction{};
+    bool steering{}, returningDefender{}, fragile{}, directWalkable{};
+    Position scoreGoal{-1,-1};
+    CommandType proposedCommand{CommandType::move};
+    int defenseRadius{};
+    Position economyCenter{-1,-1}, defenseFront{-1,-1}, tacticalObjective{-1,-1}, stagingGoal{-1,-1};
+    Position screenAnchor{-1,-1}, assignedScreen{-1,-1};
+    bool insideDefensiveArea{}, screenSlotInterior{}, screenSlotAssigned{};
+    double screenClearance{};
+    int dimensionLeft{}, dimensionRight{}, dimensionUp{}, dimensionDown{};
+    UnitId selectedTarget{-1};
+    Frame selectedTargetFirstSeen{-1};
+    Position selectedTargetPosition{-1, -1};
+};
+
+struct TacticalControlCost {
+    std::uint64_t totalUs{}, targetSelectionUs{}, contactUs{}, supportUs{};
+    std::uint64_t targetSelections{}, contactCalls{}, blockedContactOrigins{};
+    std::uint64_t supportCalls{}, supportCacheHits{}, pathSearches{}, expandedNodes{};
+};
 
 class TacticalController {
 public:
+    static constexpr std::size_t maximumScreenPreferences = 512;
+    static constexpr std::size_t maximumReturnRoutes = 512;
+    static constexpr int maximumReturnRouteQueries = 8;
+    static constexpr int maximumReturnRouteExpansions = 2000;
+    void reset();
+    [[nodiscard]] TacticalControlCost lastControlCost() const noexcept { return controlCost_; }
+    void forgetUnit(UnitId actor);
+    [[nodiscard]] std::size_t screenPreferenceCount() const noexcept { return screenPreferences_.size(); }
+    [[nodiscard]] std::size_t returnRouteCount() const noexcept { return returnRoutes_.size(); }
     [[nodiscard]] std::vector<Command> recharge(
         std::span<const UnitSnapshot> friendly, bool defending) const;
     [[nodiscard]] std::vector<Command> control(
@@ -252,7 +292,33 @@ public:
         const TacticalTargetModel* targetModel = nullptr,
         bool detectorWaitVolley = true,
         std::span<const Position> reservedStormZones = {},
-        Position stagingGoal = {-1, -1}) const;
+        Position stagingGoal = {-1, -1},
+        Frame frame = -1,
+        std::vector<TacticalMovementEvidence>* movementEvidence = nullptr,
+        int* returnRouteBudget = nullptr) const;
+
+private:
+    struct ScreenPreference {
+        Position anchor;
+        Position destination;
+        Frame observedFrame;
+    };
+    // A revalidated staging preference, not command acceptance or actor ownership.
+    mutable std::unordered_map<UnitId, ScreenPreference> screenPreferences_;
+    struct ReturnRoutePreference {
+        Position origin;
+        Position waypoint{-1, -1};
+        DefenseArea defense;
+        UnitKind kind{UnitKind::unknown};
+        Frame firstSeen{-1}, computed{-1};
+        std::array<int, 4> footprint{};
+        std::uint64_t terrain{}, collision{};
+        Position goal{-1, -1};
+    };
+    // A checked short terrain prefix, never command ownership or whole-route safety.
+    mutable std::unordered_map<UnitId, ReturnRoutePreference> returnRoutes_;
+    mutable Frame lastScreenFrame_{-1};
+    mutable TacticalControlCost controlCost_;
 };
 
 }  // namespace protodd

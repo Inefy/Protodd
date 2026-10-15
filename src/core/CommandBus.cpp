@@ -8,27 +8,31 @@ namespace protodd {
 
 bool FrameCommandClaims::available(const Frame frame, const UnitId actor) {
     beginFrame(frame);
-    return actor >= 0 && !acceptedActors_.contains(actor);
+    return actor >= 0 && !claimedActors_.contains(actor);
 }
 
 void FrameCommandClaims::recordAccepted(const Frame frame, const UnitId actor) {
+    recordConfirmed(frame, actor);
+}
+
+void FrameCommandClaims::recordConfirmed(const Frame frame, const UnitId actor) {
     beginFrame(frame);
-    if (actor >= 0) acceptedActors_.insert(actor);
+    if (actor >= 0) claimedActors_.insert(actor);
 }
 
 void FrameCommandClaims::forgetUnit(const UnitId actor) noexcept {
-    if (actor >= 0) acceptedActors_.erase(actor);
+    if (actor >= 0) claimedActors_.erase(actor);
 }
 
 void FrameCommandClaims::clear() noexcept {
     frame_ = -1;
-    acceptedActors_.clear();
+    claimedActors_.clear();
 }
 
 void FrameCommandClaims::beginFrame(const Frame frame) {
     if (frame_ == frame) return;
     frame_ = frame;
-    acceptedActors_.clear();
+    claimedActors_.clear();
 }
 
 void CommandBus::beginFrame(const Frame frame, const int latencyFrames) {
@@ -170,6 +174,14 @@ std::vector<Command> CommandBus::finalize(const std::size_t maximumCommands) {
     return budgeted;
 }
 
+void CommandBus::invalidateLease(const UnitId actor, const CommandOwner owner,
+                                 const std::uint64_t generation) {
+    if (actor < 0 || owner == CommandOwner::unspecified || generation == 0) return;
+    auto& latest = latestLeaseGenerations_[actor][owner];
+    latest = std::max(latest, generation);
+    static_cast<void>(discardPending(actor, owner));
+}
+
 void CommandBus::markIssued(const Command& command) {
     const auto tracksEffect = command.type == CommandType::move ||
         command.type == CommandType::attackMove || command.type == CommandType::attackUnit ||
@@ -181,6 +193,17 @@ void CommandBus::markIssued(const Command& command) {
         auto& latest = latestLeaseGenerations_[command.actor][command.owner];
         latest = std::max(latest, command.leaseGeneration);
     }
+}
+
+void CommandBus::observePosition(const UnitId actor, const Position position) {
+    const auto found = lastIssued_.find(actor);
+    if (found == lastIssued_.end() || !position.valid()) return;
+    auto& previous = found->second;
+    if (previous.command.type != CommandType::move ||
+        !previous.command.targetPosition.valid() ||
+        frame_ - previous.frame <= latencyFrames_) return;
+    if (distanceSquared(position, previous.command.targetPosition) <= 8 * 8)
+        previous.movementArrived = true;
 }
 
 std::vector<CommandEffectFeedback> CommandBus::pendingEffectFeedback() const {
@@ -275,6 +298,14 @@ bool CommandBus::redundant(const Command& command) const {
         command.effectiveUrgency() <= previous.command.effectiveUrgency() &&
         (command.type == CommandType::attackUnit || command.type == CommandType::attackMove ||
          command.type == CommandType::move || command.type == CommandType::hold)) return true;
+    // The deadband protects an active route from jitter. Once a short escape
+    // step has actually arrived, keeping it for 48 frames strands the unit in
+    // enemy range. Allow its next distinct waypoint without dropping history,
+    // ownership, or duplicate protection for the completed destination.
+    if (previous.movementArrived && isTacticalMicroMove(command) &&
+        isTacticalMicroMove(previous.command) && command.targetPosition.valid() &&
+        distanceSquared(command.targetPosition, previous.command.targetPosition) > 8 * 8)
+        return false;
     auto suppressionWindow = std::max(2, latencyFrames_ + 1);
     if (command.type == CommandType::attackUnit) {
         suppressionWindow = std::max(suppressionWindow, 18);

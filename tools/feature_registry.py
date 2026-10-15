@@ -129,14 +129,14 @@ RUNTIME_CONTROLS = [
     {
         "id": "allin_opening", "file": "AllIn-opening.txt", "kind": "mode",
         "owner": "ProtoddModule", "description": "Native replay-derived opening profile.",
-        "allowed_values": ["unset", "auto", "standard", "two-gate-zealot", "three-gate-dragoon",
+        "allowed_values": ["unset", "auto", "standard", "two-gate-zealot", "two-gate-pressure", "three-gate-dragoon",
                            "four-gate-dragoon", "dt-pressure"], "default_value": "auto",
         "tournament_values": ["unset"],
         "purpose_values": {"training": ["unset"], "development": ["unset", "auto", "standard",
-            "two-gate-zealot", "three-gate-dragoon", "four-gate-dragoon", "dt-pressure"],
+            "two-gate-zealot", "two-gate-pressure", "three-gate-dragoon", "four-gate-dragoon", "dt-pressure"],
             "final-test": ["unset"]},
         "dependencies": [], "dependencies_by_value": {value: ["PROTODD_NATIVE_ALLIN_OPENING"]
-            for value in ("auto", "standard", "two-gate-zealot", "three-gate-dragoon", "four-gate-dragoon", "dt-pressure")},
+            for value in ("auto", "standard", "two-gate-zealot", "two-gate-pressure", "three-gate-dragoon", "four-gate-dragoon", "dt-pressure")},
         "baseline": "auto",
         "evidence": ["src/bwapi/ProtoddModule.cpp", "tests/test_arena.py"],
         "promotion_status": "development-only pending matchup qualification",

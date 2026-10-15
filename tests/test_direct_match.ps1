@@ -26,6 +26,8 @@ foreach ($requiredText in @(
     '[string]$MapSourcePath',
     'Resolve-MatchMapPath -RuntimeRoot $runtimeA'
     'Start-HeadlessStarCraftLauncher',
+    'Start-ConsoleFreeProcess',
+    '$observerProcess.OutputCompletion.Wait(5000)',
     'headless = $true',
     'native_diagnostics = $nativeDiagnostics'
 )) {
@@ -33,7 +35,38 @@ foreach ($requiredText in @(
         throw "Direct-match full-callback audit integration is missing: $requiredText"
     }
 }
+# Exercise the actual generated runtime configuration. An external client
+# must have one eligible server, belonging to its opponent, never the host.
+$iniAssignments = @{}
+foreach ($node in $ast.FindAll({param($node)
+    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+    $node.Left -is [Management.Automation.Language.VariableExpressionAst]
+}, $true)) {
+    $name=$node.Left.VariablePath.UserPath
+    if ($name -in @('hostIni','joinIni','opponentSharedMemory')) { $iniAssignments[$name]=$node.Extent.Text }
+}
+foreach ($resolvedOpponentType in @('Dll','Proxy')) {
+    foreach ($name in @('opponentSharedMemory','hostIni','joinIni')) {
+        if (!$iniAssignments.ContainsKey($name)) { throw "Missing runtime configuration assignment: $name" }
+        . ([ScriptBlock]::Create($iniAssignments[$name]))
+    }
+    if ($hostIni -notmatch '(?m)^shared_memory = OFF\r?$') { throw 'DLL host is exposed to an external client' }
+    $expected = if ($resolvedOpponentType -eq 'Proxy') { 'ON' } else { 'OFF' }
+    if ($joinIni -notmatch ('(?m)^shared_memory = '+$expected+'\r?$')) {
+        throw "Wrong external-client availability for $resolvedOpponentType opponent"
+    }
+}
 $sessionStart = [DateTime]::SpecifyKind([DateTime]'2026-10-07T02:50:00', [DateTimeKind]::Utc)
+$identity=[pscustomobject]@{process_id=101;parent_process_id=100;created_utc=$sessionStart.ToString('o')}
+$same=[pscustomobject]@{ProcessId=101;ParentProcessId=100;CreationDate=$sessionStart}
+if (!(Test-OwnedMatchProcessIdentity -Identity $identity -Process $same)) { throw 'Matching cleanup identity rejected' }
+foreach ($replacement in @(
+    [pscustomobject]@{ProcessId=102;ParentProcessId=100;CreationDate=$sessionStart},
+    [pscustomobject]@{ProcessId=101;ParentProcessId=200;CreationDate=$sessionStart},
+    [pscustomobject]@{ProcessId=101;ParentProcessId=100;CreationDate=$sessionStart.AddSeconds(1)}
+)) {
+    if (Test-OwnedMatchProcessIdentity -Identity $identity -Process $replacement) { throw 'Changed cleanup identity accepted' }
+}
 $processSnapshot = @(
     [pscustomobject]@{ ProcessId = 303; ParentProcessId = 302; CreationDate = $sessionStart.AddSeconds(3) },
     [pscustomobject]@{ ProcessId = 404; ParentProcessId = 999; CreationDate = $sessionStart.AddSeconds(2) },
@@ -118,6 +151,22 @@ $runtimeB = Join-Path $fixtureRoot 'opponent'
 $script:startedAtUtc = [DateTime]::UtcNow.AddMinutes(-1)
 try {
     New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
+    $replayFunction=$ast.Find({param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-MatchReplayPath'
+    },$true)
+    if(!$replayFunction){throw 'Missing instance-specific replay resolver'}
+    . ([ScriptBlock]::Create($replayFunction.Extent.Text))
+    $replayRoot=Join-Path $fixtureRoot 'replay-runtime'
+    New-Item -ItemType Directory -Path (Join-Path $replayRoot 'Replays') -Force|Out-Null
+    $firstReplay=Get-MatchReplayPath -RuntimeRoot $replayRoot -Label 'same-match' -HostInstance 1
+    $secondReplay=Get-MatchReplayPath -RuntimeRoot $replayRoot -Label 'same-match' -HostInstance 2
+    [IO.File]::WriteAllText($firstReplay,'host-first bytes')
+    [IO.File]::WriteAllText($secondReplay,'host-second bytes')
+    if([IO.File]::ReadAllText($firstReplay) -ne 'host-first bytes' -or
+       [IO.File]::ReadAllText($secondReplay) -ne 'host-second bytes' -or
+       [IO.Path]::GetFileName($secondReplay) -ne 'same-match[2].rep'){
+        throw 'Replay resolver mixed host instances or treated brackets as wildcards'
+    }
     $mapFunction = $ast.Find({param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
             $node.Name -eq 'Resolve-MatchMapPath'
@@ -234,6 +283,26 @@ try {
     if ($reports.Count -ne 2 -or @($reports | Where-Object side -eq 'protodd').Count -ne 1) {
         throw 'Fresh host crash was not identified correctly'
     }
+    $readerFailures = [Collections.Generic.List[string]]::new()
+    $sharedReport = Join-Path $runtimeA 'Errors/writing-fatal.txt'
+    $writer = [IO.FileStream]::new($sharedReport, [IO.FileMode]::Create,
+        [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes("EXCEPTION: 0xc0000005`n")
+        $writer.Write($bytes,0,$bytes.Length)
+        $writer.Flush()
+        $reports = @(Get-MatchCrashReports)
+        if ($reports.Count -ne 3) {
+            $readerFailures.Add('A shared crash-report reader missed a flushed report while its writer remained open')
+        }
+    } finally { $writer.Dispose() }
+    Remove-Item -LiteralPath $sharedReport
+    Set-Content -LiteralPath (Join-Path $runtimeA 'Errors/native-modules.txt') -Value 'EXCEPTION: journal entry is not a crash report' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $runtimeA 'Errors/Protodd-fixture-native-exits.txt') -Value 'EXCEPTION: journal entry is not a crash report' -Encoding ascii
+    if (@(Get-MatchCrashReports).Count -ne 2) {
+        $readerFailures.Add('Append-only module or exit journals were scanned as crash reports')
+    }
+    if ($readerFailures.Count) { throw ($readerFailures -join '; ') }
 'Direct-match crash detection and map placement regressions passed'
 } finally {
     $resolved = [IO.Path]::GetFullPath($fixtureRoot)

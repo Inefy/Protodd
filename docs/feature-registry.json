@@ -795,6 +795,7 @@
           "scripts/build-opening-comparison.ps1",
           "scripts/build-tournament.ps1",
           "scripts/build-trained-controller.ps1",
+          "scripts/direct-match.ps1",
           "src/bwapi/ProtoddModule.cpp",
           "tools/feature_registry.py"
         ],
@@ -1183,6 +1184,7 @@
         "auto",
         "standard",
         "two-gate-zealot",
+        "two-gate-pressure",
         "three-gate-dragoon",
         "four-gate-dragoon",
         "dt-pressure"
@@ -1200,6 +1202,7 @@
           "auto",
           "standard",
           "two-gate-zealot",
+          "two-gate-pressure",
           "three-gate-dragoon",
           "four-gate-dragoon",
           "dt-pressure"
@@ -1217,6 +1220,9 @@
           "PROTODD_NATIVE_ALLIN_OPENING"
         ],
         "two-gate-zealot": [
+          "PROTODD_NATIVE_ALLIN_OPENING"
+        ],
+        "two-gate-pressure": [
           "PROTODD_NATIVE_ALLIN_OPENING"
         ],
         "three-gate-dragoon": [

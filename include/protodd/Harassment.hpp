@@ -15,6 +15,16 @@ struct HarassmentRouteBudget {
     static constexpr int maximumPathExpansions = 2048;
     int pathSearches{};
     int deferredChecks{};
+    // Read-only diagnostics for the last committed-objective request.
+    UnitId probeActor{-1};
+    Position probeOrigin{-1, -1}, probeTarget{-1, -1}, probeApproach{-1, -1};
+    const char* probeReason{"not-requested"};
+    NavigationStatus probeRouteStatus{NavigationStatus::invalidInput};
+    unsigned probeEligibility{};
+    bool probeOriginWalkable{}, probeTargetWalkable{};
+    bool probeSearchBudgetExhausted{};
+    MovementFootprint probeFootprint{};
+    std::size_t probeRetainedWork{};
 };
 
 struct HarassmentOpportunity {
@@ -33,6 +43,12 @@ struct HarassmentOpportunity {
 [[nodiscard]] bool harassmentRouteSafe(const GameState& state,
     const UnitSnapshot& raider, Position target, bool flyingRoute = false,
     const NavigationGrid* navigation = nullptr, HarassmentRouteBudget* routeBudget = nullptr);
+
+// A known occupied building center may be probed through a proved approach.
+[[nodiscard]] HarassmentOpportunity harassmentObjectiveProbe(
+    const GameState& state, const UnitSnapshot& raider, Position target,
+    const NavigationGrid* navigation = nullptr, HarassmentRouteBudget* routeBudget = nullptr,
+    NavigationWorkQueue* retainedRoutes = nullptr);
 
 struct RaidMission {
     std::vector<UnitId> members;

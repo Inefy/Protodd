@@ -27,8 +27,8 @@ if(Test-Path $archive) {
 Copy-Item -LiteralPath $dllPath -Destination (Join-Path $runtime 'bwapi-data/AI/AuditScenario.dll')
 if(-not $Resume){[ordered]@{dll=$dllPath;sha256=(Get-FileHash $dllPath).Hash;cases=$Cases;started=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json | Set-Content (Join-Path $archive 'receipt.json')}
 foreach($case in $Cases) {
- if($case -notin @('storm-allies','storm-clear','producer','producer-pair','cannon-blocker','resource-overlap','construction-budget','build-cancel','learned-cancel-build','builder-evacuation','builder-evacuation-started','worker-issuer','worker-local-defense','worker-mining','scout-issuer','whole-game-issuer','racebot-worker-defense','racebot-combat','command-suppression','observer-safety','fault-callback','fault-lifecycle','lifecycle-reset','lifecycle-early-exit','lifecycle-write-denied','lifecycle-output-blocked','lifecycle-truncated-history','fault-startup','fault-diagnostics','fault-diagnostics-evacuation','fault-end-history','fault-end-reporting','fault-phase','fault-observe','fault-production','fault-production-evacuation','fault-whole-game','slow-observation','slow-observation-model','pylon-loss','prerequisite','combat','combat-corpus','combat-corpus-elevation','unit-memory','footprint-native','dynamic-navigation','supply-anchor','power-recovery')) { throw 'Invalid case' }
- $mapCase=if($case -eq 'supply-anchor'){'prerequisite'}elseif($case -in @('builder-evacuation','builder-evacuation-started')){'build-cancel'}elseif($case -in @('construction-budget','learned-cancel-build','lifecycle-reset','lifecycle-early-exit','lifecycle-write-denied','lifecycle-output-blocked','lifecycle-truncated-history')){'resource-overlap'}elseif($case -in @('fault-production-evacuation','fault-diagnostics-evacuation')){'worker-local-defense'}elseif($case -in @('slow-observation','slow-observation-model')){'load'}elseif($case -in @('scout-issuer','whole-game-issuer')){'worker-mining'}elseif($case -in @('fault-callback','fault-lifecycle','fault-startup','fault-diagnostics','fault-end-history','fault-end-reporting','fault-phase','fault-observe','fault-production','fault-whole-game')){'resource-overlap'}else{$case}
+ if($case -notin @('storm-allies','storm-clear','producer','producer-pair','cannon-blocker','resource-overlap','construction-budget','build-task-pylons','build-task-cannons','build-cancel','observation-cancel','owner-build','owner-active','owner-loaded','owner-pickup','owner-mixed-loaded','owner-mixed-pickup','raw-actor-claims','learned-owner-emergency','learned-owner-active','learned-owner-active-raw','learned-owner-unconfirmed-raw','learned-cancel-build','builder-evacuation','builder-evacuation-started','worker-issuer','worker-local-defense','worker-mining','scout-issuer','whole-game-issuer','racebot-worker-defense','racebot-combat','racebot-construction-resume','racebot-construction-timeout','command-suppression','observer-safety','fault-callback','fault-lifecycle','lifecycle-reset','lifecycle-early-exit','lifecycle-write-denied','lifecycle-output-blocked','lifecycle-truncated-history','fault-startup','fault-diagnostics','fault-diagnostics-evacuation','fault-end-history','fault-end-reporting','fault-phase','fault-observe','fault-production','fault-production-evacuation','fault-whole-game','slow-observation','slow-observation-model','pylon-loss','prerequisite','combat','combat-corpus','combat-corpus-elevation','unit-memory','footprint-native','dynamic-navigation','builder-admission','fragile-defense-retreat','scout-mining-planner','depletion-ready','depletion-blocked','depletion-organic','depletion-pressure','depletion-live-unsafe','supply-anchor','power-recovery')) { throw 'Invalid case' }
+ $mapCase=if($case -in @('raw-actor-claims','learned-owner-emergency','learned-owner-active','learned-owner-active-raw','learned-owner-unconfirmed-raw')){'owner-mixed-loaded'}elseif($case -eq 'racebot-construction-timeout'){'racebot-build-timeout'}elseif($case -eq 'supply-anchor'){'prerequisite'}elseif($case -in @('builder-evacuation','builder-evacuation-started','owner-build','owner-active')){'build-cancel'}elseif($case -in @('construction-budget','learned-cancel-build','lifecycle-reset','lifecycle-early-exit','lifecycle-write-denied','lifecycle-output-blocked','lifecycle-truncated-history')){'resource-overlap'}elseif($case -in @('fault-production-evacuation','fault-diagnostics-evacuation')){'worker-local-defense'}elseif($case -in @('slow-observation','slow-observation-model')){'load'}elseif($case -in @('scout-issuer','whole-game-issuer')){'worker-mining'}elseif($case -in @('fault-callback','fault-lifecycle','fault-startup','fault-diagnostics','fault-end-history','fault-end-reporting','fault-phase','fault-observe','fault-production','fault-whole-game')){'resource-overlap'}else{$case}
  $mapPath=Join-Path $runtime "maps/audit/$mapCase.scx"
  if($Resume -and (Test-Path (Join-Path $archive "$case.csv"))){
   if(-not (Select-String -Path (Join-Path $archive "$case.csv") -Pattern '^DONE,')){throw 'Archived case incomplete'}
@@ -50,7 +50,7 @@ tournament =
 [auto_menu]
 auto_menu = LAN
 lan_mode = Local PC
-character_name = AstraBot
+character_name = Protodd
 pause_dbg = OFF
 auto_restart = OFF
 map = maps/audit/$mapCase.scx
@@ -150,11 +150,12 @@ log_path = bwapi-data/logs
  # a successful case solely because a DONE record exists.
  Copy-Item (Join-Path $runtime 'bwapi-data/bwapi.ini') (Join-Path $archive "$case.ini")
  Copy-Item $mapPath (Join-Path $archive "$case.scx")
- if($case -in @('racebot-worker-defense','racebot-combat')){
+ if($case -in @('racebot-worker-defense','racebot-combat','racebot-construction-resume','racebot-construction-timeout')){
   $raceBotLog=Join-Path $runtime 'bwapi-data/write/RaceBot.log'
   if(Test-Path -LiteralPath $raceBotLog){Copy-Item -LiteralPath $raceBotLog -Destination (Join-Path $archive 'RaceBot.log')}
-  $issuer=if($case -eq 'racebot-worker-defense'){'worker-defense'}else{'combat-defense'}
-  if(-not (Select-String -Path (Join-Path $archive 'RaceBot.log') -Pattern "^COMMAND,\d+,\d+,$issuer,Attack_Unit,.*accepted=1,error=accepted$")){
+  $issuer=switch($case){'racebot-worker-defense'{'worker-defense'}'racebot-combat'{'combat-defense'}'racebot-construction-resume'{'construction-resume'}'racebot-construction-timeout'{'construction-timeout-release'}}
+   $command=switch($case){'racebot-construction-resume'{'Right_Click_Unit'}'racebot-construction-timeout'{'Stop'}default{'Attack_Unit'}}
+  if(-not (Select-String -Path (Join-Path $archive 'RaceBot.log') -Pattern "^COMMAND,\d+,\d+,$issuer,$command,.*accepted=1,error=accepted$")){
    throw "RaceBot did not record an accepted $issuer command"
   }
  }

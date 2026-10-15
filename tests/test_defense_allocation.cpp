@@ -1,8 +1,10 @@
 #include "protodd/Squads.hpp"
 #include "protodd/UnitCatalog.hpp"
+#include "protodd/ConstructionAnchor.hpp"
 
 #include <algorithm>
 #include <iostream>
+#include <set>
 #include <unordered_set>
 
 namespace {
@@ -32,6 +34,324 @@ std::size_t mobileDefenders(const std::vector<protodd::Squad>& squads) {
     return count;
 }
 }
+
+namespace {
+using namespace protodd;
+
+UnitSnapshot rankFighter(const int id, const UnitKind kind, const Position position,
+                         const bool ours = true) {
+    UnitSnapshot unit;
+    unit.id = id; unit.kind = kind; unit.position = position; unit.ours = ours;
+    unit.completed = unit.visible = unit.detected = unit.powered = true;
+    unit.hitPoints = unit.maxHitPoints = 100;
+    unit.groundWeapon = {.damage = 20, .cooldown = 30, .maxRange = 192,
+                         .targetsGround = true};
+    unit.topSpeed = 3.0;
+    return unit;
+}
+
+std::set<UnitId> responseMembers(const std::vector<Squad>& squads) {
+    std::set<UnitId> ids;
+    for (const auto& squad : squads) {
+        if (squad.role != SquadRole::baseDefense) continue;
+        for (const auto& unit : squad.units)
+            if (!isBuilding(unit.kind)) ids.insert(unit.id);
+    }
+    return ids;
+}
+
+void checkOpeningScreenStaging(int& failures) {
+    const auto check = [&](const bool condition, const char* message) {
+        if (!condition) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
+    };
+    GameState state;
+    state.frame = 3860;
+    state.self.id = 1; state.enemy.id = 2;
+    state.self.race = state.enemy.race = Race::protoss;
+    state.mapWidthPixels = state.mapHeightPixels = 3072;
+    state.self.supplyUsed = 34; state.self.supplyTotal = 50;
+    BaseSnapshot base;
+    base.id = 1; base.ownerId = 1; base.startLocation = true;
+    base.center = {1056, 272}; base.mineralLine = {896, 224};
+    base.mineralPatches = 8; base.mineralsRemaining = 8000;
+    base.defense.anchor = {1724, 404}; base.defense.entrance = {1788, 524};
+    base.defense.width = 256;
+    state.bases = {base};
+    auto nexus = rankFighter(1, UnitKind::nexus, base.center);
+    nexus.role = UnitRole::resourceDepot; nexus.groundWeapon = {};
+    auto gateway = rankFighter(2, UnitKind::gateway, {1088, 400});
+    gateway.groundWeapon = {};
+    auto zealot = rankFighter(179, UnitKind::zealot, {1048, 448});
+    zealot.shields = zealot.maxShields = 60; zealot.topSpeed = 4.0;
+    zealot.groundWeapon = {.damage = 8, .cooldown = 22,
+                           .maxRange = 15, .targetsGround = true};
+    zealot.groundWeapon.hits = 2;
+    zealot.dimensionLeft = zealot.dimensionRight = 11;
+    zealot.dimensionUp = 5; zealot.dimensionDown = 13;
+    state.self.units = {nexus, gateway, zealot};
+    for (int index = 0; index < 14; ++index) {
+        auto probe = rankFighter(20 + index, UnitKind::probe, base.mineralLine);
+        probe.role = UnitRole::worker;
+        state.self.units.push_back(probe);
+    }
+    const auto plan = StrategyEngine{}.plan(state, {});
+    check((plan.posture == Posture::hold || plan.posture == Posture::defend) &&
+          !plan.expansionTarget.valid(), "opening fixture exercises a holding one-base rally");
+    check(plan.rallyPoint.valid() && distance(plan.rallyPoint, base.center) <= 160,
+          "a lone opening defender must not rally hundreds of pixels ahead of the economy");
+    check(plan.constructionRallyPoint() == base.defense.anchor &&
+          constructionBuilderAnchor(UnitKind::photonCannon, base.center,
+                                    plan.constructionRallyPoint(), plan.expansionTarget) == base.center,
+          "temporary army staging preserves the planned front while distant static placement screens at the base");
+    auto compactState = state;
+    compactState.bases.front().defense.anchor = {base.center.x + 128, base.center.y};
+    const auto compactPlan = StrategyEngine{}.plan(compactState, {});
+    check(constructionBuilderAnchor(UnitKind::photonCannon, base.center,
+                                    compactPlan.constructionRallyPoint(), compactPlan.expansionTarget) ==
+              compactState.bases.front().defense.anchor,
+          "a supported compact construction front survives temporary army staging");
+    for (const auto homeBuilding : {UnitKind::pylon, UnitKind::gateway, UnitKind::forge})
+        check(constructionBuilderAnchor(homeBuilding, base.center, plan.constructionRallyPoint(),
+                                        plan.expansionTarget) == base.center,
+              "separating staging preserves home builder selection");
+    check(constructionBuilderAnchor(UnitKind::nexus, base.center, plan.constructionRallyPoint(),
+                                    {2200, 2000}) == Position{2200, 2000},
+          "explicit expansion construction retains its own destination");
+    const auto quietArea = SquadPlanner::defensiveArea(state, base.defense.anchor);
+    check(distance(quietArea.center, base.center) <= 160 && !quietArea.front.valid(),
+          "quiet squad geometry must not restore an unsupported distant terrain anchor");
+    auto enemy = zealot;
+    enemy.id = 175; enemy.ours = false; enemy.position = {1788, 524};
+    enemy.lastSeen = state.frame;
+    state.enemy.units = {enemy};
+    StrategicPlan holding;
+    holding.posture = Posture::defend;
+    holding.rallyPoint = moveToward(base.center, base.defense.anchor, 144.0);
+    holding.attackTarget = enemy.position;
+    const std::vector<UnitSnapshot> army{zealot};
+    const auto squads = SquadPlanner{}.form(state, army, state.enemy.units, holding, base.center);
+    const auto defense = std::ranges::find(squads, SquadRole::baseDefense, &Squad::role);
+    check(defense != squads.end() && distance(defense->defense.center, base.center) <= 160 &&
+          !defense->defense.front.valid() && defense->defense.contains(base.center),
+          "first-contact squad formation must preserve a near-economy unsupported screen");
+    auto second = zealot;
+    second.id = 190; second.position = {1088, 448};
+    auto paired = state;
+    paired.self.units.push_back(second);
+    check(!openingScreenNeedsCover(paired, base, paired.self.units),
+          "two ready local defenders can take terrain against one observed attacker");
+    auto anotherEnemy = enemy;
+    anotherEnemy.id = 176; anotherEnemy.position.y += 32;
+    paired.enemy.units.push_back(anotherEnemy);
+    check(openingScreenNeedsCover(paired, base, paired.self.units),
+          "a merely equal opening force stages near the economy instead of advancing unsupported");
+    auto fogContact = paired;
+    for (auto& contact : fogContact.enemy.units) { contact.visible = contact.detected = false; }
+    check(openingScreenNeedsCover(fogContact, base, fogContact.self.units),
+          "recently hidden attackers do not release and recall an equal opening force on visibility changes");
+    for (auto& contact : fogContact.enemy.units) contact.locationConfidence = 0.05;
+    check(!openingScreenNeedsCover(fogContact, base, fogContact.self.units),
+          "expired attacker locations do not indefinitely pin a ready opening force");
+    auto third = zealot;
+    third.id = 191; third.position = {1120, 448};
+    paired.self.units.push_back(third);
+    check(!openingScreenNeedsCover(paired, base, paired.self.units),
+          "a ready opening force with a local lead retains terrain formation");
+    auto remoteFront = paired;
+    remoteFront.bases.front().defense.anchor = {2048, 404};
+    remoteFront.bases.front().defense.entrance = {2112, 524};
+    for (auto& fighter : remoteFront.self.units)
+        if (fighter.kind == UnitKind::zealot) fighter.position = remoteFront.bases.front().defense.anchor;
+    remoteFront.enemy.units.clear();
+    check(!openingScreenNeedsCover(remoteFront, remoteFront.bases.front(), remoteFront.self.units),
+          "arriving at a distant terrain front does not make a ready force cease being local support");
+    auto airContact = paired;
+    auto mutalisk = enemy;
+    mutalisk.kind = UnitKind::mutalisk; mutalisk.flying = true;
+    airContact.enemy.units = {mutalisk};
+    check(openingScreenNeedsCover(airContact, base, airContact.self.units),
+          "ground-only fighters cannot release a screen against an observed air attacker");
+    for (int unavailable = 0; unavailable < 7; ++unavailable) {
+        auto unavailablePair = state;
+        auto escort = second;
+        switch (unavailable) {
+            case 0: escort.completed = false; break;
+            case 1: escort.disabled = true; break;
+            case 2: escort.loaded = true; break;
+            case 3: escort.hallucination = true; break;
+            case 4: escort.recharging = true; break;
+            case 5: escort.hitPoints = 20; escort.shields = 0; break;
+            case 6: escort.kind = UnitKind::reaver; escort.ammo = 0; break;
+        }
+        unavailablePair.self.units.push_back(escort);
+        check(openingScreenNeedsCover(unavailablePair, base, unavailablePair.self.units),
+              "an unavailable, wounded or empty-ammo escort cannot release the opening screen");
+    }
+    auto distantPair = state;
+    second.position = {2600, 2400};
+    distantPair.self.units.push_back(second);
+    check(openingScreenNeedsCover(distantPair, base, distantPair.self.units),
+          "a distant raid is not local opening support");
+    auto supported = state;
+    auto cannon = rankFighter(200, UnitKind::photonCannon, base.defense.anchor);
+    cannon.groundWeapon.maxRange = 224; cannon.topSpeed = 0;
+    supported.self.units.push_back(cannon);
+    check(!openingScreenNeedsCover(supported, base, supported.self.units),
+          "completed forward Cannon coverage retains terrain assembly");
+    for (int unavailable = 0; unavailable < 5; ++unavailable) {
+        auto unavailableSupport = supported;
+        auto& tower = unavailableSupport.self.units.back();
+        switch (unavailable) {
+            case 0: tower.completed = false; break;
+            case 1: tower.powered = false; break;
+            case 2: tower.disabled = true; break;
+            case 3: tower.loaded = true; break;
+            case 4: tower.hallucination = true; break;
+        }
+        check(openingScreenNeedsCover(unavailableSupport, base, unavailableSupport.self.units),
+              "an unusable Cannon cannot release an unsupported opening screen");
+    }
+    supported.self.units.back().position = {1168, 128};
+    const auto rearArea = SquadPlanner::defensiveArea(supported, base.defense.anchor);
+    check(openingScreenNeedsCover(supported, base, supported.self.units) &&
+          rearArea.center == supported.self.units.back().position,
+          "rear Cannon support keeps the opening screen within actual support instead of a distant choke");
+    auto mature = state;
+    mature.frame = 10 * 60 * 24;
+    check(!openingScreenNeedsCover(mature, base, mature.self.units),
+          "opening staging does not replace mature terrain behavior");
+    auto expanded = state;
+    auto naturalNexus = nexus;
+    naturalNexus.id = 201; naturalNexus.position = {2200, 2000};
+    expanded.self.units.push_back(naturalNexus);
+    check(!openingScreenNeedsCover(expanded, base, expanded.self.units),
+          "multi-base defense does not inherit the one-base opening restriction");
+    auto closeTerrain = base;
+    closeTerrain.defense.anchor = {1280, 320};
+    check(!openingScreenNeedsCover(state, closeTerrain, state.self.units),
+          "terrain close to the economy remains usable by the first defender");
+
+    // Same roster, objective and retreat; only ammunition readiness changes
+    // whether this defense may use the terrain front. Routing must see it.
+    auto armed = state;
+    auto reaver = zealot;
+    reaver.id = 190; reaver.kind = UnitKind::reaver; reaver.ammo = 1;
+    reaver.position = {1088, 448}; reaver.topSpeed = 1.8;
+    reaver.groundWeapon = {.damage = 100, .cooldown = 60, .maxRange = 256, .targetsGround = true};
+    armed.self.units.push_back(reaver);
+    const std::vector<UnitSnapshot> armedArmy{zealot, reaver};
+    const auto armedSquads = SquadPlanner{}.form(armed, armedArmy, armed.enemy.units, holding, base.center);
+    auto empty = armed;
+    empty.self.units.back().ammo = 0;
+    auto emptyArmy = armedArmy;
+    emptyArmy.back().ammo = 0;
+    const auto emptySquads = SquadPlanner{}.form(empty, emptyArmy, empty.enemy.units, holding, base.center);
+    const auto armedDefense = std::ranges::find(armedSquads, SquadRole::baseDefense, &Squad::role);
+    const auto emptyDefense = std::ranges::find(emptySquads, SquadRole::baseDefense, &Squad::role);
+    check(armedDefense != armedSquads.end() && emptyDefense != emptySquads.end() &&
+          armedDefense->defense.front.valid() && !emptyDefense->defense.front.valid() &&
+          armedDefense->signature != emptyDefense->signature &&
+          armedDefense->engagementKey == emptyDefense->engagementKey,
+          "changed opening defense geometry invalidates routing identity without resetting fight hysteresis");
+}
+
+void checkDefenderResponseStability(int& failures) {
+    const auto check = [&](const bool condition, const char* message) {
+        if (!condition) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
+    };
+    GameState state;
+    state.self.id = 1; state.enemy.id = 2; state.frame = 1000;
+    state.mapWidthPixels = state.mapHeightPixels = 2048;
+    BaseSnapshot base;
+    base.id = 1; base.center = {500, 500}; base.mineralLine = {400, 500}; base.ownerId = 1;
+    state.bases = {base};
+    StrategicPlan plan;
+    plan.posture = Posture::hold; plan.rallyPoint = base.center; plan.attackTarget = {1800, 1800};
+    std::vector<UnitSnapshot> army, enemies;
+    for (int i = 0; i < 10; ++i)
+        army.push_back(rankFighter(i, UnitKind::dragoon, {500 + i * 8, 500}));
+    for (int i = 0; i < 3; ++i) {
+        auto tank = rankFighter(100 + i, UnitKind::siegeTank, {1100, 480 + i * 24}, false);
+        tank.groundWeapon.maxRange = 384; tank.lastSeen = state.frame;
+        enemies.push_back(tank);
+    }
+    const auto initialState = state;
+    const auto initialArmy = army;
+    SquadPlanner planner;
+    const auto form = [&] {
+        return responseMembers(planner.form(state, army, enemies, plan, base.center, nullptr, false));
+    };
+    const auto original = form();
+    check(original.size() == 6, "fixture commits six capable mobile defenders");
+    // The same healthy force and threat: a24px movement crosses nearest-arrival ranking.
+    for (auto& unit : army) unit.position.x += original.contains(unit.id) ? -24 : 24;
+    state.frame += 24;
+    for (auto& enemy : enemies) enemy.lastSeen = state.frame;
+    const auto next = form();
+    check(next == original, "same healthy defensive response must survive a small arrival-rank crossing");
+    std::ranges::reverse(army);
+    check(form() == next, "rank crossing is independent of snapshot iteration order");
+    const auto disabledId = *next.begin();
+    for (auto& unit : army) if (unit.id == disabledId) unit.disabled = true;
+    state.frame += 24;
+    for (auto& enemy : enemies) enemy.lastSeen = state.frame;
+    const auto replacement = form();
+    check(replacement.size() == 6 && !replacement.contains(disabledId),
+          "disabled defender is immediately replaced without reducing demand");
+    // A materially slower response must yield to available faster responders.
+    for (auto& unit : army) {
+        unit.disabled = false;
+        unit.position.x = replacement.contains(unit.id) ? 1600 : 640;
+    }
+    state.frame += 24;
+    for (auto& enemy : enemies) enemy.lastSeen = state.frame;
+    const auto urgent = form();
+    check(urgent.size() == 6 && std::ranges::any_of(army, [&](const auto& unit) {
+              return !replacement.contains(unit.id) && urgent.contains(unit.id);
+          }), "materially faster responders are not excluded by a prior assignment");
+    planner.reset();
+    check(form() == responseMembers(SquadPlanner{}.form(
+              state, army, enemies, plan, base.center, nullptr, false)),
+          "reset releases any defensive assignment history");
+
+    const auto invalidatedResponse = [&](const auto& invalidate, const char* message) {
+        auto localState = initialState;
+        auto localArmy = initialArmy;
+        auto localEnemies = enemies;
+        for (auto& enemy : localEnemies) enemy.lastSeen = localState.frame;
+        SquadPlanner localPlanner;
+        const auto selected = responseMembers(localPlanner.form(
+            localState, localArmy, localEnemies, plan, base.center, nullptr, false));
+        for (auto& unit : localArmy) unit.position.x += selected.contains(unit.id) ? -24 : 24;
+        localState.frame += 24;
+        invalidate(localPlanner, localState, localArmy, selected);
+        for (auto& enemy : localEnemies) enemy.lastSeen = localState.frame;
+        const auto observed = responseMembers(localPlanner.form(
+            localState, localArmy, localEnemies, plan, base.center, nullptr, false));
+        const auto fresh = responseMembers(SquadPlanner{}.form(
+            localState, localArmy, localEnemies, plan, base.center, nullptr, false));
+        check(observed == fresh, message);
+    };
+    invalidatedResponse([](auto&, auto& localState, auto& localArmy, const auto&) {
+        for (auto& unit : localArmy) unit.firstSeen = localState.frame;
+    }, "a reused actor lifetime cannot inherit a prior defensive response");
+    invalidatedResponse([](auto&, auto& localState, auto&, const auto&) {
+        localState.frame += 73;
+    }, "a stale defensive response does not override current arrival ranking");
+    invalidatedResponse([](auto&, auto& localState, auto&, const auto&) {
+        localState.bases.front().id = 2;
+    }, "response preference belongs to the current base identity");
+    invalidatedResponse([](auto&, auto&, auto& localArmy, const auto& selected) {
+        for (auto& unit : localArmy) if (selected.contains(unit.id)) unit.hitPoints = 25;
+    }, "wounded defenders lose preference while demand uses current health");
+    invalidatedResponse([](auto& localPlanner, auto&, auto&, const auto& selected) {
+        for (const auto id : selected) localPlanner.forgetUnit(id);
+    }, "forgotten actors release their defensive response preference");
+    invalidatedResponse([](auto&, auto& localState, auto&, const auto&) {
+        localState.frame = 999;
+    }, "a frame rollback clears defensive response history");
+}
+} // namespace
 
 int main() {
     using namespace protodd;
@@ -322,5 +642,7 @@ int main() {
     std::ranges::reverse(enemies);
     check(mobileDefenders(allocate(army, enemies)) == uncovered,
           "allocation is deterministic across snapshot order");
+    checkDefenderResponseStability(failures);
+    checkOpeningScreenStaging(failures);
     return failures == 0 ? 0 : 1;
 }

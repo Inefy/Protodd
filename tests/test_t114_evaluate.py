@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from tools.t114_evaluate import (
@@ -8,33 +9,122 @@ from tools.t114_evaluate import (
     _sha256_bytes,
     evaluate_schedule,
     score_result,
+    schedule_digest,
+    source_inventory_digest,
     stratified_bootstrap,
     verify_schedule,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEDULE_PATH = ROOT / "artifacts/goal-20261005/t114-match-identity-20261007/matched-schedule-dev-confirmation-v2.json"
+
+
+def schedule_fixture(root):
+    schedule_dir = root / "schedule"
+    schedule_dir.mkdir()
+    schedule = {
+        "schedule_id": "portable-evaluation-fixture",
+        "status": "frozen-development-schedule-not-yet-executed",
+        "development": {"pair_count": 24, "seeds": [123, 456]},
+        "arms": {}, "maps": {}, "opponents": {}, "pairs": [],
+        "shared_runtime": {
+            "runtime_profile": "stock-certification", "runtime_archive_sha256": "a" * 64,
+            "bwapi_dll_sha256": "b" * 64, "host_race": "Protoss", "frame_limit": 86400,
+            "frame_milliseconds": 0, "save_replay": True, "observer_enabled": False,
+            "preserve_learning": False,
+        },
+    }
+    for name in ("reference", "candidate"):
+        source = f"// {name} fixture source\n".encode()
+        dll = f"{name} fixture DLL bytes".encode()
+        files = [{"path": "src/bot.cpp", "sha256": _sha256_bytes(source), "size_bytes": len(source)}]
+        source_hash = source_inventory_digest(files)
+        build = {"schema": "protodd-build-v1", "source_files": files,
+                 "source_snapshot_sha256": source_hash, "dll_sha256": _sha256_bytes(dll),
+                 "cmake_options": {"tournament": True}}
+        manifest = {"schema": "protodd-tournament-package-v1", "build_manifest": build,
+                    "package_dll_sha256": _sha256_bytes(dll)}
+        package = schedule_dir / f"{name}.zip"
+        with zipfile.ZipFile(package, "w") as archive:
+            archive.writestr("manifest.json", json.dumps(manifest))
+            archive.writestr("Protodd.dll", dll)
+            archive.writestr("source/src/bot.cpp", source)
+        schedule["arms"][name] = {"name": name, "package_path": package.name,
+            "package_sha256": _sha256_bytes(package.read_bytes()),
+            "dll_sha256": _sha256_bytes(dll), "source_snapshot_sha256": source_hash}
+    for index in range(4):
+        key = f"map{index}"
+        data = f"map evidence fixture {index}".encode()
+        path = schedule_dir / f"{key}.scx"
+        path.write_bytes(data)
+        schedule["maps"][key] = {"relative_path": f"maps/{key}.scx",
+            "evidence_path": path.name, "sha256": _sha256_bytes(data)}
+    for race in ("Protoss", "Terran", "Zerg"):
+        name = f"Fixture{race}"
+        dll = f"{name} opponent bytes".encode()
+        package_hash = _sha256_bytes(f"{name} package".encode())
+        package = root / "ladder" / "bots" / name
+        (package / "AI").mkdir(parents=True)
+        (package / "AI" / f"{name}.dll").write_bytes(dll)
+        (package / ".astra-ladder.json").write_text(json.dumps({"sha256": package_hash}), encoding="utf-8")
+        schedule["opponents"][race] = {"name": name, "race": race,
+            "dll_sha256": _sha256_bytes(dll), "declared_package_sha256": package_hash}
+        for map_key in schedule["maps"]:
+            for seed in schedule["development"]["seeds"]:
+                ordinal = len(schedule["pairs"]) + 1
+                pair_id = f"fixture-{race}-{map_key}-{seed}"
+                order = ["reference", "candidate"] if ordinal % 2 else ["candidate", "reference"]
+                schedule["pairs"].append({"pair_id": pair_id, "ordinal": ordinal,
+                    "map": map_key, "matchup": f"Pv{race[0]}", "opponent": race, "seed": seed,
+                    "arm_order": order, "runs": [{"arm": arm, "label": pair_id,
+                        "runtime_set": f"{pair_id}-{arm}"} for arm in order]})
+    schedule["schedule_sha256"] = schedule_digest(schedule)
+    return schedule, schedule_dir
 
 
 class T114EvaluationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.schedule = json.loads(SCHEDULE_PATH.read_text(encoding="utf-8"))
+        cls.fixture = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.fixture.cleanup)
+        cls.fixture_root = Path(cls.fixture.name)
+        cls.schedule, cls.schedule_dir = schedule_fixture(cls.fixture_root)
 
     def test_frozen_schedule_packages_and_maps_verify(self):
-        self.assertEqual([], verify_schedule(self.schedule, SCHEDULE_PATH.parent, ROOT))
+        self.assertEqual([], verify_schedule(self.schedule, self.schedule_dir, self.fixture_root))
 
     def test_schedule_tampering_is_detected(self):
         altered = dict(self.schedule)
         altered["status"] = "executed"
-        self.assertIn("schedule hash mismatch", verify_schedule(altered, SCHEDULE_PATH.parent, ROOT))
+        self.assertIn("schedule hash mismatch", verify_schedule(altered, self.schedule_dir, self.fixture_root))
+
+    def test_packaged_source_tampering_is_detected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            schedule, directory = schedule_fixture(Path(temporary))
+            package = directory / schedule["arms"]["candidate"]["package_path"]
+            with zipfile.ZipFile(package) as archive:
+                entries = {name: archive.read(name) for name in archive.namelist()}
+            entries["source/src/bot.cpp"] = b"substituted source"
+            with zipfile.ZipFile(package, "w") as archive:
+                for name, data in entries.items():
+                    archive.writestr(name, data)
+            schedule["arms"]["candidate"]["package_sha256"] = _sha256_bytes(package.read_bytes())
+            schedule["schedule_sha256"] = schedule_digest(schedule)
+            errors = verify_schedule(schedule, directory, Path(temporary))
+        self.assertIn("candidate: source file hash differs from package manifest: src/bot.cpp", errors)
+
+    def test_map_evidence_tampering_is_detected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            schedule, directory = schedule_fixture(Path(temporary))
+            (directory / schedule["maps"]["map0"]["evidence_path"]).write_bytes(b"substituted map")
+            errors = verify_schedule(schedule, directory, Path(temporary))
+        self.assertIn("map evidence hash mismatch: map0", errors)
 
     def test_configuration_hash_matches_direct_match_powershell_serialization(self):
-        preflight_path = ROOT / "artifacts/goal-20261005/t113-bananabrain-smoke-20261007/t113-bananabrain-benzene-seed-20261027.preflight.json"
-        preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
-        actual = _sha256_bytes(_powershell_compact_json(preflight["configuration"]))
-        self.assertEqual(preflight["configuration_sha256"], actual)
+        configuration = {"label": "fixture", "game": {"map": "maps/test.scx", "seed": 123},
+                         "save": True, "optional": None}
+        expected = b'{"label":"fixture","game":{"map":"maps/test.scx","seed":123},"save":true,"optional":null}'
+        self.assertEqual(expected, _powershell_compact_json(configuration))
 
     def test_result_scoring_requires_a_terminal_win_draw_or_loss(self):
         self.assertEqual(1.0, score_result("END,win,2400"))

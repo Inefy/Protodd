@@ -146,10 +146,18 @@ std::uint64_t squadSignature(const Squad& squad) {
         hash *= 1099511628211ULL;
     };
     mix(static_cast<std::uint64_t>(squad.role));
+    mix(squad.objectiveRoutePending);
     mix(static_cast<std::uint32_t>(squad.objective.x));
     mix(static_cast<std::uint32_t>(squad.objective.y));
     mix(static_cast<std::uint32_t>(squad.retreat.x));
     mix(static_cast<std::uint32_t>(squad.retreat.y));
+    mix(static_cast<std::uint32_t>(squad.defense.center.x));
+    mix(static_cast<std::uint32_t>(squad.defense.center.y));
+    mix(static_cast<std::uint32_t>(squad.defense.pursuitRadius));
+    mix(static_cast<std::uint32_t>(squad.defense.economyCenter.x));
+    mix(static_cast<std::uint32_t>(squad.defense.economyCenter.y));
+    mix(static_cast<std::uint32_t>(squad.defense.front.x));
+    mix(static_cast<std::uint32_t>(squad.defense.front.y));
     for (const auto& unit : squad.units) {
         mix(static_cast<std::uint32_t>(unit.id));
     }
@@ -165,6 +173,64 @@ void finishSquad(Squad& squad) {
 
 }  // namespace
 
+bool openingScreenNeedsCover(const GameState& state, const BaseSnapshot& base,
+                             const std::span<const UnitSnapshot> friendly) noexcept {
+    if (state.frame < 0 || state.frame >= 10 * 60 * 24 || base.ownerId != state.self.id ||
+        !base.center.valid() || !base.defense.valid() ||
+        distanceSquared(base.center, base.defense.anchor) <= 320 * 320) return false;
+    const auto nexuses = std::ranges::count_if(state.self.units, [](const UnitSnapshot& unit) {
+        return unit.kind == UnitKind::nexus && unit.completed && !unit.disabled &&
+            !unit.loaded && !unit.hallucination && unit.position.valid() && unit.durability() > 0;
+    });
+    if (nexuses != 1) return false;
+    for (const auto& unit : state.self.units) {
+        if (!isStaticDefense(unit.kind) || !unit.completed || unit.disabled || unit.loaded ||
+            unit.hallucination || !unit.position.valid() || unit.durability() <= 0 ||
+            (unitStats(unit.kind).requiresPsi && !unit.powered)) continue;
+        const auto& weapon = unit.groundWeapon;
+        if (weapon.damage > 0 && weapon.targetsGround && weapon.maxRange > 0 &&
+            distanceSquared(unit.position, base.defense.anchor) <= weapon.maxRange * weapon.maxRange)
+            return false;
+    }
+    auto groundCount = 0;
+    auto groundPower = 0.0;
+    auto airPower = 0.0;
+    for (const auto& unit : friendly) {
+        if (!isCombatUnit(unit.kind) || isBuilding(unit.kind) || isWorker(unit.kind) ||
+            !unit.completed || unit.disabled || unit.loaded || unit.hallucination || unit.recharging ||
+            !unit.position.valid() || unit.healthFraction() < 0.5 ||
+            !std::isfinite(unit.topSpeed) || unit.topSpeed <= 0.1 ||
+            (distanceSquared(unit.position, base.center) > 800 * 800 &&
+             distanceSquared(unit.position, base.defense.anchor) > 320 * 320) ||
+            ((unit.kind == UnitKind::reaver || unit.kind == UnitKind::carrier) && unit.ammo <= 0)) continue;
+        const auto power = allocationPower(unit);
+        if (unit.groundWeapon.damage > 0 && unit.groundWeapon.targetsGround) {
+            ++groundCount;
+            groundPower += power;
+        }
+        if (unit.airWeapon.damage > 0 && unit.airWeapon.targetsAir) airPower += power;
+    }
+    if (groundCount < 2) return true;
+    auto enemyGroundPower = 0.0;
+    auto enemyAirPower = 0.0;
+    for (const auto& enemy : state.enemy.units) {
+        if ((!enemy.visible && std::min(enemy.existenceConfidence, enemy.locationConfidence) < 0.2) ||
+            !enemy.completed || enemy.disabled || enemy.loaded || enemy.hallucination ||
+            enemy.invincible || !enemy.position.valid() ||
+            enemy.groundWeapon.damage <= 0 || !enemy.groundWeapon.targetsGround ||
+            (unitStats(enemy.kind).requiresPsi && !enemy.powered) ||
+            (distanceSquared(enemy.position, base.center) > 800 * 800 &&
+             distanceSquared(enemy.position, base.defense.entrance) > 640 * 640)) continue;
+        if (enemy.requiresDetection() && !enemy.detected) return true;
+        if (enemy.flying) enemyAirPower += allocationPower(enemy);
+        else enemyGroundPower += allocationPower(enemy);
+    }
+    // Advance when the opening screen has a known local lead; retaining recent
+    // attacker knowledge avoids releasing and recalling it on fog transitions.
+    // Keep the combat evaluator's separate uncertainty and retreat controls.
+    return groundPower < enemyGroundPower * 1.35 || airPower < enemyAirPower * 1.35;
+}
+
 std::vector<Squad> SquadPlanner::form(
     const GameState& state,
     const std::span<const UnitSnapshot> friendly,
@@ -172,12 +238,36 @@ std::vector<Squad> SquadPlanner::form(
     const StrategicPlan& plan,
     const Position fallbackRetreat, const NavigationGrid* navigation,
     const bool emergencyConsolidation) const {
+    constexpr Frame responseFreshness = 3 * 24;
+    constexpr double arrivalPreferenceFrames = 24.0;
+    constexpr std::size_t maximumResponsePreferences = 512;
+    if (state.frame < lastDefensiveResponseFrame_) dtProbeRoutes_.reset();
+    if (state.frame < lastDefensiveResponseFrame_ ||
+        state.frame - lastDefensiveResponseFrame_ > responseFreshness)
+        defensiveResponses_.clear();
+    std::unordered_map<UnitId, DefensiveResponsePreference> nextResponses;
     std::vector<Squad> result;
     std::unordered_set<UnitId> assigned;
     auto nextId = 1;
     auto remainingArrivalPathSearches = maximumDefensiveArrivalPathSearches;
     harassmentRoutingStats_ = {};
     auto& harassmentRouteBudget = harassmentRoutingStats_;
+    // An exclusive DT composition is a committed timing, rather than a spare
+    // raider attached to a mixed army. Use typed intent instead of plan names.
+    const auto committedDtPressure =
+        (plan.posture == Posture::attack || plan.posture == Posture::pressure) &&
+        std::ranges::any_of(plan.composition, [](const CompositionTarget& target) {
+            return target.kind == UnitKind::darkTemplar && target.weight > 0.0;
+        }) && std::ranges::none_of(plan.composition, [](const CompositionTarget& target) {
+            return target.kind != UnitKind::darkTemplar && target.weight > 0.0;
+        });
+    if (committedDtPressure && navigation != nullptr && !navigation->empty()) {
+        if (!dtProbeRoutes_) dtProbeRoutes_ = std::make_unique<NavigationWorkQueue>();
+        dtProbeRoutes_->beginFrame(*navigation, state.frame,
+            HarassmentRouteBudget::maximumPathExpansions);
+    } else {
+        dtProbeRoutes_.reset();
+    }
 
     // Size economic defense by recently observed combat value. Briefly losing
     // sight of a ranged contain must not release its defenders across the map.
@@ -227,11 +317,10 @@ std::vector<Squad> SquadPlanner::form(
                             distanceSquared(ally.position, unit.position) <= 640 * 640;
                     })) fieldPower += power;
             }
-            // In PvT the same nearby Tanks and mines can be a real contain.
-            // Release the field group only when it also has a substantial
-            // local power lead; otherwise retain the base-defense response.
-            const auto localBreakoutLead = state.enemy.race != Race::terran ||
-                fieldPower >= threatPower * 1.60;
+            // Presence alone cannot license a weaker army to leave a live
+            // contain. Keep its defense assignment when the strategic flag
+            // changes, and release it once the local force has a power lead.
+            const auto localBreakoutLead = fieldPower >= threatPower * 1.60;
             if (fieldPower > 0.0 && fieldPower >= mobilePower * 0.60 &&
                 localBreakoutLead) continue;
         }
@@ -288,7 +377,8 @@ std::vector<Squad> SquadPlanner::form(
                 candidates.push_back(unit);
             }
         }
-        std::ranges::sort(candidates, [&baseThreats, &arrivalByUnit](
+        std::ranges::sort(candidates, [this, &baseThreats, &arrivalByUnit, threatenedBase,
+                                      responsePoint, &state](
                                           const UnitSnapshot& left,
                                           const UnitSnapshot& right) {
             const auto contributes = [&baseThreats](const UnitSnapshot& unit) {
@@ -303,8 +393,27 @@ std::vector<Squad> SquadPlanner::form(
             const auto& rightArrival = arrivalByUnit.at(right.id);
             if (leftArrival.routeValidated != rightArrival.routeValidated)
                 return leftArrival.routeValidated > rightArrival.routeValidated;
-            if (leftArrival.frames != rightArrival.frames)
-                return leftArrival.frames < rightArrival.frames;
+            const auto preferred = [&](const UnitSnapshot& unit, const DefensiveArrival& arrival,
+                                       const bool contributes) {
+                const auto previous = defensiveResponses_.find(unit.id);
+                if (!contributes || previous == defensiveResponses_.end() || !unit.ours || unit.loaded ||
+                    unit.hallucination || unit.healthFraction() < 0.5) return false;
+                const auto& response = previous->second;
+                return response.baseId == threatenedBase->id &&
+                    response.baseCenter == threatenedBase->center && response.responsePoint == responsePoint &&
+                    response.kind == unit.kind && response.firstSeen == unit.firstSeen &&
+                    response.routeValidated == arrival.routeValidated &&
+                    state.frame >= response.observedAt &&
+                    state.frame - response.observedAt <= responseFreshness;
+            };
+            // Nearby responders trading places across an arrival boundary must
+            // not exchange defense/field authority every planning tick. A
+            // materially faster responder still wins the same bounded ranking.
+            const auto leftFrames = leftArrival.frames +
+                (preferred(left, leftArrival, leftContributes) ? 0.0 : arrivalPreferenceFrames);
+            const auto rightFrames = rightArrival.frames +
+                (preferred(right, rightArrival, rightContributes) ? 0.0 : arrivalPreferenceFrames);
+            if (leftFrames != rightFrames) return leftFrames < rightFrames;
             return left.id < right.id;
         });
         Squad defense;
@@ -374,6 +483,11 @@ std::vector<Squad> SquadPlanner::form(
         for (const auto& candidate : candidates) {
             if (mobileCount >= committedMinimum && committedPower >= targetPower) break;
             defense.units.push_back(candidate);
+            if (nextResponses.size() < maximumResponsePreferences) {
+                nextResponses.emplace(candidate.id, DefensiveResponsePreference{
+                    threatenedBase->id, threatenedBase->center, responsePoint, candidate.kind,
+                    candidate.firstSeen, state.frame, arrivalByUnit.at(candidate.id).routeValidated});
+            }
             ++mobileCount;
             assigned.insert(candidate.id);
             if (std::ranges::any_of(baseThreats, [&candidate](const UnitSnapshot& threat) {
@@ -383,6 +497,10 @@ std::vector<Squad> SquadPlanner::form(
             }
         }
         if (defense.units.empty()) continue;
+        if (defense.defense.front.valid() &&
+            openingScreenNeedsCover(state, *threatenedBase, defense.units)) {
+            defense.defense = {responsePoint, 320, threatenedBase->center};
+        }
         for (const auto& unit : defense.units) assigned.insert(unit.id);
         defense.center = centroid(defense.units);
         finishSquad(defense);
@@ -408,8 +526,13 @@ std::vector<Squad> SquadPlanner::form(
                 }
                 candidates.push_back(unit);
             }
-            std::ranges::sort(candidates, [homeBase](const UnitSnapshot& left,
+            std::ranges::sort(candidates, [homeBase, committedDtPressure](const UnitSnapshot& left,
                                                       const UnitSnapshot& right) {
+                // Supporting fighters can guard the Nexus while the unit
+                // that triggered the DT timing carries out its commitment.
+                if (committedDtPressure && (left.kind == UnitKind::darkTemplar) !=
+                    (right.kind == UnitKind::darkTemplar))
+                    return left.kind != UnitKind::darkTemplar;
                 const auto leftDistance = distanceSquared(left.position, homeBase->center);
                 const auto rightDistance = distanceSquared(right.position, homeBase->center);
                 if (leftDistance != rightDistance) return leftDistance < rightDistance;
@@ -496,14 +619,63 @@ std::vector<Squad> SquadPlanner::form(
         squad.id = nextId++;
         squad.role = SquadRole::harassment;
         squad.units = std::move(group);
-        const auto opportunity = harassmentOpportunity(state, squad.units.front(), false,
-                                                       navigation, &harassmentRouteBudget);
-        squad.objective = opportunity.target.valid() ? opportunity.waypoint : fallbackRetreat;
-        squad.withdrawing = !opportunity.target.valid();
-        squad.missionReason = opportunity.target.valid() ?
+        auto opportunity = harassmentOpportunity(state, squad.units.front(), false,
+                                                  navigation, &harassmentRouteBudget);
+        const auto& lead = squad.units.front();
+        bool committedProbe = false;
+        bool pendingProbe = false;
+        if (!opportunity.target.valid() && lead.kind == UnitKind::darkTemplar) {
+            harassmentRouteBudget.probeActor = lead.id;
+            harassmentRouteBudget.probeOrigin = lead.position;
+            harassmentRouteBudget.probeTarget = plan.attackTarget;
+            harassmentRouteBudget.probeReason = "commitment-eligibility-rejected";
+            harassmentRouteBudget.probeEligibility =
+                (committedDtPressure ? 1U : 0U) |
+                (lead.cloaked ? 2U : 0U) |
+                (!lead.underAttack ? 4U : 0U) |
+                (!lead.recentlyDamaged ? 8U : 0U) |
+                (state.scannerSweeps.empty() ? 16U : 0U) |
+                (plan.attackTarget.valid() ? 32U : 0U) |
+                (fallbackRetreat.valid() ? 64U : 0U) |
+                (distanceSquared(plan.attackTarget, fallbackRetreat) > 640 * 640 ? 128U : 0U);
+        }
+        // Fog hides worker lines before the first arrival. A committed DT may
+        // scout its attack objective without assuming that workers exist,
+        // while retaining route, observed detection and damage checks.
+        if (!opportunity.target.valid() && committedDtPressure &&
+            lead.kind == UnitKind::darkTemplar && lead.cloaked &&
+            !lead.underAttack && !lead.recentlyDamaged && state.scannerSweeps.empty() &&
+            plan.attackTarget.valid() && fallbackRetreat.valid() &&
+            distanceSquared(plan.attackTarget, fallbackRetreat) > 640 * 640) {
+            const auto probe = harassmentObjectiveProbe(state, lead, plan.attackTarget,
+                navigation, &harassmentRouteBudget, dtProbeRoutes_.get());
+            if (probe.target.valid()) {
+                opportunity = probe;
+                committedProbe = true;
+            } else if (harassmentRouteBudget.probeRouteStatus == NavigationStatus::budgetExhausted ||
+                (harassmentRouteBudget.probeSearchBudgetExhausted &&
+                 harassmentRouteBudget.probeRouteStatus == NavigationStatus::partial)) {
+                // A pending terrain proof is not a recall. Stay at currently
+                // safe positions while the bounded frontier progresses.
+                pendingProbe = std::ranges::all_of(squad.units, [&](const UnitSnapshot& unit) {
+                    return unit.kind == UnitKind::darkTemplar && unit.cloaked &&
+                        !unit.underAttack && !unit.recentlyDamaged && !unit.underStorm &&
+                        unit.healthFraction() >= 0.60 &&
+                        harassmentRouteSafe(state, unit, unit.position, false,
+                            navigation, &harassmentRouteBudget);
+                });
+            }
+        }
+        squad.center = centroid(squad.units);
+        squad.objective = opportunity.target.valid() ? opportunity.waypoint :
+            pendingProbe ? squad.center : fallbackRetreat;
+        squad.withdrawing = !opportunity.target.valid() && !pendingProbe;
+        squad.objectiveRoutePending = pendingProbe;
+        squad.missionReason = committedProbe ? "Probe committed DT attack objective" :
+            pendingProbe ? "Wait for committed DT objective route" :
+            opportunity.target.valid() ?
             (squad.units.front().flying ? "Raid exposed air logistics" : "Raid exposed worker line") :
             "Raid waiting: no observed safe economic target";
-        squad.center = centroid(squad.units);
         const auto home = nearestOwnedBase(state, squad.center);
         squad.retreat = home != nullptr ? defensiveScreen(state, *home) : fallbackRetreat;
         squad.requiredRatio = plan.attackThreshold;
@@ -570,6 +742,8 @@ std::vector<Squad> SquadPlanner::form(
     std::ranges::sort(result, {}, &Squad::id);
     for (auto& squad : result)
         squad.fightMission = fightMissionFor(state, squad);
+    defensiveResponses_ = std::move(nextResponses);
+    lastDefensiveResponseFrame_ = state.frame;
     return result;
 }
 
@@ -1159,6 +1333,15 @@ bool SquadPlanner::survivingBaseUnderThreat(const GameState& state) noexcept {
     return false;
 }
 
+DefenseArea SquadPlanner::assemblyDefense(
+    const GameState& state, const Squad& squad, const Position rally,
+    const DefenseArea currentDefense) {
+    // Moving the assembly point cannot replace the boundary of a fight that
+    // is already in progress. Expansion handoff may adopt its local screen
+    // separately once the squad reaches that area.
+    return squad.enemies.empty() ? defensiveArea(state, rally) : currentDefense;
+}
+
 DefenseArea SquadPlanner::expansionDefense(
     const Squad& squad, const Position assembly, const Position expansion,
     const DefenseArea currentDefense) noexcept {
@@ -1173,20 +1356,24 @@ DefenseArea SquadPlanner::expansionDefense(
 
 DefenseArea SquadPlanner::defensiveArea(const GameState& state, const Position rally) {
     const auto* base = nearestOwnedBase(state, rally);
-    if (base != nullptr && base->defense.valid() &&
-        distanceSquared(rally, base->defense.anchor) < 256 * 256)
+    const auto terrainRally = base != nullptr && base->defense.valid() &&
+        distanceSquared(rally, base->defense.anchor) < 256 * 256;
+    const auto stageOpening = terrainRally && openingScreenNeedsCover(state, *base, state.self.units);
+    const auto formationRally = stageOpening ? defensiveScreen(state, *base) : rally;
+    if (terrainRally && !stageOpening)
         return {base->defense.anchor, std::clamp(base->defense.width, 192, 320),
                 base->center, base->defense.entrance};
     std::vector<UnitSnapshot> support;
     for (const auto& unit : state.self.units) {
         if (isStaticDefense(unit.kind) && unit.completed && unit.powered && !unit.disabled &&
-            distanceSquared(unit.position, rally) <= 576 * 576 &&
+            !unit.loaded && !unit.hallucination && unit.position.valid() &&
+            distanceSquared(unit.position, formationRally) <= 576 * 576 &&
             (base == nullptr || nearestOwnedBase(state, unit.position) == base)) {
             support.push_back(unit);
         }
     }
     const auto economy = base != nullptr ? base->center : Position{-1, -1};
-    return support.empty() ? DefenseArea{rally, 320, economy}
+    return support.empty() ? DefenseArea{formationRally, 320, economy}
                            : DefenseArea{centroid(support), 256, economy};
 }
 

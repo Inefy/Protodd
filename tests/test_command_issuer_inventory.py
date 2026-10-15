@@ -12,13 +12,16 @@ DIRECT_ISSUE = re.compile(r"(?:->|\.)\s*issueCommand\s*\(")
 class CommandIssuerInventoryTests(unittest.TestCase):
     def test_all_production_issue_calls_use_the_audited_boundaries(self):
         calls = []
-        for path in sorted((ROOT / "src").rglob("*")):
+        for path in sorted(path for directory in ("src", "include")
+                           for path in (ROOT / directory).rglob("*")):
             if path.suffix not in {".cpp", ".hpp"}:
                 continue
             relative = path.relative_to(ROOT).as_posix()
-            for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                if DIRECT_ISSUE.search(line):
-                    calls.append((relative, line_number, line.strip()))
+            source = path.read_text(encoding="utf-8")
+            lines = source.splitlines()
+            for match in DIRECT_ISSUE.finditer(source):
+                line_number = source.count("\n", 0, match.start()) + 1
+                calls.append((relative, line_number, lines[line_number - 1].strip()))
 
         self.assertEqual(
             [(path, line) for path, _, line in calls],
@@ -30,6 +33,43 @@ class CommandIssuerInventoryTests(unittest.TestCase):
             ],
             "Every production BWAPI issueCommand call must be added to an audited logging boundary",
         )
+
+    def test_unit_convenience_commands_cannot_bypass_logged_boundaries(self):
+        # These BWAPI UnitInterface methods issue commands internally. Model
+        # load, frame-load queries and opening build selection are unrelated
+        # calls with overlapping names; only those exact reviewed receivers
+        # are excluded from this production-source gate.
+        verbs = (
+            "attack move patrol holdPosition stop follow gather returnCargo repair "
+            "burrow unburrow cloak decloak siege unsiege lift land load unload unloadAll "
+            "rightClick haltConstruction cancelConstruction cancelAddon cancelTrain "
+            "cancelMorph cancelResearch cancelUpgrade useTech build buildAddon train "
+            "morph research upgrade setRallyPoint placeCOP setCommand"
+        ).split()
+        command_call = re.compile(r"(?:->|\.)\s*(?:" + "|".join(verbs) + r")\s*\(")
+        exceptions = {
+            ("include/protodd/MacroObservationStream.hpp", "budget.load"),
+            ("src/bwapi/ModelRuntime.cpp", "policy_.load"),
+            ("src/bwapi/ProductionRuntime.cpp", "model_.load"),
+            ("src/bwapi/ProtoddModule.cpp", "tacticalTarget_.load"),
+            ("src/bwapi/ProtoddModule.cpp", "allIn_.build"),
+            ("src/bwapi/ProtoddModule.cpp", "frameBudget_.load"),
+        }
+        bypasses = []
+        for path in sorted(path for directory in ("src", "include")
+                           for path in (ROOT / directory).rglob("*")):
+            if path.suffix not in {".cpp", ".hpp"}:
+                continue
+            source = path.read_text(encoding="utf-8")
+            relative = path.relative_to(ROOT).as_posix()
+            for match in command_call.finditer(source):
+                prefix = re.search(r"[A-Za-z_]\w*\s*$", source[:match.start()])
+                receiver = prefix.group().strip() if prefix else "<expression>"
+                method = re.search(r"[A-Za-z_]\w*", match.group()).group()
+                if (relative, receiver + "." + method) not in exceptions:
+                    bypasses.append((relative, source.count("\n", 0, match.start()) + 1,
+                                     receiver, method))
+        self.assertEqual(bypasses, [], "BWAPI convenience orders must use the logged issue boundary")
 
     def test_protodd_boundary_logs_the_bwapi_acceptance_result(self):
         source = (ROOT / "src/bwapi/BwapiBridge.cpp").read_text(encoding="utf-8")
@@ -87,9 +127,12 @@ class CommandIssuerInventoryTests(unittest.TestCase):
             "observer safety must preempt scout travel before it is issued",
         )
 
-        workers = module[module.index("void ProtoddModule::updateWorkers("):]
+        worker_start = module.index("void ProtoddModule::updateWorkers(")
+        worker_end = module.index("void ProtoddModule::releaseScoutLeaseForPreemption(", worker_start)
+        workers = module[worker_start:worker_end]
         self.assertIn("leasedScouts_.begin()", workers)
-        self.assertIn("releaseScoutLeaseForPreemption(assignment.worker", workers)
+        self.assertNotIn("releaseScoutLeaseForPreemption(", workers,
+                         "worker proposals cannot release scout state before API acceptance")
 
         preemption_start = module.index("void ProtoddModule::releaseScoutLeaseForPreemption(")
         preemption_end = module.index("void ProtoddModule::updateScouting(", preemption_start)
@@ -124,7 +167,10 @@ class CommandIssuerInventoryTests(unittest.TestCase):
         self.assertIn("bridge_.beginCommandBudget(", frame)
         self.assertLess(frame.index("bridge_.beginCommandBudget("),
                         frame.index('if (!measure("observe"'))
-        self.assertIn("commands_.beginFrame(state_.frame, state_.latencyFrames)", frame)
+        self.assertIn("commands_.beginFrame(commandBudgetFrame, BWAPI::Broodwar->getLatencyFrames())", frame)
+        self.assertLess(frame.index("bridge_.beginFrameCommands(commands_, commandBudgetFrame)"),
+                        frame.index('if (!measure("observe"'))
+        self.assertIn("~FrameCommandScope() { bridge.endFrameCommands(); }", frame)
         self.assertIn("commands_.submit(std::move(safetyCommand))", frame)
         self.assertIn("bridge_.submitScouts(pendingScoutOrders_, commands_)", frame)
         self.assertIn("bridge_.runMaintenance(plan_, commands_)", frame)
@@ -168,7 +214,8 @@ class CommandIssuerInventoryTests(unittest.TestCase):
         self.assertIn("frameCommandClaims_.available(frame, command.actor)", arbitration)
         self.assertIn('"actor-frame-authority-already-claimed"', arbitration)
         self.assertIn("executeUnchecked(command, resourcesPaid)", arbitration)
-        self.assertIn("if (accepted) frameCommandClaims_.recordAccepted(frame, command.actor)", arbitration)
+        self.assertIn("if (accepted) {\n        frameCommandClaims_.recordAccepted(frame, command.actor);", arbitration)
+        self.assertIn("releaseLearnedCommandLease(command, true)", arbitration)
 
         start = bridge.index("void BwapiBridge::onStart()")
         end = bridge.index("GameState BwapiBridge::observe()", start)
@@ -248,14 +295,103 @@ class CommandIssuerInventoryTests(unittest.TestCase):
         self.assertIn("void BwapiBridge::beginFrameCommands", bridge)
         self.assertIn("void BwapiBridge::endFrameCommands()", bridge)
         self.assertIn("bool BwapiBridge::executeFrameCommand(", bridge)
-        self.assertIn("bridge_.beginFrameCommands(commands_, state_.frame)", module)
+        self.assertIn("bridge_.beginFrameCommands(commands_, commandBudgetFrame)", module)
         self.assertIn("bridge_.executeFrameCommand(command)", module)
         self.assertIn("bridge_.endFrameCommands()", module)
         self.assertIn("commands_.finalize(bridge_.commandBudgetRemaining())", module)
         self.assertNotIn("frameCommandLimit_", module)
-        self.assertIn("commands_.displacedCommands()", module)
-        self.assertIn("bridge_.releaseWorkerCommandLease(proposal.actor)", module)
+        bus = (ROOT / "src/core/CommandBus.cpp").read_text(encoding="utf-8")
+        self.assertIn("displacedCommands_.push_back({command, authorityWinners_.back()})", bus)
+        self.assertIn("bridge_.releaseWorkerCommandLease(command.actor)", module)
+        self.assertIn("bridge_.invalidateCommandLease(command.actor, CommandOwner::worker, generation)", module)
         self.assertIn("++lease.generation", bridge)
+
+    def test_owner_release_requires_confirmed_authority(self):
+        module = (ROOT / "src/bwapi/ProtoddModule.cpp").read_text(encoding="utf-8")
+        start = module.index("void ProtoddModule::dispatchFrameCommands(")
+        end = module.index("void ProtoddModule::reconcileCommandEffects(", start)
+        dispatch = module[start:end]
+        release_start = dispatch.index("const auto releaseConfirmedAuthority")
+        release_end = dispatch.index("for (const auto& command : selectedCommands) selectedActors", release_start)
+        release = dispatch[release_start:release_end]
+        self.assertIn("bridge_.claimConfirmedFrameAuthority(command, apiAccepted)", release)
+        bridge = (ROOT / "src/bwapi/BwapiBridge.cpp").read_text(encoding="utf-8")
+        claim = bridge[bridge.index("bool BwapiBridge::claimConfirmedFrameAuthority("):
+                       bridge.index("bool BwapiBridge::commandActive(")]
+        self.assertIn("!changesActorOrder(command.type)", claim)
+        self.assertIn("!apiAccepted && (!command.alreadyActive || !commandActive(command))", claim)
+        for owner_release in ("releaseScoutLeaseForPreemption(command.actor",
+                              "bridge_.releaseWorkerCommandLease(command.actor)",
+                              "bridge_.releaseConstructionCommandLease(command, apiAccepted)",
+                              "transports_.preemptActor("):
+            self.assertIn(owner_release, release)
+        self.assertNotIn("commands_.displacedCommands()", release,
+                         "held owner state must release even without a current queued proposal")
+        self.assertIn("releaseConfirmedAuthority(command, false)", dispatch)
+        execute = dispatch.index("const auto accepted = bridge_.executeFrameCommand(command)")
+        confirmed = dispatch.index("releaseConfirmedAuthority(command, true)", execute)
+        accepted_branch = dispatch.index("if (accepted) {", execute)
+        self.assertLess(accepted_branch, confirmed)
+        self.assertLess(confirmed, dispatch.index("commands_.markIssued(command)", execute))
+        scout_start = module.index("void ProtoddModule::releaseScoutLeaseForPreemption(")
+        scout_end = module.index("void ProtoddModule::updateScouting(", scout_start)
+        self.assertIn("bridge_.invalidateCommandLease(actor, CommandOwner::scouting, generation)",
+                      module[scout_start:scout_end])
+
+    def test_native_mixed_fixture_calls_exact_production_dispatch(self):
+        fixture = (ROOT / "tests/bwapi_actor_authority_scenario.cpp").read_text(encoding="utf-8")
+        header = (ROOT / "src/bwapi/ProtoddModule.hpp").read_text(encoding="utf-8")
+        cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("module_.dispatchFrameCommands()", fixture)
+        self.assertIn("native->getOrderTargetPosition()", fixture)
+        self.assertIn("liveDestinationMatches && module_.bridge_.commandActive(r.emergency)", fixture)
+        self.assertIn("r.acceptedPosition)>=16*16", fixture)
+        self.assertIn("distance(r.acceptedPosition,r.emergency.targetPosition)", fixture)
+        self.assertIn("module_.bridge_.submitScouts", fixture)
+        self.assertIn("module_.bridge_.submitWorkerCommands", fixture)
+        self.assertIn("module_.bridge_.executeMacro", fixture)
+        for manual_release in ("releaseScoutLeaseForPreemption", "releaseWorkerCommandLease",
+                               "releaseConstructionCommandLease", "preemptActor(", "releaseLease("):
+            self.assertNotIn(manual_release, fixture,
+                             "native mixed proof must exercise production owner release")
+        self.assertIn("#ifdef PROTODD_ACTOR_AUTHORITY_TESTS", header)
+        self.assertIn("friend class ActorAuthorityFixture;", header)
+        start = cmake.index("add_library(protodd_audit_actor_scenario MODULE")
+        end = cmake.index("add_library(protodd_audit_load MODULE", start)
+        target = cmake[start:end]
+        self.assertIn("src/bwapi/ProtoddModule.cpp", target)
+        self.assertIn("PROTODD_ACTOR_AUTHORITY_TESTS=1", target)
+        shipping = cmake[cmake.index("add_library(protodd_bwapi"):start] if "add_library(protodd_bwapi" in cmake else cmake[:start]
+        self.assertNotIn("PROTODD_ACTOR_AUTHORITY_TESTS=1", shipping)
+
+    def test_construction_and_transport_handoff_keep_native_acknowledgment(self):
+        bridge = (ROOT / "src/bwapi/BwapiBridge.cpp").read_text(encoding="utf-8")
+        start = bridge.index("std::uint64_t BwapiBridge::releaseConstructionCommandLease(")
+        end = bridge.index("std::uint64_t BwapiBridge::releaseWorkerCommandLease(", start)
+        handoff = bridge[start:end]
+        self.assertIn("!apiAccepted && (!winner.alreadyActive || !commandActive(winner))", handoff)
+        self.assertIn("pending.cancellation.handoff(frame, true)", handoff)
+        self.assertNotIn("pendingBuilds_.erase", handoff)
+        self.assertIn("invalidateCommandLease(winner.actor, CommandOwner::construction, generation)", handoff)
+        self.assertIn("pending.cancellation.acknowledged(false, frame)", bridge)
+        cancellation = (ROOT / "include/protodd/BuildCancellation.hpp").read_text(encoding="utf-8")
+        self.assertIn("!handoff_ &&", cancellation)
+        self.assertIn("handoff_ && observedFrame <= lastRequest_", cancellation)
+        transport = (ROOT / "src/core/Transport.cpp").read_text(encoding="utf-8")
+        self.assertIn("!confirmed || winner.owner == CommandOwner::transport", transport)
+        self.assertIn("cargoHandoffs_.insert_or_assign", transport)
+        self.assertIn('"transport-handoff-cancel-pickup"', transport)
+        self.assertIn('"transport-handoff-unload"', transport)
+        self.assertIn("shuttle->orderTargetId == cargo.passenger", transport)
+        self.assertIn("passenger->loaded && passenger->transportId == shuttleId", transport)
+        self.assertIn("state.frame >= cargo.unloadAcknowledgmentDeadline", transport)
+        self.assertIn("state.frame >= mission.unloadAcknowledgmentDeadline", transport)
+        self.assertIn("remainingTravel / std::max(0.5, shuttle.topSpeed)", transport)
+        self.assertIn("remaining + 16.0 <= initial", transport)
+        self.assertIn("state.frame < cargo.emergencyTravelDeadline", transport)
+        self.assertIn("armEmergencyTravel(cargo, state, winner, shuttleId)", transport)
+        self.assertIn("sameActiveIntent = winner.alreadyActive", transport)
+        self.assertIn("if (!sameActiveIntent)", transport)
 
     def test_protodd_uses_one_global_budget_for_direct_and_bus_commands(self):
         module = (ROOT / "src/bwapi/ProtoddModule.cpp").read_text(encoding="utf-8")
@@ -300,6 +436,88 @@ class CommandIssuerInventoryTests(unittest.TestCase):
         self.assertIn("command.owner = owner", owned)
         self.assertIn("command.leaseGeneration", owned)
 
+
+
+    def test_raw_commands_share_accepted_actor_frame_claims(self):
+        bridge = (ROOT / "src/bwapi/BwapiBridge.cpp").read_text(encoding="utf-8")
+        start = bridge.index("bool BwapiBridge::issue(")
+        end = bridge.index("bool BwapiBridge::requestBuildCancellation(", start)
+        sink = bridge[start:end]
+        claim = sink.index("frameCommandClaims_.available(frame, actorId)")
+        native = sink.index("command.getUnit()->issueCommand(command)")
+        record = sink.index("if (accepted) frameCommandClaims_.recordAccepted(frame, actorId)")
+        self.assertLess(claim, sink.index("const auto cost = resourceCost"))
+        self.assertLess(claim, sink.index("commandBudget_.consume"))
+        self.assertLess(native, record)
+        self.assertIn('"actor-frame-authority-already-claimed"', sink)
+        self.assertIn("command.extra, false, false", sink)
+        fixture = (ROOT / "tests/bwapi_actor_authority_scenario.cpp").read_text(encoding="utf-8")
+        self.assertIn("executeWholeGame(a,24)", fixture)
+        self.assertIn("executeProduction(b)", fixture)
+        self.assertIn("raw-api-rejection-is-not-a-claim", fixture)
+        self.assertIn("raw-ammunition-rejections-do-not-charge", fixture)
+        self.assertNotIn("->issueCommand(", fixture)
+
+
+    def test_learned_owner_preemption_requires_confirmed_higher_urgency(self):
+        bridge = (ROOT / "src/bwapi/BwapiBridge.cpp").read_text(encoding="utf-8")
+        start = bridge.index("bool BwapiBridge::canPreemptLearnedCommandLease(")
+        end = bridge.index("std::uint64_t BwapiBridge::releaseConstructionCommandLease(", start)
+        handoff = bridge[start:end]
+        self.assertIn("winner.effectiveUrgency() > lease->second.urgency", handoff)
+        self.assertIn("changesActorOrder(winner.type)", handoff)
+        self.assertIn("winner.owner != CommandOwner::learned", handoff)
+        self.assertIn("(!apiAccepted && (!winner.alreadyActive || !commandActive(winner)))", handoff)
+        self.assertLess(handoff.index("(!apiAccepted"), handoff.index("learnedCommandLeases_.erase"))
+        self.assertIn("invalidateCommandLease(winner.actor, CommandOwner::learned, generation)", handoff)
+        module = (ROOT / "src/bwapi/ProtoddModule.cpp").read_text(encoding="utf-8")
+        self.assertIn("bridge_.releaseLearnedCommandLease(command, apiAccepted)", module)
+        self.assertIn("~RestoreTypedCommand() { current = previous; }", bridge)
+        fixture = (ROOT / "tests/bwapi_actor_authority_scenario.cpp").read_text(encoding="utf-8")
+        self.assertIn("learned-budget-deferred-retains-owner", fixture)
+        self.assertIn("learned-api-rejected-retains-owner", fixture)
+        self.assertIn("learned-confirmed-retires-old-generation", fixture)
+        self.assertIn("learned-lower-urgency-retains-owner", fixture)
+
+
+    def test_confirmed_active_authority_blocks_fresh_raw_calls(self):
+        bridge = (ROOT / "src/bwapi/BwapiBridge.cpp").read_text(encoding="utf-8")
+        start = bridge.index("bool BwapiBridge::claimConfirmedFrameAuthority(")
+        end = bridge.index("bool BwapiBridge::commandActive(", start)
+        claim = bridge[start:end]
+        self.assertIn("!changesActorOrder(command.type)", claim)
+        self.assertIn("!apiAccepted && (!command.alreadyActive || !commandActive(command))", claim)
+        self.assertLess(claim.index("!apiAccepted"), claim.index("frameCommandClaims_.recordConfirmed("))
+        self.assertNotIn("commandBudget_.consume", claim)
+        self.assertNotIn("actionDiagnostic(", claim)
+        module = (ROOT / "src/bwapi/ProtoddModule.cpp").read_text(encoding="utf-8")
+        self.assertIn("if (!bridge_.claimConfirmedFrameAuthority(command, apiAccepted)) return;", module)
+        fixture = (ROOT / "tests/bwapi_actor_authority_scenario.cpp").read_text(encoding="utf-8")
+        for proof in ("learned-active-fresh-raw-rejected", "learned-active-native-winner-preserved",
+                      "learned-unconfirmed-native-hint-is-false", "learned-unconfirmed-raw-retry-accepted"):
+            self.assertIn(proof, fixture)
+        self.assertNotIn("claimConfirmedFrameAuthority", fixture,
+                         "native proof must use production dispatch to claim authority")
+
+
+    def test_builder_inspection_limits_unknown_search_admission(self):
+        bridge = (ROOT / "src/bwapi/BwapiBridge.cpp").read_text(encoding="utf-8")
+        start = bridge.index("BWAPI::Unit BwapiBridge::findBuilder(")
+        end = bridge.index("BWAPI::TilePosition BwapiBridge::buildLocation(", start)
+        finder = bridge[start:end]
+        self.assertIn("NavigationSearchAdmissionScope admission{constructionRouteWork_}", finder)
+        self.assertEqual(finder.count("admission.restrictNewSearches()"), 2)
+        navigation = (ROOT / "src/core/Navigation.cpp").read_text(encoding="utf-8")
+        restricted = navigation[navigation.index("if (found == state.jobs.end() && !newSearchAdmission_)"):
+                                navigation.index("if (found == state.jobs.end()) {", navigation.index("if (found == state.jobs.end() && !newSearchAdmission_)"))]
+        self.assertIn("navigation.lineWalkable(from,to,footprint)", restricted)
+        self.assertIn("state.frameWork", restricted)
+        self.assertNotIn("state.jobs.push_back", restricted)
+        self.assertNotIn("findPath(", restricted)
+        fixture = (ROOT / "tests/bwapi_actor_authority_scenario.cpp").read_text(encoding="utf-8")
+        self.assertIn("admission-one-uncertain-builder-route", fixture)
+        self.assertNotIn("NavigationSearchAdmissionScope", fixture,
+                         "native admission proof must use the real macro selector")
 
 if __name__ == "__main__":
     unittest.main()

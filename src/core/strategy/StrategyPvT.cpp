@@ -88,10 +88,21 @@ StrategicPlan StrategyEngine::planPvT(
         result.desiredWorkers = std::min(result.desiredWorkers, 7);
     }
     if (antiBioDefense && supplyAtLeast(state, DisplayedSupply{7})) {
-        goal(result, GoalKind::build, UnitKind::forge, 1, bioOpening ? 113 : 100,
-             "fortified anti-bio opening anchor", true);
-        goal(result, GoalKind::build, UnitKind::photonCannon, 2, bioOpening ? 112 : 99,
-             "overlap the intercept before first contact", true);
+        // A late Marine warning can arrive after ranged access is complete.
+        // Starting the Forge/Cannon chain ahead of a ready Gateway then buys
+        // defense that finishes after contact while starving the next Dragoon.
+        // Preserve the early static bank, but let the existing reinforcement
+        // budget fund ready ranged cycles before this late support chain.
+        const auto rangedResponseReady =
+            effectiveUnitCount(state, UnitKind::cyberneticsCore, UnitCountBasis::completed) > 0 &&
+            effectiveUnitCount(state, UnitKind::gateway, UnitCountBasis::completed) > 0;
+        const auto earlyStaticIntercept = bioOpening && !rangedResponseReady;
+        goal(result, GoalKind::build, UnitKind::forge, 1, earlyStaticIntercept ? 113 : 100,
+             rangedResponseReady ? "support the late ranged anti-bio response" :
+                                   "fortified anti-bio opening anchor", true);
+        goal(result, GoalKind::build, UnitKind::photonCannon, 2, earlyStaticIntercept ? 112 : 99,
+             rangedResponseReady ? "add static cover behind the ranged response" :
+                                   "overlap the intercept before first contact", true);
         goal(result, GoalKind::build, UnitKind::gateway, 1, 98,
              "field mobile defense behind the completed static intercept", true);
     }
@@ -270,10 +281,19 @@ StrategicPlan StrategyEngine::planPvT(
         const auto rangedReservationSafe =
             dragoonInfrastructureReady && state.self.gas >= 50 &&
             effectiveUnitCount(state, UnitKind::photonCannon, UnitCountBasis::completed) >= 2;
+        // Priority alone cannot save a 100--124 mineral balance: a cheaper
+        // melee cycle can consume it before the first Dragoon becomes funded.
+        // Once the opening mobile screen exists, reserve that first ranged
+        // cycle without waiting for the late Cannon chain. Busy Gateways are
+        // filtered by the macro planner and keep the static bank available.
+        const auto firstRangedReservationSafe = dragoonInfrastructureReady &&
+            state.self.gas >= unitStats(UnitKind::dragoon).gas &&
+            (rangedReservationSafe ||
+             effectiveUnitCount(state, UnitKind::zealot, UnitCountBasis::completed) >= 2);
         if (dragoonInfrastructureReady && effectiveUnitCount(state, UnitKind::dragoon, UnitCountBasis::observed) == 0) {
             goal(result, GoalKind::train, UnitKind::dragoon, 1, 104,
                  "field the first ranged defender before support infrastructure",
-                 rangedReservationSafe);
+                 firstRangedReservationSafe);
         }
         goal(result, GoalKind::train, UnitKind::dragoon, 8,
              dragoonInfrastructureReady ? 99 : 96,

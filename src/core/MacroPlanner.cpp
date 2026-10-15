@@ -40,10 +40,6 @@ int queuedForProducer(const GameState& state, const UnitKind producer) {
     return queued + busyWithoutQueue;
 }
 
-int queuedUnitsOf(const GameState& state, const UnitKind kind) {
-    return static_cast<int>(std::ranges::count(state.self.queuedUnits, kind));
-}
-
 int usableProducers(const GameState& state, const UnitKind kind) {
     return static_cast<int>(std::ranges::count_if(state.self.units,
         [kind](const UnitSnapshot& unit) {
@@ -156,7 +152,35 @@ bool sameConstructionTask(const ConstructionTaskSite& left,
            (!left.valid() || left.id == right.id);
 }
 
+bool targetableGroundPressureAtDepot(const GameState& state) {
+    return std::ranges::any_of(state.enemy.units, [&state](const UnitSnapshot& enemy) {
+        if (!enemy.visible || !enemy.completed || enemy.flying || !enemy.detected ||
+            enemy.disabled || enemy.loaded || enemy.hallucination || enemy.invincible ||
+            !enemy.position.valid() || !isCombatUnit(enemy.kind)) return false;
+        return std::ranges::any_of(state.self.units, [&enemy](const UnitSnapshot& own) {
+            return own.kind == UnitKind::nexus && own.completed && !own.loaded &&
+                !own.hallucination && own.position.valid() &&
+                withinPixelRadius(enemy.position, own.position, PixelRadius{800});
+        });
+    });
+}
+
 }  // namespace
+
+bool MacroPlanner::constructionDemandFulfilled(const GameState& state, const GoalKind goal,
+                                 const UnitKind target, const int desiredCount,
+                                 const ConstructionTaskSite& site,
+                                 const int plannedNexuses) {
+    if (goal == GoalKind::expand && target == UnitKind::nexus && site.valid()) {
+        // An expansion goal's count is the global base quota. Its site owns
+        // one depot, and observed unfinished depots already fulfill that slot.
+        return countExistingAtSite(state, target, site) > 0 ||
+               countExisting(state, target) + plannedNexuses >= desiredCount;
+    }
+    const auto existing = site.valid() ? countExistingAtSite(state, target, site)
+                                       : countExisting(state, target);
+    return existing >= desiredCount;
+}
 
 bool trainingSlotAvailable(const bool active, const int queueSize,
                            const int remainingFrames, const int latencyFrames,
@@ -262,7 +286,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     const GameState& state,
     const StrategicPlan& plan,
     ResourceLedger& ledger,
-    const std::span<const BuildBlockerFeedback> buildBlockers) const {
+    const std::span<const BuildBlockerFeedback> buildBlockers,
+    const std::span<const ConstructionTaskSite> leasedExpansionSites) const {
     std::vector<MacroAction> actions;
     std::vector<ProductionGoal> goals = plan.goals;
     actions.reserve(goals.size() + 1U);
@@ -272,16 +297,36 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     // structure demand across that boundary. Macro reconciliation itself is
     // latency-aware and runs on increasing frames, so an equal frame is safe
     // to treat as a fresh snapshot as well.
-    if (lastFrame_ >= state.frame) pendingGoals_.clear();
+    if (lastFrame_ >= state.frame) {
+        pendingGoals_.clear();
+        pendingCriticalBankHold_.reset();
+        pendingStaticBankHold_.reset();
+        cannonCommitmentObserved_ = false;
+        lastGatheredMinerals_ = -1;
+        lastMineralDeliveryFrame_ = -1;
+    }
     lastFrame_ = state.frame;
+    if (state.estimatedMineralIncomePerMinute < 0 || state.self.gatheredMinerals < 0) {
+        lastGatheredMinerals_ = -1;
+        lastMineralDeliveryFrame_ = -1;
+    } else {
+        if (lastGatheredMinerals_ < 0 ||
+            state.self.gatheredMinerals != lastGatheredMinerals_)
+            lastMineralDeliveryFrame_ = state.frame;
+        lastGatheredMinerals_ = state.self.gatheredMinerals;
+    }
+    const auto miningInterruptedUnderGroundPressure = plan.prioritizeReinforcements &&
+        !plan.recoveringLastNexus && lastMineralDeliveryFrame_ >= 0 &&
+        state.frame - lastMineralDeliveryFrame_ >= 5 * 24 &&
+        targetableGroundPressureAtDepot(state);
+    cannonCommitmentObserved_ = cannonCommitmentObserved_ ||
+        countExisting(state, UnitKind::photonCannon) > 0;
 
     // Keep only a bounded, actionable history.  Existing structures clear the
     // demand immediately; otherwise it survives brief scouting/plan churn.
     std::erase_if(pendingGoals_, [&state](const PendingGoal& pending) {
-        const auto existing = pending.constructionSite.valid()
-            ? countExistingAtSite(state, pending.target, pending.constructionSite)
-            : countExisting(state, pending.target);
-        return existing >= pending.desiredCount || pending.lastRequested < 0 ||
+        return constructionDemandFulfilled(state, pending.goal, pending.target,
+                   pending.desiredCount, pending.constructionSite) || pending.lastRequested < 0 ||
                state.frame < pending.lastRequested ||
                state.frame - pending.lastRequested > 30 * 24;
     });
@@ -292,13 +337,23 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     }
     // An explicit lower/cancelled demand supersedes memory. Expansions must
     // obey today's safety decision immediately, even during the grace period.
-    std::erase_if(pendingGoals_, [&plan](const PendingGoal& pending) {
+    std::erase_if(pendingGoals_, [&plan, leasedExpansionSites](const PendingGoal& pending) {
         return (pending.goal == GoalKind::expand &&
                 (plan.desiredBases < pending.desiredCount ||
-                 std::ranges::none_of(plan.goals, [&pending](const ProductionGoal& goal) {
+                 (std::ranges::none_of(plan.goals, [&pending](const ProductionGoal& goal) {
                      return goal.goal == GoalKind::expand && goal.blocking &&
-                            goal.desiredCount >= pending.desiredCount;
-                 }))) ||
+                            goal.desiredCount >= pending.desiredCount &&
+                            (!pending.constructionSite.valid() ||
+                             sameConstructionTask(goal.constructionSite,
+                                                  pending.constructionSite));
+                 }) && std::ranges::none_of(leasedExpansionSites,
+                     [&pending](const ConstructionTaskSite& leased) {
+                         // A site switch removes an unissued demand, not an
+                         // engine order. Keep the previous task's allocation
+                         // until the bridge has observed its lease ending.
+                         return pending.constructionSite.valid() &&
+                                sameConstructionTask(leased, pending.constructionSite);
+                     })))) ||
                std::ranges::any_of(plan.goals, [&pending](const ProductionGoal& goal) {
                    return goal.goal == pending.goal && goal.target == pending.target &&
                           sameConstructionTask(goal.constructionSite,
@@ -334,10 +389,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         if (candidate.goal != GoalKind::train) {
             const auto fulfilled = candidate.technology != TechnologyKind::none
                 ? technologyLevel(state.self, candidate.technology) >= candidate.desiredCount
-                : (candidate.constructionSite.valid()
-                       ? countExistingAtSite(state, candidate.target,
-                                             candidate.constructionSite)
-                       : countExisting(state, candidate.target)) >= candidate.desiredCount;
+                : constructionDemandFulfilled(state, candidate.goal, candidate.target,
+                                              candidate.desiredCount, candidate.constructionSite);
             if (fulfilled) continue;
         }
         // Train goals are intentionally not merged: one demand can fill one
@@ -360,26 +413,44 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             mergedGoals.push_back(candidate);
             continue;
         }
+        const auto mandatory = existing->blocking || candidate.blocking;
         if (candidate.priority > existing->priority) {
             *existing = candidate;
         } else if (candidate.priority == existing->priority) {
             existing->desiredCount = std::max(existing->desiredCount, candidate.desiredCount);
             existing->blocking = existing->blocking || candidate.blocking;
         }
+        // Priority chooses the representative request; an optional larger
+        // quota must not erase an unfulfilled mandatory checkpoint. Fulfilled
+        // checkpoints were filtered above, so their reservation expires as
+        // soon as the required structure is committed.
+        existing->blocking = mandatory;
     }
     goals = std::move(mergedGoals);
     std::unordered_map<UnitKind, int> planned;
     std::unordered_map<UnitKind, int> committedProducers;
     std::unordered_set<UnitKind> gasStarvedProducers;
-    const auto blockedBuild = [&state, buildBlockers](
+    const auto blockedBuild = [&state, buildBlockers, leasedExpansionSites](
                                   const UnitKind target,
                                   const ConstructionTaskSite& constructionSite) {
         const auto found = std::ranges::find_if(buildBlockers,
-            [&state, target, &constructionSite](const BuildBlockerFeedback& feedback) {
-                if (feedback.target != target || feedback.retryAt <= state.frame ||
+            [&state, target, &constructionSite, leasedExpansionSites](const BuildBlockerFeedback& feedback) {
+                if (feedback.target != target ||
                     !sameConstructionTask(feedback.constructionSite, constructionSite)) {
                     return false;
                 }
+                // A short retry allows the bridge to resume route analysis.
+                // It does not prove readiness to reserve construction funds.
+                // An already-owned engine lease has a spending obligation of
+                // its own; expired admission feedback cannot remove that.
+                const auto ownedExpansion = target == UnitKind::nexus &&
+                    constructionSite.valid() && std::ranges::any_of(leasedExpansionSites,
+                        [&constructionSite](const ConstructionTaskSite& leased) {
+                            return sameConstructionTask(leased, constructionSite);
+                        });
+                if (feedback.retryAt <= state.frame &&
+                    (!pendingRouteObservationCurrent(feedback, state.frame) || ownedExpansion))
+                    return false;
                 // A missing-prerequisite report is only actionable while the
                 // prerequisite is still absent. Once a repaired prerequisite
                 // appears, retry the target immediately instead of waiting out
@@ -389,6 +460,96 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             });
         return found;
     };
+    // A critical replacement loses its last affordable bank when ordinary
+    // composition spends during a transient unknown route. Give this narrow
+    // depletion request one bounded analysis grace, with a worker cycle free.
+    // Keep the original clock across fresh observations and rotating sites;
+    // an explicit cancellation, worker breach, unsafe route or completed
+    // admission ends the episode. Ordinary expansion blockers retain their
+    // existing bank-release policy.
+    constexpr Frame criticalPendingBankGrace = 5 * 24;
+    constexpr Frame replacementPreparationRunway = 9 * 60 * 24;
+    ConstructionTaskSite pendingBankSite{};
+    Frame pendingBankFrames{-1};
+    const ProductionGoal* criticalPendingGoal = nullptr;
+    const auto healthyWorker = std::ranges::any_of(state.self.units,
+        [](const UnitSnapshot& unit) {
+            return isWorker(unit.kind) && unit.completed && unit.hitPoints > 0;
+        });
+    const auto workerBreach = std::ranges::any_of(state.self.units,
+        [](const UnitSnapshot& unit) {
+            return isWorker(unit.kind) && unit.underAttack;
+        });
+    if (!plan.deferExpansion && !plan.recoveringLastNexus && healthyWorker &&
+        !workerBreach && countCompleted(state, UnitKind::nexus) > 0 &&
+        plan.desiredBases > countCompleted(state, UnitKind::nexus) &&
+        plan.estimatedMiningRunwayFrames >= 0 &&
+        plan.estimatedMiningRunwayFrames <= replacementPreparationRunway) {
+        for (const auto& goal : goals) {
+            if (goal.goal != GoalKind::expand || goal.target != UnitKind::nexus ||
+                !goal.blocking || goal.priority < 114 || !goal.constructionSite.valid()) continue;
+            const auto blocker = blockedBuild(goal.target, goal.constructionSite);
+            if (blocker == buildBlockers.end() ||
+                !pendingRouteObservationCurrent(*blocker, state.frame)) continue;
+            if (!criticalPendingGoal || goal.priority > criticalPendingGoal->priority)
+                criticalPendingGoal = &goal;
+        }
+    }
+    if (!criticalPendingGoal) {
+        pendingCriticalBankHold_.reset();
+    } else {
+        bool siteChanged = false;
+        if (!pendingCriticalBankHold_) {
+            pendingCriticalBankHold_ = PendingCriticalBankHold{
+                criticalPendingGoal->constructionSite, state.frame};
+        } else if (!sameConstructionTask(pendingCriticalBankHold_->site,
+                                        criticalPendingGoal->constructionSite)) {
+            pendingCriticalBankHold_->site = criticalPendingGoal->constructionSite;
+            siteChanged = true;
+        }
+        const auto age = state.frame - pendingCriticalBankHold_->firstPendingFrame;
+        if (!siteChanged && age >= 0 && age < criticalPendingBankGrace) {
+            pendingBankSite = pendingCriticalBankHold_->site;
+            pendingBankFrames = criticalPendingBankGrace - age;
+        }
+    }
+    // A brief route query for an emergency anchor must not spend its last
+    // 150 minerals on a lower-priority Gateway. Keep this allocation bounded:
+    // fresh feedback and changed sites cannot renew the same waiting episode.
+    const ProductionGoal* staticPendingGoal = nullptr;
+    Frame staticBankFrames{-1};
+    if (plan.posture == Posture::defend && !plan.recoveringLastNexus && healthyWorker &&
+        countCompleted(state, UnitKind::nexus) > 0) {
+        for (const auto& goal : goals) {
+            if (goal.goal != GoalKind::build || !goal.blocking || goal.priority < 100 ||
+                (goal.target != UnitKind::forge && goal.target != UnitKind::photonCannon)) continue;
+            const auto blocker = blockedBuild(goal.target, goal.constructionSite);
+            if (blocker == buildBlockers.end() ||
+                !pendingRouteObservationCurrent(*blocker, state.frame)) continue;
+            if (!staticPendingGoal || goal.priority > staticPendingGoal->priority)
+                staticPendingGoal = &goal;
+        }
+    }
+    if (!staticPendingGoal) {
+        pendingStaticBankHold_.reset();
+    } else {
+        auto changed = false;
+        if (!pendingStaticBankHold_) {
+            pendingStaticBankHold_ = PendingStaticBankHold{
+                staticPendingGoal->target, staticPendingGoal->constructionSite, state.frame};
+        } else if (pendingStaticBankHold_->target != staticPendingGoal->target ||
+                   !sameConstructionTask(pendingStaticBankHold_->site, staticPendingGoal->constructionSite)) {
+            pendingStaticBankHold_->target = staticPendingGoal->target;
+            pendingStaticBankHold_->site = staticPendingGoal->constructionSite;
+            changed = true;
+        }
+        const auto age = state.frame - pendingStaticBankHold_->firstPendingFrame;
+        if (!changed && age >= 0 && age < criticalPendingBankGrace)
+            staticBankFrames = criticalPendingBankGrace - age;
+    }
+    // Goal generation and sorting below can invalidate the selected pointer.
+    const auto staticBankTarget = staticPendingGoal ? staticPendingGoal->target : UnitKind::unknown;
+    const auto staticBankSite = staticPendingGoal ? staticPendingGoal->constructionSite : ConstructionTaskSite{};
     // A blocking Pylon is a supply deadline, not a license to idle the
     // Nexus.  Before the game is within four supply of the cap, let a Probe
     // spend an otherwise-unaffordable Pylon's current mineral shortfall and
@@ -677,11 +838,11 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                 demand.priority = std::max(120, demand.priority);
             else if ((demand.target == UnitKind::forge || demand.target == UnitKind::photonCannon) &&
                      demand.desiredCount > countExisting(state, demand.target) && demand.blocking &&
-                     countExisting(state, UnitKind::photonCannon) == 0 && demand.priority >= 110) {
+                     !cannonCommitmentObserved_ && demand.priority >= 110) {
                 demand.priority = std::max(126, demand.priority);
-                // Once the first Cannon is paid for, let the mobile screen
-                // reinforce while it warps in instead of funding another
-                // unfinished Cannon ahead of every available Gateway.
+                // Once an actual Cannon is observed, this boost stays spent
+                // even if it dies while warping. Available Gateways then get
+                // their cycle before a replacement uses the surplus.
                 demand.desiredCount = 1;
             }
             else if (demand.goal != GoalKind::train)
@@ -691,14 +852,14 @@ std::vector<MacroAction> MacroPlanner::reconcile(
     // A ready first Gateway must deliver bodies before optional opening
     // infrastructure consumes its bank. Count paid-for queues, not just
     // completed units, so this never reserves a second layer of production.
+    // Respect the matchup screen size: quiet ranged PvP asks for one escort.
     const auto openingScreen = countExisting(state, UnitKind::zealot) +
-        countExisting(state, UnitKind::dragoon) +
-        static_cast<int>(std::ranges::count(state.self.queuedUnits, UnitKind::zealot)) +
-        static_cast<int>(std::ranges::count(state.self.queuedUnits, UnitKind::dragoon));
+        countExisting(state, UnitKind::dragoon);
     if (!plan.requireMobileDetection && state.enemy.race != Race::zerg &&
         state.frame >= 2 * 60 * 24 &&
         state.frame < 4 * 60 * 24 &&
-        openingScreen < 2 && countExisting(state, UnitKind::cyberneticsCore) == 0 &&
+        openingScreen < plan.openingScreenTarget &&
+        countExisting(state, UnitKind::cyberneticsCore) == 0 &&
         availableTrainingProducers(state, UnitKind::gateway) > 0) {
         goals.push_back({GoalKind::train, UnitKind::zealot,
             countExisting(state, UnitKind::zealot) + 1, openingScreen == 0 ? 127 : 119, true,
@@ -725,7 +886,23 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             goal.priority += criticalDeadlinePriorityAdjustment(goal.timing, state.frame);
         }
     }
-    std::ranges::stable_sort(goals, std::greater{}, &ProductionGoal::priority);
+    const auto ownsExpansionLease = [leasedExpansionSites](const ProductionGoal& goal) {
+        return goal.target == UnitKind::nexus && goal.constructionSite.valid() &&
+            std::ranges::any_of(leasedExpansionSites,
+                [&goal](const ConstructionTaskSite& leased) {
+                    return sameConstructionTask(leased, goal.constructionSite);
+                });
+    };
+    // An outstanding engine order can still spend before cancellation is
+    // observed. Allocate its cost before funding a replacement demand; plan
+    // priority governs only the bank remaining after those obligations.
+    std::ranges::stable_sort(goals, [&ownsExpansionLease](const ProductionGoal& left,
+                                                        const ProductionGoal& right) {
+        const auto leftLeased = ownsExpansionLease(left);
+        const auto rightLeased = ownsExpansionLease(right);
+        if (leftLeased != rightLeased) return leftLeased;
+        return left.priority > right.priority;
+    });
 
     for (auto goal : goals) {
         if (plan.deferExpansion && goal.target == UnitKind::nexus &&
@@ -752,12 +929,21 @@ std::vector<MacroAction> MacroPlanner::reconcile(
         // applies to both explicit goals and recursively requested tech, so
         // an Observer cannot indirectly reserve an unusable Observatory.
         if (wait > 10 * 24) continue;
-        // Higher-priority detection may have consumed gas since the budget
-        // was composed. Recheck the actual ledger before leaving a usable
-        // Gateway idle with enough minerals for its fallback unit.
-        if (goal.allowMineralFallback && goal.target == UnitKind::dragoon && ledger.freeGas() < 50) {
-            goal.target = UnitKind::zealot;
-            goal.desiredCount = countExisting(state, UnitKind::zealot) + planned[UnitKind::zealot] + 1;
+        // Recheck the ledger after higher-priority obligations. Besides gas
+        // starvation, confirmed stopped deliveries can strand a 100--124
+        // mineral bank forever while a local ground attack destroys the base.
+        // Keep ordinary ranged saving when deliveries continue, and never
+        // reclaim an existing reservation to make the fallback affordable.
+        if (goal.allowMineralFallback && goal.target == UnitKind::dragoon) {
+            const auto affordableEmergencyMelee = miningInterruptedUnderGroundPressure &&
+                ledger.freeMinerals() >= unitStats(UnitKind::zealot).minerals &&
+                ledger.freeMinerals() < unitStats(UnitKind::dragoon).minerals;
+            if (ledger.freeGas() < unitStats(UnitKind::dragoon).gas || affordableEmergencyMelee) {
+                goal.target = UnitKind::zealot;
+                goal.desiredCount = countExisting(state, UnitKind::zealot) + planned[UnitKind::zealot] + 1;
+                if (affordableEmergencyMelee)
+                    goal.reason = "field affordable defense after mineral deliveries stopped";
+            }
         }
         if (goal.technology != TechnologyKind::none) {
             const auto& stats = technologyStats(goal.technology);
@@ -847,11 +1033,13 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             continue;
         }
 
+        if (goal.goal == GoalKind::expand && goal.target == UnitKind::nexus &&
+            goal.constructionSite.valid() &&
+            constructionDemandFulfilled(state, goal.goal, goal.target, goal.desiredCount,
+                                        goal.constructionSite, planned[UnitKind::nexus])) continue;
         const auto existing = goal.constructionSite.valid()
             ? countExistingAtSite(state, goal.target, goal.constructionSite)
-            : countExisting(state, goal.target) + planned[goal.target] +
-                  (goal.goal == GoalKind::train
-                       ? queuedUnitsOf(state, goal.target) : 0);
+            : countExisting(state, goal.target) + planned[goal.target];
         if (existing >= goal.desiredCount) {
             continue;
         }
@@ -938,11 +1126,20 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                                         goal.goal == GoalKind::expand;
         const auto blockerActive = isConstructionGoal &&
             blockedBuild(goal.target, goal.constructionSite) != buildBlockers.end();
+        const auto preparationBank = ledger.freeMinerals();
         action.reserved = !blockerActive && ledger.reserve(stats.minerals, stats.gas);
         action.executable = !blockerActive;
+        if (!action.reserved && goal.blocking && goal.goal == GoalKind::expand &&
+            goal.target == UnitKind::nexus && goal.constructionSite.valid() &&
+            !plan.deferExpansion) {
+            action.preparationFundingFrames = expansionPreparationFundingWaitFrames(
+                preparationBank, state.estimatedMineralIncomePerMinute);
+        }
         if (action.reserved || goal.blocking) {
             actions.push_back(std::move(action));
-            if (!goal.constructionSite.valid()) ++planned[goal.target];
+            if (!goal.constructionSite.valid() ||
+                (goal.goal == GoalKind::expand && goal.target == UnitKind::nexus))
+                ++planned[goal.target];
             if (goal.goal == GoalKind::train) {
                 ++committedProducers[producerFor(goal.target)];
                 if (actions.back().reserved) plannedSupply += stats.supply;
@@ -955,8 +1152,27 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             goal.timing.reservationReason == CriticalReservationReason::supply &&
             !goal.timing.feasible;
         if (goal.blocking && !actions.back().reserved && !missedSupplyDeadline) {
-            protectBlocking(goal.target, stats.minerals, stats.gas,
-                            goal.priority, goal.constructionSite);
+            if (blockerActive && staticBankFrames > 0 &&
+                goal.goal == GoalKind::build && goal.target == staticBankTarget &&
+                sameConstructionTask(goal.constructionSite, staticBankSite)) {
+                const auto priorProtected = ledger.protectedMinerals;
+                ledger.protect(stats.minerals, stats.gas);
+                actions.back().pendingCriticalBankHoldFrames = staticBankFrames;
+                actions.back().pendingCriticalMineralsProtected =
+                    ledger.protectedMinerals - priorProtected;
+            } else if (blockerActive && goal.goal == GoalKind::expand &&
+                goal.target == UnitKind::nexus && pendingBankFrames > 0 &&
+                sameConstructionTask(goal.constructionSite, pendingBankSite)) {
+                const auto priorProtected = ledger.protectedMinerals;
+                ledger.protect(std::min(stats.minerals,
+                                       std::max(0, ledger.freeMinerals() - 50)), 0);
+                actions.back().pendingCriticalBankHoldFrames = pendingBankFrames;
+                actions.back().pendingCriticalMineralsProtected =
+                    ledger.protectedMinerals - priorProtected;
+            } else {
+                protectBlocking(goal.target, stats.minerals, stats.gas,
+                                goal.priority, goal.constructionSite);
+            }
             // One future unit can reserve its mineral cost while gas arrives.
             // Repeating that reservation for every idle Gateway locks the
             // entire bank behind an income stream that may have been raided.
@@ -1001,8 +1217,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
 
     auto armyCount = 0;
     for (const auto& target : plan.composition) {
-        armyCount += countExisting(state, target.kind) +
-                     queuedUnitsOf(state, target.kind) + planned[target.kind];
+        armyCount += countExisting(state, target.kind) + planned[target.kind];
     }
     constexpr auto maximumCompositionActions = 8;
     for (auto cycle = 0; cycle < maximumCompositionActions &&
@@ -1023,8 +1238,7 @@ std::vector<MacroAction> MacroPlanner::reconcile(
                 !ledger.canReserve(stats.minerals, stats.gas)) {
                 continue;
             }
-            const auto current = countExisting(state, target.kind) +
-                                 queuedUnitsOf(state, target.kind) + planned[target.kind];
+            const auto current = countExisting(state, target.kind) + planned[target.kind];
             const auto desired = target.weight / availableCompositionWeight *
                                  static_cast<double>(armyCount + 1);
             // Affordability is not permission to keep growing an already
@@ -1107,10 +1321,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
             (candidate.goal != GoalKind::build && candidate.goal != GoalKind::expand)) {
             continue;
         }
-        const auto existingAtDemand = candidate.constructionSite.valid()
-            ? countExistingAtSite(state, candidate.target, candidate.constructionSite)
-            : countExisting(state, candidate.target);
-        if (existingAtDemand >= candidate.desiredCount) continue;
+        if (constructionDemandFulfilled(state, candidate.goal, candidate.target,
+                                       candidate.desiredCount, candidate.constructionSite)) continue;
         const auto existing = std::ranges::find_if(
             pendingGoals_, [&candidate](const PendingGoal& pending) {
                 return pending.goal == candidate.goal &&
@@ -1146,6 +1358,8 @@ std::vector<MacroAction> MacroPlanner::reconcile(
 }
 
 int MacroPlanner::countExisting(const GameState& state, const UnitKind kind) {
+    // Includes paid waiting entries; callers add only newly planned units.
+    // The active Protoss trainee is already represented in self.units.
     const auto units = std::ranges::count(state.self.units, kind, &UnitSnapshot::kind);
     const auto queued = std::ranges::count(state.self.queuedUnits, kind);
     return static_cast<int>(units) + static_cast<int>(queued);

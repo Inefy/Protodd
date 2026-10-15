@@ -8,8 +8,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace protodd {
@@ -17,11 +19,17 @@ namespace protodd {
 inline constexpr int maximumDefensiveArrivalPathSearches = 8;
 inline constexpr int maximumDefensiveArrivalPathExpansions = 1024;
 
+// A distant opening choke needs a usable local screen or actual forward fire
+// support. Mature, multi-base and nearby terrain formations keep their geometry.
+[[nodiscard]] bool openingScreenNeedsCover(
+    const GameState& state, const BaseSnapshot& base,
+    std::span<const UnitSnapshot> friendly) noexcept;
+
 enum class SquadRole : std::uint8_t { mainArmy, baseDefense, harassment };
 
 struct Squad {
     int id{};
-    // Changes whenever the role, objective, retreat anchor, or membership
+    // Changes whenever the role, objective, retreat/defense geometry, or membership
     // changes. Runtime caches use this instead of the transient vector index.
     std::uint64_t signature{};
     // Combat decision memory survives reinforcement and a moving objective;
@@ -39,6 +47,7 @@ struct Squad {
     bool emergencyDefense{};
     DefenseArea defense;
     bool withdrawing{};
+    bool objectiveRoutePending{};
     std::string missionReason;
 };
 
@@ -68,11 +77,19 @@ enum class MainArmyTravelMode : std::uint8_t {
 
 class SquadPlanner {
 public:
-    void reset() { harassment_.reset(); harassmentRoutingStats_ = {}; }
+    void reset() {
+        harassment_.reset(); harassmentRoutingStats_ = {};
+        dtProbeRoutes_.reset();
+        defensiveResponses_.clear(); lastDefensiveResponseFrame_ = -1;
+    }
     [[nodiscard]] const HarassmentRouteBudget& harassmentRoutingStats() const noexcept {
         return harassmentRoutingStats_;
     }
-    void forgetUnit(UnitId id) { harassment_.forgetUnit(id); }
+    void forgetUnit(UnitId id) {
+        harassment_.forgetUnit(id); defensiveResponses_.erase(id);
+        if (dtProbeRoutes_ && id >= 0)
+            dtProbeRoutes_->forgetOwner(static_cast<std::uint64_t>(id) + 1U);
+    }
     [[nodiscard]] static std::optional<Position> threatenedNaturalRally(
         const GameState& state, const StrategicPlan& plan);
     [[nodiscard]] std::vector<Squad> form(
@@ -123,6 +140,9 @@ public:
 
     [[nodiscard]] static DefenseArea defensiveArea(
         const GameState& state, Position rally);
+    [[nodiscard]] static DefenseArea assemblyDefense(
+        const GameState& state, const Squad& squad, Position rally,
+        DefenseArea currentDefense = {});
     [[nodiscard]] static bool shouldCoverExpansion(
         const GameState& state, const StrategicPlan& plan,
         bool coverForwardThird = false) noexcept;
@@ -150,8 +170,22 @@ public:
         const Squad& squad, const Squad& vanguard, Position attackTarget);
 
 private:
+    struct DefensiveResponsePreference {
+        int baseId;
+        Position baseCenter;
+        Position responsePoint;
+        UnitKind kind;
+        Frame firstSeen;
+        Frame observedAt;
+        bool routeValidated;
+    };
+    // Arrival preference only: current eligibility, capability, route confidence
+    // and defensive power demand are checked again before assignment.
+    mutable std::unordered_map<UnitId, DefensiveResponsePreference> defensiveResponses_;
+    mutable Frame lastDefensiveResponseFrame_{-1};
     mutable HarassmentPlanner harassment_;
     mutable HarassmentRouteBudget harassmentRoutingStats_;
+    mutable std::unique_ptr<NavigationWorkQueue> dtProbeRoutes_;
     [[nodiscard]] static Position centroid(std::span<const UnitSnapshot> units) noexcept;
     [[nodiscard]] static std::vector<std::vector<UnitSnapshot>> connectedGroups(
         std::span<const UnitSnapshot> units,

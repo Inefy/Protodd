@@ -110,6 +110,76 @@ int main() {
     check(hysteresis.target(hysteresisState, noObligations) == 5,
           "gas collection resumes before the protected bank is exhausted");
 
+    GameState changedDemand;
+    changedDemand.self.minerals = 80;
+    changedDemand.self.gas = 300;
+    StrategicPlan changedPlan;
+    changedPlan.desiredGasWorkers = 3;
+    GasBankController changedBank;
+    check(changedBank.target(changedDemand, changedPlan) == 0,
+          "idle gas bank is initially paused");
+    changedDemand.self.gas = 250;
+    changedPlan.goals = {{GoalKind::train, UnitKind::arbiter, 1, 100, true,
+                          "new urgent gas obligation"}};
+    ++changedDemand.frame;
+    check(changedBank.target(changedDemand, changedPlan) == 3,
+          "a new unpaid blocking cost overrides paused-bank hysteresis");
+
+    GameState firstTech;
+    firstTech.self.minerals = 80;
+    UnitSnapshot nexus;
+    nexus.kind = UnitKind::nexus;
+    nexus.completed = true;
+    firstTech.self.units.push_back(nexus);
+    StrategicPlan firstTechPlan;
+    firstTechPlan.desiredGasWorkers = 3;
+    firstTechPlan.goals = {{GoalKind::build, UnitKind::cyberneticsCore, 1, 101, true,
+                            "fund the first ranged production prerequisite"}};
+    GasBankController firstTechBank;
+    firstTech.self.gas = 49;
+    check(firstTechBank.target(firstTech, firstTechPlan) == 3,
+          "first-tech funding still collects the first Dragoon gas cost");
+    firstTech.self.gas = 50;
+    ++firstTech.frame;
+    check(firstTechBank.target(firstTech, firstTechPlan) == 0,
+          "gas workers return to minerals once the first ranged cycle is funded");
+    firstTech.self.gas = 40;
+    ++firstTech.frame;
+    check(firstTechBank.target(firstTech, firstTechPlan) == 0,
+          "the opening gas reserve keeps hysteresis instead of shuffling each cycle");
+    firstTechPlan.goals.push_back({GoalKind::train, UnitKind::dragoon, 4, 108, true,
+                                   "first ranged reinforcements"});
+    ++firstTech.frame;
+    check(firstTechBank.target(firstTech, firstTechPlan) == 3,
+          "an unpaid first Dragoon obligation resumes gas immediately");
+    firstTech.self.gas = 75;
+    ++firstTech.frame;
+    check(firstTechBank.target(firstTech, firstTechPlan) == 0,
+          "a funded ranged obligation and buffer still prioritize Core minerals");
+    UnitSnapshot core;
+    core.kind = UnitKind::cyberneticsCore;
+    core.completed = false;
+    firstTech.self.units.push_back(core);
+    ++firstTech.frame;
+    check(firstTechBank.target(firstTech, firstTechPlan) == 0,
+          "a paid but unfinished Core cannot spend an oversized gas reserve");
+    firstTech.self.units.back().completed = true;
+    ++firstTech.frame;
+    check(firstTechBank.target(firstTech, firstTechPlan) == 3,
+          "completed ranged tech restores the ordinary gas reserve");
+    firstTech.self.units.back().completed = false;
+    firstTechPlan.goals.push_back({GoalKind::train, UnitKind::arbiter, 1, 120, true,
+                                   "additional mandatory gas obligation"});
+    firstTech.self.gas = 375;
+    ++firstTech.frame;
+    GasBankController costlyFirstTech;
+    check(costlyFirstTech.target(firstTech, firstTechPlan) == 3,
+          "opening bank reduction never discards other unpaid gas obligations");
+    firstTech.self.gas = 425;
+    ++firstTech.frame;
+    check(costlyFirstTech.target(firstTech, firstTechPlan) == 0,
+          "opening pause waits for the full combined obligation plus buffer");
+
     if (!errors) std::cout << "Gas-bank controller scenarios passed\n";
     return errors ? 1 : 0;
 }

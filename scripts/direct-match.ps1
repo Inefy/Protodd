@@ -12,6 +12,9 @@ param(
     [string]$OpponentOpening = "",
     [ValidateSet('', 'Terran_MarineRush', 'Terran_TankPush', 'Terran_4RaxMarines', 'Terran_VultureRush')]
     [string]$OpponentStrategy = "",
+    [ValidateSet('', 'standard', 'two-gate-zealot', 'two-gate-pressure', 'three-gate-dragoon', 'four-gate-dragoon', 'dt-pressure')]
+    [string]$HostOpening = "",
+    [switch]$SkipDecisionReport,
     [string]$Map = "maps/aiide/(2)Benzene.scx",
     [string]$MapSourcePath = "",
     [string]$Label = "direct-match",
@@ -188,6 +191,9 @@ if (Test-Path -LiteralPath $buildManifestPath -PathType Leaf) {
 $buildManifestSha256 = if ($buildManifest) {
     (Get-FileHash -LiteralPath $buildManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
 } else { $null }
+if ($HostOpening -and (!$buildManifest -or $buildManifest.cmake_options.native_allin_opening -ne 'ON')) {
+    throw 'HostOpening requires a manifested DLL built with PROTODD_NATIVE_ALLIN_OPENING=ON'
+}
 $runtimeAExists = Test-Path -LiteralPath $runtimeA -PathType Container
 $runtimeBExists = Test-Path -LiteralPath $runtimeB -PathType Container
 if ($runtimeAExists -ne $runtimeBExists) {
@@ -291,6 +297,17 @@ foreach ($file in $opponentFiles) {
     $opponentComponents[$relative] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
 }
 
+function Get-MatchReplayPath {
+    param([Parameter(Mandatory)][string]$RuntimeRoot,
+          [Parameter(Mandatory)][string]$Label,
+          [ValidateSet(1,2)][int]$HostInstance=1)
+    # Stock BWAPI's Detours.cpp appends [gdwProcNum] to replay names.
+    # A proxy starts first, so its DLL host is instance2. Use the exact
+    # expected name, not a wildcard or a different match's replay.
+    $filename=if($HostInstance -eq 1){$Label+'.rep'}else{$Label+'[2].rep'}
+    return Join-Path $RuntimeRoot ('Replays/'+$filename)
+}
+
 function Get-LearningStateInventory {
     param([Parameter(Mandatory)][string]$RuntimePath)
     $items = [Collections.Generic.List[object]]::new()
@@ -364,6 +381,10 @@ if (-not $PreserveLearning) {
         }
     }
 }
+if ($HostOpening) {
+    $openingPath = Join-Path $runtimeA 'bwapi-data/read/AllIn-opening.txt'
+    [IO.File]::WriteAllText($openingPath, $HostOpening + "`n", [Text.UTF8Encoding]::new($false))
+}
 $hostLearningInitial = @(Get-LearningStateInventory -RuntimePath $runtimeA)
 $opponentLearningInitial = @(Get-LearningStateInventory -RuntimePath $runtimeB)
 
@@ -433,7 +454,7 @@ function Ensure-CharacterProfile {
         Copy-Item -LiteralPath $template.FullName -Destination $destination
     }
 }
-Ensure-CharacterProfile -RuntimePath $runtimeA -CharacterName "AstraBot"
+Ensure-CharacterProfile -RuntimePath $runtimeA -CharacterName "Protodd"
 Ensure-CharacterProfile -RuntimePath $runtimeB -CharacterName $OpponentCharacterName
 if ($OpponentOpening) {
     # Runtime-only configuration: the installed ladder opponent is unchanged.
@@ -460,7 +481,7 @@ tournament =
 
 [auto_menu]
 auto_menu = LAN
-character_name = AstraBot
+character_name = Protodd
 pause_dbg = OFF
 lan_mode = Local PC
 auto_restart = OFF
@@ -478,7 +499,7 @@ wait_for_time = 1000
 
 [config]
 holiday = OFF
-shared_memory = ON
+shared_memory = OFF
 console_attach_on_startup = FALSE
 console_alloc_on_startup = FALSE
 console_attach_auto = FALSE
@@ -500,6 +521,7 @@ drop_players = ON
 [paths]
 log_path = bwapi-data/logs
 "@
+$opponentSharedMemory = if ($resolvedOpponentType -eq 'Proxy') { 'ON' } else { 'OFF' }
 $joinIni = @"
 [ai]
 ai = bwapi-data/AI/$moduleName
@@ -525,7 +547,7 @@ wait_for_time = 1000
 
 [config]
 holiday = OFF
-shared_memory = ON
+shared_memory = $opponentSharedMemory
 console_attach_on_startup = FALSE
 console_alloc_on_startup = FALSE
 console_attach_auto = FALSE
@@ -612,7 +634,7 @@ foreach ($item in $hostLearningInitial) {
 foreach ($item in $opponentLearningInitial) {
     $preflightFiles["opponent_learning_$($item.path)"] = Join-Path $runtimeB "bwapi-data/$($item.path)"
 }
-foreach ($character in @(@('AstraBot', $runtimeA), @($OpponentCharacterName, $runtimeB))) {
+foreach ($character in @(@('Protodd', $runtimeA), @($OpponentCharacterName, $runtimeB))) {
     foreach ($extension in @('mpc', 'spc')) {
         $characterPath = Join-Path $character[1] "characters/$($character[0]).$extension"
         $preflightFiles["character_$($character[0])_$extension"] = $characterPath
@@ -652,7 +674,7 @@ $preflightConfiguration = [ordered]@{
     bwapi_source_commit = if ($buildManifest) { $buildManifest.bwapi_source_commit } else { $null }
     bwapi_source_patch_sha256 = if ($buildManifest) { $buildManifest.bwapi_source_patch_sha256 } else { $null }
     bwapi_library_sha256 = if ($buildManifest) { $buildManifest.bwapi_library_sha256 } else { $null }
-    host = [ordered]@{ race = $HostRace; runtime_ini_sha256 = $hostRuntimeIniHash }
+    host = [ordered]@{ race = $HostRace; opening = $HostOpening; runtime_ini_sha256 = $hostRuntimeIniHash }
     opponent = [ordered]@{
         name = $OpponentName
         type = $resolvedOpponentType
@@ -694,6 +716,7 @@ $launched = @()
 $hostLauncher = $null
 $opponentLauncher = $null
 $proxyLaunched = @()
+$script:ownedProxyRecords = [Collections.Generic.Dictionary[int, object]]::new()
 $script:launcherPids = @()
 $script:ownedStarCraftIds = [Collections.Generic.HashSet[int]]::new()
 $script:ownedProcessRecords = [Collections.Generic.Dictionary[int, object]]::new()
@@ -714,6 +737,15 @@ function Get-TrackedStarCraftProcesses {
 function Get-TrackedStarCraftIds {
     $ids = @(Get-TrackedStarCraftProcesses | Select-Object -ExpandProperty process_id)
     @($ids | Sort-Object -Unique)
+}
+function Start-TrackedGameLauncher {
+    param([Parameter(Mandatory)][string]$Runtime,[Parameter(Mandatory)][string]$Role)
+    $launcher=Start-HeadlessStarCraftLauncher -Runtime $Runtime -LegacyWindowPlugin:$LegacyWindowPlugin
+    $script:launcherPids += $launcher.Id
+    Start-Sleep -Seconds 3
+    $owned=@(Get-TrackedStarCraftProcesses|Where-Object parent_process_id -eq $launcher.Id)
+    if (!$owned.Count) { throw "Could not establish ownership of the launched $Role StarCraft process" }
+    return [pscustomobject]@{Launcher=$launcher;Processes=$owned}
 }
 function Close-LaunchedStarCraft {
     # Never use AppActivate or SendKeys here: focus can change while a game
@@ -785,7 +817,7 @@ function Close-LaunchedStarCraft {
         $process = Get-Process -Id $id -ErrorAction SilentlyContinue
         if (-not $process -or $process.ProcessName -ne 'StarCraft') { continue }
         try {
-            Stop-Process -Id $id -Force -ErrorAction Stop
+            [void](Stop-OwnedMatchProcess -Identity $script:ownedProcessRecords[$id])
         } catch {
             $forceStopFailures.Add([ordered]@{pid=$id; error=$_.Exception.Message})
         }
@@ -809,17 +841,62 @@ function Close-LaunchedStarCraft {
         remaining_pids = $remainingIds
     }
 }
-function Close-LaunchedProxy {
-    foreach ($id in @($script:proxyLaunched)) {
-        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+function Update-OwnedProxyProcesses {
+    if (!$script:proxyLaunched.Count) { return }
+    $all = @(Get-CimInstance Win32_Process)
+    $records = @(Get-OwnedStarCraftProcesses -Processes $all `
+        -RootProcessIds $script:proxyLaunched -StartedAtUtc $script:startedAtUtc)
+    foreach ($process in $all) {
+        if ([int]$process.ProcessId -in $script:proxyLaunched -and
+            [int]$process.ParentProcessId -eq $PID -and
+            $process.CreationDate.ToUniversalTime() -ge $script:startedAtUtc) {
+            $records += [pscustomobject]@{process_id=[int]$process.ProcessId;
+                parent_process_id=[int]$process.ParentProcessId;
+                created_utc=$process.CreationDate.ToUniversalTime().ToString('o')}
+        }
     }
+    foreach ($record in $records) {
+        if (!$script:ownedProxyRecords.ContainsKey([int]$record.process_id)) {
+            $script:ownedProxyRecords[[int]$record.process_id] = $record
+        }
+    }
+}
+function Close-LaunchedProxy {
+    $failures = [Collections.Generic.List[string]]::new()
+    try { Update-OwnedProxyProcesses } catch { $failures.Add($_.Exception.Message) }
+    foreach ($identity in @($script:ownedProxyRecords.Values | Sort-Object created_utc -Descending)) {
+        try { [void](Stop-OwnedMatchProcess -Identity $identity) }
+        catch { $failures.Add($_.Exception.Message) }
+    }
+    Start-Sleep -Milliseconds 250
+    $remaining = @()
+    foreach ($identity in $script:ownedProxyRecords.Values) {
+        $current = Get-CimInstance Win32_Process -Filter ('ProcessId = '+$identity.process_id)
+        if ($current -and (Test-OwnedMatchProcessIdentity -Identity $identity -Process $current)) {
+            $remaining += [int]$identity.process_id
+        }
+    }
+    if ($proxy -and !$proxy.OutputCompletion.Wait(5000)) { $failures.Add('Proxy output drain timed out') }
+    return [ordered]@{cleanup_complete=($remaining.Count -eq 0 -and $failures.Count -eq 0);
+        owned_processes=@($script:ownedProxyRecords.Values);
+        remaining_pids=$remaining;errors=@($failures.ToArray())}
 }
 function Get-MatchCrashReports {
     foreach ($side in @(@('protodd', $runtimeA), @('opponent', $runtimeB))) {
         $errorRoot = Join-Path $side[1] 'Errors'
         foreach ($file in @(Get-ChildItem -LiteralPath $errorRoot -Filter '*.txt' -File -ErrorAction SilentlyContinue)) {
+            # These append journals are not exception reports. Reading the
+            # growing module journal used to deny the monitor's next append.
+            if ($file.Name -match '(?:^|-)native-(?:modules|exits)\.txt$') { continue }
             if ($file.LastWriteTimeUtc -lt $script:startedAtUtc) { continue }
-            try { $report = [IO.File]::ReadAllText($file.FullName) }
+            try {
+                $stream = [IO.File]::Open($file.FullName, [IO.FileMode]::Open,
+                    [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                try {
+                    $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $true)
+                    try { $report = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                } finally { $stream.Dispose() }
+            }
             catch { continue } # The exception handler may still be writing.
             if ($report -match '(?m)^EXCEPTION:') {
                 [pscustomobject]@{side=$side[0]; file=$file}
@@ -848,10 +925,16 @@ $gameProcessExited = $false
 $lastObservedFrame = -1
 $traceBeforeCleanup = ""
 $runtimeCrashes = @()
+$nativeMonitorFailed = $false
 $script:startedAtUtc = [DateTime]::UtcNow
 $startedUtc = $script:startedAtUtc.ToString('o')
 $cleanupStatus = $null
 $observerProcess = $null
+$proxy = $null
+$proxyCleanupStatus = $null
+$proxyConnectionReceipt = $null
+$hostLauncher = $null
+$opponentLauncher = $null
 try {
     [void](Assert-MatchInputManifest -Manifest $preflightManifest)
     if ($buildManifest) {
@@ -865,12 +948,12 @@ try {
         $observerPort = $listener.LocalEndpoint.Port
         $listener.Stop()
         $observerArguments = @(
-            ('"{0}"' -f (Join-Path $repoPath 'tools/decision_report.py')),
-            ('"{0}"' -f $logPath), '--serve', [string]$observerPort, '--manifest',
-            ('"{0}"' -f (Join-Path $archiveRoot "$Label.json"))
+            (Join-Path $repoPath 'tools/decision_report.py'),
+            $logPath, '--serve', [string]$observerPort, '--manifest',
+            (Join-Path $archiveRoot "$Label.json")
         )
-        $observerProcess = Start-Process -FilePath (Get-Command python).Source `
-            -ArgumentList $observerArguments -WorkingDirectory $repoPath -WindowStyle Hidden -PassThru `
+        $observerProcess = Start-ConsoleFreeProcess -FilePath (Get-Command python).Source `
+            -Arguments $observerArguments -WorkingDirectory $repoPath `
             -RedirectStandardOutput (Join-Path $archiveRoot "$Label.observer.out") `
             -RedirectStandardError (Join-Path $archiveRoot "$Label.observer.err")
         "LIVE_OBSERVER=http://127.0.0.1:$observerPort"
@@ -879,37 +962,39 @@ try {
     if ($buildManifest) {
         Assert-TournamentSourceMatchesManifest -Manifest $buildManifest -RepositoryRoot $repoPath
     }
-    $hostLauncher = Start-HeadlessStarCraftLauncher -Runtime $runtimeA -LegacyWindowPlugin:$LegacyWindowPlugin
-    $script:launcherPids += $hostLauncher.Id
     if ($resolvedOpponentType -eq "Proxy") {
-        $proxy = Start-Process -FilePath $env:ComSpec `
-            -ArgumentList @('/c', 'call', 'bwapi-data\AI\run_proxy.bat') `
-            -WorkingDirectory $runtimeB -WindowStyle Hidden -PassThru
+        # Stock BWAPI constructs its Server before loading shared_memory.
+        # OFF alone does not remove the DLL host from client discovery.
+        # Establish the opponent's client connection before creating a host.
+        $startedOpponent=Start-TrackedGameLauncher -Runtime $runtimeB -Role 'opponent'
+        $opponentLauncher=$startedOpponent.Launcher
+        $opponentProcesses=@($startedOpponent.Processes)
+        $commandInterpreter = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+        $proxy = Start-ConsoleFreeProcess -FilePath $commandInterpreter `
+            -Arguments @('/c', 'call', 'bwapi-data\AI\run_proxy.bat') `
+            -WorkingDirectory $runtimeB `
+            -RedirectStandardOutput (Join-Path $archiveRoot "$Label.proxy.out") `
+            -RedirectStandardError (Join-Path $archiveRoot "$Label.proxy.err")
         $proxyLaunched += $proxy.Id
-        Start-Sleep -Seconds 2
+        Update-OwnedProxyProcesses
+        $proxyConnectionReceipt=Wait-HeadlessProxyConnection -OpponentProcesses $opponentProcesses
     }
-    Start-Sleep -Seconds 3
-    $hostProcesses = @(Get-TrackedStarCraftProcesses |
-        Where-Object parent_process_id -eq $hostLauncher.Id)
-    if ($hostProcesses.Count -eq 0) {
-        throw 'Could not establish ownership of the launched host StarCraft process'
+    $startedHost=Start-TrackedGameLauncher -Runtime $runtimeA -Role 'host'
+    $hostLauncher=$startedHost.Launcher
+    if ($resolvedOpponentType -ne 'Proxy') {
+        $startedOpponent=Start-TrackedGameLauncher -Runtime $runtimeB -Role 'opponent'
+        $opponentLauncher=$startedOpponent.Launcher
     }
-    $launched += @($hostProcesses | Select-Object -ExpandProperty process_id)
-    $opponentLauncher = Start-HeadlessStarCraftLauncher -Runtime $runtimeB -LegacyWindowPlugin:$LegacyWindowPlugin
-    $script:launcherPids += $opponentLauncher.Id
-    Start-Sleep -Seconds 3
-    $opponentProcesses = @(Get-TrackedStarCraftProcesses |
-        Where-Object parent_process_id -eq $opponentLauncher.Id)
-    if ($opponentProcesses.Count -eq 0) {
-        throw 'Could not establish ownership of the launched opponent StarCraft process'
-    }
-    $launched += @($opponentProcesses | Select-Object -ExpandProperty process_id)
     $launched = @(Get-TrackedStarCraftIds | Sort-Object -Unique)
 
     $deadline = if ($TimeoutSeconds -gt 0) {
         [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     } else { $null }
     while ($true) {
+        Update-OwnedProxyProcesses
+        if (@(@($hostLauncher, $opponentLauncher) | Where-Object {
+            $_ -and $_.Monitor -and $_.Monitor.Failed
+        }).Count -gt 0) { $nativeMonitorFailed = $true; break }
         if (@(Get-MatchCrashReports).Count -gt 0) { break }
         if (Test-Path -LiteralPath $logPath) {
             try {
@@ -980,7 +1065,7 @@ try {
         'runner-stopped'
     }
     $cleanupStatus = Close-LaunchedStarCraft
-    Close-LaunchedProxy
+    $proxyCleanupStatus = Close-LaunchedProxy
     # Shutdown can fault after onEnd and after the first report scan. Preserve
     # the terminal callback as an observation, but never certify that run.
     foreach ($crash in @(Get-MatchCrashReports)) {
@@ -1000,6 +1085,16 @@ try {
             $nativeDiagnostics += [ordered]@{side=$side[0];path=$saved;sha256=(Get-FileHash -LiteralPath $saved).Hash}
         }
     }
+    $nativeMonitorErrors = @($nativeDiagnostics | Where-Object path -like '*-monitor-error.txt')
+    $nativeMonitorFailures = @(@($hostLauncher, $opponentLauncher) | Where-Object {
+        $_ -and $_.Monitor -and $_.Monitor.Failed
+    } | ForEach-Object {
+        [ordered]@{launcher_pid=$_.Id; desktop=$_.Desktop; reason=$_.Monitor.FailureReason}
+    })
+    if ($nativeMonitorFailed -or $nativeMonitorFailures.Count -gt 0 -or $nativeMonitorErrors.Count -gt 0) {
+        $result = $null
+        $terminationReason = 'native-monitor-failure'
+    }
     $traceRecords = @($traceBeforeCleanup -split "`r?`n" |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $traceLines = $traceRecords.Count
@@ -1010,12 +1105,16 @@ try {
         result = $result
         observed_terminal_result = $observedTerminalResult
         runtime_crashes = $runtimeCrashes
+        runtime_monitor_errors = $nativeMonitorErrors
+        runtime_monitor_failures = $nativeMonitorFailures
         native_diagnostics = $nativeDiagnostics
         headless = $true
         legacy_window_plugin = [bool]$LegacyWindowPlugin
         runtime_profile = $RuntimeProfile
         runtime_profile_source = $runtimeProfileInfo.source
         process_cleanup = $cleanupStatus
+        proxy_process_cleanup = $proxyCleanupStatus
+        proxy_pre_host_connection = $proxyConnectionReceipt
         runtime_profile_archive_sha256 = if ($runtimeProfileInfo.PSObject.Properties.Name -contains 'archive_sha256') {
             $runtimeProfileInfo.archive_sha256
         } else { $null }
@@ -1100,7 +1199,10 @@ try {
     $replayHash = $null
     $replayBytes = 0
     if ($SaveReplay) {
-        $runtimeReplay = Join-Path $runtimeA "Replays/$Label.rep"
+        $hostInstance=if($resolvedOpponentType -eq 'Proxy'){2}else{1}
+        $runtimeReplay = Get-MatchReplayPath -RuntimeRoot $runtimeA -Label $Label -HostInstance $hostInstance
+        $record.runtime_replay_source = $runtimeReplay
+        $record.host_instance_expected = $hostInstance
         if (Test-Path -LiteralPath $runtimeReplay -PathType Leaf) {
             $replaySavedPath = Join-Path $archiveRoot "$Label.rep"
             Copy-Item -LiteralPath $runtimeReplay -Destination $replaySavedPath -Force
@@ -1118,7 +1220,11 @@ try {
         if ($cleanupTerminal) { $record.cleanup_result_ignored = [string]$cleanupTerminal }
     }
     if ($null -ne $observerProcess) {
-        Stop-Process -Id $observerProcess.Id -ErrorAction SilentlyContinue
+        # Retain the exact process handle; never kill a later reuse of its PID.
+        if (!$observerProcess.HasExited) { $observerProcess.Kill() }
+        if (!$observerProcess.WaitForExit(5000)) { throw 'Observer cleanup timed out' }
+        if (!$observerProcess.OutputCompletion.Wait(5000)) { throw 'Observer output drain timed out' }
+        $observerProcess.Dispose()
     }
     if ($OpponentName -eq 'BananaBrain') {
         # This is opponent-side diagnostic evidence only. Never replace the
@@ -1139,13 +1245,18 @@ if (Test-Path -LiteralPath $logPath) {
     [System.IO.File]::WriteAllText($archive, $traceBeforeCleanup)
     "TRACE=$archive"
     $decisionReport = Join-Path $archiveRoot "$Label.decisions.html"
-    python (Join-Path $repoPath "tools/decision_report.py") $archive --output $decisionReport | Out-Null
-    if ($LASTEXITCODE -eq 0) { "DECISION_REPORT=$decisionReport" }
-    else { Write-Warning "Decision report generation failed; the archived match trace is intact" }
+    if (-not $SkipDecisionReport) {
+        python (Join-Path $repoPath "tools/decision_report.py") $archive --output $decisionReport | Out-Null
+        if ($LASTEXITCODE -eq 0) { "DECISION_REPORT=$decisionReport" }
+        else { Write-Warning "Decision report generation failed; the archived match trace is intact" }
+    }
 }
 if ($null -eq $cleanupStatus -or -not $cleanupStatus.cleanup_complete) {
     $remaining = if ($cleanupStatus) { @($cleanupStatus.remaining_pids) -join ',' } else { 'unknown' }
     throw "Match cleanup is incomplete for '$Label'; remaining owned StarCraft PIDs: $remaining. See the archived match manifest."
+}
+if ($null -eq $proxyCleanupStatus -or -not $proxyCleanupStatus.cleanup_complete) {
+    throw "Proxy cleanup is incomplete for '$Label'; see the archived match manifest."
 }
 if (-not $result) {
     if ($runtimeCrashes.Count -gt 0) {

@@ -33,7 +33,19 @@ StrategicPlan StrategyEngine::planPvP(
         recentEnemyCount(state, UnitKind::zealot) >= 2 ||
         (recentEnemyCount(state, UnitKind::gateway) >= 2 &&
          recentEnemyCount(state, UnitKind::cyberneticsCore) == 0);
-    const auto pressureEvidence = hardBreachAtMain(state) || meleeEvidence ||
+    // The existing insurance branch must be reachable when the worker scout
+    // sees only one Gateway. Otherwise the quiet return bypasses it until the
+    // first melee unit is already approaching the mineral line.
+    const auto gatewayOnlyFork = state.frame >= framesForMinutes(2) + framesForSeconds(36) &&
+        state.frame < framesForMinutes(6) && threat.cloak <= 0.20 &&
+        std::ranges::any_of(state.enemy.units, [](const UnitSnapshot& enemy) {
+            return enemy.kind == UnitKind::gateway && enemy.hitPoints > 0;
+        }) && std::ranges::none_of(state.enemy.units, [](const UnitSnapshot& enemy) {
+            return enemy.kind == UnitKind::cyberneticsCore || enemy.kind == UnitKind::roboticsFacility ||
+                   enemy.kind == UnitKind::dragoon || enemy.kind == UnitKind::reaver ||
+                   enemy.kind == UnitKind::citadelOfAdun || enemy.kind == UnitKind::templarArchives;
+        });
+    const auto pressureEvidence = hardBreachAtMain(state) || meleeEvidence || gatewayOnlyFork ||
         threat.combatEnemiesNearMain > 0 || homeApproach ||
         threat.immediateGround > 0.45 || threat.workerRush > 0.30 ||
         threat.proxy + threat.staticContain > 0.34 || threat.cloak > 0.20;
@@ -41,6 +53,7 @@ StrategicPlan StrategyEngine::planPvP(
         StrategicPlan opening;
         opening.name = "PvP ranged economy into Robo";
         opening.desiredWorkers = 32;
+        opening.openingScreenTarget = 1;
         opening.desiredGasWorkers = supplyAtLeast(state, DisplayedSupply{12}) ? 3 : 0;
         opening.minimumAttackSize = 8;
         opening.attackThreshold = 1.25;
@@ -53,7 +66,7 @@ StrategicPlan StrategyEngine::planPvP(
                               Posture::pressure : Posture::hold;
         const auto rangedScreenCommitted = effectiveUnitCount(state, UnitKind::dragoon, UnitCountBasis::observed) >= 2;
         // The explicit bodyguard goal owns the first Zealot. Letting the
-        // composition filler keep making melee during Core construction
+        // composition filler keep making melee throughout Core construction
         // occupies the Gateway when its first Dragoons become available.
         opening.composition = rangedScreenCommitted
                                   ? std::vector<CompositionTarget>{{UnitKind::dragoon, 0.85},
@@ -77,9 +90,31 @@ StrategicPlan StrategyEngine::planPvP(
             goal(opening, GoalKind::train, UnitKind::zealot, 1, 98, "opening bodyguard", true);
             goal(opening, GoalKind::build, UnitKind::cyberneticsCore, 1, 97, "timely ranged access", true);
         }
+        // Extra escorts must not steal an unstarted Core's bank. Once the
+        // Core is paid for, use its early construction window for one more
+        // bodyguard only when the entire train cycle finishes before ranged
+        // production becomes available. Progress is rounded down by BWAPI;
+        // subtract its next percentage point for a conservative time window.
+        auto coreWindow = std::numeric_limits<int>::max();
+        for (const auto& own : state.self.units) {
+            if (own.kind != UnitKind::cyberneticsCore) continue;
+            const auto remaining = own.completed || own.buildProgress < 0 ? 0 :
+                unitStats(UnitKind::cyberneticsCore).buildTime *
+                    std::max(0, 99 - own.buildProgress) / 100;
+            coreWindow = std::min(coreWindow, remaining);
+        }
+        if (coreWindow != std::numeric_limits<int>::max() &&
+            coreWindow >= unitStats(UnitKind::zealot).buildTime +
+                std::max(24, state.latencyFrames * 2)) {
+            goal(opening, GoalKind::train, UnitKind::zealot, 2, 107,
+                 "finish a bodyguard during paid Core construction", true);
+        }
         if (effectiveUnitCount(state, UnitKind::cyberneticsCore, UnitCountBasis::observed) > 0) {
             goal(opening, GoalKind::train, UnitKind::dragoon, 4, 108, "fund four Dragoons before optional tech", true);
-            if (effectiveUnitCount(state, UnitKind::dragoon, UnitCountBasis::observed) >= 1)
+            // A busy first Gateway must not release the second Dragoon
+            // budget to range. Observe both paid units before researching;
+            // waiting for their completion is unnecessary.
+            if (rangedScreenCommitted)
                 technologyGoal(opening, TechnologyKind::singularityCharge, 1, 98, "opening range", true);
         }
         if (dragoonsReady >= 4 || roboCommitted) {
@@ -1182,24 +1217,46 @@ StrategicPlan StrategyEngine::planPvP(
                 goal(result, GoalKind::build, UnitKind::photonCannon, 1, 120,
                      "complete the first melee anchor before more infrastructure", true);
             }
-            // Once the mobile screen has four bodies, gas is no longer a
-            // luxury: the opponent's next wave is likely Dragoons. Re-enable
-            // three gas workers before the eight-minute scouting window ends
-            // so the completed Core can actually turn the saved bank into
-            // ranged defenders.
-            result.desiredGasWorkers = 3;
+            // Preserve the gas pause until the mobile screen is established,
+            // unless observed ranged tech or our existing ranged defenders
+            // already need the transition. A paid first escort alone must
+            // not undo the mineral priority for the unfinished static anchor.
+            // The completed-anchor transition above can also resume gas.
+            if (mobileOpening >= 4 || dragoonsReady > 0 || coreLost ||
+                visibleRangedOpening) {
+                result.desiredGasWorkers = 3;
+            }
             goal(result, GoalKind::train, UnitKind::zealot, 2, 105,
                  "field a mobile screen against scouted double production", true);
             if (!detectionFirst) {
                 goal(result, GoalKind::build, UnitKind::forge, 1, 112,
                      "prepare a static answer to scouted melee production", true);
             }
-            // One Cannon is enough to stabilize a mobile-first opening. Only
-            // buy the second mineral sink when the army is actually moving
-            // toward the main (or a hard breach is already present); a timer
-            // alone made the bot spend the exact minerals needed for the Core
-            // and Robotics transition while BananaBrain's army grew.
-            const auto staticCannonTarget =
+            // Retain the normal single-anchor transition. A confirmed two-Gateway
+            // melee line with a paid first Cannon and a small completed screen
+            // gets its partner before contact; other openings still require
+            // visible pressure before committing that extra mineral bank.
+            const auto paidFirstAnchor = std::ranges::any_of(state.self.units,
+                [](const UnitSnapshot& own) {
+                    return own.kind == UnitKind::photonCannon && own.powered &&
+                           !own.disabled && !own.hallucination && own.hitPoints > 0;
+                });
+            const auto observedCovertTech = std::ranges::any_of(state.enemy.units,
+                [](const UnitSnapshot& enemy) {
+                    return enemy.kind == UnitKind::citadelOfAdun ||
+                           enemy.kind == UnitKind::templarArchives ||
+                           enemy.kind == UnitKind::darkTemplar;
+                });
+            // A confirmed melee production pair can cross before a fourth
+            // defender exists. Once the first anchor is paid, overlap its
+            // partner instead of letting spare capacity consume that bank.
+            const auto anticipateMeleePair = state.frame >= framesForMinutes(3) &&
+                state.frame < framesForMinutes(5) && scoutedTwoGatewayConstruction &&
+                !rangedOpening && !observedCovertTech && threat.cloak <= 0.20 &&
+                workers >= 14 && zealotsReady >= 2 && zealotsReady < 4 &&
+                effectiveUnitCount(state, UnitKind::nexus, UnitCountBasis::observed) == 1 &&
+                paidFirstAnchor;
+            const auto staticCannonTarget = anticipateMeleePair ? 2 :
                 (hardBreachAtMain(state) || threat.immediateGround > 0.25 ||
                  threat.approachingArmyValue >= 4.0) &&
                         (state.frame >= framesForMinutes(6) || zealotsReady >= 4)
@@ -1297,9 +1354,15 @@ StrategicPlan StrategyEngine::planPvP(
         }
     }
 
-    const auto visibleEnemyArmy = std::ranges::any_of(
-        state.enemy.units, [](const UnitSnapshot& enemy) {
-            return enemy.visible && enemy.completed && !enemy.flying &&
+    // The combat planner retains recent fog contacts. A visibility dropout
+    // must not simultaneously tell strategy that the map is empty and send
+    // the same army back toward enemy production.
+    const auto recentEnemyArmy = std::ranges::any_of(
+        state.enemy.units, [&state](const UnitSnapshot& enemy) {
+            const auto recent = enemy.visible ||
+                (enemy.lastSeen > 0 && enemy.lastSeen <= state.frame &&
+                 state.frame - enemy.lastSeen <= framesForSeconds(5));
+            return recent && enemy.completed && !enemy.flying &&
                    isCombatUnit(enemy.kind);
         });
     const auto earlyMeleeStrike = currentMeleeRush &&
@@ -1307,7 +1370,7 @@ StrategicPlan StrategyEngine::planPvP(
                                   state.frame < framesForMinutes(8) &&
                                   mobileOpening >= 4 &&
                                   threat.mostLikely == EnemyPlan::fastExpand &&
-                                  !visibleEnemyArmy &&
+                                  !recentEnemyArmy &&
                                   threat.combatEnemiesNearMain == 0 &&
                                   !activeApproach(state, threat) &&
                                   !hardBreachAtMain(state);
@@ -1367,7 +1430,7 @@ StrategicPlan StrategyEngine::planPvP(
         });
     const auto earlyTimingAttack = state.frame >= framesForMinutes(8) + framesForSeconds(12) &&
                                    state.frame < framesForMinutes(11) &&
-                                   mobileOpening >= 8 && !visibleEnemyArmy &&
+                                   mobileOpening >= 8 && !recentEnemyArmy &&
                                    !visibleArmyNearHome && !directBreach &&
                                    threat.mostLikely != EnemyPlan::fastRush &&
                                    (threat.mostLikely == EnemyPlan::unknown ||
@@ -1392,7 +1455,7 @@ StrategicPlan StrategyEngine::planPvP(
                                     mobileOpening >= 12 &&
                                     threat.mostLikely != EnemyPlan::heavyPressure &&
                                     threat.combatEnemiesNearMain == 0 &&
-                                    !visibleArmyNearHome && !visibleEnemyArmy &&
+                                    !visibleArmyNearHome && !recentEnemyArmy &&
                                     !directBreach && enemyMain(state).valid();
     if (reaverTimingStrike) {
         // Once the first Reaver is ready, a compact timing attack is safer

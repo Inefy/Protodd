@@ -122,9 +122,26 @@ int main() {
     const auto unsafeSearches = NavigationGrid::diagnosticsForCurrentThread().searches - beforeUnsafe;
     passed &= check(noRoute.empty() && disconnected.informationGap().unresolved &&
                     disconnected.informationGap().target == Position{3008, 1024} &&
+                    disconnected.informationGap().reason == ScoutGapReason::navigationPending &&
+                    unsafeSearches == 0 && disconnected.navigationDiagnostics().frameWork <=
+                        ScoutManager::navigationWorkPerFrame,
+                    "information-gap reporting keeps an unfinished route pending within shared work");
+    auto neverIssued = noRoute.empty();
+    auto boundedPending = true;
+    for (int step = 0; step < 128 &&
+         disconnected.informationGap().reason == ScoutGapReason::navigationPending; ++step) {
+        many.frame += 6;
+        static_cast<void>(disconnected.controlWorkerScout(many, empty, &separated));
+        neverIssued = disconnected.assign(many, std::array<UnitId, 1>{100}, empty, threat,
+                                          &separated).empty() && neverIssued;
+        boundedPending = boundedPending && disconnected.navigationDiagnostics().frameWork <=
+            ScoutManager::navigationWorkPerFrame;
+    }
+    passed &= check(neverIssued && boundedPending &&
                     disconnected.informationGap().reason == ScoutGapReason::unsafeRoute &&
-                    unsafeSearches > 0 && unsafeSearches <= 5,
-                    "information-gap reporting reuses the failed route proof without hiding the unresolved mission");
+                    disconnected.navigationDiagnostics().searchStarts <= 5 &&
+                    NavigationGrid::diagnosticsForCurrentThread().searches == beforeUnsafe,
+                    "completed disconnected proofs remain unsafe without issuing a route or synchronous fallback");
     std::cout << "unsafe mission route searches=" << unsafeSearches << '\n';
 
     // Equal mission values must still be resolved by proved travel distance,
@@ -155,7 +172,7 @@ int main() {
     passed &= check(fallbackOrder.size() == 1 &&
                     fallbackOrder.front().informationTarget == Position{640, 512} &&
                     fallback.informationGap().target == Position{3008, 1024} &&
-                    fallback.informationGap().reason == ScoutGapReason::unsafeRoute &&
+                    fallback.informationGap().reason == ScoutGapReason::navigationPending &&
                     NavigationGrid::diagnosticsForCurrentThread().searches - beforeFallback <= 5,
                     "an unproved high-value route never prevents a lower-value safe mission from progressing");
     return passed ? 0 : 1;

@@ -13,8 +13,8 @@ int actionFor(const BWAPI::UnitCommand& c) {
     const std::array<UnitType,8> types{UnitTypes::Protoss_Probe,UnitTypes::Protoss_Pylon,
         UnitTypes::Protoss_Gateway,UnitTypes::Protoss_Assimilator,UnitTypes::Protoss_Cybernetics_Core,
         UnitTypes::Protoss_Zealot,UnitTypes::Protoss_Dragoon,UnitTypes::Protoss_Nexus};
-    for(int i=0;i<8;++i) if(c.extra==types[i].getID() &&
-        types[i].isBuilding()==(c.getType()==UnitCommandTypes::Build)) return i;
+    for(std::size_t i=0;i<8;++i) if(c.extra==types[i].getID() &&
+        types[i].isBuilding()==(c.getType()==UnitCommandTypes::Build)) return static_cast<int>(i);
     return -1;
 }
 int queued(BWAPI::Unit u, int type) {
@@ -180,7 +180,7 @@ void ProductionRuntime::infer(Frame frame,const FrameBudget& budget,std::ostream
     inputs_.write(reinterpret_cast<const char*>(prediction->quantities.data()),32);
     if(!inputs_){fail("input-audit-write",log);return;}
     log<<"PRODUCTION_SHADOW,"<<frame<<",observation="<<sample;
-    for(int i=0;i<8;++i)log<<','<<productionDemandActions[i]<<'='<<prediction->quantities[i];
+    for(std::size_t i=0;i<8;++i)log<<','<<productionDemandActions[i]<<'='<<prediction->quantities[i];
     log<<'\n';
 }
 void ProductionRuntime::end(std::ostream& log){if(inputs_.is_open()){feedback_.end(log);inputs_.close();}observing_=false;}

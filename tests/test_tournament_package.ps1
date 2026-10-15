@@ -41,6 +41,7 @@ try {
         "scripts/MatchProvenance.psm1", "scripts/prepare-patched-runtime.ps1",
         "scripts/start-owned-starcraft.ps1", "scripts/stop-owned-starcraft.ps1",
         "scripts/HeadlessStarCraft.psm1", "scripts/HeadlessStarCraft.cs", "scripts/run-headless-starcraft.ps1",
+        "scripts/ConsoleFreeOwnedStarCraft.cs",
         "training/compare_replay.mjs",
         "bwapi-data/read/WholeGame-mode.txt",
         "bwapi-data/write/Protodd-private.csv", "tools/__pycache__/ignored.pyc",
@@ -65,6 +66,7 @@ try {
         $paths -notcontains "scripts/start-owned-starcraft.ps1" -or
         $paths -notcontains "scripts/stop-owned-starcraft.ps1" -or
         $paths -notcontains "scripts/HeadlessStarCraft.cs" -or
+        $paths -notcontains "scripts/ConsoleFreeOwnedStarCraft.cs" -or
         $paths -notcontains "scripts/HeadlessStarCraft.psm1" -or
         $paths -notcontains "scripts/run-headless-starcraft.ps1" -or
         $paths -notcontains "scripts/prepare-patched-runtime.ps1" -or

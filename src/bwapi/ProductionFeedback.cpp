@@ -4,7 +4,7 @@ namespace protodd::bwapi {
 void ProductionFeedback::observe(int frame,std::ostream& log) {
     if(frame==frame_)return;
     auto self=BWAPI::Broodwar->self();
-    ProductionCommitments::Snapshot snapshot{frame,self->minerals(),self->gas()};
+    ProductionCommitments::Snapshot snapshot{frame,self->minerals(),self->gas(), {}, {}, {}, {}, {}};
     for(auto unit:self->getUnits())if(unit->exists())snapshot.live.insert(unit->getID());
     for(auto& [key,w]:work_) {
         const auto& ticket=ledger_.ticket(key);

@@ -95,7 +95,7 @@ under ignored `build/ladder-source-audit/`.
 The candidate is built at `build/protodd-tournament/Release/Protodd.dll` and
 frozen as `build/ladder-source-audit/candidate.dll`.
 The ignored default `ladder/ladder.local.json` now stages that Protodd build
-instead of the older `AstraBot.dll`; its previous settings are backed up at
+instead of the older bot module; its previous settings are backed up at
 `build/ladder-source-audit/ladder.local.before.json`. This configures subsequent
 local experiments and does not submit or promote a tournament release.
 

@@ -51,17 +51,26 @@ double observerRouteRisk(const GameState& state, const UnitSnapshot& observer,
                          const InfluenceMap& influence,
                          Position from, Position to);
 
+const UnitSnapshot* eligibleScout(const GameState& state, const UnitId id) noexcept {
+    const auto unit = std::ranges::find(state.self.units, id, &UnitSnapshot::id);
+    return unit != state.self.units.end() && unit->ours && unit->completed &&
+        !unit->loaded && !unit->disabled && !unit->hallucination &&
+        unit->position.valid() && unit->firstSeen <= state.frame ? &*unit : nullptr;
+}
+
 struct ScoutApproach {
     Position position{-1, -1};
     double risk{std::numeric_limits<double>::infinity()};
     RouteThreatProfile route{};
     Position routeWaypoint{-1, -1};
+    bool navigationPending{};
 };
 
 ScoutApproach chooseApproach(const GameState& state, const UnitSnapshot& scout,
                              const Candidate& candidate, const InfluenceMap& influence,
                              const NavigationGrid* terrain,
-                             const Position previousWaypoint = {-1, -1}) {
+                             const Position previousWaypoint,
+                             NavigationWorkQueue& work, const std::uint64_t owner) {
     const auto observer = scout.kind == UnitKind::observer;
     const auto budget = observer ? 0.08 : scout.kind == UnitKind::probe ? 1.0 : 2.5;
     const auto sightRange = scout.sightRange > 0 ? scout.sightRange : 224;
@@ -69,8 +78,14 @@ ScoutApproach chooseApproach(const GameState& state, const UnitSnapshot& scout,
     const auto directAlternative = selectSafeRouteAlternative(influence, scout.position,
         candidate.position, scout.flying, terrain,
         {scout.dimensionLeft, scout.dimensionRight, scout.dimensionUp, scout.dimensionDown},
-        budget, previousWaypoint);
+        budget, previousWaypoint, std::numeric_limits<double>::infinity(), &work, owner);
     const auto directRoute = directAlternative.profile;
+    if (!directRoute.reachable && directRoute.searchBudgetExhausted) {
+        ScoutApproach pending;
+        pending.navigationPending = true;
+        return pending;
+    }
+    auto navigationPending = directAlternative.unresolvedAlternatives;
     const auto directRisk = observer
         ? observerRouteRisk(state, scout, influence, scout.position, candidate.position)
         : directRoute.score();
@@ -99,8 +114,10 @@ ScoutApproach chooseApproach(const GameState& state, const UnitSnapshot& scout,
         const auto alternative = selectSafeRouteAlternative(
             influence, scout.position, point, scout.flying, terrain,
             {scout.dimensionLeft, scout.dimensionRight, scout.dimensionUp, scout.dimensionDown},
-            budget, previousWaypoint);
+            budget, previousWaypoint, std::numeric_limits<double>::infinity(), &work, owner);
         const auto route = alternative.profile;
+        navigationPending = navigationPending || route.searchBudgetExhausted ||
+            alternative.unresolvedAlternatives;
         if (!route.reachable) continue;
         const auto risk = observer
             ? observerRouteRisk(state, scout, influence, scout.position, point)
@@ -114,8 +131,12 @@ ScoutApproach chooseApproach(const GameState& state, const UnitSnapshot& scout,
             best = {point, risk, route, alternative.waypoint};
         }
     }
-    return best.position.valid() ? best : directSafe
-        ? ScoutApproach{candidate.position, directRisk, directRoute} : ScoutApproach{};
+    if (best.position.valid()) return best;
+    if (directSafe)
+        return {candidate.position, directRisk, directRoute, directAlternative.waypoint};
+    ScoutApproach unavailable;
+    unavailable.navigationPending = navigationPending;
+    return unavailable;
 }
 
 bool informationPurpose(const ScoutPurpose purpose) noexcept {
@@ -184,6 +205,7 @@ std::string_view scoutGapReasonName(const ScoutGapReason reason) noexcept {
         case ScoutGapReason::noAvailableScout: return "no-available-scout";
         case ScoutGapReason::unsafeRoute: return "unsafe-route";
         case ScoutGapReason::lowerPriority: return "lower-priority";
+    case ScoutGapReason::navigationPending: return "navigation-pending";
     }
     return "unknown";
 }
@@ -375,7 +397,85 @@ std::optional<Command> ProbeHarasser::control(
     return std::nullopt;
 }
 
+std::uint64_t ScoutManager::routeOwner(const UnitSnapshot& scout) {
+    const auto found = routeOwners_.find(scout.id);
+    if (found != routeOwners_.end()) return found->second.token;
+    // Tokens are local to this queue. A recycled ID gets no old route proof.
+    auto token = ++nextRouteOwner_;
+    if (token == 0) token = ++nextRouteOwner_;
+    routeOwners_.emplace(scout.id, RouteOwner{scout.firstSeen, scout.kind, token});
+    return token;
+}
+
+void ScoutManager::forgetRouteOwner(const UnitId id) noexcept {
+    if (const auto owner = routeOwners_.find(id); owner != routeOwners_.end()) {
+        navigationWork_.forgetOwner(owner->second.token);
+        routeOwners_.erase(owner);
+    }
+    pendingRoutes_.erase(id);
+}
+
+void ScoutManager::advanceNavigation(const GameState& state, const NavigationGrid* terrain) {
+    std::vector<UnitId> invalid;
+    for (const auto& [id, owner] : routeOwners_) {
+        const auto scout = eligibleScout(state, id);
+        if (!scout || scout->firstSeen != owner.firstSeen || scout->kind != owner.kind)
+            invalid.push_back(id);
+    }
+    for (const auto id : invalid) forgetUnit(id);
+    if (terrain != nullptr && !terrain->empty())
+        navigationWork_.beginFrame(*terrain, state.frame, navigationWorkPerFrame);
+}
+
+bool ScoutManager::planningMayContinueUnder(
+    const GameState& state, const Command& confirmed) const noexcept {
+    if (confirmed.owner != CommandOwner::worker ||
+        confirmed.activity != CommandActivity::workerEconomy ||
+        (confirmed.type != CommandType::gather && confirmed.type != CommandType::returnCargo) ||
+        (confirmed.type == CommandType::gather && confirmed.targetUnit < 0) ||
+        previousOrders_.contains(confirmed.actor) ||
+        confirmed.actor == openingScout() || confirmed.actor == returningScout()) return false;
+    const auto owner = routeOwners_.find(confirmed.actor);
+    const auto scout = eligibleScout(state, confirmed.actor);
+    return owner != routeOwners_.end() && scout && scout->kind == UnitKind::probe &&
+        scout->firstSeen == owner->second.firstSeen && scout->kind == owner->second.kind &&
+        !scout->underAttack && !scout->underStorm &&
+        (confirmed.type != CommandType::returnCargo || scout->carryingResources);
+}
+
+std::vector<UnitId> ScoutManager::activeMissionScouts() const {
+    std::vector<UnitId> result;
+    result.reserve(previousOrders_.size());
+    for (const auto& [id, mission] : previousOrders_) result.push_back(id);
+    std::ranges::sort(result);
+    return result;
+}
+
+std::vector<Command> ScoutManager::pendingRouteHolds(const GameState& state) const {
+    std::vector<Command> result;
+    for (const auto id : pendingRoutes_) {
+        const auto mission = previousOrders_.find(id);
+        const auto owner = routeOwners_.find(id);
+        const auto scout = eligibleScout(state, id);
+        if (mission == previousOrders_.end() || owner == routeOwners_.end() || !scout ||
+            scout->firstSeen != owner->second.firstSeen || scout->kind != owner->second.kind ||
+            id == openingScout() || id == returningScout()) continue;
+        Command hold{id, CommandType::hold, -1, {-1, -1}, UnitKind::unknown,
+                     60, state.frame, "scout-route-pending"};
+        hold.owner = CommandOwner::scouting;
+        hold.deadlineFrame = state.frame;
+        hold.leaseGeneration = mission->second.order.leaseGeneration;
+        result.push_back(std::move(hold));
+    }
+    std::ranges::sort(result, {}, &Command::actor);
+    return result;
+}
+
 void ScoutManager::reset() noexcept {
+    navigationWork_.reset();
+    routeOwners_.clear();
+    pendingRoutes_.clear();
+    nextRouteOwner_ = 0;
     previousOrders_.clear();
     leaseGenerations_.clear();
     revisitAfter_.clear();
@@ -395,6 +495,7 @@ void ScoutManager::reset() noexcept {
 
 void ScoutManager::forgetUnit(const UnitId id) noexcept {
     if (id < 0) return;
+    forgetRouteOwner(id);
     if (const auto mission = previousOrders_.find(id); mission != previousOrders_.end()) {
         ++missionMetrics_.lost;
         const auto target = mission->second.order.informationTarget.valid()
@@ -418,8 +519,11 @@ void ScoutManager::forgetUnit(const UnitId id) noexcept {
 
 std::uint64_t ScoutManager::releaseLease(const UnitId id, const Frame frame) {
     if (id < 0) return 0;
+    const auto releasedRoute = hasRouteWork(id);
+    forgetRouteOwner(id);
     auto generation = std::uint64_t{};
     auto releasedMission = false;
+    const auto releasedWorker = workerScout_ == id;
     if (const auto mission = previousOrders_.find(id); mission != previousOrders_.end()) {
         generation = mission->second.order.leaseGeneration;
         const auto target = mission->second.order.informationTarget.valid()
@@ -441,7 +545,11 @@ std::uint64_t ScoutManager::releaseLease(const UnitId id, const Frame frame) {
         harasser_.reset();
         returnHarasser_.reset();
     }
-    return generation;
+    if (!releasedMission && !releasedWorker && !releasedRoute) return 0;
+    auto& nextGeneration = leaseGenerations_[id];
+    nextGeneration = std::max(nextGeneration, generation);
+    if (nextGeneration < std::numeric_limits<std::uint64_t>::max()) ++nextGeneration;
+    return nextGeneration;
 }
 
 void ScoutManager::recordCommandFeedback(
@@ -456,6 +564,7 @@ void ScoutManager::recordCommandFeedback(
         frame + scoutFrameSeconds(30);
     ++missionMetrics_.rejected;
     ++missionMetrics_.cancelled;
+    forgetRouteOwner(feedback.scout);
     previousOrders_.erase(mission);
 }
 
@@ -713,6 +822,7 @@ UnitId ScoutManager::selectWorkerScout(
 
 std::optional<Command> ScoutManager::controlWorkerScout(
     const GameState& state, const InfluenceMap& influence, const NavigationGrid* terrain) {
+    advanceNavigation(state, terrain);
     if (returningMission_) {
         auto command = returnHarasser_.control(
             state, workerScout_, friendlyMain(state), influence, terrain);
@@ -725,15 +835,20 @@ std::optional<Command> ScoutManager::controlWorkerScout(
         return command;
     }
     if (!openingMission_) return std::nullopt;
-    const auto previous = previousOrders_.find(workerScout_);
-    const auto goal = previous != previousOrders_.end()
+    const auto scoutId = workerScout_;
+    const auto previous = previousOrders_.find(scoutId);
+    const auto pending = pendingRoutes_.contains(scoutId);
+    const auto goal = pending ? Position{-1,-1} : previous != previousOrders_.end()
         ? previous->second.order.target : friendlyMain(state);
-    const auto command = harasser_.control(state, workerScout_, goal, influence, terrain);
+    const auto command = harasser_.control(state, scoutId, goal, influence, terrain);
     if (harasser_.finished()) {
         openingMission_ = false;
         workerScout_ = -1;
         nextWorkerMission_ = state.frame + 45 * 24;
     }
+    if (!command && pending && !harasser_.finished())
+        return Command{scoutId, CommandType::hold, -1, {-1,-1}, UnitKind::unknown,
+            60, state.frame, "probe-scout-route-pending"};
     return command;
 }
 
@@ -743,6 +858,14 @@ std::vector<ScoutOrder> ScoutManager::assign(
     const InfluenceMap& influence,
     const ThreatAssessment& threat,
     const NavigationGrid* terrain) {
+    // Releasing a preempted actor cancels only its jobs, before any work runs.
+    std::vector<UnitId> unavailable;
+    for (const auto& [id, owner] : routeOwners_)
+        if (std::ranges::find(availableScouts, id) == availableScouts.end() &&
+            id != openingScout() && id != returningScout()) unavailable.push_back(id);
+    for (const auto id : unavailable) static_cast<void>(releaseLease(id, state.frame));
+    advanceNavigation(state, terrain);
+    pendingRoutes_.clear();
     std::vector<Candidate> candidates;
     candidates.reserve(state.bases.size() + 4);
     informationGap_ = {};
@@ -922,8 +1045,10 @@ std::vector<ScoutOrder> ScoutManager::assign(
     std::unordered_map<UnitId, std::vector<std::optional<ScoutApproach>>> approachesByScout;
     orders.reserve(availableScouts.size());
     for (const auto scoutId : availableScouts) {
-        const auto scout = state.findUnit(scoutId);
+        const auto scout = eligibleScout(state, scoutId);
         if (!scout) continue;
+        const auto owner = routeOwner(*scout);
+        auto previousPending = false;
         if (scout->kind == UnitKind::observer &&
             (observerInDanger(state, *scout, influence) ||
              (observerEvadeUntil_.contains(scoutId) &&
@@ -932,6 +1057,8 @@ std::vector<ScoutOrder> ScoutManager::assign(
         auto bestScore = -std::numeric_limits<double>::infinity();
         ScoutApproach bestApproach;
         const auto previous = previousOrders_.find(scoutId);
+        const auto findingEnemy = scoutId == openingScout() && enemyDepot == state.enemy.units.end();
+        std::optional<std::size_t> pendingEnemyStart;
         struct RankedCandidate {
             std::size_t index{};
             double scoreUpperBound{};
@@ -972,18 +1099,40 @@ std::vector<ScoutOrder> ScoutManager::assign(
                 distance(scout->position, candidate.position) - maximumStandOff) / 1000.0;
             ranked.push_back({i, candidate.value + bonus - minimumTravel, bonus, previousWaypoint});
         }
-        std::ranges::sort(ranked, [](const RankedCandidate& left, const RankedCandidate& right) {
+        std::ranges::sort(ranked, [&](const RankedCandidate& left, const RankedCandidate& right) {
+            if (findingEnemy) {
+                const auto leftStart = candidates[left.index].purpose == ScoutPurpose::findEnemy;
+                const auto rightStart = candidates[right.index].purpose == ScoutPurpose::findEnemy;
+                if (leftStart != rightStart) return leftStart;
+            }
             return left.scoreUpperBound > right.scoreUpperBound ||
                 (left.scoreUpperBound == right.scoreUpperBound && left.index < right.index);
         });
         auto& cachedApproaches = approachesByScout[scoutId];
         cachedApproaches.resize(candidates.size());
         for (const auto& rankedCandidate : ranked) {
-            if (rankedCandidate.scoreUpperBound + 1e-9 < bestScore) break;
             const auto i = rankedCandidate.index;
             const auto& candidate = candidates[i];
+            // Finding the opponent owns the opening scout. A pending start
+            // route must not be displaced by an easier expansion visit, which
+            // moves the actor away from that search's retained origin.
+            if (findingEnemy && candidate.purpose != ScoutPurpose::findEnemy &&
+                (pendingEnemyStart || bestApproach.position.valid())) break;
+            if (rankedCandidate.scoreUpperBound + 1e-9 < bestScore) break;
             const auto approach = chooseApproach(
-                state, *scout, candidate, influence, terrain, rankedCandidate.previousWaypoint);
+                state, *scout, candidate, influence, terrain, rankedCandidate.previousWaypoint,
+                navigationWork_, owner);
+            if (approach.navigationPending) {
+                const auto priorTarget = previous != previousOrders_.end()
+                    ? (previous->second.order.informationTarget.valid()
+                        ? previous->second.order.informationTarget : previous->second.order.target)
+                    : Position{-1, -1};
+                const auto priorMission = priorTarget.valid() &&
+                    missionKey(previous->second.order.purpose, priorTarget) == candidate.key;
+                previousPending = previousPending || priorMission;
+                if (findingEnemy && candidate.purpose == ScoutPurpose::findEnemy &&
+                    (!pendingEnemyStart || priorMission)) pendingEnemyStart = i;
+            }
             if (!rankedCandidate.previousWaypoint.valid()) cachedApproaches[i] = approach;
             if (!approach.position.valid()) continue;
             const auto travel = approach.route.distance / 1000.0;
@@ -999,19 +1148,11 @@ std::vector<ScoutOrder> ScoutManager::assign(
                 bestApproach = approach;
             }
         }
-        if (std::isfinite(bestScore) && !candidates.empty() &&
-            bestApproach.position.valid() && !claimed.contains(candidates[bestIndex].key)) {
-            const auto& candidate = candidates[bestIndex];
-            claimed.insert(candidate.key);
-            const auto previous = previousOrders_.find(scoutId);
+        const auto rememberMission = [&](ScoutOrder& order, const Candidate& candidate) {
             const auto continuingLease = previous != previousOrders_.end() &&
                 missionKey(previous->second.order.purpose,
                     previous->second.order.informationTarget.valid()
-                        ? previous->second.order.informationTarget
-                        : previous->second.order.target) == candidate.key;
-            ScoutOrder order{scoutId, bestApproach.position, candidate.purpose, bestScore,
-                             candidate.position, bestApproach.risk, candidate.deadlineFrame,
-                             bestApproach.routeWaypoint};
+                        ? previous->second.order.informationTarget : previous->second.order.target) == candidate.key;
             if (continuingLease) {
                 order.leaseGeneration = previous->second.order.leaseGeneration;
             } else {
@@ -1020,7 +1161,6 @@ std::vector<ScoutOrder> ScoutManager::assign(
                 if (generation == 0) generation = 1;
                 order.leaseGeneration = generation;
             }
-            orders.push_back(order);
             if (continuingLease) {
                 auto mission = previous->second;
                 mission.order = order;
@@ -1030,9 +1170,36 @@ std::vector<ScoutOrder> ScoutManager::assign(
                 nextOrders.emplace(scoutId, std::move(mission));
             } else {
                 nextOrders.emplace(scoutId, ScoutMission{
-                    order, state.frame, state.frame, state.frame,
-                    candidate.lastObserved,
+                    order, state.frame, state.frame, state.frame, candidate.lastObserved,
                     static_cast<int>(distance(scout->position, candidate.position)), false});
+            }
+        };
+        if (std::isfinite(bestScore) && !candidates.empty() &&
+            bestApproach.position.valid() && !claimed.contains(candidates[bestIndex].key)) {
+            const auto& candidate = candidates[bestIndex];
+            claimed.insert(candidate.key);
+            ScoutOrder order{scoutId, bestApproach.position, candidate.purpose, bestScore,
+                candidate.position, bestApproach.risk, candidate.deadlineFrame, bestApproach.routeWaypoint};
+            rememberMission(order, candidate);
+            orders.push_back(order);
+        } else if (findingEnemy && pendingEnemyStart) {
+            const auto& candidate = candidates[*pendingEnemyStart];
+            claimed.insert(candidate.key);
+            // This stores intent and ownership only. It never emits a travel
+            // order or treats an unfinished route as proof of reachability.
+            ScoutOrder pending{scoutId, candidate.position, candidate.purpose, 0.0,
+                candidate.position, 0.0, candidate.deadlineFrame, {-1,-1}};
+            rememberMission(pending, candidate);
+            pendingRoutes_.insert(scoutId);
+        } else if (previousPending && previous != previousOrders_.end()) {
+            const auto& order = previous->second.order;
+            const auto key = missionKey(order.purpose,
+                order.informationTarget.valid() ? order.informationTarget : order.target);
+            if (!claimed.contains(key)) {
+                // Retain bookkeeping/ownership, never the old route command.
+                claimed.insert(key);
+                nextOrders.emplace(scoutId, previous->second);
+                pendingRoutes_.insert(scoutId);
             }
         }
     }
@@ -1067,15 +1234,18 @@ std::vector<ScoutOrder> ScoutManager::assign(
                    distanceSquared(order.informationTarget, nextInformation->position) <= 128 * 128;
         })) {
         auto safestRouteRisk = std::numeric_limits<double>::infinity();
+        auto navigationPending = false;
         const auto candidateIndex = static_cast<std::size_t>(nextInformation - candidates.data());
         for (const auto scoutId : availableScouts) {
-            const auto scout = state.findUnit(scoutId);
+            const auto scout = eligibleScout(state, scoutId);
             if (!scout) continue;
             const auto cached = approachesByScout.find(scoutId);
             const auto hasCached = cached != approachesByScout.end() &&
                 candidateIndex < cached->second.size() && cached->second[candidateIndex].has_value();
             const auto approach = hasCached ? *cached->second[candidateIndex] : chooseApproach(
-                state, *scout, *nextInformation, influence, terrain);
+                state, *scout, *nextInformation, influence, terrain, {-1, -1},
+                navigationWork_, routeOwner(*scout));
+            navigationPending = navigationPending || approach.navigationPending;
             safestRouteRisk = std::min(safestRouteRisk, approach.risk);
         }
         const auto observed = std::max<Frame>(0, nextInformation->lastObserved);
@@ -1099,6 +1269,7 @@ std::vector<ScoutOrder> ScoutManager::assign(
                            0.15 * std::clamp(threat.uncertainty, 0.0, 1.0) +
                            0.05 * routeRisk, 0.0, 1.0),
             availableScouts.empty() ? ScoutGapReason::noAvailableScout
+                : navigationPending ? ScoutGapReason::navigationPending
                 : (!std::isfinite(safestRouteRisk) || safestRouteRisk > 1.0
                     ? ScoutGapReason::unsafeRoute : ScoutGapReason::lowerPriority),
         };

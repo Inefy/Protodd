@@ -15,6 +15,17 @@ enum class BuildTaskPhase : std::uint8_t {
     constructing,
 };
 
+// LastCommand records API acceptance even when the engine resumes an older
+// attack/gather order. After latency, only current construction activity can
+// retain a Build command's lease. Staged Move tasks have no Build issue frame.
+[[nodiscard]] constexpr bool constructionBuildOrderLost(
+    const Frame frame, const Frame commandIssued, const Frame latencyFrames,
+    const bool nativeConstructionActive) noexcept {
+    return commandIssued >= 0 && frame >= commandIssued &&
+        frame - commandIssued > std::max(12, latencyFrames + 6) &&
+        !nativeConstructionActive;
+}
+
 [[nodiscard]] constexpr bool activeConstructionWaypointOrder(
     const bool moveCommand, const bool moveOrder,
     const Position commandTarget, const Position waypoint) noexcept {
@@ -22,6 +33,42 @@ enum class BuildTaskPhase : std::uint8_t {
     // an actual Move toward this waypoint may suppress a new route leg.
     return moveCommand && moveOrder && commandTarget.valid() && waypoint.valid() &&
         distanceSquared(commandTarget, waypoint) <= 24 * 24;
+}
+
+struct BuildWaypointProgress {
+    Position waypoint{-1, -1};
+    int bestDistancePixels{-1};
+    Frame lastProgress{-1};
+};
+
+// Native Move can keep a Probe moving around a blocked approach. Only getting
+// closer to this accepted waypoint extends retention of that same route leg.
+inline void recordBuildWaypointProgress(
+    BuildWaypointProgress& progress, const Frame frame,
+    const Position builder, const Position waypoint) noexcept {
+    if (frame < 0 || !builder.valid() || !waypoint.valid()) {
+        progress = {};
+        return;
+    }
+    const auto distancePixels = static_cast<int>(distance(builder, waypoint));
+    if (progress.waypoint != waypoint) {
+        progress = {waypoint, distancePixels, frame};
+    } else if (frame >= progress.lastProgress &&
+               distancePixels <= progress.bestDistancePixels - 24) {
+        progress.bestDistancePixels = distancePixels;
+        progress.lastProgress = frame;
+    }
+}
+
+[[nodiscard]] inline bool constructionWaypointMakingProgress(
+    const BuildWaypointProgress& progress, const Frame frame,
+    const Position builder, const bool moveCommand, const bool moveOrder,
+    const Position commandTarget) noexcept {
+    return builder.valid() && progress.lastProgress >= 0 &&
+        frame >= progress.lastProgress && frame - progress.lastProgress <= 2 * 24 &&
+        distanceSquared(builder, progress.waypoint) > 96 * 96 &&
+        activeConstructionWaypointOrder(
+            moveCommand, moveOrder, commandTarget, progress.waypoint);
 }
 
 // Give distant builders time proportional to their route, with a hard bound

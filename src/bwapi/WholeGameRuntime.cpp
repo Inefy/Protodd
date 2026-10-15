@@ -258,7 +258,8 @@ void WholeGameRuntime::start() {
     enabled_ = output_.is_open() || model_ != nullptr;
     if (!enabled_) return;
     auto& game = BWAPI::Broodwar;
-    terrain_.width = game->mapWidth(); terrain_.height = game->mapHeight();
+    terrain_.width = static_cast<std::uint32_t>(game->mapWidth());
+    terrain_.height = static_cast<std::uint32_t>(game->mapHeight());
     terrain_.walkableFraction.resize(static_cast<std::size_t>(terrain_.width) * terrain_.height);
     for (int y = 0; y < game->mapHeight(); ++y)
         for (int x = 0; x < game->mapWidth(); ++x) {
@@ -266,8 +267,8 @@ void WholeGameRuntime::start() {
             for (int dy = 0; dy < 4; ++dy)
                 for (int dx = 0; dx < 4; ++dx)
                     walkable += game->isWalkable(x * 4 + dx, y * 4 + dy) ? 1 : 0;
-            terrain_.walkableFraction[static_cast<std::size_t>(y) * terrain_.width + x]
-                = walkable / 16.0f;
+            terrain_.walkableFraction[static_cast<std::size_t>(y) * terrain_.width +
+                static_cast<std::size_t>(x)] = static_cast<float>(walkable) / 16.0f;
         }
     if (!output_) return;
     std::ofstream terrain("bwapi-data/write/WholeGame-terrain.json", std::ios::trunc);
@@ -399,7 +400,8 @@ std::vector<LegalWholeGameCommand> WholeGameRuntime::observe() {
     }
     row.entities = entities_;
     whole_observation::maskUnpublishedReferences(row, published_);
-    row.vision.reserve(game->mapWidth() * game->mapHeight());
+    row.vision.reserve(static_cast<std::size_t>(game->mapWidth()) *
+        static_cast<std::size_t>(game->mapHeight()));
     for (int y = 0; y < game->mapHeight(); ++y)
         for (int x = 0; x < game->mapWidth(); ++x) {
             const BWAPI::TilePosition tile(x,y);

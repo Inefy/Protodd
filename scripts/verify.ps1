@@ -17,7 +17,7 @@ try {
 
     New-Item -ItemType Directory -Force -Path "build/verify" | Out-Null
     $coreSources = @(
-        Get-ChildItem -LiteralPath "src/core" -Filter "*.cpp" | ForEach-Object FullName
+        Get-ChildItem -LiteralPath "src/core" -Filter "*.cpp" -Recurse | ForEach-Object FullName
     )
     $coreSources += (Resolve-Path "tests/test_main.cpp").Path
     & $zigPath c++ -std=c++20 -Iinclude -Wall -Wextra -Wpedantic -Wconversion `
@@ -58,7 +58,7 @@ try {
 
         $adapterFlags = @(
             '-target', 'x86-windows-msvc', '-std=c++20', '-fms-extensions',
-            '-Iinclude', '-isystem', $bwapiInclude, '-Isrc/bwapi',
+            '-Iinclude', '-isystem', $bwapiInclude, '-Isrc/bwapi', '-Isrc/cpu',
             '-Wall', '-Wextra', '-Wpedantic', '-Wconversion', '-Wshadow', '-Werror',
             '-Wno-nullability-completeness', '-Wno-unknown-pragmas',
             '-Wno-deprecated-this-capture', '-Wno-division-by-zero',

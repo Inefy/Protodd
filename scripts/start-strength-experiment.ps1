@@ -5,6 +5,7 @@ if ($Label -notmatch '^[A-Za-z0-9_-]+$') { throw 'Invalid label' }
 $run = Join-Path $repo "build/strength-20260918/$Label"
 if (-not (Test-Path -LiteralPath "$run/manifest.json")) { throw 'Prepare experiment first' }
 Import-Module (Join-Path $PSScriptRoot 'HeadlessCampaign.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'HeadlessStarCraft.psm1') -Force
 foreach ($clientName in @('client1','client2')) {
     Assert-HeadlessArenaClient -ClientDirectory (Join-Path $run $clientName)
 }
@@ -19,9 +20,9 @@ foreach ($component in @('server','client1','client2')) {
     $dir = Join-Path $run $component
     $kind = if ($component -eq 'server') { 'server' } else { 'client' }
     # All game launches must use the current headless client bundle.
-    $process = Start-Process -FilePath $java -ArgumentList @('-jar',"$kind.jar", "${kind}_settings.json") `
+    $process = Start-ConsoleFreeProcess -FilePath $java -Arguments @('-jar',"$kind.jar", "${kind}_settings.json") `
         -WorkingDirectory $dir -RedirectStandardOutput "$dir/stdout.log" `
-        -RedirectStandardError "$dir/stderr.log" -WindowStyle Hidden -PassThru
+        -RedirectStandardError "$dir/stderr.log"
     $processes += [ordered]@{component=$component; pid=$process.Id; started=$process.StartTime.ToString('o')}
     if ($component -eq 'server') { Start-Sleep -Seconds 3 }
 }

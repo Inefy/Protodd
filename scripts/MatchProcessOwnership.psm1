@@ -66,6 +66,62 @@ function Get-OwnedStarCraftProcesses {
     return @($owned.Values | Sort-Object { [int]$_.process_id })
 }
 
+function Test-OwnedMatchProcessIdentity {
+    param([Parameter(Mandatory)][object]$Identity,
+          [Parameter(Mandatory)][object]$Process)
+    return ([int]$Process.ProcessId -eq [int]$Identity.process_id -and
+        [int]$Process.ParentProcessId -eq [int]$Identity.parent_process_id -and
+        (ConvertTo-OwnershipUtcTime $Process.CreationDate) -eq
+            (ConvertTo-OwnershipUtcTime $Identity.created_utc))
+}
+
+function Stop-OwnedMatchProcess {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$Identity)
+    if (-not ('Protodd.Runtime.OwnedTermination' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace Protodd.Runtime {
+ public static class OwnedTermination {
+  [DllImport("kernel32.dll",SetLastError=true)] public static extern IntPtr OpenProcess(uint access,bool inherit,uint pid);
+  [DllImport("kernel32.dll",SetLastError=true)] public static extern bool TerminateProcess(IntPtr handle,uint code);
+  [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
+ }
+}
+'@
+    }
+    $filter = 'ProcessId = ' + [int]$Identity.process_id
+    $current = Get-CimInstance Win32_Process -Filter $filter
+    if (!$current) { return $false }
+    if (!(Test-OwnedMatchProcessIdentity -Identity $Identity -Process $current)) {
+        throw 'Owned process identity changed before cleanup'
+    }
+    # Stop-Process requests query access as well as termination. StarCraft
+    # can deny query access while permitting termination, so request only
+    # the right needed here and keep ownership validation independent.
+    $handle = [Protodd.Runtime.OwnedTermination]::OpenProcess(1, $false, [uint32]$Identity.process_id)
+    if ($handle -eq [IntPtr]::Zero) {
+        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        if (!(Get-CimInstance Win32_Process -Filter $filter)) { return $false }
+        throw [ComponentModel.Win32Exception]::new($errorCode, 'Cannot open owned termination handle')
+    }
+    try {
+        # Recheck while holding the handle: a recycled PID cannot authorize
+        # terminating a replacement process.
+        $current = Get-CimInstance Win32_Process -Filter $filter
+        if (!$current) { return $false }
+        if (!(Test-OwnedMatchProcessIdentity -Identity $Identity -Process $current)) {
+            throw 'Owned process identity changed while acquiring cleanup handle'
+        }
+        if (![Protodd.Runtime.OwnedTermination]::TerminateProcess($handle, 1)) {
+            throw [ComponentModel.Win32Exception]::new(
+                [Runtime.InteropServices.Marshal]::GetLastWin32Error(), 'Cannot terminate owned process')
+        }
+        return $true
+    } finally { [void][Protodd.Runtime.OwnedTermination]::CloseHandle($handle) }
+}
+
 function Enter-MatchRuntimeLock {
     [CmdletBinding()]
     param(
@@ -118,6 +174,8 @@ function Exit-MatchRuntimeLock {
 
 Export-ModuleMember -Function @(
     'Get-OwnedStarCraftProcesses',
+    'Test-OwnedMatchProcessIdentity',
+    'Stop-OwnedMatchProcess',
     'Enter-MatchRuntimeLock',
     'Exit-MatchRuntimeLock'
 )

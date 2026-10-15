@@ -65,7 +65,7 @@ tournament =
 [auto_menu]
 auto_menu = LAN
 lan_mode = Local PC
-character_name = AstraBot
+character_name = Protodd
 pause_dbg = OFF
 auto_restart = OFF
 map = $Map
@@ -199,7 +199,14 @@ if($frameValues.Count -eq 0){$callbackGateIssues.Add('no onFrame samples were re
 if(@($callbackRows | Where-Object callback -eq 'onStart').Count -ne 1){$callbackGateIssues.Add('expected exactly one onStart sample')}
 if(@($callbackRows | Where-Object callback -eq 'onEnd').Count -ne 1){$callbackGateIssues.Add('expected exactly one onEnd sample')}
 if($callbackRows | Where-Object threw -eq '1'){$callbackGateIssues.Add('one or more bot callbacks threw')}
-if($callbackSummary | Where-Object over_55ms -gt 0){$callbackGateIssues.Add('a bot callback exceeded 55 ms')}
+if($callbackSummary | Where-Object {$_.callback -eq 'onFrame' -and $_.over_55ms -gt 0}){
+ $callbackGateIssues.Add('an onFrame callback exceeded 55 ms')
+}
+# AIIDE's 42/55 ms limits apply to onFrame. Keep every lifecycle/unit sample
+# visible, and use a separate conservative local one-second safety limit.
+if($callbackSummary | Where-Object {$_.callback -ne 'onFrame' -and $_.over_1000ms -gt 0}){
+ $callbackGateIssues.Add('a lifecycle or unit callback exceeded the local one-second safety limit')
+}
 if($frameValues | Where-Object {$_ -gt 55000}){$callbackGateIssues.Add('an onFrame callback exceeded 55 ms')}
 if($performanceSummary.over_55ms -gt 0 -or $performanceSummary.over_1000ms -gt 0 -or
    $performanceSummary.over_10000ms -gt 0){$callbackGateIssues.Add('Protodd PERF_SUMMARY reports a timeout-threshold overrun')}
@@ -228,6 +235,7 @@ $frameSummary=[ordered]@{
  callback_over_55ms=@(($callbackRows|Where-Object {[long]$_.duration_us -gt 55000}).Count)
  onframe_binary_csv_exact=$true
  callback_gate_passed=$callbackGatePassed
+ callback_gate_policy='zero onFrame overruns above 55 ms; lifecycle/unit callbacks below one second; zero throws'
  callback_gate_issues=@($callbackGateIssues.ToArray())
  protodd_performance_summary=$performanceSummary
  peak_working_set_bytes=if($memoryRecords.Count){($memoryRecords|Measure-Object peak_working_set -Maximum).Maximum}else{0}

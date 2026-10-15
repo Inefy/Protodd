@@ -13,6 +13,26 @@ constexpr Frame kUnsafeRouteHoldFrames = 30 * 24;
 constexpr Frame kUnsafeRouteRetryFrames = 60 * 24;
 constexpr Frame kUnsafeRouteSafeResetFrames = 5 * 24;
 constexpr Frame kSurvivalRunwayFrames = 9 * 60 * 24;
+constexpr Frame kRouteKnowledgeHoldFrames = 30 * 24;
+constexpr Frame kRouteKnowledgeRetryFrames = 15 * 24;
+
+bool threatensExpansionSite(const UnitSnapshot& enemy, const Position site,
+                             const Frame frame) {
+    if (!enemy.completed || enemy.disabled || enemy.loaded || enemy.hallucination ||
+        enemy.invincible || !enemy.position.valid() || enemy.groundWeapon.damage <= 0 ||
+        (unitStats(enemy.kind).requiresPsi && !enemy.powered)) return false;
+    if (!enemy.visible) {
+        auto remembered = enemy;
+        remembered.updateMemoryConfidence(frame);
+        // Use the same decaying location evidence as the influence map. A
+        // five-second cutoff forgets an army as soon as it destroys our vision,
+        // and also forgets stationary defenses that have never been cleared.
+        if (remembered.existenceConfidence * remembered.locationConfidence < 0.2)
+            return false;
+    }
+    const auto radius = std::max(480, enemy.groundWeapon.maxRange + 128);
+    return distanceSquared(enemy.position, site) <= radius * radius;
+}
 
 Position safeAlternativeSite(const GameState& state, const Position blockedSite,
                              const std::vector<Position>& recentlyFailedSites,
@@ -39,13 +59,7 @@ Position safeAlternativeSite(const GameState& state, const Position blockedSite,
         if (occupied) continue;
         const auto threatened = std::ranges::any_of(state.enemy.units,
             [&state, &base](const UnitSnapshot& enemy) {
-                if (!enemy.completed || enemy.disabled || enemy.loaded ||
-                    enemy.hallucination || enemy.invincible ||
-                    !enemy.position.valid() || enemy.groundWeapon.damage <= 0 ||
-                    (!enemy.visible && (enemy.lastSeen <= 0 ||
-                     state.frame - enemy.lastSeen > 5 * 24))) return false;
-                const auto radius = std::max(480, enemy.groundWeapon.maxRange + 128);
-                return distanceSquared(base.center, enemy.position) <= radius * radius;
+                return threatensExpansionSite(enemy, base.center, state.frame);
             });
         if (threatened) continue;
         if (best == nullptr || base.groundDistanceFromMain < best->groundDistanceFromMain ||
@@ -102,13 +116,24 @@ void ExpansionCoordinator::reset() noexcept {
     unsafeRouteSince_ = -1;
     unsafeRouteLastFrame_ = -1;
     unsafeRouteSite_ = {-1, -1};
+    routeWaitSince_ = -1;
+    routeWaitLastFrame_ = -1;
+    routeWaitSite_ = {-1, -1};
+    routeKnowledgeWaitFrames_ = -1;
+    routeKnowledgeTimedOut_ = false;
+    routeAdmissionSince_ = routeAdmissionLastFrame_ = -1;
+    routeAdmissionSite_ = {-1, -1};
+    routeAdmissionWaitFrames_ = -1;
+    routeAdmissionTimedOut_ = false;
     releaseBuilder_ = false;
     reason_ = "No expansion mission";
 }
 
 void ExpansionCoordinator::update(StrategicPlan& plan, const GameState& state,
-                                  const ExpansionFeedback& feedback) {
+                                  const ExpansionFeedback& observedFeedback) {
     releaseBuilder_ = false;
+    routeKnowledgeTimedOut_ = false;
+    routeAdmissionTimedOut_ = false;
     if (state.frame >= retryAfter_) {
         retryAfter_ = 0;
         failedSites_.clear();
@@ -128,6 +153,35 @@ void ExpansionCoordinator::update(StrategicPlan& plan, const GameState& state,
         state.self.units, [](const UnitSnapshot& unit) {
             return unit.kind == UnitKind::nexus && unit.completed;
         }));
+    const UnitSnapshot* quotaWarping = nullptr;
+    const auto startedNexuses = std::ranges::count_if(state.self.units,
+        [](const UnitSnapshot& unit) { return unit.kind == UnitKind::nexus; });
+    if (!observedFeedback.pending && !preservingWorkers &&
+        plan.desiredBases > completedNexuses && startedNexuses >= plan.desiredBases) {
+        const auto anchor = committedSite_.valid() ? committedSite_ : plan.expansionTarget;
+        for (const auto& unit : state.self.units) {
+            if (unit.kind != UnitKind::nexus || unit.completed || !unit.position.valid()) continue;
+            if (quotaWarping == nullptr ||
+                (anchor.valid() && distanceSquared(unit.position, anchor) <
+                                   distanceSquared(quotaWarping->position, anchor)) ||
+                ((!anchor.valid() || distanceSquared(unit.position, anchor) ==
+                                    distanceSquared(quotaWarping->position, anchor)) &&
+                 unit.id < quotaWarping->id)) quotaWarping = &unit;
+        }
+    }
+    auto feedback = observedFeedback;
+    if (quotaWarping != nullptr) {
+        // The paid structure is stronger evidence than a stale admission
+        // blocker. Keep protection at its actual site until it completes;
+        // another empty site is not a new obligation for the same base quota.
+        feedback = {};
+        routeWaitSince_ = routeWaitLastFrame_ = -1;
+        routeWaitSite_ = {-1, -1};
+        unsafeRouteSince_ = unsafeRouteLastFrame_ = -1;
+        unsafeRouteSite_ = {-1, -1};
+        routeAdmissionSince_ = routeAdmissionLastFrame_ = -1;
+        routeAdmissionSite_ = {-1, -1};
+    }
     const auto expansionRequested = feedback.pending ||
         plan.desiredBases > completedNexuses;
     const auto feedbackMatchesPlan = feedback.site.valid() &&
@@ -139,11 +193,14 @@ void ExpansionCoordinator::update(StrategicPlan& plan, const GameState& state,
                 return distanceSquared(site, failedSite) <= 96 * 96;
             });
     };
-    if (feedback.pending && feedback.site.valid()) {
+    if (quotaWarping != nullptr) {
+        plan.expansionTarget = plan.rallyPoint = committedSite_ = quotaWarping->position;
+    } else if (feedback.pending && feedback.site.valid()) {
         plan.expansionTarget = feedback.site;
         plan.rallyPoint = feedback.site;
         committedSite_ = feedback.site;
-    } else if (feedback.unsafeRoute && expansionRequested && !plan.deferExpansion &&
+    } else if ((feedback.unsafeRoute || feedback.routePending) &&
+               expansionRequested && !plan.deferExpansion &&
                feedbackMatchesPlan && !recentlyFailed(feedback.site)) {
         plan.expansionTarget = feedback.site;
         plan.rallyPoint = feedback.site;
@@ -170,16 +227,66 @@ void ExpansionCoordinator::update(StrategicPlan& plan, const GameState& state,
             committedSite_ = {-1, -1};
         } else if (distanceSquared(plan.expansionTarget, committedSite_) > 96 * 96) {
             const auto requestedSite = plan.expansionTarget;
-            plan.expansionTarget = committedSite_;
-            if (distanceSquared(plan.rallyPoint, requestedSite) <= 96 * 96 ||
-                !plan.rallyPoint.valid())
-                plan.rallyPoint = committedSite_;
+            const auto replacementDemand = std::ranges::any_of(plan.goals,
+                [completedNexuses](const ProductionGoal& goal) {
+                    return goal.goal == GoalKind::expand && goal.target == UnitKind::nexus &&
+                        goal.blocking && goal.replacementMining &&
+                        goal.desiredCount > completedNexuses;
+                });
+            const auto requestedBase = std::ranges::find_if(state.bases,
+                [requestedSite, committedDistance = site->groundDistanceFromMain](const BaseSnapshot& base) {
+                    return distanceSquared(base.center, requestedSite) <= 96 * 96 &&
+                        base.ownerId == -1 && !base.island && base.depotFootprintAvailable &&
+                        base.center.valid() && base.mineralLine.valid() &&
+                        base.mineralPatches >= 4 && base.mineralsRemaining >= 4000 &&
+                        base.groundReachabilityKnown && base.groundDistanceFromMain >= 0 &&
+                        base.groundDistanceFromMain < committedDistance;
+                });
+            const auto requestedOccupied = std::ranges::any_of(state.self.units,
+                [requestedSite](const UnitSnapshot& unit) {
+                    return unit.kind == UnitKind::nexus && unit.position.valid() &&
+                        distanceSquared(unit.position, requestedSite) < 320 * 320;
+                });
+            // An unleased fallback must not permanently pin a depletion
+            // replacement to a longer route. Reconsider only an eligible,
+            // nearer request after its cooldown; the bridge still has to
+            // prove the current route and footprint before issuing commands.
+            if (replacementDemand && !feedback.cancelling &&
+                requestedBase != state.bases.end() && !recentlyFailed(requestedSite) &&
+                !requestedOccupied) {
+                if (!plan.rallyPoint.valid() ||
+                    distanceSquared(plan.rallyPoint, committedSite_) <= 96 * 96)
+                    plan.rallyPoint = requestedSite;
+                committedSite_ = requestedSite;
+            } else {
+                plan.expansionTarget = committedSite_;
+                if (distanceSquared(plan.rallyPoint, requestedSite) <= 96 * 96 ||
+                    !plan.rallyPoint.valid())
+                    plan.rallyPoint = committedSite_;
+            }
         }
+    }
+    const auto admissionRoutePending = feedback.routePending && !feedback.pending &&
+        expansionRequested && !plan.deferExpansion && feedback.site.valid() &&
+        (!plan.expansionTarget.valid() ||
+         distanceSquared(feedback.site, plan.expansionTarget) <= 96 * 96);
+    if (admissionRoutePending) {
+        if (!routeWaitSite_.valid() || distanceSquared(routeWaitSite_, feedback.site) > 96 * 96) {
+            routeWaitSite_ = feedback.site;
+            routeWaitSince_ = state.frame;
+        }
+        routeWaitLastFrame_ = state.frame;
+    } else if (feedback.pending || !expansionRequested || plan.deferExpansion ||
+               (routeWaitSince_ >= 0 && state.frame - routeWaitLastFrame_ >= 5 * 24)) {
+        routeWaitSince_ = -1;
+        routeWaitLastFrame_ = -1;
+        routeWaitSite_ = {-1, -1};
     }
     const auto unsafeFeedbackMatchesPlan = feedback.unsafeRoute &&
         feedback.site.valid() &&
         (feedback.pending || !plan.expansionTarget.valid() ||
          distanceSquared(feedback.site, plan.expansionTarget) <= 96 * 96);
+    routeKnowledgeWaitFrames_ = routeWaitSince_ >= 0 ? state.frame - routeWaitSince_ : -1;
     if (unsafeFeedbackMatchesPlan) {
         if (!unsafeRouteSite_.valid() ||
             distanceSquared(unsafeRouteSite_, feedback.site) > 96 * 96) {
@@ -197,7 +304,29 @@ void ExpansionCoordinator::update(StrategicPlan& plan, const GameState& state,
         unsafeRouteSite_.valid() && expansionRequested && !plan.deferExpansion &&
         state.frame - unsafeRouteLastFrame_ < kUnsafeRouteSafeResetFrames &&
         !unsafeFeedbackMatchesPlan;
-    if (unsafeRouteFeedbackGap) {
+    const auto routeAdmissionUnavailable = !feedback.pending && expansionRequested &&
+        !plan.deferExpansion && feedback.site.valid() &&
+        (feedback.routePending || feedback.unsafeRoute) &&
+        (!plan.expansionTarget.valid() ||
+         distanceSquared(feedback.site, plan.expansionTarget) <= 96 * 96);
+    if (routeAdmissionUnavailable) {
+        if (!routeAdmissionSite_.valid() ||
+            distanceSquared(routeAdmissionSite_, feedback.site) > 96 * 96) {
+            routeAdmissionSite_ = feedback.site;
+            routeAdmissionSince_ = state.frame;
+        }
+        routeAdmissionLastFrame_ = state.frame;
+    } else if (feedback.pending || !expansionRequested ||
+               (routeAdmissionSince_ >= 0 &&
+                state.frame - routeAdmissionLastFrame_ >= kUnsafeRouteSafeResetFrames)) {
+        routeAdmissionSince_ = routeAdmissionLastFrame_ = -1;
+        routeAdmissionSite_ = {-1, -1};
+    }
+    routeAdmissionWaitFrames_ = routeAdmissionSince_ >= 0
+        ? state.frame - routeAdmissionSince_ : -1;
+    const auto routeAdmissionExpired = routeAdmissionUnavailable &&
+        routeAdmissionWaitFrames_ >= kRouteKnowledgeHoldFrames;
+    if (unsafeRouteFeedbackGap && !routeAdmissionExpired) {
         plan.expansionTarget = unsafeRouteSite_;
         plan.rallyPoint = unsafeRouteSite_;
         committedSite_ = unsafeRouteSite_;
@@ -216,12 +345,7 @@ void ExpansionCoordinator::update(StrategicPlan& plan, const GameState& state,
     });
     std::vector<UnitSnapshot> siteEnemies;
     for (const auto& enemy : state.enemy.units) {
-        const auto radius = std::max(480, enemy.groundWeapon.maxRange + 128);
-        if (enemy.completed && !enemy.disabled && !enemy.loaded &&
-            !enemy.hallucination && !enemy.invincible && enemy.position.valid() &&
-            (enemy.visible || (enemy.lastSeen > 0 && state.frame - enemy.lastSeen <= 5 * 24)) &&
-            enemy.groundWeapon.damage > 0 &&
-            distanceSquared(enemy.position, plan.expansionTarget) <= radius * radius)
+        if (threatensExpansionSite(enemy, plan.expansionTarget, state.frame))
             siteEnemies.push_back(enemy);
     }
     auto expansionBlocked = false;
@@ -240,7 +364,8 @@ void ExpansionCoordinator::update(StrategicPlan& plan, const GameState& state,
                 unsafeRouteSince_ = state.frame;
             }
             unsafeRouteLastFrame_ = state.frame;
-            if (state.frame - unsafeRouteSince_ < kUnsafeRouteHoldFrames) {
+            if (state.frame - unsafeRouteSince_ < kUnsafeRouteHoldFrames &&
+                !routeAdmissionExpired) {
                 // Give the army one bounded window to secure the builder route.
                 // If the route stays unsafe, stop defending this one site
                 // forever and try another base or preserve the current miners.
@@ -305,13 +430,43 @@ void ExpansionCoordinator::update(StrategicPlan& plan, const GameState& state,
         // evaluating the local fight, though, and pull the mobile screen back
         // when the site lacks enough nearby cover.
         plan.deferExpansion = false;
-        plan.expansionProtectionRequired = expansionBlocked;
+        plan.expansionProtectionRequired = expansionBlocked ||
+            (completedNexuses < 2 && siteEnemies.empty());
         reason_ = expansionBlocked ? "Reinforce threatened warping Nexus" :
             siteEnemies.empty() ? "Protect Nexus while it warps in" :
                                   "Local cover protects warping Nexus";
         return;
     }
-    const auto builderStalled = feedback.pending && feedback.stalledFrames >= 8 * 24;
+    if ((routeAdmissionExpired || (admissionRoutePending && feedbackMatchesTarget &&
+        (recentlyFailed(feedback.site) ||
+         state.frame - routeWaitSince_ >= kRouteKnowledgeHoldFrames)))) {
+        routeAdmissionTimedOut_ = routeAdmissionExpired;
+        routeKnowledgeTimedOut_ = routeKnowledgeWaitFrames_ >= kRouteKnowledgeHoldFrames;
+        // Unknown geometry is never called unsafe or used for a Move. But an
+        // unleased expansion cannot wait indefinitely for admission while its
+        // income runs out. Try another site or preserve the remaining miners.
+        if (!recentlyFailed(feedback.site))
+            rememberFailedSite(feedback.site, kRouteKnowledgeRetryFrames);
+        routeWaitSince_ = -1;
+        routeWaitLastFrame_ = -1;
+        routeWaitSite_ = {-1, -1};
+        routeAdmissionSince_ = routeAdmissionLastFrame_ = -1;
+        routeAdmissionSite_ = {-1, -1};
+        expansionBlocked = true;
+        blockedReason = routeAdmissionExpired
+            ? "Expansion route admission stayed unavailable; choose an alternative"
+            : "Expansion route knowledge stayed pending; choose an alternative";
+    }
+    // An arrived prepositioning Probe can legitimately be stationary while
+    // its protected bank finishes funding. The bridge proves the live lease,
+    // legal footprint and readiness; neither unknown nor unsafe routes qualify.
+    // Keep the existing travel stall breaker and cap stationary funding grace.
+    const auto readyFundingWait = feedback.readyAwaitingFunds && feedback.pending &&
+        feedback.stalledFrames >= 0 && feedback.stalledFrames < 30 * 24 &&
+        !feedback.cancelling && !feedback.unsafeRoute && !feedback.routePending &&
+        !feedback.rejectedFootprint && !feedback.noSafeBuilder && !feedback.noPlacement;
+    const auto builderStalled = feedback.pending && feedback.stalledFrames >= 8 * 24 &&
+        !readyFundingWait;
     // A worker still travelling does not trigger this circuit breaker. Stop
     // the stale order before releasing the bank; otherwise it can spend later.
     if (builderStalled) {

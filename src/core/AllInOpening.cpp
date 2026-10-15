@@ -19,8 +19,8 @@ int count(const GameState& state, const UnitKind kind, const bool completed = fa
         static_cast<int>(std::ranges::count(state.self.queuedUnits, kind)));
 }
 void goal(StrategicPlan& plan, GoalKind kind, UnitKind target, int desired, int priority,
-          bool blocking = true) {
-    plan.goals.push_back({kind, target, desired, priority, blocking, "ladder opening commitment"});
+          bool blocking = true, std::string reason = "ladder opening commitment") {
+    plan.goals.push_back({kind, target, desired, priority, blocking, std::move(reason)});
 }
 struct Profile { int workers; int gates; int ready; Frame window; Frame travelTimeout; Frame deadline; };
 void protectObservedDtBreach(StrategicPlan& plan, const GameState& state) {
@@ -86,9 +86,9 @@ void protectObservedDtBreach(StrategicPlan& plan, const GameState& state) {
             });
         if (coveredInTime) continue;
 
-        const auto siteRadius = 416 * 416;
+        constexpr auto siteRadius = 416 * 416;
         const auto localCannons = static_cast<int>(std::ranges::count_if(
-            state.self.units, [base, siteRadius](const UnitSnapshot& own) {
+            state.self.units, [base](const UnitSnapshot& own) {
                 return own.kind == UnitKind::photonCannon && own.position.valid() &&
                        distanceSquared(own.position, base->position) <= siteRadius;
             }));
@@ -133,6 +133,7 @@ Position recoveryExpansion(const GameState& state) {
 Profile profile(const AllInBuild build) {
     switch (build) {
         case AllInBuild::twoGateZealot: return {14, 2, 4, 120 * 24, 90 * 24, 9000};
+        case AllInBuild::twoGatePressure: return {14, 2, 2, 90 * 24, 90 * 24, 9000};
         case AllInBuild::threeGateDragoon: return {20, 3, 4, 120 * 24, 90 * 24, 12000};
         case AllInBuild::fourGateDragoon: return {20, 4, 6, 150 * 24, 90 * 24, 13200};
         case AllInBuild::darkTemplar: return {18, 2, 1, 90 * 24, 60 * 24, 10800};
@@ -143,6 +144,7 @@ Profile profile(const AllInBuild build) {
 }
 
 AllInBuild allInBuild(const std::string_view name) noexcept {
+    if (name.starts_with("two-gate-pressure")) return AllInBuild::twoGatePressure;
     if (name.starts_with("two-gate-zealot")) return AllInBuild::twoGateZealot;
     if (name.starts_with("three-gate-dragoon")) return AllInBuild::threeGateDragoon;
     if (name.starts_with("four-gate-dragoon")) return AllInBuild::fourGateDragoon;
@@ -152,6 +154,7 @@ AllInBuild allInBuild(const std::string_view name) noexcept {
 std::string_view allInBuildName(const AllInBuild build) noexcept {
     switch (build) {
         case AllInBuild::twoGateZealot: return "two-gate-zealot";
+        case AllInBuild::twoGatePressure: return "two-gate-pressure";
         case AllInBuild::threeGateDragoon: return "three-gate-dragoon";
         case AllInBuild::fourGateDragoon: return "four-gate-dragoon";
         case AllInBuild::darkTemplar: return "dt-pressure";
@@ -175,7 +178,7 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
                                const ThreatAssessment& threat) {
     if (!active()) return;
     const auto p = profile(build_);
-    const bool zealot = build_ == AllInBuild::twoGateZealot;
+    const bool zealot = build_ == AllInBuild::twoGateZealot || build_ == AllInBuild::twoGatePressure;
     const bool dt = build_ == AllInBuild::darkTemplar;
     const auto mainUnit = zealot ? UnitKind::zealot : dt ? UnitKind::darkTemplar : UnitKind::dragoon;
     const auto ready = count(state, mainUnit, true);
@@ -231,7 +234,7 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
             else if (pressureStart_ < 0 && arrival_ >= 0) pressureStart_ = arrival_;
             if (pressureStart_ >= 0 && state.frame - pressureStart_ >= p.window) {
                 phase_ = AllInPhase::transition; reason_ = "pressure-window";
-            } else if (arrival_ < 0 &&
+            } else if (arrival_ < 0 && contact_ < 0 &&
                        state.frame - (departure_ >= 0 ? departure_ : launch_) >= p.travelTimeout) {
                 phase_ = AllInPhase::transition; reason_ = "travel-timeout";
             } else if (state.frame - launch_ >= 24 * 12 && peakArmy_ >= p.ready &&
@@ -371,7 +374,7 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
                        prior.blocking;
             });
         if (count(state, UnitKind::assimilator) == 0 && !assimilatorDemand)
-            goal(plan, GoalKind::build, UnitKind::assimilator, 1, 129,
+            goal(plan, GoalKind::build, UnitKind::assimilator, 1, 129, true,
                  "fund required mobile detection");
         const bool detectorDemand = std::ranges::any_of(plan.goals,
             [](const ProductionGoal& prior) {
@@ -379,7 +382,7 @@ void AllInOpeningPlanner::apply(StrategicPlan& plan, const GameState& state,
                        prior.blocking;
             });
         if (!detectorDemand)
-            goal(plan, GoalKind::train, UnitKind::observer, 1, 128,
+            goal(plan, GoalKind::train, UnitKind::observer, 1, 128, true,
                  "complete required mobile detection");
     }
     protectObservedDtBreach(plan, state);

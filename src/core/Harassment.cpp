@@ -223,6 +223,95 @@ bool harassmentRouteSafe(const GameState& state, const UnitSnapshot& raider,
         safeRaidRoute(state, raider, target, flyingRoute, navigation, budget);
 }
 
+HarassmentOpportunity harassmentObjectiveProbe(
+    const GameState& state, const UnitSnapshot& raider, const Position target,
+    const NavigationGrid* navigation, HarassmentRouteBudget* routeBudget,
+    NavigationWorkQueue* retainedRoutes) {
+    HarassmentRouteBudget localBudget;
+    auto& budget = routeBudget != nullptr ? *routeBudget : localBudget;
+    budget.probeActor = raider.id;
+    budget.probeOrigin = raider.position;
+    budget.probeTarget = target;
+    budget.probeApproach = target;
+    budget.probeFootprint = movementFootprint(raider);
+    budget.probeReason = "invalid-input-or-unsafe-target";
+    budget.probeRouteStatus = NavigationStatus::invalidInput;
+    budget.probeSearchBudgetExhausted = false;
+    budget.probeRetainedWork = 0;
+    budget.probeOriginWalkable = navigation == nullptr || navigation->empty() ||
+        navigation->walkable(raider.position, movementFootprint(raider));
+    budget.probeTargetWalkable = navigation == nullptr || navigation->empty() ||
+        navigation->walkable(target, movementFootprint(raider));
+    if (!raider.position.valid() || !target.valid() || raider.flying ||
+        !raidTargetSafe(state, raider, target)) return {};
+    auto approach = target;
+    if (navigation != nullptr && !navigation->empty() &&
+        !navigation->walkable(target, movementFootprint(raider))) {
+        const auto occupiedBuilding = std::ranges::any_of(state.enemy.units,
+            [target](const UnitSnapshot& enemy) {
+                return isBuilding(enemy.kind) && !enemy.flying && !enemy.loaded &&
+                    !enemy.hallucination && enemy.position.valid() &&
+                    target.x >= enemy.position.x - enemy.dimensionLeft &&
+                    target.x <= enemy.position.x + enemy.dimensionRight &&
+                    target.y >= enemy.position.y - enemy.dimensionUp &&
+                    target.y <= enemy.position.y + enemy.dimensionDown;
+            });
+        if (!occupiedBuilding) {
+            budget.probeReason = "blocked-objective-outside-known-building";
+            return {};
+        }
+        constexpr auto maximumApproachDistance = 256;
+        const auto searchRadius = maximumApproachDistance / std::max(1, navigation->cellSize());
+        approach = navigation->nearestWalkable(target, searchRadius, movementFootprint(raider));
+        if (!approach.valid() || distanceSquared(approach, target) >
+            maximumApproachDistance * maximumApproachDistance) {
+            budget.probeReason = "no-legal-building-approach";
+            return {};
+        }
+    }
+    budget.probeApproach = approach;
+    // Check detection at the true objective and prove the full approach route.
+    if (!raidTargetSafe(state, raider, approach)) {
+        budget.probeReason = "unsafe-approach";
+        return {};
+    }
+    std::vector<Position> route;
+    const auto footprint = movementFootprint(raider);
+    if (navigation == nullptr || navigation->empty() ||
+        navigation->lineWalkable(raider.position, approach, footprint)) {
+        route = {raider.position, approach};
+        budget.probeRouteStatus = NavigationStatus::reached;
+    } else {
+        if (budget.pathSearches >= HarassmentRouteBudget::maximumPathSearches) {
+            ++budget.deferredChecks;
+            budget.probeReason = "route-search-count-exhausted";
+            budget.probeRouteStatus = NavigationStatus::budgetExhausted;
+            return {};
+        }
+        ++budget.pathSearches;
+        auto result = retainedRoutes != nullptr && raider.id >= 0
+            ? retainedRoutes->query(static_cast<std::uint64_t>(raider.id) + 1U,
+                *navigation, raider.position, approach, footprint)
+            : navigation->findPath(raider.position, approach,
+                HarassmentRouteBudget::maximumPathExpansions, footprint);
+        if (retainedRoutes != nullptr)
+            budget.probeRetainedWork = retainedRoutes->diagnostics().frameWork;
+        budget.probeRouteStatus = result.status;
+        budget.probeSearchBudgetExhausted = result.searchBudgetExhausted;
+        if (!result.reached()) {
+            budget.probeReason = "terrain-route-not-proven";
+            return {};
+        }
+        route = std::move(result.points);
+    }
+    if (!safeRaidPath(state, raider, approach, false, route)) {
+        budget.probeReason = "observed-route-threat";
+        return {};
+    }
+    budget.probeReason = "safe-objective-probe";
+    return {target, 0.0, 0, approach, true};
+}
+
 HarassmentOpportunity harassmentOpportunity(const GameState& state, const UnitSnapshot& raider,
                                             const bool flyingRoute, const NavigationGrid* navigation,
                                             HarassmentRouteBudget* routeBudget) {

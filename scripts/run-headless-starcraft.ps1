@@ -14,7 +14,8 @@ try {
 $request = Join-Path $Runtime 'headless-close-request.json'
 if (Test-Path -LiteralPath $request) { Remove-Item -LiteralPath $request }
 $launcher = Start-HeadlessStarCraftLauncher -Runtime $Runtime -InjectorName 'injectory.x86.exe'
-[ordered]@{launcher_pid=$launcher.Id; monitor_pid=$PID; desktop=$launcher.Desktop; headless=$true} |
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class HeadlessMonitorConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'
+[ordered]@{console_window_handle=[HeadlessMonitorConsoleProbe]::GetConsoleWindow().ToInt64(); launcher_pid=$launcher.Id; monitor_pid=$PID; desktop=$launcher.Desktop; headless=$true} |
     ConvertTo-Json | Set-Content -LiteralPath $ReceiptPath
 while(!$launcher.Monitor.Completed) {
     if(Test-Path -LiteralPath $request) {

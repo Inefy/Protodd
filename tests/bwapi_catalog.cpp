@@ -1,8 +1,10 @@
+#include "../src/bwapi/PlacementFootprint.hpp"
 #include "protodd/UnitCatalog.hpp"
 #include "protodd/Technology.hpp"
 #include "../src/bwapi/ProductionCount.hpp"
 #include "../src/bwapi/TerranDetection.hpp"
 #include "../src/bwapi/SupplyPlanning.hpp"
+#include "../src/bwapi/ObservedCloak.hpp"
 
 #include <BWAPI/UnitType.h>
 #include <BWAPI/UnitCommand.h>
@@ -50,6 +52,73 @@ int main() {
         std::pair{UnitKind::arbiter, Protoss_Arbiter},
     };
     auto failures = 0;
+    using protodd::bwapi::observedUnitCloaked;
+    if (!observedUnitCloaked(Protoss_Dark_Templar, false, true) ||
+        !observedUnitCloaked(Protoss_Observer, false, true) ||
+        observedUnitCloaked(Protoss_Dark_Templar, false, false) ||
+        observedUnitCloaked(Protoss_Observer, false, false) ||
+        observedUnitCloaked(Protoss_Zealot, false, true) ||
+        observedUnitCloaked(Terran_Ghost, false, true) ||
+        observedUnitCloaked(Terran_Wraith, false, true) ||
+        !observedUnitCloaked(Terran_Ghost, true, true) ||
+        !observedUnitCloaked(Terran_Wraith, true, true)) {
+        std::cerr << "Observed cloak must include completed permanent cloakers while preserving toggle state\n";
+        ++failures;
+    }
+    // Exercise the actual BWAPI dimensions, including inclusive edge contact.
+    // Native traces supply the expensive path reproduction; these controls
+    // guard the occupancy exception and deferred-check decision order.
+    const BWAPI::TilePosition footprintTile{10,10};
+    const auto verifyFootprint = [&](const BWAPI::UnitType type) {
+        using protodd::bwapi::PlacementBuilderBounds;
+        using protodd::bwapi::placementFootprintBuildable;
+        const auto center = BWAPI::Position(footprintTile) + BWAPI::Position(type.tileSize()) / 2;
+        const auto right = center.x + type.dimensionRight();
+        int mapCalls{}, builderCalls{};
+        const auto mapCheck = [&] { ++mapCalls; return true; };
+        const auto builderCheck = [&] { ++builderCalls; return true; };
+        if (!placementFootprintBuildable(footprintTile,type,{0,0,16,16},mapCheck,builderCheck) ||
+            mapCalls != 1 || builderCalls != 0) {
+            std::cerr << "A clear footprint must defer its redundant builder path check\n";
+            ++failures;
+        }
+        mapCalls = builderCalls = 0;
+        const auto blockedMap = [&] { ++mapCalls; return false; };
+        if (placementFootprintBuildable(footprintTile,type,{0,0,16,16},blockedMap,builderCheck) ||
+            mapCalls != 1 || builderCalls != 0) {
+            std::cerr << "A remote builder cannot unblock another occupant\n";
+            ++failures;
+        }
+        mapCalls = builderCalls = 0;
+        if (!placementFootprintBuildable(footprintTile,type,
+                {right,center.y,right+16,center.y+16},blockedMap,builderCheck) ||
+            mapCalls != 1 || builderCalls != 1) {
+            std::cerr << "A builder touching the footprint must retain its exclusion check\n";
+            ++failures;
+        }
+        builderCalls = 0;
+        if (placementFootprintBuildable(footprintTile,type,
+                {right+1,center.y,right+17,center.y+16},blockedMap,builderCheck) || builderCalls != 0) {
+            std::cerr << "A worker outside the inclusive collision edge cannot unblock the footprint\n";
+            ++failures;
+        }
+        builderCalls = 0;
+        if (placementFootprintBuildable(footprintTile,type,
+                {center.x,center.y,center.x+16,center.y+16},blockedMap,
+                [&] { ++builderCalls; return false; }) || builderCalls != 1) {
+            std::cerr << "Builder exclusion must not override another failed placement requirement\n";
+            ++failures;
+        }
+        builderCalls = 0;
+        if (!placementFootprintBuildable(footprintTile,type,{},blockedMap,builderCheck) || builderCalls != 1) {
+            std::cerr << "Unknown builder bounds must retain conservative native validation\n";
+            ++failures;
+        }
+    };
+    for (const auto& [kind,type] : pairs) {
+        static_cast<void>(kind);
+        if (type.isBuilding() && !type.isRefinery()) verifyFootprint(type);
+    }
     using protodd::bwapi::supplyPlanningBuffer;
     if (supplyPlanningBuffer(true, 8) != 12 ||
         supplyPlanningBuffer(true, 30) != 12 ||

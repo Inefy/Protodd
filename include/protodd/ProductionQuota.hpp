@@ -10,15 +10,17 @@ public:
         if(observation<0||observation%240||observation>=7200||observation<=sample_)return false;
         for(int q:quantities)if(q<0||q>4)throw std::invalid_argument("invalid production quantity");
         sample_=observation;remaining_={};attempts_={};
-        for(int a:{0,5,6})remaining_[a]=quantities[a];return true;
+        for(std::size_t a:{0U,5U,6U})remaining_[a]=quantities[a];return true;
     }
     bool wants(int frame,int action) const {
+        const auto index=static_cast<std::size_t>(action);
         return action>=0&&action<8&&sample_>=0&&frame>=sample_&&frame<sample_+240&&frame<7200&&
-            remaining_[action]>0&&attempts_[action]<2;
+            remaining_[index]>0&&attempts_[index]<2;
     }
     void result(int frame,int action,bool accepted) {
         if(!wants(frame,action))throw std::invalid_argument("dispatch outside quota");
-        if(accepted){--remaining_[action];attempts_[action]=0;}else ++attempts_[action];
+        const auto index=static_cast<std::size_t>(action);
+        if(accepted){--remaining_[index];attempts_[index]=0;}else ++attempts_[index];
     }
 private:
     int sample_{-1};std::array<int,8> remaining_{},attempts_{};

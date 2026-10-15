@@ -2,6 +2,7 @@
 
 #include "protodd/GameState.hpp"
 
+#include <cstdint>
 #include <vector>
 
 namespace protodd {
@@ -21,6 +22,12 @@ public:
     void update(const GameState& state);
     void updateStorms(std::span<const Position> storms);
     [[nodiscard]] float stormDanger(Position position) const noexcept;
+    // This identifies the current ground field and storm inputs for retry
+    // invalidation. A changed value grants fresh analysis, not route safety.
+    [[nodiscard]] std::uint64_t groundThreatIdentity() const noexcept {
+        return groundFieldIdentity_ ^ (stormIdentity_ + 0x9e3779b97f4a7c15ULL +
+            (groundFieldIdentity_ << 6U) + (groundFieldIdentity_ >> 2U));
+    }
 
     [[nodiscard]] InfluenceCell at(Position position) const noexcept;
     [[nodiscard]] float maximumGroundThreat(
@@ -40,6 +47,10 @@ private:
     int height_{};
     std::vector<InfluenceCell> cells_;
     std::vector<Position> storms_;
+    std::uint64_t groundFieldIdentity_{};
+    std::uint64_t stormIdentity_{};
+
+    void updateGroundThreatIdentity() noexcept;
 
     [[nodiscard]] std::size_t offset(int x, int y) const noexcept;
     void addThreat(const UnitSnapshot& unit, Frame currentFrame);

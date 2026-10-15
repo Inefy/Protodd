@@ -2,6 +2,7 @@
 #include "protodd/RouteSafety.hpp"
 #include "protodd/Scouting.hpp"
 #include "protodd/Squads.hpp"
+#include "protodd/ActorMovementRouting.hpp"
 
 #include <algorithm>
 #include <array>
@@ -64,6 +65,88 @@ int main() {
         if (y != 3) walkable[static_cast<std::size_t>(y * width + 20)] = 0;
     }
     const NavigationGrid wall(width, height, 32, std::move(walkable));
+    {
+        Squad advancing; advancing.role = SquadRole::mainArmy;
+        CombatEstimate advance; advance.decision = FightDecision::engage;
+        DefenseArea noDefense;
+        auto actor = makeUnit(10000, UnitKind::dragoon, start, true);
+        actor.role = UnitRole::groundArmy;
+        actor.dimensionLeft = actor.dimensionRight = actor.dimensionUp = actor.dimensionDown = 8;
+        const MovementFootprint body{8, 8, 8, 8};
+        check(!wall.lineWalkable(start, target, body) && wall.findPath(start, target, 12000, body).reached(),
+              "advance regression has a reachable detour despite its blocked straight chord");
+        Command march{actor.id, CommandType::attackMove, -1, target, UnitKind::unknown,
+                      50, 0, "squad-objective"};
+        int actorSearches = 0;
+        bool fullObjectives = true;
+        for (int i = 0; i < 32; ++i) {
+            actor.id = march.actor = 10000 + i;
+            const auto routed = routeActorMovement(march, actor, wall,
+                nativeUncontestedGroundTravel(advancing, advance, noDefense, march));
+            actorSearches += routed.pathSearched;
+            fullObjectives = fullObjectives && routed.order.type == CommandType::attackMove &&
+                routed.order.targetPosition == target;
+        }
+        check(actorSearches == 0 && fullObjectives,
+              "uncontested army keeps full engine objectives without per-actor A-star searches");
+        advancing.enemies.push_back(makeUnit(20000, UnitKind::zealot, {500,528}, false));
+        const auto tactical = routeActorMovement(march, actor, wall,
+            nativeUncontestedGroundTravel(advancing, advance, noDefense, march));
+        check(tactical.pathSearched && tactical.order.targetPosition != target &&
+              wall.lineWalkable(actor.position, tactical.order.targetPosition, body),
+              "contested movement retains a checked straight route prefix");
+        const auto beforeCrowd = NavigationGrid::diagnosticsForCurrentThread().totalExpansions;
+        bool crowdProgress = true;
+        for (int i = 0; i < 64; ++i) {
+            actor.id = march.actor = 30000 + i;
+            actor.position = {start.x, start.y + i % 8};
+            const auto bounded = routeActorMovement(march, actor, wall, false,
+                maximumActorRouteExpansionsPerUpdate / 64);
+            crowdProgress = crowdProgress && bounded.order.type == CommandType::attackMove &&
+                bounded.order.targetPosition != actor.position &&
+                wall.lineWalkable(actor.position, bounded.order.targetPosition, body);
+        }
+        const auto crowdWork = NavigationGrid::diagnosticsForCurrentThread().totalExpansions - beforeCrowd;
+        check(crowdProgress && crowdWork <= maximumActorRouteExpansionsPerUpdate,
+              "a crowded contested army makes body-safe progress within one shared search allowance");
+        const auto exhausted = routeActorMovement(march, actor, wall, false, 0);
+        check(!exhausted.pathSearched && exhausted.order.type == CommandType::hold,
+              "an exhausted search allowance never permits an unchecked terrain crossing");
+        auto shortMove = march;
+        shortMove.targetPosition = {actor.position.x + 32, actor.position.y};
+        const auto directMove = routeActorMovement(shortMove, actor, wall, false, 0);
+        check(!directMove.pathSearched && directMove.order == shortMove,
+              "direct body-safe movement remains available after the search allowance is spent");
+        actor.position = start;
+        advancing.enemies.clear();
+        advance.decision = FightDecision::retreat;
+        check(!nativeUncontestedGroundTravel(advancing, advance, noDefense, march),
+              "retreat cannot delegate its tactical route to an offensive advance");
+        advance.decision = FightDecision::engage; advance.advanceBlocked = true;
+        check(!nativeUncontestedGroundTravel(advancing, advance, noDefense, march),
+              "detection-blocked advance retains tactical routing");
+        advance.advanceBlocked = false;
+        advance.holdScreen = true;
+        check(!nativeUncontestedGroundTravel(advancing, advance, noDefense, march),
+              "a held interception screen cannot become a native advance");
+        advance.holdScreen = false;
+        advancing.withdrawing = true;
+        check(!nativeUncontestedGroundTravel(advancing, advance, noDefense, march),
+              "withdrawal retains its checked movement path");
+        advancing.withdrawing = false;
+        auto kite = march; kite.source = "combat-kite"; kite.type = CommandType::move;
+        check(!nativeUncontestedGroundTravel(advancing, advance, noDefense, kite),
+              "tactical kiting is separate from ordinary forward travel");
+        auto reload = march; reload.source = "payload-reload-travel"; reload.type = CommandType::move;
+        check(nativeUncontestedGroundTravel(advancing, advance, noDefense, reload),
+              "uncontested payload reload keeps its engine travel destination");
+        DefenseArea screen{start,448,start};
+        check(!nativeUncontestedGroundTravel(advancing, advance, screen, march),
+              "expansion and defensive screens retain their movement boundary");
+        advancing.role = SquadRole::harassment;
+        check(!nativeUncontestedGroundTravel(advancing, advance, noDefense, march),
+              "raid safety is separate from main-army native travel");
+    }
     InfluenceMap influence;
     influence.update(state);
 
@@ -82,7 +165,21 @@ int main() {
     ThreatAssessment threat;
     const UnitId scoutIds[]{1};
     const auto scoutOrders = scouts.assign(state, scoutIds, influence, threat, &wall);
-    check(scoutOrders.empty() && scouts.informationGap().reason == ScoutGapReason::unsafeRoute,
+    check(scoutOrders.empty() && scouts.informationGap().reason == ScoutGapReason::navigationPending,
+          "unfinished wall-gap proof cannot authorize a scout route");
+    auto unsafeNeverIssued = scoutOrders.empty();
+    auto scoutingBounded = true;
+    for (int step = 0; step < 256 &&
+         scouts.informationGap().reason == ScoutGapReason::navigationPending; ++step) {
+        state.frame += 6;
+        static_cast<void>(scouts.controlWorkerScout(state, influence, &wall));
+        unsafeNeverIssued = scouts.assign(state, scoutIds, influence, threat, &wall).empty() &&
+            unsafeNeverIssued;
+        scoutingBounded = scoutingBounded && scouts.navigationDiagnostics().frameWork <=
+            ScoutManager::navigationWorkPerFrame;
+    }
+    check(unsafeNeverIssued && scoutingBounded &&
+          scouts.informationGap().reason == ScoutGapReason::unsafeRoute,
           "a Probe is not assigned through a dangerous terrain detour hidden by the straight chord");
 
     auto raider = makeUnit(30, UnitKind::zealot, start, true);
@@ -131,6 +228,47 @@ int main() {
     check(builderRoute.waypoint.valid() && builderRoute.profile.peakThreat < 0.25 &&
               builderRoute.profile.score() <= 0.4125,
           "builder screening keeps a footprint-aware safe detour despite a threatening straight chord");
+
+    // A safe hint can cease to equal every regenerated midpoint when either
+    // endpoint moves. Retention still requires a current complete route proof.
+    constexpr MovementFootprint probeFootprint{11, 11, 11, 11};
+    const auto priorBuilderRoute = selectSafeRouteAlternative(
+        detourInfluence, detourStart, detourTarget, false, &openTerrain,
+        probeFootprint, 0.4125, {-1, -1}, 0.25);
+    const auto adjustedEndpointRoute = selectSafeRouteAlternative(
+        detourInfluence, detourStart, {3044, 1540}, false, &openTerrain,
+        probeFootprint, 0.4125, priorBuilderRoute.waypoint, 0.25);
+    check(priorBuilderRoute.waypoint.valid() &&
+          adjustedEndpointRoute.waypoint == priorBuilderRoute.waypoint &&
+          adjustedEndpointRoute.profile.peakThreat <= 0.25,
+          "safe previous detour survives a construction endpoint adjustment");
+    const auto movedActorRoute = selectSafeRouteAlternative(
+        detourInfluence, {164, 1540}, detourTarget, false, &openTerrain,
+        probeFootprint, 0.4125, priorBuilderRoute.waypoint, 0.25);
+    check(movedActorRoute.waypoint == priorBuilderRoute.waypoint &&
+          movedActorRoute.profile.peakThreat <= 0.25,
+          "safe previous detour survives current actor movement");
+    auto newThreatState = detourState;
+    auto newGuard = centralCannon;
+    newGuard.id = 400;
+    newGuard.position = newGuard.lastPosition = priorBuilderRoute.waypoint;
+    newThreatState.enemy.units.push_back(newGuard);
+    InfluenceMap newThreatInfluence;
+    newThreatInfluence.update(newThreatState);
+    const auto threatenedHintRoute = selectSafeRouteAlternative(
+        newThreatInfluence, {164, 1540}, detourTarget, false, &openTerrain,
+        probeFootprint, 0.4125, priorBuilderRoute.waypoint, 0.25);
+    check(threatenedHintRoute.waypoint != priorBuilderRoute.waypoint,
+          "new weapon exposure invalidates the previously safe waypoint");
+    GameState clearState = detourState;
+    clearState.enemy.units.clear();
+    InfluenceMap clearInfluence;
+    clearInfluence.update(clearState);
+    const auto excessiveHintRoute = selectSafeRouteAlternative(
+        clearInfluence, detourStart, detourTarget, false, &openTerrain,
+        probeFootprint, 0.4125, {1600, 2368}, 0.25);
+    check(excessiveHintRoute.profile.reachable && !excessiveHintRoute.waypoint.valid(),
+          "a feasible previous detour outside hysteresis yields to the clear baseline");
 
     detourState.enemy.id = 2;
     auto firstWorker = makeUnit(42, UnitKind::probe, {2960, 1600}, false);
@@ -238,6 +376,45 @@ int main() {
     check(rankedRaid.target == raid.target && rankedRaid.waypoint == raid.waypoint &&
           reorderedRaid.target == rankedRaid.target && reorderedRaid.waypoint == rankedRaid.waypoint,
           "ranked route admission preserves the best safe opportunity under input reversal");
+
+
+    // A boundary-side corridor must remain a candidate when perpendicular
+    // detours extend outside the map. The opposite-side candidates cannot
+    // cross this terrain divider; the direct route enters Cannon coverage.
+    GameState edgeState;
+    edgeState.frame = state.frame;
+    edgeState.mapWidthPixels = 1024;
+    edgeState.mapHeightPixels = 896;
+    auto edgeCannon = makeUnit(5000, UnitKind::photonCannon, {640, 448}, false);
+    edgeCannon.groundWeapon = {40, 15, 0, 192, DamageType::normal, false, true};
+    edgeState.enemy.units.push_back(edgeCannon);
+    InfluenceMap edgeInfluence;
+    edgeInfluence.update(edgeState);
+    std::vector<std::uint8_t> edgeWalk(128 * 112, 1);
+    for (int y = 0; y < 112; ++y) edgeWalk[y * 128 + 104] = 0;
+    NavigationGrid edgeTerrain(128, 112, 8, std::move(edgeWalk));
+    constexpr Position edgeStart{960, 64}, edgeTarget{896, 832};
+    const auto edgeBaseline = assessRouteThreat(edgeInfluence, edgeStart, edgeTarget,
+        false, &edgeTerrain, probeFootprint);
+    NavigationWorkQueue edgeWork;
+    RouteAlternative edgeRoute;
+    bool edgeBounded = true;
+    int edgeFrame = 0;
+    for (; edgeFrame < 256; ++edgeFrame) {
+        edgeWork.beginFrame(edgeTerrain, edgeFrame, 257);
+        edgeRoute = selectSafeRouteAlternative(edgeInfluence, edgeStart, edgeTarget,
+            false, &edgeTerrain, probeFootprint, 0.4125, {-1,-1}, 0.25, &edgeWork, 5001);
+        edgeBounded = edgeBounded && edgeWork.diagnostics().frameWork <= 257;
+        if (!edgeRoute.profile.searchBudgetExhausted && !edgeRoute.unresolvedAlternatives) break;
+    }
+    check(edgeBaseline.reachable && edgeBaseline.peakThreat > 0.25,
+          "boundary regression baseline enters weapon coverage");
+    check(edgeRoute.profile.reachable && edgeRoute.waypoint.valid() &&
+          edgeRoute.waypoint.x > edgeStart.x && edgeRoute.profile.peakThreat <= 0.25 &&
+          edgeRoute.profile.score() <= 0.4125,
+          "out-of-map detours preserve a fully proved safe boundary-side corridor");
+    check(edgeFrame < 256 && edgeBounded,
+          "boundary detour settles within the shared per-frame navigation allowance");
 
     return passed ? 0 : 1;
 }

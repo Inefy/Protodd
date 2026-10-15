@@ -4,7 +4,7 @@
 
 namespace protodd {
 
-enum class AllInBuild : std::uint8_t { standard, twoGateZealot, threeGateDragoon,
+enum class AllInBuild : std::uint8_t { standard, twoGateZealot, twoGatePressure, threeGateDragoon,
                                        fourGateDragoon, darkTemplar };
 enum class AllInPhase : std::uint8_t { assemble, pressure, transition };
 

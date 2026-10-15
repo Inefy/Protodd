@@ -256,6 +256,7 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
         client_bundle = Path(client_bundle).resolve()
         if (not zipfile.is_zipfile(client_bundle / "client.jar") or
                 not all((client_bundle / name).is_file() for name in ('stop-owned-starcraft.ps1', 'start-owned-starcraft.ps1',
+                    'ConsoleFreeOwnedStarCraft.exe', 'ConsoleFreeOwnedStarCraft.cs', 'build.json',
                     'HeadlessStarCraft.psm1', 'HeadlessStarCraft.cs', 'run-headless-starcraft.ps1',
                     'MatchProcessOwnership.psm1'))):
             raise ValueError("invalid local client bundle")
@@ -337,6 +338,7 @@ def prepare(template, output, dll, opponents, maps, purpose="development", race=
         shutil.copy2((client_bundle or client) / "client.jar", destination / "client.jar")
         if client_bundle:
             for helper in ('start-owned-starcraft.ps1', 'stop-owned-starcraft.ps1',
+                           'ConsoleFreeOwnedStarCraft.exe', 'ConsoleFreeOwnedStarCraft.cs', 'build.json',
                            'HeadlessStarCraft.psm1', 'HeadlessStarCraft.cs', 'run-headless-starcraft.ps1',
                            'MatchProcessOwnership.psm1'):
                 shutil.copy2(client_bundle / helper, destination / helper)

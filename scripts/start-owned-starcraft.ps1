@@ -18,11 +18,10 @@ $launchTime = [DateTime]::UtcNow
 $receiptPath = Join-Path $runtimePath ('headless-launch-' + [Guid]::NewGuid().ToString('N') + '.json')
 $driver = Join-Path $PSScriptRoot 'run-headless-starcraft.ps1'
 $shellPath = (Get-Command pwsh -ErrorAction Stop).Source
-$driverArguments = @('-NoProfile','-File',
-    ('"' + $driver + '"'), '-Runtime', ('"' + $runtimePath + '"'),
-    '-ReceiptPath', ('"' + $receiptPath + '"'))
+$driverArguments = @('-NoLogo','-NoProfile','-NonInteractive','-File',
+    $driver, '-Runtime', $runtimePath, '-ReceiptPath', $receiptPath)
 if ($MonitorOwnedLock) { $driverArguments += '-MonitorOwnedLock' }
-$driverProcess = Start-Process -FilePath $shellPath -ArgumentList $driverArguments -WindowStyle Hidden -PassThru
+$driverProcess = Start-ConsoleFreeProcess -FilePath $shellPath -Arguments $driverArguments -WorkingDirectory $runtimePath
 $readyDeadline = [DateTime]::UtcNow.AddSeconds(15)
 while(!(Test-Path -LiteralPath $receiptPath) -and [DateTime]::UtcNow -lt $readyDeadline) {
     if($driverProcess.HasExited) { throw 'Headless process monitor exited before launch readiness' }
@@ -30,6 +29,11 @@ while(!(Test-Path -LiteralPath $receiptPath) -and [DateTime]::UtcNow -lt $readyD
 }
 if(!(Test-Path -LiteralPath $receiptPath)) { throw 'Headless launch readiness timed out' }
 $headlessReceipt=Get-Content -Raw -LiteralPath $receiptPath | ConvertFrom-Json
+if ($headlessReceipt.console_window_handle -ne 0 -or !$headlessReceipt.headless -or
+    [int]$headlessReceipt.monitor_pid -ne $driverProcess.Id -or
+    [string]$headlessReceipt.desktop -notmatch '^Protodd-[0-9a-f]{32}$') {
+    throw 'Headless launch receipt does not confirm a console-free monitor on a private desktop'
+}
 $launcher = [pscustomobject]@{Id=[int]$headlessReceipt.launcher_pid}
 $owned = @()
 for ($attempt=0; $attempt -lt 50 -and $owned.Count -eq 0; ++$attempt) {

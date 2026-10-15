@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <limits>
 
@@ -16,6 +17,7 @@ void InfluenceMap::resize(const int widthPixels, const int heightPixels) {
     width_ = std::max(1, (widthPixels + cellSize_ - 1) / cellSize_);
     height_ = std::max(1, (heightPixels + cellSize_ - 1) / cellSize_);
     cells_.assign(static_cast<std::size_t>(width_ * height_), {});
+    updateGroundThreatIdentity();
 }
 
 void InfluenceMap::update(const GameState& state) {
@@ -42,6 +44,7 @@ void InfluenceMap::update(const GameState& state) {
             std::clamp(base.center.y / cellSize_, 0, height_ - 1))];
         cell.strategicValue += static_cast<float>(1.0 + base.mineralsRemaining / 5000.0);
     }
+    updateGroundThreatIdentity();
 }
 
 InfluenceCell InfluenceMap::at(const Position position) const noexcept {
@@ -59,6 +62,16 @@ InfluenceCell InfluenceMap::at(const Position position) const noexcept {
 
 void InfluenceMap::updateStorms(const std::span<const Position> storms) {
     storms_.assign(storms.begin(), storms.end());
+    auto identity = std::uint64_t{14695981039346656037ULL};
+    const auto mix = [&identity](const std::uint64_t value) {
+        identity = (identity ^ value) * 1099511628211ULL;
+    };
+    mix(storms_.size());
+    for (const auto center : storms_) {
+        mix(static_cast<std::uint64_t>(center.x));
+        mix(static_cast<std::uint64_t>(center.y));
+    }
+    stormIdentity_ = identity;
 }
 
 float InfluenceMap::stormDanger(const Position position) const noexcept {
@@ -126,6 +139,18 @@ Position InfluenceMap::safestStep(
         }
     }
     return best;
+}
+
+void InfluenceMap::updateGroundThreatIdentity() noexcept {
+    auto identity = std::uint64_t{14695981039346656037ULL};
+    const auto mix = [&identity](const std::uint64_t value) {
+        identity = (identity ^ value) * 1099511628211ULL;
+    };
+    mix(static_cast<std::uint64_t>(width_));
+    mix(static_cast<std::uint64_t>(height_));
+    mix(static_cast<std::uint64_t>(cellSize_));
+    for (const auto& cell : cells_) mix(std::bit_cast<std::uint32_t>(cell.groundThreat));
+    groundFieldIdentity_ = identity;
 }
 
 std::size_t InfluenceMap::offset(const int x, const int y) const noexcept {

@@ -62,9 +62,14 @@ public:
 #endif
 
 private:
+#ifdef PROTODD_ACTOR_AUTHORITY_TESTS
+    // Only the isolated native fixture can drive the exact dispatcher.
+    friend class ActorAuthorityFixture;
+#endif
     BwapiBridge bridge_;
     OpponentModel opponent_;
     InfluenceMap influence_;
+    bool influenceInvalidated_{};
     NavigationGrid navigation_;
 #ifdef PROTODD_PVP_COVERED_RANGED_NATURAL
     StrategyEngine strategy_{false, false, false, false, false, false, false,
@@ -135,6 +140,7 @@ private:
     bool workerTrainingEnabled_{};
     std::vector<std::int64_t> callbackTimes_;
     bool callbackAudit_{};
+    bool harassmentTerrainCaptured_{};
     WholeGameRuntime wholeGame_;
     UrgentEventQueue urgentEvents_;
     std::vector<Position> previousStorms_;
@@ -292,7 +298,12 @@ private:
     template <class Callback>
     void callbackBoundary(std::string_view callbackName, Callback&& callback) noexcept {
         protodd::invokeCallbackBoundary(
-            callbackName, [this, callbackName, &callback] {
+            callbackName,
+#ifdef PROTODD_ENGINE_FAULT_INJECTION
+            [this, callbackName, &callback] {
+#else
+            [&callback] {
+#endif
 #ifdef PROTODD_ENGINE_FAULT_INJECTION
                 maybeInjectAuditFault("callback", callbackName);
 #endif

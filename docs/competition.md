@@ -62,10 +62,18 @@ combat simulation and reduces navigation/scouting cadence; a frame at 40 ms
 enters an emergency tier with a smaller command budget. Macro, workers,
 detection, and retreat control continue. The bot returns to full quality after
 the cooldown window rather than permanently degrading after a transient spike.
+Actor movement searches also share a 16,000-cell expansion allowance across
+the combat update, and construction planning reserves time for scheduled
+combat before starting expensive placement work. A spent search allowance
+never authorizes an unchecked tactical move.
 
 `PERF_SUMMARY` is written before each `END` record. Any nonzero `over_55ms`,
 `over_1s`, `over_10s`, or caught-error count is a release blocker even when the
 batch win rate rises.
+These `PERF_SUMMARY` limits count playing frames. The [official AIIDE rules](https://davechurchill.ca/starcraft/aiide/)
+specify `onFrame` timing; load tests retain lifecycle/unit timing separately
+and apply a local one-second safety ceiling to those callbacks. Startup
+samples above 55 ms remain visible in the report.
 
 ## Persistent learning
 

@@ -1,5 +1,6 @@
 #include "protodd/Scouting.hpp"
 
+#include <array>
 #include <iostream>
 #include <string_view>
 
@@ -49,10 +50,117 @@ GameState scoutingState() {
     return state;
 }
 
+void openingPendingRouteControls(bool& passed) {
+    constexpr int side=512,cell=8;
+    std::vector<std::uint8_t> cells(side*side,1);
+    for(int y=0;y<480;++y) cells[y*side+256]=0;
+    NavigationGrid terrain(side,side,cell,cells);
+    GameState state;
+    state.frame=1000; state.mapWidthPixels=state.mapHeightPixels=side*cell;
+    state.self.id=1;state.enemy.id=2;
+    const Position origin{3200,400},enemyStart{288,3120},expansion{3500,1000};
+    state.self.units={unit(1,UnitKind::nexus,origin,true,state.frame),
+        unit(2,UnitKind::pylon,{3240,400},true,state.frame),
+        unit(10,UnitKind::probe,origin,true,state.frame)};
+    state.bases={{1,origin,origin,8000,5000,1,state.frame,true,false,8,1},
+                 {2,enemyStart,enemyStart,8000,5000,-1,0,true,false,8,1},
+                 {3,expansion,expansion,8000,5000,-1,0,false,false,8,1}};
+    InfluenceMap influence; influence.update(state);
+    ThreatAssessment threat;
+    ScoutManager manager;
+    const UnitId scout=manager.selectWorkerScout(state,threat);
+    const std::array available{scout};
+    const auto initial=manager.assign(state,available,influence,threat,&terrain);
+    passed &= check(scout==10 && initial.empty() &&
+                    manager.activeMissionScouts()==std::vector<UnitId>{10} &&
+                    manager.navigationDiagnostics().queued>0,
+                    "an opening scout reserves its pending enemy-start mission instead of a cheap expansion");
+    const auto waiting=manager.controlWorkerScout(state,influence,&terrain);
+    passed &= check(waiting && waiting->type==CommandType::hold &&
+                    waiting->source=="probe-scout-route-pending",
+                    "pending enemy-search proof holds the current position instead of sending the scout home");
+    std::vector<ScoutOrder> proved;
+    for(int step=0;step<256 && proved.empty();++step){
+        state.frame+=6;
+        proved=manager.assign(state,available,influence,threat,&terrain);
+        passed &= check(manager.navigationDiagnostics().frameWork<=ScoutManager::navigationWorkPerFrame,
+                        "retaining the opening mission preserves the shared navigation work allowance");
+    }
+    passed &= check(proved.size()==1 && proved.front().purpose==ScoutPurpose::findEnemy &&
+                    proved.front().informationTarget==enemyStart,
+                    "the resumable enemy-start route eventually becomes the issued mission");
+    const auto travelling=manager.controlWorkerScout(state,influence,&terrain);
+    passed &= check(travelling && travelling->type==CommandType::move &&
+                    travelling->targetPosition==enemyStart,
+                    "only a proved enemy-search mission releases the opening scout to travel");
+
+    const auto originalLease=proved.front().leaseGeneration;
+    const auto cancellations=manager.missionMetrics().cancelled;
+    state.frame+=6;state.self.units.back().position={3100,600};
+    NavigationGrid refreshed(side,side,cell,cells);
+    const auto reproving=manager.assign(state,available,influence,threat,&refreshed);
+    const auto reproofHold=manager.controlWorkerScout(state,influence,&refreshed);
+    passed &= check(reproving.empty() && reproofHold && reproofHold->type==CommandType::hold &&
+                    manager.missionMetrics().cancelled==cancellations,
+                    "a previously owned enemy-search mission survives temporary reproof without cancellation cooldown");
+    std::vector<ScoutOrder> reproved;
+    for(int step=0;step<256 && reproved.empty();++step){
+        state.frame+=6;reproved=manager.assign(state,available,influence,threat,&refreshed);
+    }
+    passed &= check(reproved.size()==1 && reproved.front().informationTarget==enemyStart &&
+                    reproved.front().leaseGeneration==originalLease,
+                    "reproved enemy-start routing retains the original mission lease");
+
+    auto multipleStarts=state;multipleStarts.bases[2].startLocation=true;
+    ScoutManager alternatives;(void)alternatives.selectWorkerScout(multipleStarts,threat);
+    const auto nearerStart=alternatives.assign(multipleStarts,available,influence,threat,&terrain);
+    passed &= check(nearerStart.size()==1 && nearerStart.front().purpose==ScoutPurpose::findEnemy &&
+                    nearerStart.front().informationTarget==expansion,
+                    "a proved alternate enemy start can be searched before an unresolved distant start");
+
+    // Route waiting must never suppress immediate worker-chaser escape.
+    ScoutManager threatened;
+    passed &= check(threatened.selectWorkerScout(state,threat)==10,
+                    "the pending-route danger fixture owns an opening worker scout");
+    (void)threatened.assign(state,available,influence,threat,&terrain);
+    const auto scoutPosition=state.self.units.back().position;
+    auto chaser=unit(50,UnitKind::probe,{scoutPosition.x+32,scoutPosition.y},false,state.frame);
+    chaser.orderTargetId=10;chaser.groundWeapon={5,22,0,15,DamageType::normal,false,true};
+    state.enemy.units.push_back(chaser);state.self.units.back().underAttack=true;
+    influence.update(state);
+    const auto escape=threatened.controlWorkerScout(state,influence,&terrain);
+    passed &= check(escape && escape->type==CommandType::move &&
+                    escape->source=="probe-harass-evade-chaser",
+                    "an immediate worker chaser overrides pending enemy-search waiting");
+
+    // A completely disproved start can release an otherwise useful safe task.
+    auto unreachableState=state;
+    unreachableState.enemy.units.clear();unreachableState.self.units.back().underAttack=false;
+    unreachableState.mapWidthPixels=unreachableState.mapHeightPixels=256;
+    unreachableState.self.units[0].position={200,200};
+    unreachableState.self.units[1].position={216,200};
+    unreachableState.self.units.back().position={200,200};
+    unreachableState.self.units.back().sightRange=64;
+    unreachableState.bases[0].center={200,200};
+    unreachableState.bases[1].center={16,16};
+    unreachableState.bases[2].center={200,224};
+    std::vector<std::uint8_t> closedCells(32*32,1);
+    for(int y=0;y<16;++y)for(int x=0;x<16;++x)closedCells[y*32+x]=0;
+    NavigationGrid closed(32,32,8,closedCells);
+    ScoutManager fallback;
+    (void)fallback.selectWorkerScout(unreachableState,threat);
+    influence.update(unreachableState);
+    const auto fallbackOrders=fallback.assign(unreachableState,available,influence,threat,&closed);
+    passed &= check(fallbackOrders.size()==1 &&
+                    fallbackOrders.front().purpose==ScoutPurpose::checkExpansion,
+                    "a disproved enemy-start route permits a proved expansion fallback");
+}
+
 }  // namespace
 
 int main() {
     bool passed = true;
+    openingPendingRouteControls(passed);
     auto state = scoutingState();
     InfluenceMap influence;
     influence.update(state);
@@ -82,7 +190,7 @@ int main() {
             {preemptedOrder.front().scout, ScoutCommandStatus::rejected,
              preemptedOrder.front().leaseGeneration}, state.frame + 1);
         const auto afterRelease = preempted.assign(state, probe, influence, threat);
-        passed &= check(releasedGeneration == preemptedOrder.front().leaseGeneration &&
+        passed &= check(releasedGeneration > preemptedOrder.front().leaseGeneration &&
                             afterRelease.empty() && preempted.missionMetrics().cancelled == 1,
                         "worker preemption releases scout mission state and cools down its displaced target");
     } else {

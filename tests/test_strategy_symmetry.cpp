@@ -336,6 +336,7 @@ void comparePlans(
                       left.reason == right.reason && left.technology == right.technology &&
                       left.allowMineralFallback == right.allowMineralFallback &&
                       left.harassmentOnly == right.harassmentOnly &&
+                      left.replacementMining == right.replacementMining &&
                       left.constructionSite.id == right.constructionSite.id &&
                       left.constructionSite.baseId == right.constructionSite.baseId &&
                       transformPosition(left.constructionSite.anchor, transform) ==
@@ -455,7 +456,7 @@ int main() {
     const std::array<std::string_view, 9> expectedFingerprints{
         "eb8aa8b2aad6b40b", "e7d213f3c7cfbdb9", "c291d4d844bb2696",
         "d65f284e7de1106b", "deef03c9c5267193", "b8b97d619a01ffe1",
-        "765d09ab50d6163e", "4cf1ec887e243bef", "b72635afaa2289db"};
+        "c52c8e25349d9bd2", "4cf1ec887e243bef", "b72635afaa2289db"};
     for (std::size_t i = 0; i < frozenStates.size(); ++i) {
         const auto& [name, state] = frozenStates[i];
         const auto plan = StrategyEngine{}.plan(state, ThreatAssessment{});

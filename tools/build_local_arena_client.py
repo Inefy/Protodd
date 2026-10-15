@@ -2,12 +2,13 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import zipfile
 
 
-def build(template, output, javac, seed_base=None, archive_pluto_logs=False):
+def build(template, output, javac, seed_base=None, archive_pluto_logs=False, csc=None):
     template, output = Path(template).resolve(), Path(output).resolve()
     if output.exists():
         raise ValueError("output already exists")
@@ -39,9 +40,8 @@ def build(template, output, javac, seed_base=None, archive_pluto_logs=False):
     start = commands.index("\t\twhile (WindowsCommandTools.IsWindowsProcessRunning(\"StarCraft.exe\"))")
     end = commands.index("\n\tpublic static void Client_KillExcessWindowsProccess", start)
     replacement = '''        try {
-            Process process = new ProcessBuilder("powershell.exe", "-NoProfile", "-NonInteractive",
-                "-WindowStyle", "Hidden", "-File", new File("stop-owned-starcraft.ps1").getAbsolutePath(),
-                "-Runtime", new File(ClientSettings.Instance().ClientStarcraftDir).getCanonicalPath())
+            Process process = new ProcessBuilder(new File("ConsoleFreeOwnedStarCraft.exe").getAbsolutePath(),
+                "stop", new File(ClientSettings.Instance().ClientStarcraftDir).getCanonicalPath())
                 .inheritIO().start();
             if (process.waitFor() != 0) throw new IOException("Owned StarCraft cleanup failed");
         } catch (Exception e) { throw new RuntimeException(e); }
@@ -52,10 +52,8 @@ def build(template, output, javac, seed_base=None, archive_pluto_logs=False):
     if commands.count(launch) != 1:
         raise ValueError("unexpected launch implementation")
     commands = commands.replace(launch, '''try {
-            Process process = new ProcessBuilder("powershell.exe", "-NoProfile", "-NonInteractive",
-                "-WindowStyle", "Hidden", "-File", new File("start-owned-starcraft.ps1").getAbsolutePath(),
-                "-Runtime", new File(ClientSettings.Instance().ClientStarcraftDir).getCanonicalPath(),
-                "-MonitorOwnedLock")
+            Process process = new ProcessBuilder(new File("ConsoleFreeOwnedStarCraft.exe").getAbsolutePath(),
+                "start", new File(ClientSettings.Instance().ClientStarcraftDir).getCanonicalPath())
                 .inheritIO().start();
             if (process.waitFor() != 0) throw new IOException("Owned StarCraft launch failed");
         } catch (Exception e) { throw new RuntimeException(e); }''')
@@ -94,7 +92,13 @@ def build(template, output, javac, seed_base=None, archive_pluto_logs=False):
                          'MatchProcessOwnership.psm1')]
     for headless_helper in headless_helpers:
         (output / headless_helper.name).write_bytes(headless_helper.read_bytes())
-    inputs = [jar, sources / "Client.java", sources / "ClientCommands.java", helper, launcher, Path(__file__), *headless_helpers]
+    console_free_source = root / 'scripts/ConsoleFreeOwnedStarCraft.cs'
+    (output / console_free_source.name).write_bytes(console_free_source.read_bytes())
+    csc = Path(csc) if csc else Path(os.environ['WINDIR']) / 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+    subprocess.run([str(csc), '/nologo', '/target:winexe', '/platform:x64',
+                    '/out:' + str(output / 'ConsoleFreeOwnedStarCraft.exe'), str(console_free_source)], check=True)
+    inputs = [jar, sources / "Client.java", sources / "ClientCommands.java", helper, launcher, Path(__file__),
+              console_free_source, csc, *headless_helpers]
     digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
     (output / "build.json").write_text(json.dumps(dict(
         seed_base=seed_base,seed_rule='seed_base + game_id' if seed_base is not None else None,
@@ -110,6 +114,7 @@ if __name__ == "__main__":
     parser.add_argument("--template", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--javac", default="javac")
+    parser.add_argument("--csc", type=Path, help="Windows C# compiler for the console-free GUI launch boundary")
     parser.add_argument('--seed-base',type=int,help='Pin BWAPI host random seed to base + game ID for paired campaigns')
     parser.add_argument('--archive-pluto-logs', action='store_true', help='Archive Pluto root engine logs with bot-write evidence')
     build(**vars(parser.parse_args()))

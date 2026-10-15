@@ -28,5 +28,25 @@ int main() {
           "a replacement construction remains blocked while the old command is actionable");
     check(cancellation.acknowledged(false) && !cancellation.awaiting(),
           "an interrupted or stopped builder releases ownership only after the order clears");
+    BuildCancellation handedOff;
+    check(!handedOff.handoff(200, false) && !handedOff.awaiting(),
+          "a rejected or deferred replacement cannot release construction authority");
+    check(handedOff.handoff(201, true) && handedOff.awaiting() && handedOff.handoffPending(),
+          "a confirmed replacement closes construction authority while retaining its reservation");
+    check(!handedOff.requestDue(201) && !handedOff.retryDue(10000),
+          "handoff cannot retry Stop and cancel the replacement owner's emergency movement");
+    check(!handedOff.acknowledged(false, 201) && handedOff.awaiting(),
+          "same-frame API acceptance is not a native acknowledgment");
+    check(!handedOff.acknowledged(true, 202) && handedOff.awaiting(),
+          "a later observation must still retain an actionable old build order");
+    check(!handedOff.handoff(203, true),
+          "repeated confirmation cannot move the original handoff acknowledgment boundary");
+    check(handedOff.acknowledged(false, 204) && !handedOff.awaiting() &&
+              !handedOff.handoffPending() && handedOff.requestDue(204),
+          "a later non-actionable observation releases the old lease and resets cancellation state");
+    BuildCancellation stopThenHandoff;
+    check(stopThenHandoff.request(300, 6, true) && stopThenHandoff.handoff(301, true) &&
+              !stopThenHandoff.retryDue(10000) && stopThenHandoff.acknowledged(false, 302),
+          "emergency handoff supersedes a pending Stop without issuing another Stop");
     return passed ? 0 : 1;
 }

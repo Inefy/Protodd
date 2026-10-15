@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <limits>
 #include <unordered_map>
 
@@ -26,6 +27,48 @@ bool suicideAttacker(const UnitKind kind) noexcept {
 MovementFootprint movementFootprint(const UnitSnapshot& unit) noexcept {
     return {unit.dimensionLeft, unit.dimensionRight,
             unit.dimensionUp, unit.dimensionDown};
+}
+
+// Unit-body clearance plus room for native collision/arrival displacement.
+// A slot admitted exactly on the pursuit boundary can otherwise trigger the
+// ordinary leash return before the native unit settles at that same slot.
+constexpr double defensiveScreenArrivalMargin = 32.0;
+
+double defensiveScreenClearance(const UnitSnapshot& unit) noexcept {
+    return defensiveScreenArrivalMargin +
+        std::hypot(static_cast<double>(std::max({0, unit.dimensionLeft, unit.dimensionRight})),
+                   static_cast<double>(std::max({0, unit.dimensionUp, unit.dimensionDown})));
+}
+
+bool defensiveScreenInterior(const UnitSnapshot& unit, const DefenseArea& defense,
+                             const Position point) noexcept {
+    if (!defense.active() || !point.valid()) return false;
+    const auto clearance = defensiveScreenClearance(unit);
+    if (defense.economyCenter.valid() &&
+        distance(defense.economyCenter, point) + clearance <= 256.0) return true;
+    if (distance(defense.center, point) + clearance > defense.pursuitRadius) return false;
+    if (defense.front.valid()) {
+        const auto nx = static_cast<double>(defense.center.x - defense.front.x);
+        const auto ny = static_cast<double>(defense.center.y - defense.front.y);
+        const auto inward = (point.x - defense.front.x) * nx + (point.y - defense.front.y) * ny;
+        if (inward < clearance * std::hypot(nx, ny)) return false;
+    }
+    return true;
+}
+
+bool defensiveContactBodyInside(const UnitSnapshot& unit, const DefenseArea& defense,
+                                const Position point) noexcept {
+    // Final contact needs body clearance, without the extra arrival buffer
+    // used for ordinary screen staging. The target's center is not proof that
+    // a crowded contact slot fits behind the current defensive boundary.
+    for (const auto x : {point.x - std::max(0, unit.dimensionLeft),
+                         point.x + std::max(0, unit.dimensionRight)}) {
+        for (const auto y : {point.y - std::max(0, unit.dimensionUp),
+                             point.y + std::max(0, unit.dimensionDown)}) {
+            if (!defense.contains({x, y})) return false;
+        }
+    }
+    return true;
 }
 
 double modeledAttackDamage(const UnitSnapshot& attacker,
@@ -229,6 +272,37 @@ double sizeMultiplier(const DamageType damage, const UnitSize size) noexcept {
 bool combatReady(const UnitSnapshot& unit) noexcept {
     return unit.completed && !unit.loaded && !unit.disabled && !unit.hallucination &&
            (!unitStats(unit.kind).requiresPsi || unit.powered);
+}
+
+struct WeaponCorridorRisk {
+    double risk{}, radius{}, separation{};
+    UnitId threat{-1}; Position position{-1,-1}; int weaponRange{};
+};
+
+// Conservative visible-weapon corridor, used only to steer short escape steps.
+// This is not a navigation proof; local movement clearance is checked separately.
+WeaponCorridorRisk visibleWeaponCorridor(const UnitSnapshot& unit, const Position from,
+                                        const Position toward, const std::span<const UnitSnapshot> enemy) {
+    WeaponCorridorRisk result;
+    if (!from.valid() || !toward.valid()) return result;
+    const auto dx=static_cast<double>(toward.x-from.x),dy=static_cast<double>(toward.y-from.y);
+    const auto length=dx*dx+dy*dy;
+    const auto ownRadius=std::hypot(static_cast<double>(std::max(unit.dimensionLeft,unit.dimensionRight)),
+                                   static_cast<double>(std::max(unit.dimensionUp,unit.dimensionDown)));
+    for (const auto& threat:enemy) {
+        if (!threat.visible || !threat.position.valid() || !combatReady(threat) || !threat.canAttack(unit)) continue;
+        const auto& weapon=unit.flying?threat.airWeapon:threat.groundWeapon;
+        if (weapon.damage<=0 || weapon.maxRange<=0) continue;
+        const auto enemyRadius=std::hypot(static_cast<double>(std::max(threat.dimensionLeft,threat.dimensionRight)),
+                                         static_cast<double>(std::max(threat.dimensionUp,threat.dimensionDown)));
+        const auto radius=static_cast<double>(weapon.maxRange+ownRadius+enemyRadius+32);
+        const auto along=length>0 ? std::clamp(((threat.position.x-from.x)*dx+(threat.position.y-from.y)*dy)/length,0.0,1.0):0.0;
+        const auto separation=std::hypot(from.x+along*dx-threat.position.x,from.y+along*dy-threat.position.y);
+        const auto risk=std::max(0.0,1.0-separation/radius);
+        if (risk>result.risk || (risk>0 && risk==result.risk && threat.id<result.threat))
+            result={risk,radius,separation,threat.id,threat.position,weapon.maxRange};
+    }
+    return result;
 }
 
 double simulationValue(const SimUnit& unit) noexcept {
@@ -1019,7 +1093,10 @@ FightDecision EngagementTracker::stabilize(
         auto initial = proposed;
         if (context.needsDetection && !context.detectionReady &&
             initial == FightDecision::engage) initial = FightDecision::kite;
-        Memory memory{initial, initial, frame, frame, frame, contact ? frame : -1};
+        Memory memory;
+        memory.decision = memory.candidate = initial;
+        memory.candidateSince = memory.changedAt = memory.lastSeen = frame;
+        memory.lastContact = contact ? frame : -1;
         memory.hasMission = true;
         memory.mission = context.mission;
         static_cast<void>(updateContext(memory));
@@ -1340,6 +1417,18 @@ std::vector<Command> TacticalController::recharge(
     return commands;
 }
 
+void TacticalController::reset() {
+    screenPreferences_.clear();
+    returnRoutes_.clear();
+    lastScreenFrame_ = -1;
+    controlCost_ = {};
+}
+
+void TacticalController::forgetUnit(const UnitId actor) {
+    screenPreferences_.erase(actor);
+    returnRoutes_.erase(actor);
+}
+
 std::vector<Command> TacticalController::control(
     const std::span<const UnitSnapshot> friendly,
     const std::span<const UnitSnapshot> enemy,
@@ -1350,17 +1439,96 @@ std::vector<Command> TacticalController::control(
     const Position formationCenter,
     const int latencyFrames,
     const bool psionicStormAvailable,
-    const DefenseArea defense, const TacticalIntent intent,
+    const DefenseArea defense, TacticalIntent intent,
     const std::span<const UnitSnapshot> support,
     const NavigationGrid* navigation,
     const std::span<const UnitSnapshot> obstacles,
     const TacticalTargetModel* targetModel,
     const bool detectorWaitVolley,
     const std::span<const Position> reservedStormZones,
-    const Position stagingGoal) const {
+    const Position stagingGoal, const Frame frame,
+    std::vector<TacticalMovementEvidence>* movementEvidence,
+    int* returnRouteBudget) const {
+    controlCost_ = {};
+    struct CostScope {
+        std::uint64_t& micros;
+        std::chrono::steady_clock::time_point started{std::chrono::steady_clock::now()};
+        ~CostScope() {
+            micros += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now()-started).count());
+        }
+    };
+    const auto workBefore=NavigationGrid::diagnosticsForCurrentThread();
+    struct WorkScope {
+        TacticalControlCost& cost;
+        NavigationDiagnostics before;
+        ~WorkScope() {
+            const auto after=NavigationGrid::diagnosticsForCurrentThread();
+            cost.pathSearches=after.searches-before.searches;
+            cost.expandedNodes=after.totalExpansions-before.totalExpansions;
+        }
+    } workScope{controlCost_,workBefore};
+    CostScope totalScope{controlCost_.totalUs};
+    const auto pendingRaidRoute = intent == TacticalIntent::raidRoutePending;
+    if (pendingRaidRoute) intent = TacticalIntent::raid;
+    if (frame >= 0) {
+        if (lastScreenFrame_ >= 0 && frame < lastScreenFrame_) {
+            screenPreferences_.clear();
+            returnRoutes_.clear();
+        }
+        lastScreenFrame_ = frame;
+        std::erase_if(screenPreferences_, [frame](const auto& entry) {
+            return frame < entry.second.observedFrame || frame - entry.second.observedFrame > 48;
+        });
+    }
+    std::erase_if(returnRoutes_, [frame](const auto& entry) {
+        return frame < 0 || frame < entry.second.computed || frame - entry.second.computed > 48;
+    });
+    auto localReturnBudget = maximumReturnRouteQueries;
+    auto& routeBudget = returnRouteBudget != nullptr ? *returnRouteBudget : localReturnBudget;
+    routeBudget = std::clamp(routeBudget, 0, maximumReturnRouteQueries);
     std::vector<Command> commands;
     commands.reserve(friendly.size());
+    struct SupportRouteKey {
+        const UnitSnapshot* ally;
+        const UnitSnapshot* target;
+        bool operator==(const SupportRouteKey&) const = default;
+    };
+    struct SupportRouteHash {
+        std::size_t operator()(const SupportRouteKey& key) const noexcept {
+            const auto a=std::hash<const UnitSnapshot*>{}(key.ally);
+            const auto b=std::hash<const UnitSnapshot*>{}(key.target);
+            return a ^ (b + std::size_t{0x9e3779b9U} + (a << 6U) + (a >> 2U));
+        }
+    };
+    std::unordered_map<SupportRouteKey,bool,SupportRouteHash> supportRouteProofs;
+    const auto meleeSupportReachable = [&supportRouteProofs,navigation,this](
+        const UnitSnapshot& ally, const UnitSnapshot& target) {
+        CostScope costScope{controlCost_.supportUs};
+        ++controlCost_.supportCalls;
+        if(navigation==nullptr || navigation->empty())return true;
+        const SupportRouteKey key{&ally,&target};
+        if(const auto cached=supportRouteProofs.find(key);cached!=supportRouteProofs.end()) {
+            ++controlCost_.supportCacheHits;
+            return cached->second;
+        }
+        const auto footprint=movementFootprint(ally);
+        const auto reached=navigation->lineWalkable(ally.position,target.position,footprint) ||
+            navigation->findPath(ally.position,target.position,2048,footprint).reached();
+        // Snapshots and shared geometry do not change within this control pass.
+        // A false result means no support was proved by this bounded query;
+        // it is never retained as evidence of global unreachability next pass.
+        if(supportRouteProofs.size()<512U)supportRouteProofs.emplace(key,reached);
+        return reached;
+    };
     CombatEvaluator evaluator;
+    const auto selectTarget = [this,&evaluator](const UnitSnapshot& attacker,
+        std::span<const UnitSnapshot> candidates, std::span<const TargetAllocation> allocations,
+        const TacticalTargetModel* model) {
+        CostScope costScope{controlCost_.targetSelectionUs};
+        ++controlCost_.targetSelections;
+        return evaluator.selectTarget(attacker,candidates,allocations,model);
+    };
     std::vector<TargetAllocation> allocations;
     allocations.reserve(enemy.size());
     std::vector<Position> plannedStorms(reservedStormZones.begin(), reservedStormZones.end());
@@ -1419,32 +1587,59 @@ std::vector<Command> TacticalController::control(
         }
     }
 
+    // A geometric assembly point can land inside a resource or building.
+    // Every slot's clearance ray starts here, so a blocked origin otherwise
+    // rejects the entire formation and leaves uncontested defenders holding.
+    if (defense.active() && navigation != nullptr && !navigation->empty()) {
+        MovementFootprint screenFootprint;
+        auto groundScreen = false;
+        for (const auto& member : friendly) {
+            if (member.flying || !combatReady(member)) continue;
+            groundScreen = true;
+            screenFootprint.left = std::max(screenFootprint.left, member.dimensionLeft);
+            screenFootprint.right = std::max(screenFootprint.right, member.dimensionRight);
+            screenFootprint.up = std::max(screenFootprint.up, member.dimensionUp);
+            screenFootprint.down = std::max(screenFootprint.down, member.dimensionDown);
+        }
+        if (groundScreen && !navigation->walkable(screenAnchor, screenFootprint)) {
+            const auto radiusCells = (128 + navigation->cellSize() - 1) / navigation->cellSize();
+            const auto reachableAnchor = navigation->nearestWalkable(
+                screenAnchor, radiusCells, screenFootprint);
+            if (reachableAnchor.valid() && defense.contains(reachableAnchor))
+                screenAnchor = reachableAnchor;
+        }
+    }
+
     // A single 96px hold disk cannot accommodate a late-game ground army.
     // Stable, separated staging positions keep the front rank from blocking
     // every arriving unit and give each unit its own destination while clear.
     std::vector<Position> screenSlots;
     std::vector<UnitId> screenMembers;
-    // Keep stable screen slots when the squad sees irrelevant enemies too.
-    // Collapsing every unit onto the shared anchor whenever any enemy appears
-    // makes an otherwise-safe army fan out and regroup at combat-tick speed.
-    if (defense.active() && friendly.size() >= 6) {
+    const auto screenSlotAvailable = [&](const Position candidate, const Position anchor) {
+        const auto reservedNexus = defense.economyCenter.valid() &&
+            std::abs(candidate.x - defense.economyCenter.x) <= 112 &&
+            std::abs(candidate.y - defense.economyCenter.y) <= 96;
+        const auto occupied = std::ranges::any_of(obstacles, [candidate](const UnitSnapshot& obstacle) {
+            return isBuilding(obstacle.kind) && obstacle.position.valid() &&
+                candidate.x >= obstacle.position.x - obstacle.dimensionLeft - 32 &&
+                candidate.x <= obstacle.position.x + obstacle.dimensionRight + 32 &&
+                candidate.y >= obstacle.position.y - obstacle.dimensionUp - 32 &&
+                candidate.y <= obstacle.position.y + obstacle.dimensionDown + 32;
+        });
+        return candidate.valid() && !reservedNexus && !occupied && defense.contains(candidate) &&
+            (navigation == nullptr || navigation->empty() || navigation->lineWalkable(anchor, candidate));
+    };
+    // Use the same slots for every group size. Reinforcement and temporary
+    // defense/main-army handoffs can repeatedly cross a six-unit threshold;
+    // changing between a shared anchor and separated slots then redirects
+    // the existing defenders even when their mission has not changed.
+    // Irrelevant visible enemies likewise do not change the slot model.
+    if (defense.active()) {
         const auto anchor = screenAnchor;
         for (int row = -5; row <= 5; ++row) {
             for (int column = -5; column <= 5; ++column) {
                 const Position candidate{anchor.x + column * 64, anchor.y + row * 64};
-                const auto reservedNexus = defense.economyCenter.valid() &&
-                    std::abs(candidate.x - defense.economyCenter.x) <= 112 &&
-                    std::abs(candidate.y - defense.economyCenter.y) <= 96;
-                const auto occupied = std::ranges::any_of(obstacles, [candidate](const UnitSnapshot& obstacle) {
-                    return isBuilding(obstacle.kind) && obstacle.position.valid() &&
-                        candidate.x >= obstacle.position.x - obstacle.dimensionLeft - 32 &&
-                        candidate.x <= obstacle.position.x + obstacle.dimensionRight + 32 &&
-                        candidate.y >= obstacle.position.y - obstacle.dimensionUp - 32 &&
-                        candidate.y <= obstacle.position.y + obstacle.dimensionDown + 32;
-                });
-                if (!candidate.valid() || reservedNexus || occupied || !defense.contains(candidate) ||
-                    (navigation != nullptr && !navigation->empty() &&
-                     !navigation->lineWalkable(anchor, candidate))) continue;
+                if (!screenSlotAvailable(candidate, anchor)) continue;
                 screenSlots.push_back(candidate);
             }
         }
@@ -1459,13 +1654,89 @@ std::vector<Command> TacticalController::control(
         std::ranges::sort(screenMembers);
     }
 
+    std::unordered_map<UnitId, Position> screenDestinations;
+    if (defense.active() && frame >= 0) {
+        std::vector<Position> reserved;
+        const auto nearbyAnchor = [&](const Position anchor) {
+            return distanceSquared(anchor, screenAnchor) <= 64 * 64;
+        };
+        const auto reservedSlot = [&](const Position point) {
+            // Retained slots can belong to a slightly shifted lattice. Keep
+            // the original 64px separation instead of checking exact equality.
+            return std::ranges::any_of(reserved, [point](const Position taken) {
+                return distanceSquared(point, taken) < 64 * 64;
+            });
+        };
+        const auto memberValid = [&](const UnitSnapshot& member, const Position point, const Position anchor) {
+            return screenSlotAvailable(point, anchor) && defensiveScreenInterior(member, defense, point) &&
+                (navigation == nullptr || navigation->empty() ||
+                 navigation->walkable(point, movementFootprint(member)));
+        };
+        // Other squads using the same screen keep their recent destinations.
+        // Current members claim retained slots before any new lower-ID arrival.
+        for (const auto& [actor, preference] : screenPreferences_) {
+            if (nearbyAnchor(preference.anchor) && screenSlotAvailable(preference.destination, preference.anchor) &&
+                std::ranges::find(screenMembers, actor) == screenMembers.end())
+                reserved.push_back(preference.destination);
+        }
+        for (const auto actor : screenMembers) {
+            const auto old = screenPreferences_.find(actor);
+            const auto member = std::ranges::find(friendly, actor, &UnitSnapshot::id);
+            if (old == screenPreferences_.end() || !nearbyAnchor(old->second.anchor) ||
+                member == friendly.end() || !memberValid(*member, old->second.destination, old->second.anchor) ||
+                reservedSlot(old->second.destination)) continue;
+            screenDestinations.emplace(actor, old->second.destination);
+            reserved.push_back(old->second.destination);
+        }
+        for (const auto actor : screenMembers) {
+            if (screenDestinations.contains(actor)) continue;
+            const auto member = std::ranges::find(friendly, actor, &UnitSnapshot::id);
+            if (member == friendly.end()) continue;
+            const auto free = std::ranges::find_if(screenSlots, [&](const Position point) {
+                return !reservedSlot(point) && memberValid(*member, point, screenAnchor);
+            });
+            if (free == screenSlots.end()) {
+                screenPreferences_.erase(actor);
+                continue;
+            }
+            screenDestinations.emplace(actor, *free);
+            reserved.push_back(*free);
+        }
+        for (const auto actor : screenMembers) {
+            const auto selected = screenDestinations.find(actor);
+            if (selected == screenDestinations.end()) continue;
+            const auto destination = selected->second;
+            if (!screenPreferences_.contains(actor) && screenPreferences_.size() >= maximumScreenPreferences) {
+                const auto oldest = std::ranges::min_element(screenPreferences_, [](const auto& a, const auto& b) {
+                    return a.second.observedFrame != b.second.observedFrame
+                        ? a.second.observedFrame < b.second.observedFrame : a.first < b.first;
+                });
+                screenPreferences_.erase(oldest);
+            }
+            const auto old = screenPreferences_.find(actor);
+            // Measure drift from the assignment anchor, rather than chaining
+            // small updates into an indefinitely stale mission preference.
+            const auto assignmentAnchor = old != screenPreferences_.end() &&
+                old->second.destination == destination && nearbyAnchor(old->second.anchor)
+                    ? old->second.anchor : screenAnchor;
+            screenPreferences_.insert_or_assign(actor, ScreenPreference{assignmentAnchor, destination, frame});
+        }
+    }
+
     std::unordered_map<UnitId, std::vector<Position>> meleeContactReservations;
     const auto chooseMeleeContact = [&](const UnitSnapshot& unit,
-                                       const UnitSnapshot& target) {
+                                       const UnitSnapshot& target,
+                                       const bool boundedDefense) {
+        CostScope costScope{controlCost_.contactUs};
+        ++controlCost_.contactCalls;
         if (navigation == nullptr || navigation->empty() || unit.flying || target.flying ||
             !unit.position.valid() || !target.position.valid()) return Position{-1, -1};
         const auto footprint = movementFootprint(unit);
         auto& reserved = meleeContactReservations[target.id];
+        const auto commonOrigin = navigation->walkable(unit.position, footprint);
+        if (!commonOrigin) ++controlCost_.blockedContactOrigins;
+        std::vector<NavigationCandidate> routeCandidates;
+        routeCandidates.reserve(16);
         if (reserved.empty()) {
             for (const auto& ally : nearbyArmy) {
                 if (ally.id == unit.id || ally.flying || ally.loaded ||
@@ -1499,6 +1770,7 @@ std::vector<Command> TacticalController::control(
                 candidate.x >= navigation->width() * navigation->cellSize() ||
                 candidate.y >= navigation->height() * navigation->cellSize() ||
                 !navigation->walkable(candidate, footprint)) continue;
+            if (boundedDefense && !defensiveContactBodyInside(unit, defense, candidate)) continue;
             auto firingPosition = unit;
             firingPosition.position = candidate;
             if (weaponDistance(firingPosition, target) > unit.groundWeapon.maxRange) continue;
@@ -1525,6 +1797,11 @@ std::vector<Command> TacticalController::control(
                     destination = order->targetPosition;
                 crowding += std::max(0.0, 48.0 - distance(candidate, destination));
             }
+            if (commonOrigin) {
+                routeCandidates.push_back({candidate, crowding * 1.5});
+                continue;
+            }
+            // Preserve the existing escape from a partially blocked origin.
             // The direct distance is a lower bound on the validated route.
             if (distance(unit.position, candidate) + crowding * 1.5 > bestScore) continue;
 
@@ -1558,6 +1835,11 @@ std::vector<Command> TacticalController::control(
                 bestScore = score;
                 best = candidate;
             }
+        }
+        if (commonOrigin) {
+            const auto selected = navigation->bestReachableCandidate(
+                unit.position, routeCandidates, 4096, footprint);
+            best = selected.target;
         }
         if (best.valid()) reserved.push_back(best);
         return best;
@@ -1593,6 +1875,19 @@ std::vector<Command> TacticalController::control(
         }
         const auto local = influence.at(unit.position);
         const auto localThreat = unit.flying ? local.airThreat : local.groundThreat;
+        // Sample short return segments at native walk-grid resolution. Coarse
+        // influence endpoints can skip a threatened cell along a diagonal.
+        const auto returnSegmentThreat = [&influence](const Position from, const Position toward) {
+            const auto samples = std::max(1, static_cast<int>(std::ceil(distance(from, toward) / 4.0)));
+            auto peak = 0.0F;
+            for (auto step = 0; step <= samples; ++step) {
+                const auto fraction = static_cast<double>(step) / samples;
+                const Position point{from.x + static_cast<int>(std::lround((toward.x - from.x) * fraction)),
+                                     from.y + static_cast<int>(std::lround((toward.y - from.y) * fraction))};
+                peak = std::max(peak, influence.at(point).groundThreat);
+            }
+            return peak;
+        };
         const auto protectedStep = [&defense](const Position proposed) {
             return defense.front.valid() && !defense.contains(proposed) ? defense.center : proposed;
         };
@@ -1619,8 +1914,12 @@ std::vector<Command> TacticalController::control(
             }
             return navigation->lineWalkable(origin, candidate, movementFootprint(unit));
         };
+        auto repositionScore = 0.0;
+        Position repositionGoal{-1,-1};
         const auto reposition = [&](const Position toward, const bool retreating = false,
-                                    const bool avoidDetection = false) {
+                                    const bool avoidDetection = false, const bool corridorSteering = false,
+                                    const bool preserveGroundThreat = false) {
+            repositionGoal=toward;
             // Small combat moves need a walkable segment, not just a safe
             // destination across a cliff. Account for allies already moving
             // this tick so retreating units do not all choose the same tile.
@@ -1634,25 +1933,33 @@ std::vector<Command> TacticalController::control(
                 occupied.push_back(order != commands.end() && order->type == CommandType::move
                     ? order->targetPosition : ally.position);
             }
+            const auto originDanger = corridorSteering
+                ? visibleWeaponCorridor(unit, unit.position, unit.position, enemy).risk : 0.0;
             constexpr std::array<Position, 9> steps{{
                 {0, 0}, {-64, 0}, {64, 0}, {0, -64}, {0, 64},
                 {-45, -45}, {-45, 45}, {45, -45}, {45, 45}}};
             for (const auto step : steps) {
                 const Position candidate{unit.position.x + step.x, unit.position.y + step.y};
                 if (!reachableStep(candidate)) continue;
+                if (corridorSteering && visibleWeaponCorridor(unit, unit.position, candidate, enemy).risk > originDanger + 1e-9) continue;
                 if (!retreating && defense.active() && defense.contains(unit.position) && !defense.contains(candidate)) continue;
                 const auto field = influence.at(candidate);
                 const auto threat = unit.flying ? field.airThreat : field.groundThreat;
+                if (preserveGroundThreat && !unit.flying &&
+                    returnSegmentThreat(unit.position, candidate) > localThreat + 1e-6F) continue;
                 const auto detectionPenalty = avoidDetection
                     ? static_cast<double>(field.detection) * 6.0 : 0.0;
                 auto crowding = 0.0;
                 for (const auto destination : occupied) {
                     crowding += std::max(0.0, 48.0 - distance(candidate, destination)) / 48.0;
                 }
-                const auto score = threat * 5.0 + detectionPenalty + crowding * 0.8 +
+                const auto corridorPenalty = corridorSteering
+                    ? visibleWeaponCorridor(unit, candidate, toward, enemy).risk * 5.0 : 0.0;
+                const auto score = threat * 5.0 + detectionPenalty + corridorPenalty + crowding * 0.8 +
                     (distance(candidate, toward) - distance(unit.position, toward)) / 96.0;
                 if (score < bestScore) { bestScore = score; best = candidate; }
             }
+            repositionScore = std::isfinite(bestScore) ? bestScore : 0.0;
             return best;
         };
         const auto fragile = unit.healthFraction() < 0.28;
@@ -1684,6 +1991,12 @@ std::vector<Command> TacticalController::control(
         // can interrupt the attack sequence. Let the shot complete instead of
         // producing stutter, cancelled Dragoon volleys, and indecisive melee.
         if (unit.attackFrame || (unit.attackWindup && !fragile && intent != TacticalIntent::withdraw)) continue;
+        if (pendingRaidRoute && covertAdvance &&
+            estimate.decision != FightDecision::retreat && !estimate.advanceBlocked) {
+            commands.push_back({unit.id, CommandType::hold, -1, unit.position,
+                UnitKind::unknown, 90, 0, "raid-route-pending"});
+            continue;
+        }
 
         // Mission extraction is unconditional, including cloaked units and
         // ready volleys. Neither target pursuit nor detector waiting may
@@ -1718,7 +2031,7 @@ std::vector<Command> TacticalController::control(
                     if (range >= weapon.minRange && range <= weapon.maxRange)
                         firingTargets.push_back(candidate);
                 }
-                if (const auto* shot = evaluator.selectTarget(
+                if (const auto* shot = selectTarget(
                         unit, firingTargets, allocations, targetModel)) {
                     commands.push_back({unit.id, CommandType::attackUnit, shot->id,
                                         {-1, -1}, UnitKind::unknown, 100, 0,
@@ -1784,7 +2097,11 @@ std::vector<Command> TacticalController::control(
         // already shelling that unit or the economy. The old early return made
         // Dragoons walk away from a lone Tank on the ramp even after the fight
         // evaluator had accepted the engagement.
+        // Critical wounds and compromised cloak are escape obligations, even
+        // when this squad has accepted the fight. Ordinary leash return must
+        // not redirect them forward as squad assignment or fight state changes.
         const auto returningDefender = defense.active() && !covertAdvance &&
+            !fragile && !cloakCompromised &&
             !defense.contains(unit.position) && !shellingDefender &&
             estimate.decision != FightDecision::retreat;
         const auto readyDefensiveShot = !fragile && unit.weaponCooldown == 0 &&
@@ -1827,7 +2144,7 @@ std::vector<Command> TacticalController::control(
             }
             targets = raidTargets;
         }
-        const auto target = evaluator.selectTarget(unit, targets, allocations, targetModel);
+        const auto target = selectTarget(unit, targets, allocations, targetModel);
 
         if (psionicStormAvailable && unit.kind == UnitKind::highTemplar &&
             unit.energy >= psionicStormEnergyCost) {
@@ -1864,12 +2181,176 @@ std::vector<Command> TacticalController::control(
             }
         }
 
+        const auto recordMovement = [&](const Position destination, const Position fallback,
+                                        const std::string_view source, const WeaponCorridorRisk& corridor,
+                                        const bool steering, const bool returning, const UnitId nearby,
+                                        const CommandType proposedCommand = CommandType::move) {
+            if (movementEvidence==nullptr || movementEvidence->size()>=512) return false;
+            movementEvidence->push_back({frame,unit.id,unit.firstSeen,unit.kind,unit.position,destination,
+                fallback,unitRetreatPoint,defense.center,source,estimate.decision,
+                localThreat,corridor.risk,corridor.radius,corridor.separation,repositionScore,
+                corridor.threat,nearby,corridor.position,corridor.weaponRange,unit.weaponCooldown,
+                unit.healthFraction(),steering,returning,fragile,reachableStep(destination),repositionGoal});
+            auto& evidence = movementEvidence->back();
+            evidence.proposedCommand = proposedCommand;
+            evidence.defenseRadius = defense.pursuitRadius;
+            evidence.economyCenter = defense.economyCenter;
+            evidence.defenseFront = defense.front;
+            evidence.tacticalObjective = objective;
+            evidence.stagingGoal = stagingGoal;
+            evidence.screenAnchor = screenAnchor;
+            if (const auto assigned = screenDestinations.find(unit.id); assigned != screenDestinations.end())
+                { evidence.assignedScreen = assigned->second; evidence.screenSlotAssigned = true; }
+            evidence.insideDefensiveArea = defense.active() && defense.contains(unit.position);
+            evidence.screenClearance = defensiveScreenClearance(unit);
+            evidence.screenSlotInterior = defensiveScreenInterior(unit, defense, evidence.assignedScreen);
+            evidence.dimensionLeft = unit.dimensionLeft;
+            evidence.dimensionRight = unit.dimensionRight;
+            evidence.dimensionUp = unit.dimensionUp;
+            evidence.dimensionDown = unit.dimensionDown;
+            return true;
+        };
+        auto returnGoal = defense.center;
+        if (const auto assigned = screenDestinations.find(unit.id); assigned != screenDestinations.end())
+            returnGoal = assigned->second;
+        const auto screenRouteNeeded = defense.active() && !covertAdvance && !fragile && !cloakCompromised &&
+            target == nullptr && estimate.decision != FightDecision::retreat && !unit.flying &&
+            returnGoal != defense.center && distanceSquared(unit.position, returnGoal) > 24 * 24 &&
+            navigation != nullptr && !navigation->empty() &&
+            !navigation->lineWalkable(unit.position, returnGoal, movementFootprint(unit));
+        const auto routedDefender = returningDefender || screenRouteNeeded;
+        auto returnDestination = returnGoal;
+        // A weapon on the blocked straight chord does not describe the actor's
+        // actual terrain detour. Check a short body-safe prefix before steering.
+        // Failed/unknown searches retain the existing conservative fallback.
+        if (routedDefender && !readyDefensiveShot && retreatThreat == nullptr &&
+            !unit.flying && navigation != nullptr && !navigation->empty() &&
+            !navigation->lineWalkable(unit.position, returnGoal, movementFootprint(unit))) {
+            const std::array<int, 4> dimensions{unit.dimensionLeft, unit.dimensionRight,
+                                               unit.dimensionUp, unit.dimensionDown};
+            const auto returnBodyEligible = [&](const UnitSnapshot& other) {
+                if (other.id == unit.id || !other.ours || !other.completed || other.flying ||
+                    other.loaded || isBuilding(other.kind) || !other.position.valid() ||
+                    distanceSquared(unit.position, other.position) > 512 * 512) return false;
+                // Exclude bodies already overlapping the actor, rather than a
+                // padded neighbourhood that can hide a clear-start blocker.
+                const auto overlapOrigin = unit.position.x + dimensions[1] >= other.position.x - other.dimensionLeft &&
+                    unit.position.x - dimensions[0] <= other.position.x + other.dimensionRight &&
+                    unit.position.y + dimensions[3] >= other.position.y - other.dimensionUp &&
+                    unit.position.y - dimensions[2] <= other.position.y + other.dimensionDown;
+                return !overlapOrigin;
+            };
+            const auto returnPrefixBodyClear = [&](const Position destination) {
+                for (const auto& other : obstacles) {
+                    if (!returnBodyEligible(other)) continue;
+                    auto enter = 0.0;
+                    auto leave = 1.0;
+                    const auto clip = [&](const int origin, const int end, const int low, const int high) {
+                        const auto delta = static_cast<double>(end) - origin;
+                        if (delta == 0.0) return origin >= low && origin <= high;
+                        auto first = (static_cast<double>(low) - origin) / delta;
+                        auto last = (static_cast<double>(high) - origin) / delta;
+                        if (first > last) std::swap(first, last);
+                        enter = std::max(enter, first);
+                        leave = std::min(leave, last);
+                        return enter <= leave;
+                    };
+                    if (clip(unit.position.x, destination.x,
+                             other.position.x - other.dimensionLeft - dimensions[1],
+                             other.position.x + other.dimensionRight + dimensions[0]) &&
+                        clip(unit.position.y, destination.y,
+                             other.position.y - other.dimensionUp - dimensions[3],
+                             other.position.y + other.dimensionDown + dimensions[2])) return false;
+                }
+                return true;
+            };
+            auto old = returnRoutes_.find(unit.id);
+            if (old != returnRoutes_.end()) {
+                const auto& cached = old->second;
+                // Only the retained prefix is reused. Recheck its current
+                // terrain and mobile bodies instead of invalidating it for
+                // unrelated obstacle changes elsewhere on the map.
+                const auto sameContext = cached.firstSeen == unit.firstSeen && cached.kind == unit.kind &&
+                    cached.defense.center == defense.center && cached.defense.pursuitRadius == defense.pursuitRadius &&
+                    cached.defense.economyCenter == defense.economyCenter && cached.defense.front == defense.front &&
+                    cached.goal == returnGoal && cached.footprint == dimensions && cached.terrain == navigation->terrainIdentity() &&
+                    (cached.waypoint.valid() || cached.collision == navigation->collisionIdentity()) &&
+                    distanceSquared(cached.origin, unit.position) <= 192 * 192;
+                // Retain a safe prefix until arrival. A 48px arrival radius
+                // discarded short detours while still in flight and could
+                // choose the opposite direction on the next planning pass.
+                const auto prefixClear = !cached.waypoint.valid() ||
+                    (distanceSquared(unit.position, cached.waypoint) > 8 * 8 &&
+                     navigation->lineWalkable(unit.position, cached.waypoint, movementFootprint(unit)) &&
+                     returnPrefixBodyClear(cached.waypoint));
+                if (!sameContext || !prefixClear) { returnRoutes_.erase(old); old = returnRoutes_.end(); }
+            }
+            if (old == returnRoutes_.end() && routeBudget > 0) {
+                --routeBudget;
+                std::vector<Position> points;
+                // Local route probe: keep mobile bodies out of the shared static grid.
+                auto localReturnGrid = navigation->copyForTemporaryObstacles();
+                std::vector<const UnitSnapshot*> returnCrowd;
+                for (const auto& other : obstacles) {
+                    if (returnBodyEligible(other)) returnCrowd.push_back(&other);
+                }
+                std::ranges::sort(returnCrowd, [&unit](const auto* a, const auto* b) {
+                    const auto first = distanceSquared(unit.position, a->position);
+                    const auto second = distanceSquared(unit.position, b->position);
+                    return first != second ? first < second : a->id < b->id;
+                });
+                if (returnCrowd.size() > 64) returnCrowd.resize(64);
+                for (const auto* other : returnCrowd)
+                    localReturnGrid.addTemporaryObstacle(
+                        {other->position.x - other->dimensionLeft, other->position.y - other->dimensionUp,
+                         other->position.x + other->dimensionRight, other->position.y + other->dimensionDown});
+                const auto route = localReturnGrid.nextWaypoint(unit.position, returnGoal, 4,
+                    maximumReturnRouteExpansions, movementFootprint(unit), &points);
+                auto waypoint = route.hasUsableWaypoint() ? route.waypoint : Position{-1, -1};
+                if (waypoint.valid() && !localReturnGrid.lineWalkable(unit.position, waypoint, movementFootprint(unit))) {
+                    const auto chosen = std::ranges::find(points, waypoint);
+                    waypoint = {-1, -1};
+                    if (chosen != points.end()) {
+                        for (auto point = std::make_reverse_iterator(chosen + 1); point != points.rend(); ++point) {
+                            if (*point != unit.position &&
+                                localReturnGrid.lineWalkable(unit.position, *point, movementFootprint(unit))) {
+                                waypoint = *point;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (waypoint == unit.position) waypoint = {-1, -1};
+                if (frame >= 0) {
+                    if (returnRoutes_.size() >= maximumReturnRoutes) {
+                        const auto oldest = std::ranges::min_element(returnRoutes_, [](const auto& a, const auto& b) {
+                            return a.second.computed != b.second.computed
+                                ? a.second.computed < b.second.computed : a.first < b.first;
+                        });
+                        returnRoutes_.erase(oldest);
+                    }
+                    old = returnRoutes_.insert_or_assign(unit.id, ReturnRoutePreference{
+                        unit.position, waypoint, defense, unit.kind, unit.firstSeen, frame, dimensions,
+                        navigation->terrainIdentity(), navigation->collisionIdentity(), returnGoal}).first;
+                } else if (waypoint.valid()) returnDestination = waypoint;
+            }
+            if (old != returnRoutes_.end() && old->second.waypoint.valid())
+                returnDestination = old->second.waypoint;
+            else returnDestination = unit.position;
+        } else returnRoutes_.erase(unit.id);
+        const auto returnCorridor = routedDefender
+            ? visibleWeaponCorridor(unit,unit.position,returnDestination,enemy):WeaponCorridorRisk{};
+
+
         // An immediately useful spell is a completed attack opportunity too.
         // Returning to a pursuit boundary must not suppress a ready Storm.
-        if (returningDefender && !readyDefensiveShot && !fragile && retreatThreat == nullptr) {
+        if (routedDefender && !readyDefensiveShot && !fragile && retreatThreat == nullptr && returnCorridor.risk==0 &&
+            (unit.flying || returnSegmentThreat(unit.position, returnDestination) <= localThreat + 1e-6F)) {
+            const auto source = returningDefender ? "defense-return" : "defense-screen";
+            recordMovement(returnDestination,returnGoal,source,returnCorridor,false,returningDefender,-1);
             commands.push_back({unit.id, CommandType::move, -1,
-                                defense.center,
-                                UnitKind::unknown, 90, 0, "defense-return"});
+                                returnDestination,
+                                UnitKind::unknown, returningDefender ? 90 : 82, 0, source});
             continue;
         }
 
@@ -1920,9 +2401,9 @@ std::vector<Command> TacticalController::control(
 
         if (fragile || cloakCompromised || returningDefender || rotateWounded || regroupFront || (!covertAdvance &&
                        (estimate.decision == FightDecision::retreat || locallyOverwhelmed))) {
-            // Falling back must not silence a ready ranged volley. Only fire
-            // at targets already in range; an attack order toward a distant
-            // target would reverse the retreat. Wounded units keep escaping.
+            // Falling back must not silence a ready ranged volley or a
+            // contact reply to one melee pursuer we cannot outrun. Never
+            // chase to fire; critical wounds and escape priorities stay first.
             if (!fragile && unit.weaponCooldown == 0 &&
                 ((unit.kind != UnitKind::reaver && unit.kind != UnitKind::carrier) ||
                  unit.ammo > 0)) {
@@ -1932,11 +2413,21 @@ std::vector<Command> TacticalController::control(
                     const auto range = weaponDistance(unit, candidate);
                     const auto screenIntercept = estimate.holdScreen && weapon.maxRange < 96 &&
                         range <= 64 && (!defense.active() || defense.contains(candidate.position));
+                    const auto& response = unit.flying ? candidate.airWeapon : candidate.groundWeapon;
+                    const auto caughtMelee = !unit.flying && !candidate.flying &&
+                        !cloakCompromised && !rotateWounded && !regroupFront &&
+                        pressureCount == 1 && closestThreat != nullptr &&
+                        closestThreat->id == candidate.id && weapon.maxRange > 0 &&
+                        weapon.maxRange < 96 && response.maxRange < 96 &&
+                        range <= weapon.maxRange && range >= response.minRange &&
+                        range <= response.maxRange && std::isfinite(unit.topSpeed) &&
+                        std::isfinite(candidate.topSpeed) && unit.topSpeed > 0.1 &&
+                        candidate.topSpeed >= unit.topSpeed - 0.05;
                     if (range >= weapon.minRange &&
-                        ((weapon.maxRange >= 96 && range <= weapon.maxRange) || screenIntercept))
+                        ((weapon.maxRange >= 96 && range <= weapon.maxRange) || screenIntercept || caughtMelee))
                         firingTargets.push_back(candidate);
                 }
-                if (const auto* shot = evaluator.selectTarget(unit, firingTargets, allocations, targetModel)) {
+                if (const auto* shot = selectTarget(unit, firingTargets, allocations, targetModel)) {
                     commands.push_back({unit.id, CommandType::attackUnit, shot->id, {-1, -1},
                                         UnitKind::unknown, 86, 0,
                                         estimate.holdScreen ? "screen-intercept" : "retreat-volley"});
@@ -1950,27 +2441,40 @@ std::vector<Command> TacticalController::control(
                     continue;
                 }
             }
-            auto fallback = returningDefender ? defense.center :
+            auto fallback = returningDefender ? returnDestination :
                 rotateWounded ? moveToward(relief->position, unitRetreatPoint, 72) :
                 regroupFront ? formationCenter : unitRetreatPoint;
             // A terrain rally can be in front of a unit that has already
             // fallen back. Retreat locally away from nearby fire instead of
             // walking back into it just to reach that strategic anchor.
-            if (retreatThreat != nullptr && fallback.valid() &&
-                distance(fallback, retreatThreat->position) + 32 < distance(unit.position, retreatThreat->position)) {
+            const auto corridorGoal = fallback;
+            const auto corridor = visibleWeaponCorridor(unit,unit.position,corridorGoal,enemy);
+            const auto corridorSteering = corridor.risk>0;
+            const auto forwardRetreatAnchor = retreatThreat != nullptr && fallback.valid() &&
+                distance(fallback, retreatThreat->position) + 32 < distance(unit.position, retreatThreat->position);
+            if (forwardRetreatAnchor) {
                 fallback = {unit.position.x + unit.position.x - retreatThreat->position.x,
                             unit.position.y + unit.position.y - retreatThreat->position.y};
             }
+            // Proximity alone must not replace a safe terrain detour with
+            // local steps. Preserve escape steering for damage, wounds,
+            // a forward anchor, and the visible weapon corridor below.
+            const auto immediateRetreatPressure = retreatThreat != nullptr &&
+                (fragile || unit.underAttack || unit.recentlyDamaged || forwardRetreatAnchor);
             const auto escape = cloakCompromised
-                ? reposition(fallback, true, true)
-                : localThreat > 0.05F || rotateWounded || regroupFront || retreatThreat != nullptr
-                    ? reposition(fallback, true)
+                ? reposition(fallback, true, true, corridorSteering)
+                : localThreat > 0.05F || rotateWounded || regroupFront || immediateRetreatPressure || corridorSteering ||
+                      (returningDefender && !unit.flying &&
+                       returnSegmentThreat(unit.position, fallback) > localThreat + 1e-6F)
+                    ? reposition(fallback, true, false, corridorSteering, returningDefender && !fragile)
                     : fallback;
+            const auto movementSource = rotateWounded ? "rotate-wounded" : regroupFront ? "regroup-frontline" : "combat-retreat";
+            recordMovement(escape,corridorGoal,movementSource,corridor,corridorSteering,returningDefender,retreatThreat?retreatThreat->id:-1);
             commands.push_back({
                 unit.id, CommandType::move, -1,
                 escape,
                 UnitKind::unknown, fragile ? 100 : 86, 0,
-                rotateWounded ? "rotate-wounded" : regroupFront ? "regroup-frontline" : "combat-retreat",
+                movementSource,
             });
             continue;
         }
@@ -2021,7 +2525,7 @@ std::vector<Command> TacticalController::control(
             }
 
             const auto meleeAhead = !unit.flying && ranged && range > weapon.maxRange &&
-                std::ranges::any_of(nearbyArmy, [thisUnit = &unit, target, navigation](
+                std::ranges::any_of(nearbyArmy, [thisUnit = &unit, target, &meleeSupportReachable](
                     const UnitSnapshot& ally) {
                     if (ally.id == thisUnit->id || ally.flying || ally.loaded ||
                         ally.groundWeapon.maxRange >= 96 || !ally.canAttack(*target) ||
@@ -2029,9 +2533,7 @@ std::vector<Command> TacticalController::control(
                         weaponDistance(ally, *target) <= ally.groundWeapon.maxRange + 96 ||
                         distanceSquared(ally.position, thisUnit->position) > 288 * 288)
                         return false;
-                    return navigation == nullptr || navigation->empty() ||
-                        navigation->findPath(ally.position, target->position, 2048,
-                                             movementFootprint(ally)).reached();
+                    return meleeSupportReachable(ally,*target);
                 });
             if (!canFire && meleeAhead) {
                 const auto anchorIsRearward = formationCenter.valid() &&
@@ -2055,11 +2557,25 @@ std::vector<Command> TacticalController::control(
             if (!unit.flying && !ranged && range > weapon.maxRange + 2 &&
                 range <= weapon.maxRange + 224 &&
                 navigation != nullptr && !navigation->empty()) {
-                const auto contact = chooseMeleeContact(unit, *target);
+                const auto contact = chooseMeleeContact(
+                    unit, *target, defense.active() && !covertAdvance);
                 if (contact.valid()) {
+                    if (recordMovement(contact, contact, "melee-contact", {}, false, false, -1)) {
+                        auto& evidence = movementEvidence->back();
+                        evidence.selectedTarget = target->id;
+                        evidence.selectedTargetFirstSeen = target->firstSeen;
+                        evidence.selectedTargetPosition = target->position;
+                    }
                     commands.push_back({unit.id, CommandType::move, -1, contact,
                         UnitKind::unknown, 83, 0, "melee-contact"});
                 } else {
+                    if (recordMovement(unit.position, unit.position, "melee-contact-wait", {},
+                                       false, false, -1, CommandType::hold)) {
+                        auto& evidence = movementEvidence->back();
+                        evidence.selectedTarget = target->id;
+                        evidence.selectedTargetFirstSeen = target->firstSeen;
+                        evidence.selectedTargetPosition = target->position;
+                    }
                     commands.push_back({unit.id, CommandType::hold, -1, {-1, -1},
                         UnitKind::unknown, 61, 0, "melee-contact-wait"});
                 }
@@ -2178,18 +2694,67 @@ std::vector<Command> TacticalController::control(
             // pursuit between control ticks. Move into the screen, then hold.
             auto anchor = screenAnchor;
             auto holdRadius = 96;
+            auto screenAssigned = false;
             if (!unit.flying && !screenMembers.empty()) {
                 const auto member = std::ranges::find(screenMembers, unit.id);
                 if (member != screenMembers.end()) {
                     const auto index = static_cast<std::size_t>(member - screenMembers.begin());
-                    anchor = screenSlots.empty() ? unit.position : screenSlots[index % screenSlots.size()];
+                    if (frame >= 0) {
+                        const auto preference = screenDestinations.find(unit.id);
+                        // A full/blocked screen keeps this unit in place rather than sharing another destination.
+                        anchor = preference == screenDestinations.end() ? unit.position : preference->second;
+                        screenAssigned = preference != screenDestinations.end();
+                    } else {
+                        std::vector<Position> compatible;
+                        for (const auto slot : screenSlots)
+                            if (defensiveScreenInterior(unit, defense, slot) &&
+                                (navigation == nullptr || navigation->empty() ||
+                                 navigation->walkable(slot, movementFootprint(unit)))) compatible.push_back(slot);
+                        anchor = compatible.empty() ? unit.position : compatible[index % compatible.size()];
+                        screenAssigned = !compatible.empty();
+                    }
                     holdRadius = 24;
                 }
             }
             if (distanceSquared(unit.position, anchor) > holdRadius * holdRadius) {
-                commands.push_back({unit.id, CommandType::move, -1, anchor,
+                auto screenMove = anchor;
+                if (!unit.flying && navigation != nullptr && !navigation->empty() &&
+                    !navigation->lineWalkable(unit.position, anchor, movementFootprint(unit))) {
+                    screenMove = unit.position;
+                    if (routeBudget > 0) {
+                        --routeBudget;
+                        std::vector<Position> screenPoints;
+                        const auto route = navigation->nextWaypoint(unit.position, anchor, 4,
+                            maximumReturnRouteExpansions, movementFootprint(unit), &screenPoints);
+                        if (route.hasUsableWaypoint()) {
+                            const auto chosen = std::ranges::find(screenPoints, route.waypoint);
+                            if (chosen != screenPoints.end()) {
+                                for (auto point = std::make_reverse_iterator(chosen + 1); point != screenPoints.rend(); ++point) {
+                                    if (*point != unit.position &&
+                                        navigation->lineWalkable(unit.position, *point, movementFootprint(unit)) &&
+                                        visibleWeaponCorridor(unit, unit.position, *point, enemy).risk == 0 &&
+                                        returnSegmentThreat(unit.position, *point) <= localThreat + 1e-6F) {
+                                        screenMove = *point;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (recordMovement(screenMove, anchor, "defense-screen", {}, false, false, -1)) {
+                    movementEvidence->back().assignedScreen = anchor;
+                    movementEvidence->back().screenSlotAssigned = screenAssigned;
+                    movementEvidence->back().screenSlotInterior = defensiveScreenInterior(unit, defense, anchor);
+                }
+                commands.push_back({unit.id, CommandType::move, -1, screenMove,
                                     UnitKind::unknown, 82, 0, "defense-screen"});
             } else {
+                if (recordMovement(anchor, anchor, "defense-hold", {}, false, false, -1, CommandType::hold)) {
+                    movementEvidence->back().assignedScreen = anchor;
+                    movementEvidence->back().screenSlotAssigned = screenAssigned;
+                    movementEvidence->back().screenSlotInterior = defensiveScreenInterior(unit, defense, anchor);
+                }
                 commands.push_back({unit.id, CommandType::hold, -1, {-1, -1},
                                     UnitKind::unknown, 82, 0, "defense-hold"});
             }

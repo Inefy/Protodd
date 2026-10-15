@@ -6,6 +6,7 @@
 #include "protodd/UnitCatalog.hpp"
 #include "protodd/UnitMemory.hpp"
 #include "protodd/Workers.hpp"
+#include "protodd/Transport.hpp"
 #include <BWAPI.h>
 #include <windows.h>
 #include <array>
@@ -59,6 +60,39 @@ class AuditScenario final : public BWAPI::AIModule {
     bool powerLossDefendersDispatched{};
     bool cannonBlockerStarted{}, cannonBlockerProbeAccepted{}, cannonBlockerProbeDebitVerified{};
     bool resourceOverlapOrdersIssued{};
+    struct ConstructionTaskFixture {
+        MacroAction action{};
+        std::uint64_t taskId{};
+        UnitId builder{-1}, building{-1};
+        Position footprint{-1, -1};
+        Frame acceptedFrame{-1}, startedFrame{-1}, completedFrame{-1};
+        bool nativeCommandObserved{};
+    };
+    std::array<ConstructionTaskFixture, 2> constructionTaskFixtures{};
+    StrategicPlan constructionTaskPlan;
+    UnitKind constructionTaskKind{UnitKind::unknown};
+    Frame constructionTasksFrame{-1};
+    int constructionTasksMineralsBefore{-1};
+    bool constructionTasksBothLeased{}, constructionTasksOldStructuresIgnored{};
+    bool constructionTasksIndependentRelease{}, constructionTasksIndependentPlan{};
+    int constructionTasksAcceptedCommands{};
+    CommandBus handoffCommands;
+    TransportController handoffTransports;
+    MacroAction handoffBuildAction{};
+    StrategicPlan handoffBuildPlan;
+    Command handoffBuildCommand;
+    UnitId handoffBuilder{-1}, handoffShuttle{-1}, handoffPassenger{-1};
+    Frame handoffStartFrame{-1}, handoffEscapeFrame{-1}, handoffReleaseFrame{-1};
+    Frame handoffUnloadFrame{-1}, handoffStopFrame{-1};
+    int handoffStage{}, handoffMinerals{-1}, handoffBuilds{}, handoffStops{}, handoffLoads{};
+    int handoffMoves{}, handoffUnloads{};
+    bool handoffNativeEscape{}, handoffNativeStop{}, handoffInjectedRejection{};
+    CommandBus observationCommands;
+    UnitId observationBuilder{-1};
+    Frame observationBuildFrame{-1}, observationStopFrame{-1};
+    int observationMineralsBefore{-1}, observationBuildAccepted{}, observationStopAccepted{};
+    bool observationInsideObserve{}, observationIssuedDuringObserve{}, observationNativeStop{};
+
     int constructionBudgetDeferredFrame{-1}, constructionBudgetMineralsBefore{-1};
     int constructionBudgetGasBefore{-1}, constructionBudgetPylonsBefore{};
     bool constructionBudgetRetried{};
@@ -563,6 +597,577 @@ class AuditScenario final : public BWAPI::AIModule {
         finished = true;
         BWAPI::Broodwar->leaveGame();
     }
+    void onUnitComplete(const BWAPI::Unit unit) override {
+        if (!scenario.starts_with("build-task-") || unit == nullptr ||
+            bridge.toKind(unit->getType()) != constructionTaskKind) return;
+        const Position footprint{unit->getTilePosition().x * 32,
+                                 unit->getTilePosition().y * 32};
+        for (std::size_t index = 0; index < constructionTaskFixtures.size(); ++index) {
+            auto& task = constructionTaskFixtures[index];
+            if (task.footprint != footprint || task.completedFrame >= 0) continue;
+            task.building = unit->getID();
+            task.completedFrame = BWAPI::Broodwar->getFrameCount();
+            log << "SITE_LIFECYCLE," << task.completedFrame << ',' << index
+                << ",complete," << task.building << ",task=" << task.taskId
+                << ",type=" << unit->getType().getID() << '\n';
+            log.flush();
+        }
+    }
+    void runConstructionTasks(const GameState& state, const InfluenceMap& influence,
+                              const Frame frame) {
+        const auto finish = [this, frame] {
+            const auto& first = constructionTaskFixtures[0];
+            const auto& second = constructionTaskFixtures[1];
+            check("task-two-native-completions", first.completedFrame >= 0 &&
+                second.completedFrame >= 0 && first.building != second.building);
+            check("task-both-native-builder-orders", first.nativeCommandObserved &&
+                second.nativeCommandObserved);
+            check("task-coexisting-builder-leases", constructionTasksBothLeased);
+            check("task-existing-nearby-structures-do-not-release-footprints",
+                constructionTasksOldStructuresIgnored);
+            check("task-first-start-releases-only-its-builder",
+                constructionTasksIndependentRelease);
+            check("task-first-structure-fulfills-only-its-site",
+                constructionTasksIndependentPlan);
+            check("task-no-duplicate-build-acceptance", constructionTasksAcceptedCommands == 2);
+            check("task-native-mineral-debits-exact", constructionTasksMineralsBefore -
+                BWAPI::Broodwar->self()->minerals() ==
+                    2 * bridge.toBwapi(constructionTaskKind).mineralPrice());
+            check("task-no-builder-lease-after-both-start", bridge.reservedBuilders().empty());
+            ResourceLedger ledger{BWAPI::Broodwar->self()->minerals(),
+                                  BWAPI::Broodwar->self()->gas()};
+            const auto finalState = bridge.observe();
+            const auto actions = planner.reconcile(finalState, constructionTaskPlan, ledger);
+            check("task-both-sites-fulfilled", std::ranges::none_of(actions, [](const auto& a) {
+                return a.constructionSite.valid();
+            }));
+            check("engine-postcondition", failures == 0);
+            log << "DONE," << frame << ',' << failures << '\n';
+            log.flush();
+            finished = true;
+            BWAPI::Broodwar->leaveGame();
+        };
+        if (constructionTasksFrame < 0) {
+            constructionTasksFrame = frame;
+            constructionTasksMineralsBefore = state.self.minerals;
+            constructionTaskKind = scenario == "build-task-pylons"
+                ? UnitKind::pylon : UnitKind::photonCannon;
+            std::vector<BWAPI::Unit> nexuses;
+            int probes{}, existing{};
+            for (const auto unit : BWAPI::Broodwar->self()->getUnits()) {
+                if (unit == nullptr || !unit->exists()) continue;
+                if (unit->getType() == BWAPI::UnitTypes::Protoss_Nexus) nexuses.push_back(unit);
+                if (unit->getType() == BWAPI::UnitTypes::Protoss_Probe) ++probes;
+                if (bridge.toKind(unit->getType()) == constructionTaskKind) ++existing;
+            }
+            std::ranges::sort(nexuses, [](const auto left, const auto right) {
+                return left->getPosition().x < right->getPosition().x;
+            });
+            check("task-fixture-two-bases-and-builders", nexuses.size() == 2 && probes == 2);
+            check("task-fixture-existing-same-kind-at-each-base", existing == 2);
+            if (nexuses.size() != 2) { finish(); return; }
+            for (std::size_t index = 0; index < nexuses.size(); ++index) {
+                ProductionGoal goal{GoalKind::build, constructionTaskKind, 2,
+                    140 - static_cast<int>(index), true,
+                    index == 0 ? "T022 main task" : "T022 natural task"};
+                // A Pylon site's anchor is its power location. The Nexus center
+                // can put legal adjacent Pylons outside the planner's 128px quota.
+                BWAPI::Unit sitePylon{};
+                int closestPylon = std::numeric_limits<int>::max();
+                for (const auto unit : BWAPI::Broodwar->self()->getUnits()) {
+                    if (unit == nullptr || !unit->exists() ||
+                        unit->getType() != BWAPI::UnitTypes::Protoss_Pylon) continue;
+                    const auto distance = unit->getDistance(nexuses[index]);
+                    if (distance < closestPylon) {
+                        sitePylon = unit;
+                        closestPylon = distance;
+                    }
+                }
+                if (sitePylon == nullptr) { check("task-site-power-anchor", false); finish(); return; }
+                const auto position = sitePylon->getPosition();
+                goal.constructionSite = {1001 + index, nexuses[index]->getID(),
+                                         {position.x, position.y}};
+                log << "SITE_GOAL," << frame << ',' << index << ",site=" << goal.constructionSite.id
+                    << ",base=" << goal.constructionSite.baseId << ",x=" << position.x
+                    << ",y=" << position.y << ",desired=2" << '\n';
+                constructionTaskPlan.goals.push_back(goal);
+            }
+            ResourceLedger ledger{state.self.minerals, state.self.gas};
+            const auto actions = planner.reconcile(state, constructionTaskPlan, ledger);
+            std::vector<MacroAction> scopedActions;
+            for (const auto& action : actions) {
+                if (action.target != constructionTaskKind || !action.constructionSite.valid()) continue;
+                scopedActions.push_back(action);
+                constructionTaskFixtures[action.constructionSite.id - 1001].action = action;
+            }
+            check("task-two-funded-independent-proposals", scopedActions.size() == 2 &&
+                std::ranges::all_of(scopedActions, [](const auto& action) { return action.reserved; }));
+            bridge.actionDiagnostic = [this](const protodd::bwapi::ActionDiagnostic& d) {
+                if (!d.source.starts_with("T022 ")) return;
+                log << "SITE_ACTION," << BWAPI::Broodwar->getFrameCount() << ',' << d.actor
+                    << ',' << d.source << ',' << d.type << ',' << d.position.x
+                    << ',' << d.position.y << ',' << d.attempted << ',' << d.accepted
+                    << ',' << d.outcome << '\n';
+                if (d.type != "Build" || !d.accepted) return;
+                ++constructionTasksAcceptedCommands;
+                for (auto& task : constructionTaskFixtures) {
+                    if (task.action.reason != d.source) continue;
+                    task.builder = d.actor;
+                    task.footprint = d.position;
+                    task.acceptedFrame = BWAPI::Broodwar->getFrameCount();
+                }
+            };
+            CommandBus commands;
+            commands.beginFrame(frame, state.latencyFrames);
+            bridge.beginCommandBudget(frame, 96);
+            bridge.beginFrameCommands(commands, frame);
+            bridge.setSpendingLedger(&ledger);
+            const auto proposed = bridge.executeMacro(scopedActions, constructionTaskPlan,
+                influence, {}, 8, nullptr, 1'000'000);
+            check("task-proposals-do-not-claim-api-acceptance", proposed == 2 &&
+                constructionTasksAcceptedCommands == 0 && bridge.reservedBuilders().empty());
+            const auto selected = commands.finalize(bridge.commandBudgetRemaining());
+            check("task-shared-bus-selects-two-builders", selected.size() == 2);
+            for (const auto& command : selected) {
+                const auto accepted = bridge.executeFrameCommand(command);
+                log << "SITE_DISPATCH," << frame << ',' << command.actor << ','
+                    << command.source << ",accepted=" << accepted << '\n';
+                if (accepted) commands.markIssued(command);
+            }
+            bridge.endFrameCommands();
+            bridge.setSpendingLedger(nullptr);
+            for (const auto& execution : bridge.macroExecutions()) {
+                const auto index = execution.action.constructionSite.id - 1001;
+                if (index >= constructionTaskFixtures.size()) continue;
+                auto& task = constructionTaskFixtures[index];
+                task.taskId = execution.taskId;
+                log << "SITE_TASK," << frame << ',' << index << ",task=" << execution.taskId
+                    << ",site=" << execution.action.constructionSite.id
+                    << ",builder=" << task.builder << ",x=" << task.footprint.x
+                    << ",y=" << task.footprint.y << ",proposalAccepted=" << execution.accepted << '\n';
+            }
+            const auto& first = constructionTaskFixtures[0];
+            const auto& second = constructionTaskFixtures[1];
+            check("task-same-tick-api-acceptance-for-distinct-sites",
+                constructionTasksAcceptedCommands == 2 && first.acceptedFrame == frame &&
+                second.acceptedFrame == frame && first.builder != second.builder &&
+                first.footprint != second.footprint);
+            check("task-distinct-stable-task-ids", first.taskId != 0 && second.taskId != 0 &&
+                first.taskId != second.taskId);
+            const auto reserved = bridge.reservedBuilders();
+            constructionTasksBothLeased = reserved.size() == 2 &&
+                std::ranges::find(reserved, first.builder) != reserved.end() &&
+                std::ranges::find(reserved, second.builder) != reserved.end();
+            log.flush();
+            if (failures != 0) finish();
+            return;
+        }
+        const auto type = bridge.toBwapi(constructionTaskKind);
+        for (std::size_t index = 0; index < constructionTaskFixtures.size(); ++index) {
+            auto& task = constructionTaskFixtures[index];
+            const auto builder = BWAPI::Broodwar->getUnit(task.builder);
+            if (builder != nullptr && builder->exists()) {
+                const auto command = builder->getLastCommand();
+                const auto nativeMatch = frame > task.acceptedFrame &&
+                    builder->getLastCommandFrame() == task.acceptedFrame &&
+                    command.getType() == BWAPI::UnitCommandTypes::Build &&
+                    command.getUnitType() == type &&
+                    command.getTargetPosition() == BWAPI::Position(task.footprint.x, task.footprint.y);
+                if (nativeMatch && !task.nativeCommandObserved) {
+                    task.nativeCommandObserved = true;
+                    log << "SITE_NATIVE_COMMAND," << frame << ',' << index << ',' << task.builder
+                        << ",commandFrame=" << builder->getLastCommandFrame()
+                        << ",type=" << command.getUnitType().getID()
+                        << ",x=" << command.getTargetPosition().x
+                        << ",y=" << command.getTargetPosition().y << '\n';
+                }
+            }
+            if (task.startedFrame >= 0) continue;
+            for (const auto unit : BWAPI::Broodwar->self()->getUnits()) {
+                if (unit == nullptr || !unit->exists() || unit->getType() != type ||
+                    unit->getTilePosition() != BWAPI::TilePosition(
+                        task.footprint.x / 32, task.footprint.y / 32)) continue;
+                task.building = unit->getID();
+                task.startedFrame = frame;
+                log << "SITE_STRUCTURE," << frame << ',' << index << ',' << task.building
+                    << ",task=" << task.taskId << ",type=" << unit->getType().getID()
+                    << ",tileX=" << unit->getTilePosition().x
+                    << ",tileY=" << unit->getTilePosition().y
+                    << ",completed=" << unit->isCompleted() << '\n';
+                break;
+            }
+        }
+        const auto reserved = bridge.reservedBuilders();
+        const auto started = static_cast<int>(std::ranges::count_if(constructionTaskFixtures,
+            [](const auto& task) { return task.startedFrame >= 0; }));
+        if (started == 0 && frame > constructionTasksFrame && reserved.size() == 2)
+            constructionTasksOldStructuresIgnored = true;
+        if (started == 1 && !constructionTasksIndependentRelease) {
+            const auto first = constructionTaskFixtures[0].startedFrame >= 0 ? 0U : 1U;
+            const auto second = 1U - first;
+            constructionTasksIndependentRelease = reserved.size() == 1 &&
+                std::ranges::find(reserved, constructionTaskFixtures[first].builder) == reserved.end() &&
+                std::ranges::find(reserved, constructionTaskFixtures[second].builder) != reserved.end();
+            ResourceLedger ledger{state.self.minerals, state.self.gas};
+            const auto actions = planner.reconcile(state, constructionTaskPlan, ledger);
+            constructionTasksIndependentPlan =
+                std::ranges::none_of(actions, [first](const auto& action) {
+                    return action.constructionSite.id == 1001 + first;
+                }) && std::ranges::any_of(actions, [second](const auto& action) {
+                    return action.constructionSite.id == 1001 + second;
+                });
+            log << "SITE_INDEPENDENCE," << frame << ",started=" << first
+                << ",pending=" << second << ",reserved=" << reserved.size()
+                << ",lease=" << constructionTasksIndependentRelease
+                << ",planner=" << constructionTasksIndependentPlan << '\n';
+        }
+        if (frame % 24 == 0) {
+            log << "SITE_STATE," << frame << ",started=" << started
+                << ",reserved=" << reserved.size() << ",minerals=" << state.self.minerals << '\n';
+            log.flush();
+        }
+        if (std::ranges::all_of(constructionTaskFixtures,
+                [](const auto& task) { return task.completedFrame >= 0; }) ||
+            frame >= constructionTasksFrame + 2400) finish();
+    }
+    void finishHandoff(const Frame frame) {
+        check("engine-postcondition", failures == 0);
+        log << "DONE," << frame << ',' << failures << '\n';
+        log.flush(); finished = true; BWAPI::Broodwar->leaveGame();
+    }
+    Command handoffEscape(const UnitId actor, const Position target, const Frame frame) const {
+        Command command{actor, CommandType::move, -1, target, UnitKind::unknown,
+                        1000, frame, "T012 owner escape"};
+        command.owner = CommandOwner::combat;
+        command.deadlineFrame = frame; command.leaseGeneration = 1;
+        return command;
+    }
+    void runConstructionHandoff(const GameState& state, const InfluenceMap& influence,
+                                const Frame frame) {
+        const auto reserved = [this] {
+            const auto builders = bridge.reservedBuilders();
+            return std::ranges::find(builders, handoffBuilder) != builders.end();
+        };
+        const auto staleProposal = [this, frame] {
+            auto old = handoffBuildCommand; old.deadlineFrame = frame;
+            const auto before = handoffCommands.stats().staleLease;
+            handoffCommands.submit(old);
+            check("owner-build-stale-proposal-rejected", handoffCommands.stats().staleLease == before + 1);
+        };
+        if (handoffStage == 0) {
+            const auto site = std::ranges::min_element(state.bases, [](const auto& left, const auto& right) {
+                return distanceSquared(left.center, Position{2050, 2000}) <
+                       distanceSquared(right.center, Position{2050, 2000});
+            });
+            const auto usable = site != state.bases.end() && site->mineralPatches >= 4 &&
+                site->ownerId < 0 && distanceSquared(site->center, Position{2050, 2000}) <= 600 * 600;
+            check("owner-build-remote-site", usable);
+            if (!usable) { finishHandoff(frame); return; }
+            handoffMinerals = state.self.minerals;
+            handoffBuildAction.action = MacroActionKind::expand;
+            handoffBuildAction.target = UnitKind::nexus;
+            handoffBuildAction.priority = 130; handoffBuildAction.minerals = 400;
+            handoffBuildAction.reserved = true; handoffBuildAction.reason = "T012 owner build";
+            handoffBuildAction.constructionSite = {0x1202, site->id, site->center};
+            handoffBuildPlan.desiredBases = 2; handoffBuildPlan.expansionTarget = site->center;
+            const auto proposed = bridge.executeMacro(std::span{&handoffBuildAction, 1},
+                handoffBuildPlan, influence, {}, 8, nullptr, 1'000'000);
+            const auto selected = handoffCommands.finalize(bridge.commandBudgetRemaining());
+            check("owner-build-common-bus-proposal", proposed == 1 && handoffBuilds == 0 &&
+                  selected.size() == 1 && selected.front().type == CommandType::build);
+            if (selected.size() != 1 || selected.front().type != CommandType::build) {
+                finishHandoff(frame); return;
+            }
+            handoffBuildCommand = selected.front(); handoffBuilder = handoffBuildCommand.actor;
+            const auto accepted = bridge.executeFrameCommand(handoffBuildCommand);
+            if (accepted) handoffCommands.markIssued(handoffBuildCommand);
+            check("owner-build-accepted-with-lease", accepted && handoffBuilds == 1 && reserved());
+            handoffStartFrame = frame; handoffStage = 1; return;
+        }
+        const auto builder = BWAPI::Broodwar->getUnit(handoffBuilder);
+        if (builder == nullptr || !builder->exists()) { check("owner-build-live-builder", false); finishHandoff(frame); return; }
+        auto escape = handoffEscape(handoffBuilder, {1776, 2528}, frame);
+        if (handoffStage == 1) {
+            check("owner-build-native-order-bound", builder->getLastCommandFrame() == handoffStartFrame &&
+                  builder->getLastCommand().getType() == BWAPI::UnitCommandTypes::Build && reserved());
+            auto old = handoffBuildCommand; old.deadlineFrame = frame;
+            handoffCommands.submit(old); handoffCommands.submit(escape);
+            check("owner-build-budget-deferred-retains-state", handoffCommands.finalize(0).empty() &&
+                  handoffCommands.stats().budgetDeferred == 1 &&
+                  bridge.releaseConstructionCommandLease(escape, false) == 0 && reserved());
+            ++handoffStage; return;
+        }
+        if (handoffStage == 2 || handoffStage == 3) {
+            auto old = handoffBuildCommand; old.deadlineFrame = frame;
+            handoffCommands.submit(old); handoffCommands.submit(escape);
+            const auto selected = handoffCommands.finalize(bridge.commandBudgetRemaining());
+            check("owner-build-emergency-wins-actor", selected.size() == 1 &&
+                  selected.front().owner == CommandOwner::combat && handoffCommands.displacedCommands().size() == 1);
+            const auto accepted = selected.size() == 1 && bridge.executeFrameCommand(selected.front());
+            if (handoffStage == 2) {
+                check("owner-build-api-rejection-retains-state", !accepted && handoffInjectedRejection &&
+                      bridge.releaseConstructionCommandLease(escape, false) == 0 && reserved());
+                ++handoffStage; return;
+            }
+            check("owner-build-emergency-api-accepted", accepted && reserved());
+            if (!accepted) { finishHandoff(frame); return; }
+            handoffCommands.markIssued(escape);
+            if (scenario == "owner-build") {
+                const auto generation = bridge.releaseConstructionCommandLease(escape, true);
+                handoffReleaseFrame = frame;
+                check("owner-build-accepted-handoff-holds-reservation", generation > handoffBuildCommand.leaseGeneration && reserved());
+                check("owner-build-no-replacement-before-native-ack", bridge.executeMacro(
+                    std::span{&handoffBuildAction, 1}, handoffBuildPlan, influence, {}, 8, nullptr, 1'000'000) == 0 &&
+                    bridge.lastMacroStatus() == "build-cancel-awaiting-ack");
+                staleProposal();
+            }
+            handoffStage = 4; return;
+        }
+        const auto nativeMove = handoffEscapeFrame >= 0 &&
+            builder->getLastCommandFrame() == handoffEscapeFrame &&
+            builder->getLastCommand().getType() == BWAPI::UnitCommandTypes::Move &&
+            builder->getLastCommand().getTargetPosition() == BWAPI::Position(1776, 2528);
+        if (nativeMove && !handoffNativeEscape && bridge.commandActive(escape)) {
+            handoffNativeEscape = true;
+            log << "OWNER_NATIVE_MOVE," << frame << ",actor=" << handoffBuilder
+                << ",commandFrame=" << builder->getLastCommandFrame()
+                << ",order=" << builder->getOrder().toString() << ",reserved=" << reserved() << '\n';
+            check("owner-build-native-replacement-bound", frame > handoffEscapeFrame && bridge.commandActive(escape));
+            if (scenario == "owner-active") {
+                escape.alreadyActive = true;
+                auto old = handoffBuildCommand; old.deadlineFrame = frame;
+                handoffCommands.submit(old); handoffCommands.submit(escape);
+                const auto selected = handoffCommands.finalize(bridge.commandBudgetRemaining());
+                check("owner-active-winner-suppresses-api", selected.empty() && reserved() &&
+                      handoffCommands.authorityWinners().size() == 1 && handoffCommands.authorityWinners().front().alreadyActive);
+                const auto generation = bridge.releaseConstructionCommandLease(escape, false);
+                handoffReleaseFrame = frame;
+                check("owner-active-confirmed-engine-order-releases-authority", generation > handoffBuildCommand.leaseGeneration && reserved());
+                staleProposal();
+            }
+        }
+        if (handoffReleaseFrame >= 0 && frame > handoffReleaseFrame &&
+            !reserved() && handoffNativeEscape) {
+            check("owner-build-native-ack-releases-old-lease", handoffNativeEscape);
+            check("owner-build-no-stop-or-duplicate-build", handoffBuilds == 1 && handoffMoves == 1 && handoffStops == 0);
+            check("owner-build-no-spending-or-phantom-nexus", state.self.minerals == handoffMinerals &&
+                  std::ranges::count(state.self.units, UnitKind::nexus, &UnitSnapshot::kind) == 1);
+            finishHandoff(frame); return;
+        }
+        if (frame >= 240) { check("owner-build-bounded-completion", false); finishHandoff(frame); }
+    }
+    void runTransportHandoff(const GameState& state, const InfluenceMap& influence, const Frame frame) {
+        constexpr Position home{768, 1024}, objective{2200, 1024};
+        const auto loadedCase = scenario == "owner-loaded";
+        const auto shuttle = std::ranges::find(state.self.units, UnitKind::shuttle, &UnitSnapshot::kind);
+        const auto passenger = std::ranges::find(state.self.units, UnitKind::reaver, &UnitSnapshot::kind);
+        if (shuttle == state.self.units.end() || passenger == state.self.units.end()) {
+            check("owner-transport-live-fixture", false); finishHandoff(frame); return;
+        }
+        handoffShuttle = shuttle->id; handoffPassenger = passenger->id;
+        const auto aboard = passenger->loaded && passenger->transportId == shuttle->id;
+        if (handoffStage == 0) {
+            handoffMinerals = state.self.minerals;
+            static_cast<void>(handoffTransports.control(state, objective, home, influence));
+            Command load{shuttle->id, CommandType::load, passenger->id, {-1, -1},
+                         UnitKind::unknown, 200, frame, "T012 owner load"};
+            load.owner = CommandOwner::transport; load.deadlineFrame = frame;
+            load.leaseGeneration = handoffTransports.leaseGeneration(shuttle->id);
+            handoffCommands.submit(load);
+            const auto selected = handoffCommands.finalize(bridge.commandBudgetRemaining());
+            const auto accepted = selected.size() == 1 && bridge.executeFrameCommand(selected.front());
+            check("owner-transport-load-common-bus-accepted", accepted && handoffLoads == 1 &&
+                  handoffTransports.ownsReaver(passenger->id));
+            if (accepted) handoffCommands.markIssued(load);
+            handoffStartFrame = frame; handoffStage = 1; return;
+        }
+        const auto nativeShuttle = BWAPI::Broodwar->getUnit(shuttle->id);
+        const auto nativePassenger = BWAPI::Broodwar->getUnit(passenger->id);
+        auto escape = handoffEscape(loadedCase ? shuttle->id : passenger->id, home, frame);
+        if (handoffStage < 4) {
+            if ((loadedCase && !aboard) || (!loadedCase && handoffStage == 1 &&
+                (nativeShuttle == nullptr || shuttle->orderTargetId != passenger->id ||
+                 nativeShuttle->getLastCommand().getType() != BWAPI::UnitCommandTypes::Load))) {
+                if (frame >= 240) { check("owner-transport-native-load-ack", false); finishHandoff(frame); }
+                return;
+            }
+            const auto orders = handoffTransports.control(state, objective, home, influence);
+            for (const auto& order : orders) if (order.actor == escape.actor) handoffCommands.submit(order);
+            handoffCommands.submit(escape);
+            if (handoffStage == 1) {
+                check("owner-transport-native-cargo-state", loadedCase ? aboard :
+                      !aboard && shuttle->orderTargetId == passenger->id);
+                check("owner-transport-budget-deferred-retains-mission", handoffCommands.finalize(0).empty() &&
+                      !handoffTransports.preemptActor(state, escape, false, home).released() &&
+                      handoffTransports.ownsReaver(passenger->id));
+                ++handoffStage; return;
+            }
+            const auto selected = handoffCommands.finalize(bridge.commandBudgetRemaining());
+            check("owner-transport-emergency-wins-actor", selected.size() == 1 && selected.front().owner == CommandOwner::combat);
+            const auto accepted = selected.size() == 1 && bridge.executeFrameCommand(selected.front());
+            if (handoffStage == 2) {
+                check("owner-transport-api-rejection-retains-mission", !accepted && handoffInjectedRejection &&
+                      !handoffTransports.preemptActor(state, escape, false, home).released() &&
+                      handoffTransports.ownsReaver(passenger->id));
+                ++handoffStage; return;
+            }
+            check("owner-transport-emergency-api-accepted", accepted);
+            if (!accepted) { finishHandoff(frame); return; }
+            handoffCommands.markIssued(escape);
+            const auto handoff = handoffTransports.preemptActor(state, escape, true, home);
+            bridge.invalidateCommandLease(handoff.shuttle, CommandOwner::transport, handoff.shuttleGeneration);
+            bridge.invalidateCommandLease(handoff.passenger, CommandOwner::transport, handoff.passengerGeneration);
+            check("owner-transport-confirmed-owner-state-release", handoff.released() &&
+                  handoff.cargoRecovery == loadedCase && handoffTransports.ownsReaver(passenger->id) == loadedCase);
+            Command stale{shuttle->id, CommandType::load, passenger->id, {-1, -1},
+                          UnitKind::unknown, 200, frame, "T012 stale load"};
+            stale.owner = CommandOwner::transport; stale.deadlineFrame = frame; stale.leaseGeneration = 1;
+            const auto before = handoffCommands.stats().staleLease;
+            handoffCommands.submit(stale);
+            check("owner-transport-stale-load-rejected", handoffCommands.stats().staleLease == before + 1);
+            handoffReleaseFrame = frame; handoffStage = 4; return;
+        }
+        const auto nativeWinner = loadedCase ? nativeShuttle : nativePassenger;
+        if (!handoffNativeEscape && nativeWinner != nullptr &&
+            nativeWinner->getLastCommandFrame() == handoffEscapeFrame &&
+            nativeWinner->getLastCommand().getType() == BWAPI::UnitCommandTypes::Move &&
+            bridge.commandActive(escape)) {
+            handoffNativeEscape = true;
+            log << "OWNER_NATIVE_MOVE," << frame << ",actor=" << nativeWinner->getID()
+                << ",commandFrame=" << nativeWinner->getLastCommandFrame() << '\n';
+            check("owner-transport-native-emergency-bound", frame > handoffEscapeFrame &&
+                  nativeWinner->getLastCommand().getTargetPosition() == BWAPI::Position(home.x, home.y));
+        }
+        if (!handoffNativeStop && handoffStopFrame >= 0 && nativeShuttle != nullptr &&
+            nativeShuttle->getLastCommandFrame() == handoffStopFrame &&
+            nativeShuttle->getLastCommand().getType() == BWAPI::UnitCommandTypes::Stop &&
+            nativeShuttle->isIdle()) {
+            handoffNativeStop = true;
+            log << "OWNER_NATIVE_PICKUP_STOP," << frame << ",actor=" << shuttle->id
+                << ",commandFrame=" << nativeShuttle->getLastCommandFrame() << ",aboard=" << aboard << '\n';
+        }
+        const auto recovery = handoffTransports.control(state, objective, home, influence);
+        for (const auto& order : recovery) handoffCommands.submit(order);
+        for (const auto& command : handoffCommands.finalize(bridge.commandBudgetRemaining())) {
+            if (bridge.executeFrameCommand(command)) handoffCommands.markIssued(command);
+        }
+        if (loadedCase && handoffUnloadFrame >= 0 && !aboard && frame > handoffUnloadFrame) {
+            log << "OWNER_NATIVE_UNLOADED," << frame << ",shuttle=" << shuttle->id
+                << ",passenger=" << passenger->id << ",commandFrame=" << nativeShuttle->getLastCommandFrame()
+                << ",loaded=" << passenger->loaded << ",owned=" << handoffTransports.ownsReaver(passenger->id) << '\n';
+            check("owner-transport-world-unload-releases-cargo", !handoffTransports.ownsReaver(passenger->id) &&
+                  !passenger->loaded && nativeShuttle->getLastCommandFrame() == handoffUnloadFrame &&
+                  nativeShuttle->getLastCommand().getType() == BWAPI::UnitCommandTypes::Unload_All_Position);
+            check("owner-transport-native-escape-and-safe-recovery", handoffNativeEscape && handoffUnloads == 1 &&
+                  handoffLoads == 1 && handoffStops == 0 && state.self.minerals == handoffMinerals);
+            finishHandoff(frame); return;
+        }
+        if (!loadedCase && frame >= handoffReleaseFrame + 48) {
+            check("owner-transport-native-pickup-cancelled", handoffNativeEscape && handoffNativeStop &&
+                  !aboard && !handoffTransports.ownsReaver(passenger->id));
+            check("owner-transport-no-reload-or-raid-resurrection", handoffLoads == 1 && handoffUnloads == 0 &&
+                  handoffStops == 1 && recovery.empty() && state.self.minerals == handoffMinerals);
+            finishHandoff(frame); return;
+        }
+        if (frame >= 480) { check("owner-transport-bounded-completion", false); finishHandoff(frame); }
+    }
+    void runObservationCancellation(const GameState& state, const InfluenceMap& influence,
+                                    const Frame frame) {
+        const auto reserved = [this] {
+            const auto builders = bridge.reservedBuilders();
+            return std::ranges::find(builders, observationBuilder) != builders.end();
+        };
+        const auto finish = [this, &state, frame, &reserved] {
+            check("observation-no-api-command-during-observe", !observationIssuedDuringObserve);
+            check("observation-native-stop-after-dispatch", observationNativeStop);
+            check("observation-lease-released-after-native-stop", observationStopFrame >= 0 &&
+                frame > observationStopFrame && !reserved());
+            check("observation-no-phantom-build-or-spending", observationBuildAccepted == 1 &&
+                observationStopAccepted == 1 && state.self.minerals == observationMineralsBefore &&
+                std::ranges::none_of(state.self.units, [](const auto& u) {
+                    return u.kind == UnitKind::pylon;
+                }));
+            check("engine-postcondition", failures == 0);
+            log << "DONE," << frame << ',' << failures << '\n';
+            log.flush(); finished = true; BWAPI::Broodwar->leaveGame();
+        };
+        if (observationBuildFrame < 0) {
+            observationMineralsBefore = state.self.minerals;
+            const auto nexus = std::ranges::find(state.self.units, UnitKind::nexus, &UnitSnapshot::kind);
+            check("observation-fixture-nexus", nexus != state.self.units.end());
+            if (nexus == state.self.units.end()) { finish(); return; }
+            MacroAction action{};
+            action.action = MacroActionKind::build;
+            action.target = UnitKind::pylon;
+            action.minerals = 100; action.priority = 120; action.reserved = true;
+            action.reason = "T012 pinned builder";
+            action.constructionSite = {1201, nexus->id, nexus->position};
+            StrategicPlan plan;
+            const auto proposed = bridge.executeMacro(std::span{&action, 1}, plan,
+                influence, {}, 8, nullptr, 1'000'000);
+            check("observation-build-is-only-a-proposal", proposed == 1 && observationBuildAccepted == 0);
+            const auto selected = observationCommands.finalize(bridge.commandBudgetRemaining());
+            check("observation-single-build-selected", selected.size() == 1 &&
+                selected.front().type == CommandType::build);
+            for (const auto& command : selected) {
+                if (bridge.executeFrameCommand(command)) observationCommands.markIssued(command);
+            }
+            check("observation-accepted-build-retains-builder", observationBuildAccepted == 1 && reserved());
+            log << "OBS_BUILD," << frame << ",builder=" << observationBuilder
+                << ",reserved=" << reserved() << ",minerals=" << state.self.minerals << '\n';
+            log.flush();
+            if (failures != 0) finish();
+            return;
+        }
+        const auto builder = BWAPI::Broodwar->getUnit(observationBuilder);
+        if (frame % 24 == 0 && builder != nullptr) {
+            log << "OBS_STATE," << frame << ",builder=" << observationBuilder
+                << ",x=" << builder->getPosition().x << ",y=" << builder->getPosition().y
+                << ",order=" << builder->getOrder().toString()
+                << ",last=" << builder->getLastCommand().getType().toString()
+                << ",lastFrame=" << builder->getLastCommandFrame()
+                << ",reserved=" << reserved() << ",minerals=" << state.self.minerals << '\n';
+            log.flush();
+        }
+        if (observationCommands.stats().proposed > 0) {
+            check("observation-cancel-queued-without-api-acceptance", observationStopAccepted == 0 &&
+                !observationIssuedDuringObserve && reserved());
+            Command competing{observationBuilder, CommandType::move, -1, {800, 544},
+                              UnitKind::unknown, 100, frame, "T012 competing worker"};
+            competing.owner = CommandOwner::worker; competing.urgency = 100;
+            competing.deadlineFrame = frame; competing.leaseGeneration = 1;
+            observationCommands.submit(competing);
+            const auto selected = observationCommands.finalize(bridge.commandBudgetRemaining());
+            check("observation-cancellation-wins-worker-conflict", selected.size() == 1 &&
+                selected.front().actor == observationBuilder && selected.front().type == CommandType::stop &&
+                selected.front().owner == CommandOwner::construction);
+            check("observation-displaced-worker-reported", std::ranges::any_of(
+                observationCommands.displacedCommands(), [](const auto& d) {
+                    return d.proposal.owner == CommandOwner::worker &&
+                           d.winner.owner == CommandOwner::construction && d.winner.type == CommandType::stop;
+                }));
+            for (const auto& command : selected) {
+                log << "OBS_SELECTED," << frame << ',' << command.actor << ',' << command.source
+                    << ",owner=" << static_cast<int>(command.owner)
+                    << ",type=" << static_cast<int>(command.type) << '\n';
+                if (bridge.executeFrameCommand(command)) observationCommands.markIssued(command);
+            }
+            check("observation-api-stop-awaits-engine-ack", observationStopAccepted == 1 && reserved());
+            log.flush();
+        }
+        if (observationStopFrame >= 0 && frame > observationStopFrame && builder != nullptr &&
+            builder->exists() && builder->getLastCommandFrame() == observationStopFrame &&
+            builder->getLastCommand().getType() == BWAPI::UnitCommandTypes::Stop && builder->isIdle()) {
+            observationNativeStop = true;
+            log << "OBS_NATIVE_STOP," << frame << ',' << observationBuilder
+                << ",commandFrame=" << builder->getLastCommandFrame()
+                << ",order=" << builder->getOrder().toString()
+                << ",idle=" << builder->isIdle() << ",reserved=" << reserved() << '\n';
+            log.flush();
+            if (!reserved()) { finish(); return; }
+        }
+        if (frame >= 1500) finish();
+    }
     void onUnitDestroy(const BWAPI::Unit unit) override {
         if (scenario != "dynamic-navigation" || unit == nullptr ||
             unit->getID() != dynamicNavigationMineralId) return;
@@ -597,7 +1202,7 @@ public:
             scenario == "pylon-loss" || scenario == "cannon-blocker" ||
                     scenario == "resource-overlap" || scenario == "construction-budget" ||
                     scenario == "worker-issuer" ||
-                    scenario == "build-cancel" || scenario == "builder-evacuation" ||
+                    scenario == "build-cancel" || scenario == "observation-cancel" || scenario == "builder-evacuation" ||
                     scenario == "builder-evacuation-started" ||
                     scenario == "worker-local-defense" ||
                     scenario == "worker-mining" || scenario == "scout-issuer" ||
@@ -606,6 +1211,8 @@ public:
                     scenario == "observer-safety" || scenario == "unit-memory" ||
                     scenario == "footprint-native" ||
                     scenario == "dynamic-navigation" ||
+                    scenario.starts_with("owner-") ||
+                    scenario.starts_with("build-task-") ||
                     scenario.starts_with("combat-corpus") ? 1 : 64);
         bridge.buildSelectionDiagnostic = [this](const protodd::bwapi::BuildSelectionDiagnostic& d) {
             if (scenario != "supply-anchor" || d.kind != UnitKind::pylon) return;
@@ -617,6 +1224,47 @@ public:
             log.flush();
         };
         bridge.onStart();
+        if (scenario.starts_with("owner-")) {
+            bridge.productionPermission = [this](const BWAPI::UnitCommand&, const std::string_view source) {
+                if (source == "T012 owner escape" && !handoffInjectedRejection) {
+                    handoffInjectedRejection = true; return false;
+                }
+                return true;
+            };
+            bridge.actionDiagnostic = [this](const protodd::bwapi::ActionDiagnostic& d) {
+                const auto frame = BWAPI::Broodwar->getFrameCount();
+                if (d.accepted) {
+                    if (d.type == "Build") ++handoffBuilds;
+                    if (d.type == "Stop") { ++handoffStops; handoffStopFrame = frame; }
+                    if (d.source == "T012 owner load") ++handoffLoads;
+                    if (d.source == "T012 owner escape") { ++handoffMoves; handoffEscapeFrame = frame; }
+                    if (d.source == "transport-handoff-unload") { ++handoffUnloads; handoffUnloadFrame = frame; }
+                }
+                log << "OWNER_ACTION," << frame << ',' << d.actor << ',' << d.target
+                    << ',' << d.source << ',' << d.type << ',' << d.attempted << ',' << d.accepted
+                    << ',' << d.position.x << ',' << d.position.y << ',' << d.outcome << '\n';
+                log.flush();
+            };
+        }
+        if (scenario == "observation-cancel") {
+            bridge.actionDiagnostic = [this](const protodd::bwapi::ActionDiagnostic& d) {
+                if (observationInsideObserve && d.attempted) observationIssuedDuringObserve = true;
+                if (d.source == "T012 pinned builder" && d.type == "Build" && d.accepted) {
+                    observationBuilder = d.actor;
+                    observationBuildFrame = BWAPI::Broodwar->getFrameCount();
+                    ++observationBuildAccepted;
+                }
+                if (d.actor == observationBuilder && d.type == "Stop" && d.accepted) {
+                    observationStopFrame = BWAPI::Broodwar->getFrameCount();
+                    ++observationStopAccepted;
+                }
+                log << "OBS_ACTION," << BWAPI::Broodwar->getFrameCount() << ',' << d.actor
+                    << ',' << d.source << ',' << d.type << ',' << d.position.x << ',' << d.position.y
+                    << ',' << d.attempted << ',' << d.accepted
+                    << ",insideObserve=" << observationInsideObserve << '\n';
+                log.flush();
+            };
+        }
         if (scenario == "pylon-loss") {
             bridge.actionDiagnostic = [this](const protodd::bwapi::ActionDiagnostic& d) {
                 if (d.source != "production-demand") return;
@@ -685,8 +1333,40 @@ public:
         const int frame=BWAPI::Broodwar->getFrameCount();
         if(frame<2) { log << "FRAME," << frame << ',' << BWAPI::Broodwar->isPaused() << '\n'; log.flush(); }
         if (frame<24 && scenario!="pylon-loss") return;
+        struct ObservationFrameScope {
+            protodd::bwapi::BwapiBridge* bridge{};
+            ~ObservationFrameScope() { if (bridge != nullptr) bridge->endFrameCommands(); }
+        } observationScope;
+        if (scenario == "observation-cancel") {
+            observationCommands.beginFrame(frame, BWAPI::Broodwar->getLatencyFrames());
+            bridge.beginCommandBudget(frame, 96);
+            bridge.beginFrameCommands(observationCommands, frame);
+            observationScope.bridge = &bridge;
+            observationInsideObserve = true;
+        }
+        if (scenario.starts_with("owner-")) {
+            handoffCommands.beginFrame(frame, BWAPI::Broodwar->getLatencyFrames());
+            bridge.beginCommandBudget(frame, 96);
+            bridge.beginFrameCommands(handoffCommands, frame);
+            observationScope.bridge = &bridge;
+        }
         auto state=bridge.observe();
+        observationInsideObserve = false;
         InfluenceMap influence; influence.update(state);
+        if (scenario == "observation-cancel") {
+            runObservationCancellation(state, influence, frame);
+            return;
+        }
+        if (scenario == "owner-build" || scenario == "owner-active") {
+            runConstructionHandoff(state, influence, frame); return;
+        }
+        if (scenario == "owner-loaded" || scenario == "owner-pickup") {
+            runTransportHandoff(state, influence, frame); return;
+        }
+        if (scenario.starts_with("build-task-")) {
+            runConstructionTasks(state, influence, frame);
+            return;
+        }
         if (scenario.starts_with("combat-corpus")) {
             runCombatCorpus(state, frame);
             return;
@@ -1419,15 +2099,8 @@ public:
                                                          site->center.y)) > 96);
                 check("T021-builder-owned-before-cancellation",
                     builderReserved());
-                const auto stopped = bridge.cancelExpansion();
-                const auto stillReserved = builderReserved();
-                check("T021-rejected-Stop-retains-build-lease",
-                    t021StopRejected && !stopped && stillReserved && buildOrder &&
-                    t021AcceptedStopCommands == 0);
-
-                const auto repeat = bridge.executeMacro(std::span{&action, 1}, plan, influence);
-                check("T021-replacement-build-blocked-after-rejection",
-                    repeat == 0 && t021BuildCommands == 1 && builderReserved());
+                // One accepted actor command per frame: reject the first Stop
+                // on a later native frame, after the Build is observable.
                 log << "T021_PENDING," << frame << ",builder=" << t021Builder
                     << ",site=" << t021Target.x << 'x' << t021Target.y
                     << ",minerals=" << t021MineralsBefore << ",last="
@@ -1435,8 +2108,40 @@ public:
                     << t021BuildCommands << '\n';
                 log.flush();
             } else if (!t021StopAccepted) {
+                const auto previouslyRejected = t021StopRejected;
                 const auto stopped = bridge.cancelExpansion();
                 const auto stillReserved = builderReserved();
+                if (!previouslyRejected && t021StopRejected) {
+                    const auto builder = BWAPI::Broodwar->getUnit(t021Builder);
+                    const auto last = builder != nullptr ? builder->getLastCommand()
+                                                         : BWAPI::UnitCommand{};
+                    const auto buildOrder = builder != nullptr && builder->exists() &&
+                        last.getType() == BWAPI::UnitCommandTypes::Build &&
+                        last.getUnitType() == BWAPI::UnitTypes::Protoss_Nexus;
+                    check("T021-rejected-Stop-retains-build-lease",
+                        !stopped && stillReserved && buildOrder && t021BuildCommands == 1 &&
+                        t021AcceptedStopCommands == 0);
+                    log << "T021_NATIVE_BUILD," << frame << ',' << t021Builder
+                        << ",commandFrame=" << builder->getLastCommandFrame()
+                        << ",x=" << last.getTargetPosition().x
+                        << ",y=" << last.getTargetPosition().y << '\n';
+                    MacroAction retryAction{};
+                    retryAction.action = MacroActionKind::expand;
+                    retryAction.target = UnitKind::nexus;
+                    retryAction.priority = 130;
+                    retryAction.minerals = 400;
+                    retryAction.reserved = true;
+                    retryAction.reason = "T021 pending expansion";
+                    retryAction.constructionSite = {0x21, site->id, t021Target};
+                    StrategicPlan retryPlan;
+                    retryPlan.desiredBases = 2;
+                    retryPlan.expansionTarget = t021Target;
+                    const auto repeat = bridge.executeMacro(std::span{&retryAction, 1},
+                                                           retryPlan, influence);
+                    check("T021-replacement-build-blocked-after-rejection",
+                        repeat == 0 && t021BuildCommands == 1 && builderReserved());
+                    log.flush();
+                }
                 if (t021AcceptedStopCommands > 0) {
                     t021StopAccepted = true;
                     check("T021-retry-Stop-accepted", !stopped && stillReserved &&

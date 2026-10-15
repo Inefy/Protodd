@@ -437,6 +437,55 @@ if(PROTODD_BUILD_TESTS)
         protodd_enable_warnings(protodd_audit_fault_scenario)
         set_target_properties(protodd_audit_fault_scenario PROPERTIES
             PREFIX "" OUTPUT_NAME "AuditFaultScenario" SUFFIX ".dll")
+        # Runs the exact production dispatcher with test-only owner fixtures.
+        add_library(protodd_audit_actor_scenario MODULE
+            tests/bwapi_actor_authority_scenario.cpp
+            src/bwapi/ProtoddModule.cpp
+            src/bwapi/BwapiBridge.cpp
+            src/bwapi/PolicyRuntime.cpp
+            src/bwapi/ModelRuntime.cpp
+            src/bwapi/ProductionRuntime.cpp
+            src/bwapi/ProductionFeedback.cpp
+            src/bwapi/WholeGameRuntime.cpp
+            src/bwapi/WholeGameAction.cpp
+            src/cpu/WholeGameCpu.cpp
+            src/cpu/WholeGameEncoder.cpp
+            src/cpu/WholeGameIntent.cpp
+        )
+        target_include_directories(protodd_audit_actor_scenario PRIVATE
+            "${BWAPI_INCLUDE_DIR}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/bwapi"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu"
+        )
+        target_link_libraries(protodd_audit_actor_scenario PRIVATE
+            Protodd::Core "${BWAPI_LIBRARY}")
+        target_compile_features(protodd_audit_actor_scenario PRIVATE cxx_std_20)
+        target_compile_definitions(protodd_audit_actor_scenario PRIVATE
+            WIN32_LEAN_AND_MEAN NOMINMAX PROTODD_ACTOR_AUTHORITY_TESTS=1)
+        # Full-callback actor fixtures must exercise every enabled shipping
+        # module option, including routing features defined on that target.
+        get_target_property(PROTODD_ACTOR_FIXTURE_MODULE_DEFINITIONS
+            protodd_bwapi COMPILE_DEFINITIONS)
+        target_compile_definitions(protodd_audit_actor_scenario PRIVATE
+            ${PROTODD_ACTOR_FIXTURE_MODULE_DEFINITIONS})
+        if(PROTODD_TOURNAMENT_PROFILE)
+            target_compile_definitions(protodd_audit_actor_scenario PRIVATE
+                PROTODD_TOURNAMENT_PROFILE=1)
+        endif()
+        if(PROTODD_DEVELOPER_PROFILE)
+            target_compile_definitions(protodd_audit_actor_scenario PRIVATE
+                PROTODD_DEVELOPER_PROFILE=1)
+        endif()
+        if(PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY)
+            target_compile_definitions(protodd_audit_actor_scenario PRIVATE
+                PROTODD_WHOLE_GAME_RESEARCH_AUTHORITY=1)
+        endif()
+        if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+            target_compile_options(protodd_audit_actor_scenario PRIVATE /arch:SSE2)
+        endif()
+        protodd_enable_warnings(protodd_audit_actor_scenario)
+        set_target_properties(protodd_audit_actor_scenario PROPERTIES
+            PREFIX "" OUTPUT_NAME "AuditActorScenario" SUFFIX ".dll")
         add_library(protodd_audit_load MODULE tests/bwapi_audit_load.cpp)
         target_include_directories(protodd_audit_load PRIVATE "${BWAPI_INCLUDE_DIR}")
         target_link_libraries(protodd_audit_load PRIVATE "${BWAPI_LIBRARY}" Psapi)
@@ -470,6 +519,15 @@ if(PROTODD_BUILD_TESTS)
             add_test(NAME protodd_build_profile_tests
                 COMMAND "${PROTODD_POWERSHELL_EXECUTABLE}" -NoProfile -File
                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_build_profiles.ps1")
+            if(PROTODD_BUILD_BWAPI_MODULE AND MSVC AND PROTODD_TOURNAMENT_PROFILE)
+                add_test(NAME protodd_build_input_drift_tests
+                    COMMAND "${PROTODD_POWERSHELL_EXECUTABLE}" -NoProfile -File
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_build_input_drift.ps1"
+                        -DllPath "$<TARGET_FILE:protodd_bwapi>"
+                        -CMakeCache "${CMAKE_BINARY_DIR}/CMakeCache.txt"
+                        -BwapiRoot "${BWAPI_ROOT}"
+                        -BwapiLibrary "${BWAPI_LIBRARY}")
+            endif()
             add_test(NAME protodd_runtime_resource_budget_tests
                 COMMAND "${PROTODD_POWERSHELL_EXECUTABLE}" -NoProfile -File
                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_resource_budget.ps1")
@@ -489,11 +547,17 @@ if(PROTODD_BUILD_TESTS)
         endforeach()
         add_test(NAME protodd_replay_pipeline_tests
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_replay_pipeline.py")
-        add_test(NAME protodd_tactical_target_fit_tests
-            COMMAND "${Python3_EXECUTABLE}" -m unittest discover
-                -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p test_tactical_target_fit.py)
-        set_tests_properties(protodd_tactical_target_fit_tests PROPERTIES
-            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import numpy"
+            RESULT_VARIABLE PROTODD_NUMPY_AVAILABLE OUTPUT_QUIET ERROR_QUIET)
+        if(PROTODD_NUMPY_AVAILABLE EQUAL 0)
+            add_test(NAME protodd_tactical_target_fit_tests
+                COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+                    -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p test_tactical_target_fit.py)
+            set_tests_properties(protodd_tactical_target_fit_tests PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        else()
+            message(STATUS "NumPy unavailable: optional tactical-target fitting test omitted")
+        endif()
         add_test(NAME protodd_replay_bundle_tests
             COMMAND "${Python3_EXECUTABLE}" -m unittest discover
                 -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p test_replay_bundle.py)

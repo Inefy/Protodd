@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <numeric>
 #include <unordered_map>
@@ -19,6 +20,77 @@ constexpr Frame kWorkerEvacuationEmergencyFrames = 18;
 constexpr Frame kWorkerEvacuationReentryThreatFrames = 3 * 24;
 constexpr Frame kWorkerEvacuationQuietFrames = 24;
 
+enum class WorkerRouteKind { economic, defensive, evacuation };
+
+class WorkerRouteBudget {
+public:
+    WorkerRouteBudget(const WorkerRoutingLimits limits, WorkerManager::RoutingStats& stats)
+        : limits_(limits), stats_(stats) {}
+
+    NavigationPathResult findPath(const NavigationGrid& navigation,
+                                 const Position from, const Position to,
+                                 const int requestedExpansions,
+                                 const MovementFootprint footprint,
+                                 const WorkerRouteKind kind) {
+        auto& queries = kind == WorkerRouteKind::economic ? stats_.economicPathSearches :
+            kind == WorkerRouteKind::defensive ? stats_.defensivePathSearches : stats_.evacuationPathSearches;
+        const auto totalLimit = std::clamp(limits_.totalQueries, 0, WorkerManager::maximumRouteQueries);
+        const auto queryLimit = kind == WorkerRouteKind::economic
+            ? std::clamp(limits_.economicQueries, 0, WorkerManager::maximumEconomicRouteSearches)
+            : kind == WorkerRouteKind::defensive ? std::clamp(limits_.defensiveQueries, 0, totalLimit)
+                                                : totalLimit;
+        auto remaining = std::clamp(limits_.totalExpansions, 0, WorkerManager::maximumRouteExpansions) -
+                         stats_.expandedNodes;
+        if (kind == WorkerRouteKind::defensive && stats_.economicPathSearches == 0 &&
+            limits_.economicQueries > 0) {
+            // Coverage estimates must not consume the entire allowance needed
+            // for an actual worker's economic route later in this pass.
+            remaining -= std::clamp(limits_.economicReserve, 0,
+                std::max(0, limits_.totalExpansions));
+        }
+        const auto categoryLimit = kind == WorkerRouteKind::economic ? limits_.economicExpansions :
+            kind == WorkerRouteKind::defensive ? limits_.defensiveExpansions : limits_.evacuationExpansions;
+        const auto expansions = std::max(0, std::min({requestedExpansions, categoryLimit, remaining}));
+        if (stats_.totalPathQueries >= totalLimit || queries >= queryLimit || expansions == 0) {
+            defer(kind);
+            return {NavigationStatus::budgetExhausted, {}, true};
+        }
+        ++queries;
+        ++stats_.totalPathQueries;
+        stats_.reservedExpansions += expansions;
+        const auto before = NavigationGrid::diagnosticsForCurrentThread().totalExpansions;
+        auto path = navigation.findPath(from, to, expansions, footprint);
+        const auto consumed = NavigationGrid::diagnosticsForCurrentThread().totalExpansions - before;
+        stats_.expandedNodes += static_cast<int>(consumed);
+        if (path.searchBudgetExhausted || path.status == NavigationStatus::budgetExhausted)
+            defer(kind);
+        return path;
+    }
+
+private:
+    void defer(const WorkerRouteKind kind) {
+        ++stats_.deferredChecks;
+        if (kind == WorkerRouteKind::economic) ++stats_.economicDeferredChecks;
+        else if (kind == WorkerRouteKind::defensive) ++stats_.defensiveDeferredChecks;
+        else ++stats_.evacuationDeferredChecks;
+    }
+    WorkerRoutingLimits limits_;
+    WorkerManager::RoutingStats& stats_;
+};
+
+struct ArrivalCacheKey {
+    const UnitSnapshot* defender{};
+    const UnitSnapshot* threat{};
+    bool operator==(const ArrivalCacheKey&) const = default;
+};
+struct ArrivalCacheHash {
+    std::size_t operator()(const ArrivalCacheKey key) const noexcept {
+        const auto first = std::hash<const UnitSnapshot*>{}(key.defender);
+        const auto second = std::hash<const UnitSnapshot*>{}(key.threat);
+        return first ^ (second + (first << 6U) + (first >> 2U));
+    }
+};
+
 Frame timeToGroundContact(const UnitSnapshot& threat, const UnitSnapshot& worker) {
     if (!threat.position.valid() || !worker.position.valid() ||
         threat.groundWeapon.damage <= 0 || !threat.groundWeapon.targetsGround) {
@@ -26,7 +98,8 @@ Frame timeToGroundContact(const UnitSnapshot& threat, const UnitSnapshot& worker
     }
     const auto range = std::max(0, threat.groundWeapon.maxRange) + 24;
     const auto approach = std::max(0.0, distance(threat.position, worker.position) - range);
-    if (approach <= 0.0 || threat.topSpeed <= 0.0) return 0;
+    if (approach <= 0.0) return 0;
+    if (threat.topSpeed <= 0.0) return std::numeric_limits<Frame>::max();
     return static_cast<Frame>(std::ceil(approach / threat.topSpeed));
 }
 
@@ -43,7 +116,8 @@ EvacuationRoute safestEvacuationRoute(
     const BaseSnapshot* localBase,
     const BaseSnapshot* safeBase,
     const InfluenceMap& influence,
-    const NavigationGrid* navigation) {
+    const NavigationGrid* navigation,
+    WorkerRouteBudget& routingBudget) {
     const MovementFootprint footprint{worker.dimensionLeft, worker.dimensionRight,
                                       worker.dimensionUp, worker.dimensionDown};
     std::vector<Position> candidates;
@@ -78,19 +152,35 @@ EvacuationRoute safestEvacuationRoute(
         auto peakThreat = 0.0F;
         auto destinationThreat = 0.0F;
         if (navigation != nullptr && !navigation->empty()) {
-            const auto path = navigation->findPath(
-                worker.position, candidate, 700, footprint);
-            if (!path.reached()) continue;
-            routeLength = 0.0;
-            for (std::size_t index = 0; index < path.points.size(); ++index) {
-                if (index > 0)
-                    routeLength += distance(path.points[index - 1], path.points[index]);
-                if (index > 0 || path.points.size() == 1)
-                    peakThreat = std::max(
-                        peakThreat, influence.at(path.points[index]).groundThreat);
+            const auto direct = navigation->lineWalkable(worker.position, candidate, footprint);
+            if (direct) {
+                // Keep threat sampling at walk-grid resolution and the short
+                // evacuation prefix, without running A* for a clear chord.
+                const auto samples = std::max(1, static_cast<int>(
+                    std::ceil(routeLength / navigation->cellSize())));
+                for (int step = 1; step <= samples; ++step) {
+                    const auto ratio = static_cast<double>(step) / samples;
+                    const Position point{
+                        worker.position.x + static_cast<int>(std::lround((candidate.x-worker.position.x)*ratio)),
+                        worker.position.y + static_cast<int>(std::lround((candidate.y-worker.position.y)*ratio))};
+                    peakThreat = std::max(peakThreat, influence.at(point).groundThreat);
+                }
+                destinationThreat = influence.at(candidate).groundThreat;
+                waypoint = moveToward(worker.position, candidate, 4.0*navigation->cellSize());
+            } else {
+                const auto path = routingBudget.findPath(*navigation, worker.position, candidate,
+                    700, footprint, WorkerRouteKind::evacuation);
+                if (!path.reached()) continue;
+                routeLength = 0.0;
+                for (std::size_t index = 0; index < path.points.size(); ++index) {
+                    if (index > 0)
+                        routeLength += distance(path.points[index - 1], path.points[index]);
+                    if (index > 0 || path.points.size() == 1)
+                        peakThreat = std::max(peakThreat, influence.at(path.points[index]).groundThreat);
+                }
+                destinationThreat = influence.at(path.points.back()).groundThreat;
+                waypoint = path.points[std::min<std::size_t>(4, path.points.size()-1)];
             }
-            destinationThreat = influence.at(path.points.back()).groundThreat;
-            waypoint = path.points[std::min<std::size_t>(4, path.points.size() - 1)];
         } else {
             waypoint = influence.safestStep(worker.position, candidate, false);
             peakThreat = influence.maximumGroundThreat(worker.position, waypoint);
@@ -112,9 +202,11 @@ EvacuationRoute safestEvacuationRoute(
     if (navigation != nullptr && !navigation->empty() &&
         (!navigation->walkable(fallback, footprint) ||
          !navigation->lineWalkable(worker.position, fallback, footprint))) {
-        const auto reachable = navigation->nextWaypoint(
-            worker.position, fallback, 1, 3000, footprint);
-        fallback = reachable.hasUsableWaypoint() ? reachable.waypoint : worker.position;
+        const auto path = routingBudget.findPath(*navigation, worker.position, fallback, 3000,
+                                                footprint, WorkerRouteKind::evacuation);
+        fallback = path.hasUsablePath() && !path.points.empty()
+            ? path.points[navigationWaypointIndex(path.points.size(), navigation->cellSize(), 1)]
+            : worker.position;
     }
     if (navigation != nullptr && !navigation->empty() &&
         (!fallback.valid() ||
@@ -126,9 +218,10 @@ EvacuationRoute safestEvacuationRoute(
 
 Frame estimatedAttackArrivalFrames(const UnitSnapshot& defender,
                                    const UnitSnapshot& threat,
-                                   const NavigationGrid* navigation) {
+                                    const NavigationGrid* navigation,
+                                    WorkerRouteBudget& routingBudget) {
     if (!defender.position.valid() || !threat.position.valid() ||
-        defender.topSpeed <= 0.0) {
+        !std::isfinite(defender.topSpeed) || defender.topSpeed <= 0.0) {
         return std::numeric_limits<Frame>::max();
     }
     const auto& weapon = threat.flying ? defender.airWeapon : defender.groundWeapon;
@@ -146,7 +239,8 @@ Frame estimatedAttackArrivalFrames(const UnitSnapshot& defender,
                                       defender.topSpeed;
         if (lowerBoundFrames > kLocalDefenseResponseFrames)
             return std::numeric_limits<Frame>::max();
-        const auto path = navigation->findPath(defender.position, threat.position, 3000, footprint);
+        const auto path = routingBudget.findPath(*navigation, defender.position, threat.position,
+                                                3000, footprint, WorkerRouteKind::defensive);
         if (!path.reached()) return std::numeric_limits<Frame>::max();
         separation = distance(defender.position, path.points.front()) +
             distance(path.points.back(), threat.position);
@@ -202,10 +296,17 @@ int targetPriority(const UnitSnapshot& enemy) {
     return 1;
 }
 
+struct EconomicRouteProof {
+    Position destination;
+    Position approach;
+    std::vector<Position> points;
+};
+
 bool safeGroundRoute(const UnitSnapshot& worker, const Position destination,
                      const InfluenceMap& influence,
                      const NavigationGrid* navigation,
-                     WorkerManager::RoutingStats& routingStats) {
+                      WorkerRouteBudget& routingBudget,
+                     std::vector<EconomicRouteProof>& provedRoutes) {
     if (!worker.position.valid() || !destination.valid()) return false;
     if (navigation == nullptr || navigation->empty())
         return influence.maximumGroundThreat(worker.position, destination) <= 0.25F;
@@ -222,20 +323,37 @@ bool safeGroundRoute(const UnitSnapshot& worker, const Position destination,
         return influence.maximumGroundThreat(worker.position, routeTarget) <= 0.25F &&
                influence.maximumGroundThreat(routeTarget, destination) <= 0.25F;
     }
-    if (routingStats.economicPathSearches >= WorkerManager::maximumEconomicRouteSearches) {
-        ++routingStats.deferredChecks;
-        return false;
+    // These proofs live only for this assignment pass: terrain, obstacles and
+    // influence cannot change underneath them. Nearby workers may join a
+    // proved detour, but each current origin still needs a walkable, safe
+    // connection. A proof for another destination never grants admission.
+    for (const auto& route : provedRoutes) {
+        if (route.destination != destination || route.approach != routeTarget ||
+            route.points.empty()) continue;
+        const auto closest = std::ranges::min_element(
+            route.points, {}, [&worker](const Position point) {
+                return distanceSquared(worker.position, point);
+            });
+        const auto safeJoin = [&](const Position point) {
+            return navigation->lineWalkable(worker.position, point) &&
+                   influence.maximumGroundThreat(worker.position, point) <= 0.25F;
+        };
+        if (safeJoin(*closest) ||
+            (*closest != route.points.front() && safeJoin(route.points.front())))
+            return true;
     }
-    ++routingStats.economicPathSearches;
-    const auto path = navigation->findPath(worker.position, routeTarget);
+    auto path = routingBudget.findPath(*navigation, worker.position, routeTarget, 12000, {},
+                                      WorkerRouteKind::economic);
     if (!path.reached()) return false;
     auto previous = worker.position;
     for (const auto waypoint : path.points) {
         if (influence.maximumGroundThreat(previous, waypoint) > 0.25F) return false;
         previous = waypoint;
     }
-    return influence.maximumGroundThreat(previous, routeTarget) <= 0.25F &&
-           influence.maximumGroundThreat(routeTarget, destination) <= 0.25F;
+    if (influence.maximumGroundThreat(previous, routeTarget) > 0.25F ||
+        influence.maximumGroundThreat(routeTarget, destination) > 0.25F) return false;
+    provedRoutes.push_back({destination, routeTarget, std::move(path.points)});
+    return true;
 }
 
 }  // namespace
@@ -310,7 +428,9 @@ const std::unordered_map<UnitId, UnitId>& MineralAllocator::assign(
         orderedWorkers.push_back(&worker);
         workerById.insert_or_assign(worker.id, &worker);
         const auto previous = targets_.find(worker.id);
-        const auto target = previous != targets_.end() ? previous->second : worker.currentTarget;
+        const auto target = worker.preserveCurrentTarget && worker.currentTarget >= 0
+            ? worker.currentTarget
+            : previous != targets_.end() ? previous->second : worker.currentTarget;
         const auto patch = std::ranges::find(patches, target, &MineralPatchCandidate::id);
         if (patch != patches.end() && patch->position.valid() &&
             distanceSquared(patch->position, worker.mineralLine) <= 480 * 480) {
@@ -341,6 +461,7 @@ const std::unordered_map<UnitId, UnitId>& MineralAllocator::assign(
 
     for (const auto* workerPointer : orderedWorkers) {
         const auto& worker = *workerPointer;
+        if (worker.preserveCurrentTarget) continue;
         const auto assigned = retained.find(worker.id);
         auto previousTarget = assigned != retained.end()
             ? assigned->second : worker.currentTarget;
@@ -439,10 +560,27 @@ int GasBankController::target(const GameState& state, const StrategicPlan& plan)
         // queued have paid their gas, so only an unmet target adds a reserve.
         if (existing < demand.desiredCount) obligation += unitStats(demand.kind).gas;
     }
-    const auto highWater = std::max(300, obligation + 100);
+    const auto coreReady = std::ranges::any_of(state.self.units,
+        [](const UnitSnapshot& unit) {
+            return unit.kind == UnitKind::cyberneticsCore && unit.completed;
+        });
+    const auto fundingFirstCore = !coreReady &&
+        std::ranges::count(state.self.units, UnitKind::nexus, &UnitSnapshot::kind) == 1 &&
+        std::ranges::any_of(plan.goals, [](const ProductionGoal& goal) {
+            return goal.goal == GoalKind::build && goal.target == UnitKind::cyberneticsCore &&
+                goal.desiredCount > 0 && goal.blocking;
+        });
+    // The first Core needs minerals, while the Gateway cannot yet spend gas.
+    // Keep one Dragoon cycle plus explicit obligations; resume the ordinary
+    // reserve as soon as ranged production becomes available.
+    const auto firstRangedCycle = unitStats(UnitKind::dragoon).gas;
+    const auto highWater = fundingFirstCore
+        ? std::max(firstRangedCycle, obligation + firstRangedCycle / 2)
+        : std::max(300, obligation + 100);
     // Separate stop/resume thresholds prevent every 50-mineral spend or
     // strategic plan flip from shuffling workers between gas and minerals.
-    if (paused_ && (state.self.gas < highWater / 2 || state.self.minerals >= 300)) paused_ = false;
+    if (paused_ && (state.self.gas < std::max(highWater / 2, obligation) ||
+                    state.self.minerals >= 300)) paused_ = false;
     if (!paused_ && state.self.minerals < 150 && state.self.gas >= highWater) paused_ = true;
     return paused_ ? 0 : std::max(0, plan.desiredGasWorkers);
 }
@@ -454,8 +592,10 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     const std::span<const UnitId> reservedBuilders,
     const bool evacuateAbandonedBase,
     const bool stageExpansionWorkers,
-    const NavigationGrid* navigation) const {
+    const NavigationGrid* navigation,
+    const WorkerRoutingLimits routingLimits) const {
     routingStats_ = {};
+    WorkerRouteBudget routingBudget{routingLimits, routingStats_};
     std::vector<const UnitSnapshot*> workers;
     for (const auto& unit : state.self.units) {
         if (isWorker(unit.kind) && unit.completed && !unit.loaded &&
@@ -488,21 +628,46 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         }
         return nearest;
     };
+    // Snapshots and navigation stay fixed for this pass. Reuse only proved
+    // arrivals for the same objects; denied work never grants protection.
+    std::unordered_map<ArrivalCacheKey, Frame, ArrivalCacheHash> arrivalCache;
+    const auto arrivalFor = [&arrivalCache, &routingBudget, navigation](
+        const UnitSnapshot& defender, const UnitSnapshot& threat) {
+        const ArrivalCacheKey key{&defender, &threat};
+        if (const auto known = arrivalCache.find(key); known != arrivalCache.end())
+            return known->second;
+        const auto frames = estimatedAttackArrivalFrames(defender, threat, navigation, routingBudget);
+        if (frames != std::numeric_limits<Frame>::max() && arrivalCache.size() < 512U)
+            arrivalCache.emplace(key, frames);
+        return frames;
+    };
     std::unordered_map<std::uint64_t, bool> routeSafetyCache;
-    const auto safeRoute = [this, &routeSafetyCache, &influence, navigation](
+    std::vector<EconomicRouteProof> provedRoutes;
+    provedRoutes.reserve(maximumEconomicRouteSearches);
+    const auto safeRoute = [&routingBudget, &routeSafetyCache, &provedRoutes, &influence, navigation](
         const UnitSnapshot* worker, const int destinationKey, const Position destination) {
         const auto key = (static_cast<std::uint64_t>(
             static_cast<std::uint32_t>(worker->id)) << 32U) |
             static_cast<std::uint32_t>(destinationKey);
         if (const auto known = routeSafetyCache.find(key); known != routeSafetyCache.end())
             return known->second;
-        const auto safe = safeGroundRoute(*worker, destination, influence, navigation, routingStats_);
+        const auto safe = safeGroundRoute(*worker, destination, influence, navigation,
+                                          routingBudget, provedRoutes);
         routeSafetyCache.emplace(key, safe);
         return safe;
     };
     const auto safeBase = safestOwnedBase(state, influence);
-    if (lastAssignedFrame_ >= 0 && state.frame < lastAssignedFrame_)
+    if (lastAssignedFrame_ >= 0 && state.frame < lastAssignedFrame_) {
         evacuationMemory_.clear();
+        bootstrapMemory_.clear();
+    }
+    for (auto memory = bootstrapMemory_.begin(); memory != bootstrapMemory_.end();) {
+        const auto worker = std::ranges::find(workers, memory->first,
+            [](const UnitSnapshot* candidate) { return candidate->id; });
+        if (worker == workers.end() || (*worker)->firstSeen != memory->second.firstSeen)
+            memory = bootstrapMemory_.erase(memory);
+        else ++memory;
+    }
     lastAssignedFrame_ = state.frame;
     for (auto memory = evacuationMemory_.begin(); memory != evacuationMemory_.end();) {
         const auto worker = std::ranges::find(workers, memory->first,
@@ -513,11 +678,22 @@ std::vector<WorkerAssignment> WorkerManager::assign(
             ++memory;
         }
     }
-    const auto hasCompletedStaticScreen = std::ranges::any_of(
-        state.self.units, [](const UnitSnapshot& unit) {
-            return unit.completed && (unit.kind == UnitKind::photonCannon ||
-                                      unit.kind == UnitKind::shieldBattery);
+    std::unordered_set<const BaseSnapshot*> basesWithStaticScreen;
+    const auto localEnemyWorkers = std::ranges::count_if(
+        state.enemy.units, [&ownedBases](const UnitSnapshot& enemy) {
+            return enemy.visible && isWorker(enemy.kind) && enemy.position.valid() &&
+                   std::ranges::any_of(ownedBases, [&enemy](const BaseSnapshot* base) {
+            return distanceSquared(enemy.position, base->center) < 640 * 640;
+                   });
         });
+    for (const auto& unit : state.self.units) {
+        if (!unit.completed || !unit.powered || unit.disabled || unit.loaded ||
+            unit.hallucination || !unit.position.valid() ||
+            (unit.kind != UnitKind::photonCannon && unit.kind != UnitKind::shieldBattery)) continue;
+        const auto* base = baseForWorker(unit);
+        if (base != nullptr && distanceSquared(unit.position, base->center) <= 640 * 640)
+            basesWithStaticScreen.insert(base);
+    }
     std::unordered_map<std::uint64_t, int> localScreenCountByThreat;
     const auto localScreenCount = [&](const UnitSnapshot& threat,
                                       const BaseSnapshot* base) {
@@ -528,24 +704,17 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         if (const auto known = localScreenCountByThreat.find(cacheKey);
             known != localScreenCountByThreat.end()) return known->second;
         auto count = 0;
-        const auto detected = threat.kind != UnitKind::darkTemplar || threat.detected ||
-            std::ranges::any_of(state.self.units, [&threat](const UnitSnapshot& detector) {
-                return detector.completed && detector.position.valid() &&
-                    ((detector.kind == UnitKind::observer &&
-                      distanceSquared(detector.position, threat.position) <= 320 * 320) ||
-                     ((detector.kind == UnitKind::photonCannon ||
-                       detector.kind == UnitKind::missileTurret ||
-                       detector.kind == UnitKind::sporeColony) && detector.powered &&
-                      distanceSquared(detector.position, threat.position) <= 320 * 320));
-            });
+        // Nearby detection does not make an undetected contact attackable.
+        // Grant cover only when the observed contact can actually be targeted.
+        const auto detected = !threat.requiresDetection() || threat.detected;
         if (detected) {
             for (const auto& defender : state.self.units) {
                 if (!defender.completed || !isCombatUnit(defender.kind) || defender.flying ||
                     defender.disabled || defender.loaded || defender.hallucination ||
-                    defender.invincible || defender.healthFraction() < 0.35 ||
+                     defender.invincible || defender.recharging || defender.healthFraction() < 0.35 ||
                     baseForWorker(defender) != base || !defender.canAttack(threat)) continue;
-                if (estimatedAttackArrivalFrames(defender, threat, navigation) <=
-                    kLocalDefenseResponseFrames) ++count;
+                if (arrivalFor(defender, threat) <= kLocalDefenseResponseFrames && ++count >= 2)
+                    break;
             }
         }
         localScreenCountByThreat[cacheKey] = count;
@@ -568,9 +737,10 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         const UnitSnapshot* nearestRetainedThreat = nullptr;
         auto nearestRetainedFrames = std::numeric_limits<Frame>::max();
         for (const auto& enemy : state.enemy.units) {
-            if (!enemy.completed || enemy.flying || enemy.disabled || enemy.loaded ||
+            if (!enemy.completed || enemy.disabled || enemy.loaded ||
                 enemy.hallucination || enemy.invincible ||
                 enemy.groundWeapon.damage <= 0 || !enemy.groundWeapon.targetsGround ||
+                (unitStats(enemy.kind).requiresPsi && !enemy.powered) ||
                 !enemy.position.valid() ||
                 (!enemy.visible && (enemy.lastSeen <= 0 ||
                     state.frame - enemy.lastSeen > kWorkerEvacuationReentryThreatFrames))) {
@@ -587,9 +757,18 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                 nearestRetainedThreat = &enemy;
             }
             const auto militiaCanRespond = militiaDemand(enemy, state.frame) > 0 &&
-                !(enemy.kind == UnitKind::marine && hasCompletedStaticScreen);
-            if ((targetsWorker ||
-                 (arrival <= kWorkerEvacuationEmergencyFrames && !militiaCanRespond)) &&
+                !(enemy.kind == UnitKind::marine && basesWithStaticScreen.contains(localBase));
+            // Military pursuit and coordinated worker rushes need warning
+            // before the final contact window, including time to cancel a
+            // build and dispatch escape. A lone worker's distant target order
+            // must not repeatedly cancel safe construction. An immobile
+            // out-of-range attacker supplies no reachable pursuit warning.
+            const auto targetedPursuit = targetsWorker &&
+                arrival != std::numeric_limits<Frame>::max() &&
+                (!workerThreat || localEnemyWorkers >= 3);
+            if ((targetedPursuit ||
+                 (arrival <= kWorkerEvacuationEmergencyFrames &&
+                  (targetsWorker || !militiaCanRespond))) &&
                 (arrival < nearestDangerFrames || targetsWorker)) {
                 nearestDangerFrames = arrival;
                 nearestDanger = &enemy;
@@ -610,10 +789,11 @@ std::vector<WorkerAssignment> WorkerManager::assign(
              nearestRetainedThreat->orderTargetId == worker->id);
         const auto localThreatPresent = std::ranges::any_of(
             state.enemy.units, [&](const UnitSnapshot& enemy) {
-                return enemy.completed && !enemy.flying && !enemy.disabled &&
+                return enemy.completed && !enemy.disabled &&
                     !enemy.loaded && !enemy.hallucination && !enemy.invincible &&
                     enemy.groundWeapon.damage > 0 && enemy.groundWeapon.targetsGround &&
                     enemy.position.valid() &&
+                    (!unitStats(enemy.kind).requiresPsi || enemy.powered) &&
                     (enemy.visible || (enemy.lastSeen > 0 &&
                      state.frame - enemy.lastSeen <= kWorkerEvacuationReentryThreatFrames)) &&
                     (localBase == nullptr ||
@@ -645,7 +825,7 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                 : memory != evacuationMemory_.end() ? memory->second.threatId : -1;
             if (immediateDanger || retainedDanger) {
                 const auto route = safestEvacuationRoute(
-                    *worker, threat, refuge, localBase, safeBase, influence, navigation);
+                    *worker, threat, refuge, localBase, safeBase, influence, navigation, routingBudget);
                 refuge = route.destination;
                 const auto lastDanger = state.frame;
                 evacuationMemory_[worker->id] = {
@@ -656,7 +836,7 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                     route.waypoint, 99});
             } else {
                 const auto route = safestEvacuationRoute(
-                    *worker, nullptr, refuge, localBase, safeBase, influence, navigation);
+                    *worker, nullptr, refuge, localBase, safeBase, influence, navigation, routingBudget);
                 if (distanceSquared(worker->position, refuge) <= 128 * 128) {
                     result.push_back({worker->id, WorkerJob::idle,
                         localBase != nullptr ? localBase->id : -1, threatId,
@@ -706,6 +886,7 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                         return enemy.position.valid() && enemy.completed &&
                             !enemy.disabled && !enemy.hallucination && !enemy.loaded &&
                             enemy.groundWeapon.damage > 0 &&
+                            (!unitStats(enemy.kind).requiresPsi || enemy.powered) &&
                             (enemy.visible || (enemy.lastSeen > 0 &&
                                 state.frame - enemy.lastSeen <= 3 * 24)) &&
                             distanceSquared(enemy.position, base.center) <= 800 * 800;
@@ -737,7 +918,7 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                            ? distanceSquared(worker->position, enemy.position)
                            : std::numeric_limits<int>::max();
             });
-        if (hasCompletedStaticScreen && rangedBio != state.enemy.units.end() &&
+        if (basesWithStaticScreen.contains(localBase) && rangedBio != state.enemy.units.end() &&
             rangedBio->visible && rangedBio->kind == UnitKind::marine &&
             distanceSquared(worker->position, rangedBio->position) < 288 * 288) {
             const Position away{
@@ -809,13 +990,6 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         const BaseSnapshot* base{};
     };
     std::vector<MilitiaTarget> baseThreats;
-    const auto localEnemyWorkers = std::ranges::count_if(
-        state.enemy.units, [&ownedBases](const UnitSnapshot& enemy) {
-            return enemy.visible && isWorker(enemy.kind) && enemy.position.valid() &&
-                   std::ranges::any_of(ownedBases, [&enemy](const BaseSnapshot* base) {
-            return distanceSquared(enemy.position, base->center) < 640 * 640;
-                   });
-        });
     for (const auto& enemy : state.enemy.units) {
         auto demand = militiaDemand(enemy, state.frame);
         // A militia time limit must not also switch off worker protection.
@@ -823,10 +997,6 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                                  (enemy.kind == UnitKind::zealot || enemy.kind == UnitKind::zergling ||
                                   enemy.kind == UnitKind::darkTemplar);
         if ((demand == 0 && !meleeDanger) || !enemy.position.valid()) continue;
-        // Probes cannot close on ranged bio efficiently. Once a Cannon/Battery
-        // screen exists, charging Marines only donates the economy and blocks
-        // the combat units that should be using that screen.
-        if (enemy.kind == UnitKind::marine && hasCompletedStaticScreen) continue;
         if (isWorker(enemy.kind) && localEnemyWorkers < 3) {
             const auto attackingProbe = enemy.orderTargetId >= 0 &&
                 std::ranges::any_of(workers, [&enemy](const UnitSnapshot* worker) {
@@ -853,6 +1023,10 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                 nearestThreatenedBase = base;
             }
         }
+        // A usable screen protects its own mineral line. A Cannon/Battery at
+        // another base must not disable the local emergency Marine response.
+        if (enemy.kind == UnitKind::marine && basesWithStaticScreen.contains(nearestThreatenedBase))
+            continue;
         if (nearestThreatenedBase != nullptr)
             baseThreats.push_back({&enemy, demand, nearestThreatenedBase});
     }
@@ -861,23 +1035,13 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     for (const auto& unit : state.self.units) {
         if (!unit.completed || !isCombatUnit(unit.kind) || unit.flying || unit.disabled ||
             unit.loaded || unit.hallucination || unit.healthFraction() < 0.35 ||
-            unit.invincible) continue;
+            unit.invincible || unit.recharging) continue;
         const MilitiaTarget* nearestCoveredThreat = nullptr;
         auto nearestArrivalFrames = kLocalDefenseResponseFrames + 1;
         for (const auto& target : baseThreats) {
-            if (target.unit->kind == UnitKind::darkTemplar && !target.unit->detected &&
-                !std::ranges::any_of(state.self.units, [&target](const UnitSnapshot& detector) {
-                    return detector.completed && detector.position.valid() &&
-                        ((detector.kind == UnitKind::observer &&
-                          distanceSquared(detector.position, target.unit->position) <= 320 * 320) ||
-                         ((detector.kind == UnitKind::photonCannon ||
-                           detector.kind == UnitKind::missileTurret ||
-                           detector.kind == UnitKind::sporeColony) && detector.powered &&
-                          distanceSquared(detector.position, target.unit->position) <= 320 * 320));
-                })) continue;
+            if (target.unit->requiresDetection() && !target.unit->detected) continue;
             if (!unit.canAttack(*target.unit)) continue;
-            const auto arrivalFrames = estimatedAttackArrivalFrames(
-                unit, *target.unit, navigation);
+            const auto arrivalFrames = arrivalFor(unit, *target.unit);
             if (arrivalFrames <= kLocalDefenseResponseFrames &&
                 arrivalFrames < nearestArrivalFrames) {
                 nearestArrivalFrames = arrivalFrames;
@@ -948,7 +1112,7 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                     ? safeBase->mineralLine : safeBase->center;
                 const auto route = safestEvacuationRoute(
                     **closestWorker, target.unit, refuge, localBase, safeBase,
-                    influence, navigation);
+                    influence, navigation, routingBudget);
                 evacuationMemory_[(*closestWorker)->id] = {
                     state.frame, (*closestWorker)->firstSeen,
                     localBase != nullptr ? localBase->id : -1,
@@ -1048,9 +1212,10 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         auto nearestArrival = std::numeric_limits<Frame>::max();
         auto directlyTargeted = false;
         for (const auto& enemy : state.enemy.units) {
-            if (!enemy.completed || enemy.flying || enemy.disabled || enemy.loaded ||
+            if (!enemy.completed || enemy.disabled || enemy.loaded ||
                 enemy.hallucination || enemy.invincible ||
                 enemy.groundWeapon.damage <= 0 || !enemy.groundWeapon.targetsGround ||
+                (unitStats(enemy.kind).requiresPsi && !enemy.powered) ||
                 !enemy.position.valid() ||
                 (!enemy.visible && (enemy.lastSeen <= 0 ||
                     state.frame - enemy.lastSeen > kWorkerEvacuationReentryThreatFrames))) {
@@ -1085,7 +1250,7 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                 ? safeBase->mineralLine
                 : safeBase != nullptr ? safeBase->center : Position{-1, -1};
         const auto route = safestEvacuationRoute(
-            **worker, imminentThreat, refuge, localBase, safeBase, influence, navigation);
+            **worker, imminentThreat, refuge, localBase, safeBase, influence, navigation, routingBudget);
         const auto threatId = imminentThreat != nullptr ? imminentThreat->id : -1;
         evacuationMemory_[(*worker)->id] = {
             state.frame, (*worker)->firstSeen, localBase != nullptr ? localBase->id : -1,
@@ -1096,6 +1261,7 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     }
 
     if (ownedBases.empty()) {
+        bootstrapMemory_.clear();
         const auto pendingNexus = std::ranges::find_if(
             state.self.units, [](const UnitSnapshot& unit) {
                 return unit.kind == UnitKind::nexus && !unit.completed &&
@@ -1142,11 +1308,14 @@ std::vector<WorkerAssignment> WorkerManager::assign(
         // when they can reach it safely; otherwise stop their stale gather
         // orders so they do not keep walking into an exposed mineral line.
         for (const auto* worker : available) {
+            const auto* admittedSite = rebuildSite != nullptr &&
+                safeRoute(worker, rebuildSite->id, rebuildSite->mineralLine) ? rebuildSite : nullptr;
             result.push_back({worker->id, WorkerJob::rebuild,
-                rebuildSite != nullptr ? rebuildSite->id : -1, -1,
-                rebuildSite != nullptr ? rebuildSite->mineralLine : Position{-1, -1}, 90});
+                admittedSite != nullptr ? admittedSite->id : -1, -1,
+                admittedSite != nullptr ? admittedSite->mineralLine : Position{-1, -1}, 90});
         }
         std::ranges::sort(result, {}, &WorkerAssignment::worker);
+        rememberConstructionExclusions(state, result);
         return result;
     }
 
@@ -1171,6 +1340,7 @@ std::vector<WorkerAssignment> WorkerManager::assign(
             [&state, &building](const UnitSnapshot& enemy) {
                 return enemy.position.valid() && enemy.completed && !isWorker(enemy.kind) &&
                     enemy.groundWeapon.damage > 0 && !enemy.disabled &&
+                    (!unitStats(enemy.kind).requiresPsi || enemy.powered) &&
                     (enemy.visible || state.frame - enemy.lastSeen <= 8 * 24) &&
                     distanceSquared(enemy.position, building.position) <=
                         (enemy.groundWeapon.maxRange + 128) * (enemy.groundWeapon.maxRange + 128);
@@ -1290,9 +1460,27 @@ std::vector<WorkerAssignment> WorkerManager::assign(
     if (!available.empty()) {
         const auto offset = static_cast<std::size_t>(std::max<Frame>(0, state.frame) / 12) %
                             available.size();
-        std::rotate(available.begin(), available.begin() + offset, available.end());
+        std::rotate(available.begin(), available.begin() +
+            static_cast<std::ptrdiff_t>(offset), available.end());
+        // A bounded bootstrap group must be able to finish its trip. Admit
+        // its prior members before rotating fresh retries, then recheck the
+        // actual destination and route below on every update.
+        std::ranges::stable_sort(available, [this](const UnitSnapshot* left,
+                                                   const UnitSnapshot* right) {
+            return bootstrapMemory_.contains(left->id) &&
+                   !bootstrapMemory_.contains(right->id);
+        });
+    }
+    // Account for workers that have not been reconsidered yet at their current
+    // bases. Starting every line at zero makes balanced bases exchange workers
+    // simply because one base's workers are visited first.
+    for (const auto* worker : available) {
+        if (const auto* base = baseForWorker(*worker); base != nullptr)
+            ++assignedPerBase[base->id];
     }
     for (const auto* worker : available) {
+        if (const auto* base = baseForWorker(*worker); base != nullptr)
+            --assignedPerBase[base->id];
         const BaseSnapshot* bestBase = nullptr;
         auto bestScore = std::numeric_limits<double>::infinity();
         for (const auto* base : ownedBases) {
@@ -1320,13 +1508,41 @@ std::vector<WorkerAssignment> WorkerManager::assign(
             }
         }
         if (bestBase == nullptr) {
+            // Not proving an abstract resource-line route is not evidence that
+            // a live mineral cycle has stopped working. Keep its exact native
+            // order; the adapter must not reassign its patch without a proof.
+            // All pursuit, damage, storm and local militia checks ran above.
+            const auto* localBase = baseForWorker(*worker);
+            const auto liveLocalDepot = localBase != nullptr && std::ranges::any_of(
+                state.self.units, [localBase](const UnitSnapshot& depot) {
+                    return depot.completed && !depot.flying &&
+                        (depot.kind == UnitKind::nexus || depot.role == UnitRole::resourceDepot) &&
+                        withinPixelRadius(depot.position, localBase->center, PixelRadius{320});
+                });
+            if (worker->gatheringMinerals && liveLocalDepot &&
+                localBase->mineralsRemaining > 0 &&
+                withinPixelRadius(worker->position, localBase->center, PixelRadius{640}) &&
+                influence.at(worker->position).groundThreat <= 0.25F &&
+                influence.at(localBase->center).groundThreat <= 0.25F) {
+                ++assignedPerBase[localBase->id];
+                result.push_back({worker->id, WorkerJob::minerals, localBase->id,
+                    -1, localBase->mineralLine, 50, true});
+                continue;
+            }
             // A surviving Nexus can outlast every mineral patch at its base.
             // If so, a safe neutral mineral line can bootstrap the 400-mineral
             // expansion cost. Without this fallback, probes idle at home and
             // the economy can never recover even when rich reachable sites
             // remain on the map.
             const BaseSnapshot* remoteMiningBase = nullptr;
-            auto bestRemoteScore = std::numeric_limits<double>::infinity();
+            struct MiningCandidate {
+                const BaseSnapshot* base{};
+                double score{};
+                bool preferred{};
+            };
+            std::vector<MiningCandidate> miningCandidates;
+            miningCandidates.reserve(state.bases.size());
+            const auto remembered = bootstrapMemory_.find(worker->id);
             for (const auto& candidate : state.bases) {
                 if (candidate.ownerId != -1 || candidate.island ||
                     !candidate.depotFootprintAvailable ||
@@ -1337,15 +1553,16 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                 }
                 const auto occupied = std::ranges::any_of(state.self.units,
                     [&candidate](const UnitSnapshot& unit) {
-                        return unit.kind == UnitKind::nexus && unit.position.valid() &&
+                        return (unit.kind == UnitKind::nexus || unit.role == UnitRole::resourceDepot) &&
+                               !unit.flying && !unit.hallucination && unit.position.valid() &&
                                distanceSquared(unit.position, candidate.center) < 320 * 320;
                     }) || std::ranges::any_of(state.enemy.units,
                     [&candidate](const UnitSnapshot& unit) {
-                        return unit.kind == UnitKind::nexus && unit.position.valid() &&
+                        return (unit.kind == UnitKind::nexus || unit.role == UnitRole::resourceDepot) &&
+                               !unit.flying && !unit.hallucination && unit.position.valid() &&
                                distanceSquared(unit.position, candidate.center) < 320 * 320;
                     });
-                if (occupied || influence.at(candidate.center).groundThreat > 0.25F ||
-                    !safeRoute(worker, -candidate.id - 1, candidate.mineralLine)) {
+                if (occupied || influence.at(candidate.center).groundThreat > 0.25F) {
                     continue;
                 }
                 auto score = distance(worker->position, candidate.mineralLine) +
@@ -1354,11 +1571,24 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                     distanceSquared(candidate.center, plan.expansionTarget) <= 384 * 384) {
                     score -= 512.0;
                 }
-                if (score < bestRemoteScore ||
-                    (score == bestRemoteScore &&
-                     (remoteMiningBase == nullptr || candidate.id < remoteMiningBase->id))) {
-                    bestRemoteScore = score;
-                    remoteMiningBase = &candidate;
+                miningCandidates.push_back({&candidate, score,
+                    remembered != bootstrapMemory_.end() &&
+                    remembered->second.baseId == candidate.id});
+            }
+            // Spend bounded route work in economic preference order. Once
+            // the best safe destination is proved, inferior candidates must
+            // not consume the searches needed by the rest of the group.
+            std::ranges::sort(miningCandidates,
+                [](const MiningCandidate& left, const MiningCandidate& right) {
+                    if (left.preferred != right.preferred) return left.preferred;
+                    if (left.score != right.score) return left.score < right.score;
+                    return left.base->id < right.base->id;
+                });
+            for (const auto& candidate : miningCandidates) {
+                if (safeRoute(worker, -candidate.base->id - 1,
+                              candidate.base->mineralLine)) {
+                    remoteMiningBase = candidate.base;
+                    break;
                 }
             }
             if (remoteMiningBase != nullptr) {
@@ -1396,7 +1626,47 @@ std::vector<WorkerAssignment> WorkerManager::assign(
                           bestBase->id, -1, bestBase->mineralLine, 50});
     }
 
+    bootstrapMemory_.clear();
+    for (const auto& assignment : result) {
+        if (assignment.job != WorkerJob::transfer) continue;
+        const auto base = std::ranges::find(state.bases, assignment.baseId, &BaseSnapshot::id);
+        if (base == state.bases.end() || base->ownerId != -1) continue;
+        const auto worker = std::ranges::find(workers, assignment.worker,
+            [](const UnitSnapshot* candidate) { return candidate->id; });
+        if (worker != workers.end())
+            bootstrapMemory_.emplace(assignment.worker,
+                BootstrapMemory{(*worker)->firstSeen, assignment.baseId});
+    }
     std::ranges::sort(result, {}, &WorkerAssignment::worker);
+    rememberConstructionExclusions(state, result);
+    return result;
+}
+
+void WorkerManager::rememberConstructionExclusions(
+    const GameState& state, const std::span<const WorkerAssignment> assignments) const {
+    emergencyConstructionExclusions_.clear();
+    for (const auto& assignment : assignments) {
+        if (assignment.job != WorkerJob::evacuate && assignment.job != WorkerJob::defend &&
+            !(assignment.job == WorkerJob::idle && assignment.priority >= 99)) continue;
+        const auto worker = std::ranges::find(state.self.units, assignment.worker, &UnitSnapshot::id);
+        if (worker != state.self.units.end())
+            emergencyConstructionExclusions_.emplace(worker->id, worker->firstSeen);
+    }
+}
+
+std::vector<UnitId> WorkerManager::constructionExclusions(const GameState& state) const {
+    std::vector<UnitId> result;
+    // Worker planning normally runs every twelve frames. Never let a missing
+    // refresh or a reused unit ID strand a healthy Probe outside construction.
+    if (lastAssignedFrame_ < 0 || state.frame < lastAssignedFrame_ ||
+        state.frame - lastAssignedFrame_ > 24) return result;
+    for (const auto& worker : state.self.units) {
+        const auto found = emergencyConstructionExclusions_.find(worker.id);
+        if (found != emergencyConstructionExclusions_.end() &&
+            found->second == worker.firstSeen && isWorker(worker.kind) && worker.completed)
+            result.push_back(worker.id);
+    }
+    std::ranges::sort(result);
     return result;
 }
 

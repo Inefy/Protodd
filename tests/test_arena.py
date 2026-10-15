@@ -190,6 +190,7 @@ if (($global:arenaStopped -join ',') -ne '1,4') { throw 'peer ownership or PID-r
             (bundle / 'stop-owned-starcraft.ps1').write_text('fixture')
             (bundle / 'start-owned-starcraft.ps1').write_text('fixture')
             for helper in ('HeadlessStarCraft.psm1', 'HeadlessStarCraft.cs', 'run-headless-starcraft.ps1',
+                           'ConsoleFreeOwnedStarCraft.exe', 'ConsoleFreeOwnedStarCraft.cs', 'build.json',
                            'MatchProcessOwnership.psm1'):
                 (bundle / helper).write_text('fixture')
             prepare(**args, client_bundle=bundle)

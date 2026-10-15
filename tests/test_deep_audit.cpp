@@ -1,3 +1,4 @@
+#include "protodd/ActorMovementRouting.hpp"
 #include "protodd/Combat.hpp"
 #include "protodd/CommandBus.hpp"
 #include "protodd/Harassment.hpp"
@@ -30,6 +31,35 @@ UnitSnapshot unit(int id, UnitKind kind, Position position = {500, 500}, bool ou
     return u;
 }
 void navigation() {
+    // R25 native Probe131 at (3956,615) while mining: its footprint ends
+    // at y626, two pixels above Pylon178's native top y628. Raster cell
+    // y78 nevertheless contains both the footprint edge and the Pylon.
+    const MovementFootprint probeFootprint{11, 11, 11, 11};
+    NavigationGrid nativeOrigin{512, 192, 8,
+        std::vector<std::uint8_t>(512 * 192, 1U)};
+    nativeOrigin.updateDynamicObstacle(178, {3920, 628, 3952, 660});
+    nativeOrigin.updateDynamicObstacle(3, {3968, 576, 4031, 607});
+    const Position miningOrigin{3956, 615};
+    check(nativeOrigin.walkable(miningOrigin, probeFootprint),
+          "native clear Probe origin is not rounded into the adjacent Pylon");
+    check(nativeOrigin.lineWalkable(miningOrigin, {3956, 580}, probeFootprint),
+          "clear origin connects to ordinary terrain cells without ignoring obstacles");
+    check(nativeOrigin.findPath(miningOrigin, {3680, 1328}, 12000,
+                               probeFootprint).reached(),
+          "builder route searches from the exact clear native origin");
+    check(!nativeOrigin.walkable({3956, 617}, probeFootprint) &&
+          !nativeOrigin.findPath({3956, 617}, {3680, 1328}, 12000,
+                                probeFootprint).reached(),
+          "actual inclusive Pylon contact remains blocked");
+    nativeOrigin.updateDynamicObstacle(179, {3945, 604, 3950, 610});
+    check(!nativeOrigin.walkable(miningOrigin, probeFootprint),
+          "another overlapping live or planned obstacle still blocks the origin");
+    nativeOrigin.removeDynamicObstacle(179);
+    auto wallCells = std::vector<std::uint8_t>(512 * 192, 1U);
+    wallCells[78 * 512 + 493] = 0U;
+    NavigationGrid nativeWall{512, 192, 8, std::move(wallCells)};
+    check(!nativeWall.walkable(miningOrigin, probeFootprint),
+          "exact dynamic bounds cannot excuse blocked static terrain");
     const NavigationGrid blocked{2, 2, 32, {1, 0, 0, 1}};
     check(!blocked.lineWalkable({16, 16}, {48, 48}), "diagonal cannot cut two blocked corners");
     const auto blockedWaypoint = blocked.nextWaypoint({16, 16}, {48, 48});
@@ -76,6 +106,77 @@ void navigation() {
           "Dragoon footprint rejects narrow passages and fits its wider lane");
     check(!passes(3, reaver) && passes(5, reaver),
           "Reaver footprint rejects routes sized only for smaller units and fits its wider lane");
+}
+void gatewayEdgeRouting() {
+    // Native Destination r267: Zealot177 stopped here for over 800 frames.
+    // Its top is y442, clear of the Gateway's bottom y440. Snapping its
+    // center to the walk cell's y444 incorrectly moves that top to y439.
+    const MovementFootprint zealot{11, 11, 5, 13};
+    NavigationGrid grid{256, 128, 8, std::vector<std::uint8_t>(256 * 128, 1U)};
+    grid.updateDynamicObstacle(168, {1040, 368, 1136, 440});
+    grid.updateDynamicObstacle(181, {1196, 392, 1268, 436});
+    grid.updateDynamicObstacle(161, {1200, 276, 1232, 308});
+    const Position screen{1732, 332};
+    for (const auto origin : std::array{Position{1060, 447}, Position{1088, 447}}) {
+        check(grid.walkable(origin, zealot), "recorded Zealot body clears the Gateway");
+        check(grid.lineWalkable(origin, {origin.x, 452}, zealot) &&
+                  grid.lineWalkable({origin.x, 452}, origin, zealot),
+              "exact clear Gateway edge connects to a search cell in either direction");
+        check(grid.lineWalkable(origin, {1172, 452}, zealot),
+              "Gateway edge has a clear swept exit beside the Forge");
+        check(grid.findPath(origin, screen, 4000, zealot).reached(),
+              "clear native origin can reach its defensive screen");
+        auto actor = unit(177, UnitKind::zealot, origin);
+        actor.dimensionLeft = actor.dimensionRight = 11;
+        actor.dimensionUp = 5; actor.dimensionDown = 13;
+        const Command move{177, CommandType::move, -1, screen, UnitKind::unknown,
+                           80, 0, "defense-screen"};
+        const auto routed = routeActorMovement(move, actor, grid, false);
+        check(routed.order.type == CommandType::move &&
+                  routed.order.targetPosition != origin &&
+                  grid.lineWalkable(origin, routed.order.targetPosition, zealot),
+              "tactical movement retains a clear prefix instead of holding at the Gateway");
+    }
+
+    GameState state;
+    state.frame = 4536; state.self.id = 1; state.enemy.id = 2;
+    state.mapWidthPixels = 2048; state.mapHeightPixels = 1024;
+    BaseSnapshot base;
+    base.id = 1; base.ownerId = 1; base.center = {1056, 272};
+    base.mineralLine = {1000, 220};
+    base.defense = {{1724, 404}, {1748, 428}, {1692, 340}, {1756, 468}, 192, false};
+    state.bases = {base};
+    auto first = unit(177, UnitKind::zealot, {1088, 447});
+    first.dimensionLeft = first.dimensionRight = 11;
+    first.dimensionUp = 5; first.dimensionDown = 13;
+    first.shields = first.maxShields = 60; first.detected = true;
+    first.groundWeapon = {8, 22, 0, 15, DamageType::normal, false, true, 2};
+    auto second = first; second.id = 184; second.position = {1488, 388};
+    auto enemy = first; enemy.id = 174; enemy.ours = false;
+    enemy.position = {1740, 350}; enemy.lastSeen = state.frame;
+    StrategicPlan plan;
+    plan.posture = Posture::hold; plan.rallyPoint = base.defense.anchor;
+    plan.attackTarget = {1900, 900};
+    const auto squads = SquadPlanner{}.form(state, std::array{first, second},
+        std::array{enemy}, plan, base.center, &grid, false);
+    auto defenders = 0;
+    for (const auto& squad : squads)
+        if (squad.role == SquadRole::baseDefense)
+            defenders += static_cast<int>(squad.units.size());
+    check(defenders == 2, "physically reachable first Zealot joins the other defender");
+
+    check(!grid.lineWalkable({1088, 445}, {1088, 452}, zealot),
+          "inclusive actual Gateway contact still blocks an exit");
+    check(!grid.lineWalkable({1000, 400}, {1172, 400}, zealot),
+          "swept actor cannot cross the Gateway between clear endpoints");
+    grid.updateDynamicObstacle(999, {1140, 448, 1156, 464});
+    check(!grid.lineWalkable({1088, 447}, {1172, 452}, zealot),
+          "resolving a rounded origin does not ignore another real obstacle on its exit");
+    auto wall = std::vector<std::uint8_t>(256 * 128, 1U);
+    wall[55 * 256 + 136] = 0U;
+    NavigationGrid blocked{256, 128, 8, std::move(wall)};
+    check(!blocked.lineWalkable({1088, 447}, {1088, 452}, zealot),
+          "exact dynamic collision checks cannot waive blocked static terrain");
 }
 void dynamicNavigation() {
     constexpr auto width = 64;
@@ -156,6 +257,51 @@ void meleeTargets() {
     const std::array allocation{TargetAllocation{near.id, 100}};
     check(select(near, allocation) == far.id, "fully allocated target must not suppress another melee target");
     check(select(near) == near.id, "a legal close enemy still takes precedence over distant pursuit");
+}
+void meleeRetreatReplies() {
+    auto actor = unit(179, UnitKind::zealot, {1452, 124});
+    actor.dimensionLeft = actor.dimensionRight = 11;
+    actor.dimensionUp = 5; actor.dimensionDown = 13;
+    actor.shields = actor.maxShields = 60;
+    actor.detected = true;
+    actor.groundWeapon = {8, 22, 0, 15, DamageType::normal, false, true, 2};
+    auto pursuer = actor;
+    pursuer.id = 175; pursuer.ours = false; pursuer.position = {1454, 150};
+    CombatEstimate estimate;
+    estimate.decision = FightDecision::retreat;
+    estimate.holdScreen = false;
+    const DefenseArea defense{{1724, 404}, 192, {1056, 272}, {1748, 428}};
+    const auto issue = [&](const UnitSnapshot& us, const std::vector<UnitSnapshot>& enemies) {
+        return TacticalController{}.control(std::span{&us, 1}, enemies, estimate,
+            {1724, 404}, {1197, 300}, InfluenceMap{}, {}, 3, false, defense);
+    };
+    const auto replies = [&](const UnitSnapshot& us, const std::vector<UnitSnapshot>& enemies) {
+        const auto orders = issue(us, enemies);
+        return orders.size() == 1 && orders.front().type == CommandType::attackUnit &&
+               orders.front().targetUnit == pursuer.id;
+    };
+    check(replies(actor, {pursuer}),
+          "ready healthy melee retreat replies to one equally fast pursuer already in contact");
+    auto faster = pursuer; faster.topSpeed = 5;
+    check(replies(actor, {faster}), "one faster melee pursuer in contact receives a ready reply");
+    auto slower = pursuer; slower.topSpeed = 3;
+    check(!replies(actor, {slower}), "a melee actor can continue escaping a slower pursuer");
+    auto distant = pursuer; distant.position.y += 32;
+    check(!replies(actor, {distant}), "contact reply cannot become a chase toward a distant target");
+    auto ranged = pursuer; ranged.groundWeapon.maxRange = 128;
+    check(!replies(actor, {ranged}), "contact reply does not override escape from ranged fire");
+    auto reloading = actor; reloading.weaponCooldown = 6;
+    check(!replies(reloading, {pursuer}), "a reloading melee defender keeps moving");
+    auto wounded = actor; wounded.hitPoints = 20; wounded.shields = 0;
+    check(!replies(wounded, {pursuer}), "a critically wounded defender keeps its escape obligation");
+    auto stormed = actor; stormed.underStorm = true;
+    check(!replies(stormed, {pursuer}), "Storm escape takes precedence over a contact reply");
+    auto second = pursuer; second.id = 180; second.position.x += 8;
+    check(!replies(actor, {pursuer, second}), "multiple attackers do not trigger the lone-pursuer reply");
+    auto unseenSpeed = pursuer; unseenSpeed.topSpeed = 0;
+    check(!replies(actor, {unseenSpeed}), "unknown speed does not establish an unavoidable pursuer");
+    auto hidden = pursuer; hidden.detected = false;
+    check(!replies(actor, {hidden}), "undetected contact cannot receive an attack order");
 }
 void threatAndRoutes() {
     GameState state;
@@ -495,6 +641,38 @@ void navigationWorkspaceReuse() {
     check(oversized.empty(), "oversized navigation maps are rejected before scratch allocation");
 }
 void reachableTargetSnapping() {
+    // Destination r270: the retreat point lies inside a Pylon's expanded
+    // collision bounds. A 256px snap-search radius must not turn the clear
+    // Gateway exit, still 211px away, into an already-arrived destination.
+    NavigationGrid retreatGrid{256, 128, 8, std::vector<std::uint8_t>(256 * 128, 1U)};
+    retreatGrid.updateDynamicObstacle(168, {1040, 368, 1136, 440});
+    retreatGrid.updateDynamicObstacle(161, {1200, 276, 1232, 308});
+    const MovementFootprint zealot{11, 11, 5, 13};
+    const Position retreatOrigin{1052, 452}, blockedRetreat{1197, 300};
+    const auto retreatRoute = retreatGrid.findPath(retreatOrigin, blockedRetreat, 4000, zealot);
+    auto clearRetreat = retreatRoute.points.size() >= 2U;
+    for (std::size_t i = 1; clearRetreat && i < retreatRoute.points.size(); ++i)
+        clearRetreat = retreatGrid.lineWalkable(retreatRoute.points[i - 1U], retreatRoute.points[i], zealot);
+    check(retreatRoute.status == NavigationStatus::partial && clearRetreat &&
+              distanceSquared(retreatRoute.points.back(), blockedRetreat) < 32 * 32,
+          "blocked retreat target permits safe progress to nearby clear terrain");
+    auto actor = unit(190, UnitKind::zealot, retreatOrigin);
+    actor.dimensionLeft = actor.dimensionRight = 11;
+    actor.dimensionUp = 5; actor.dimensionDown = 13;
+    const auto routed = routeActorMovement(
+        {190, CommandType::move, -1, blockedRetreat, UnitKind::unknown, 80, 0, "combat-retreat"},
+        actor, retreatGrid, false);
+    check(routed.order.type == CommandType::move && routed.order.targetPosition != retreatOrigin &&
+              retreatGrid.lineWalkable(retreatOrigin, routed.order.targetPosition, zealot),
+          "a blocked retreat point does not cause a distant actor to hold at its current cell");
+    check(retreatGrid.findPath(retreatOrigin, blockedRetreat, 1, zealot).searchBudgetExhausted,
+          "blocked-target routing respects the search allowance instead of reporting arrival early");
+    const auto close = retreatGrid.nearestWalkable(blockedRetreat, -1, zealot);
+    const auto closeRoute = retreatGrid.findPath(close, blockedRetreat, 4000, zealot);
+    check(closeRoute.status == NavigationStatus::partial && closeRoute.points.size() == 1U &&
+              closeRoute.points.front() == close && retreatGrid.walkable(close, zealot),
+          "an actor already at a nearby clear substitute can stop safely");
+
     constexpr auto width = 30;
     constexpr auto height = 16;
     constexpr auto cellSize = 32;
@@ -516,6 +694,10 @@ void reachableTargetSnapping() {
         clear = grid.lineWalkable(route.points[i - 1U], route.points[i]);
     check(route.status == NavigationStatus::partial && clear,
           "blocked target snaps to safe progress in the origin's connected region");
+    const auto nearbyIsolated = grid.findPath({400, 272}, blockedTarget, 4000);
+    check(nearbyIsolated.status == NavigationStatus::partial &&
+              nearbyIsolated.points.size() > 1U && nearbyIsolated.points.back().x == 464,
+          "being inside the snap-search area does not prevent closer reachable progress across a wall");
     const auto reachable = grid.nearestReachable(from, blockedTarget, 4000);
     check(reachable.status == NavigationStatus::partial &&
               reachable.hasUsableWaypoint() && !route.points.empty() &&
@@ -578,8 +760,8 @@ void ammunitionAndTargetDomain() {
 }
 }
 int main() {
-    navigation(); dynamicNavigation(); navigationOutcomes(); navigationWorkspaceReuse();
-    reachableTargetSnapping(); meleeTargets(); threatAndRoutes(); stormSafety(); upgrades();
+    navigation(); gatewayEdgeRouting(); dynamicNavigation(); navigationOutcomes(); navigationWorkspaceReuse();
+    reachableTargetSnapping(); meleeTargets(); meleeRetreatReplies(); threatAndRoutes(); stormSafety(); upgrades();
     commandIdentity(); unavailableWorkers();
     legalTechnologyProducer();
     ammunitionAndTargetDomain();

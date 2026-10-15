@@ -39,6 +39,39 @@ namespace Protodd.Runtime {
         [DllImport("kernel32.dll", SetLastError = true)] static extern bool WaitForDebugEvent(out DebugEvent debugEvent, uint milliseconds);
         [DllImport("kernel32.dll", SetLastError = true)] static extern bool ContinueDebugEvent(uint pid, uint tid, uint status);
         [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr OpenFileMapping(uint access, bool inherit, string name);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr MapViewOfFile(IntPtr mapping, uint access, uint high, uint low, UIntPtr size);
+        [DllImport("kernel32.dll")] static extern bool UnmapViewOfFile(IntPtr view);
+        public sealed class ServerConnection {
+            public uint ProcessId { get; set; }
+            public bool Connected { get; set; }
+        }
+        public static ServerConnection[] ReadServerConnections(string name) {
+            // Official BWAPI4.4 GameTable:8 rows of uint,bool,padding,uint.
+            // Discovery is read-only; never claim a slot or attach a client.
+            IntPtr mapping = OpenFileMapping(4, false, name);
+            if (mapping == IntPtr.Zero) {
+                int error = Marshal.GetLastWin32Error();
+                if (error == 2) return new ServerConnection[0];
+                throw new Win32Exception(error, "Cannot read BWAPI client discovery");
+            }
+            try {
+                IntPtr view = MapViewOfFile(mapping, 4, 0, 0, (UIntPtr)96);
+                if (view == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot map BWAPI client discovery");
+                try {
+                    var rows = new List<ServerConnection>();
+                    for (int i = 0; i < 8; ++i) {
+                        uint pid = unchecked((uint)Marshal.ReadInt32(view, i * 12));
+                        if (pid != 0) rows.Add(new ServerConnection {
+                            ProcessId = pid, Connected = Marshal.ReadByte(view, i * 12 + 4) != 0 });
+                    }
+                    return rows.ToArray();
+                } finally { UnmapViewOfFile(view); }
+            } finally { CloseHandle(mapping); }
+        }
+        [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();
         [DllImport("kernel32.dll", SetLastError = true)] static extern bool DebugSetProcessKillOnExit(bool kill);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern uint GetFinalPathNameByHandle(IntPtr file, StringBuilder path, uint size, uint flags);
@@ -49,6 +82,8 @@ namespace Protodd.Runtime {
         readonly ManualResetEvent ready = new ManualResetEvent(false);
         readonly ManualResetEvent done = new ManualResetEvent(false);
         public bool Completed { get { return done.WaitOne(0); } }
+        public bool Failed { get { return Completed && launchError != null; } }
+        public string FailureReason { get { return Failed ? launchError.ToString() : null; } }
         readonly Dictionary<uint, IntPtr> processes = new Dictionary<uint, IntPtr>();
         readonly Dictionary<uint, List<Module>> modules = new Dictionary<uint, List<Module>>();
         Exception launchError; uint injectorId; int dumps;
@@ -75,13 +110,24 @@ namespace Protodd.Runtime {
                 }
             } catch { return 0; }
         }
+        void AppendDiagnostic(string directory, string name, string text) {
+            // A launch owns its journal even when a runtime directory is reused.
+            // Live readers must permit this writer, and this writer permits them.
+            using (var stream = new FileStream(Path.Combine(directory, DesktopName + "-" + name),
+                       FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+            using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
+                writer.Write(text);
+        }
         void AddModule(uint pid, IntPtr file, ulong address, string directory) {
-            string path = ModulePath(file);
-            if (!modules.ContainsKey(pid)) modules.Add(pid, new List<Module>());
-            modules[pid].Add(new Module { start = address, size = ImageSize(path), path = path });
-            File.AppendAllText(Path.Combine(directory, "native-modules.txt"),
-                pid + ",0x" + address.ToString("x") + "," + path + Environment.NewLine);
-            if (file != IntPtr.Zero) CloseHandle(file);
+            try {
+                string path = ModulePath(file);
+                if (!modules.ContainsKey(pid)) modules.Add(pid, new List<Module>());
+                modules[pid].Add(new Module { start = address, size = ImageSize(path), path = path });
+                AppendDiagnostic(directory, "native-modules.txt",
+                    pid + ",0x" + address.ToString("x") + "," + path + Environment.NewLine);
+            } finally {
+                if (file != IntPtr.Zero) CloseHandle(file);
+            }
         }
         void RecordException(DebugEvent e, string directory) {
             uint code = BitConverter.ToUInt32(e.data, 0);
@@ -91,7 +137,7 @@ namespace Protodd.Runtime {
             Module owner = new Module { path = "unknown" };
             if (modules.ContainsKey(e.pid)) foreach (var module in modules[e.pid])
                 if (address >= module.start && address - module.start < module.size) owner = module;
-            string prefix = e.pid + "-" + e.tid + "-" + (first ? "first" : "fatal") + "-" + dumps;
+            string prefix = DesktopName + "-" + e.pid + "-" + e.tid + "-" + (first ? "first" : "fatal") + "-" + dumps;
             string report = (first ? "FIRST_CHANCE: " : "EXCEPTION: ") + "0x" + code.ToString("x8") + Environment.NewLine +
                 "process=" + e.pid + Environment.NewLine + "thread=" + e.tid + Environment.NewLine +
                 "address=0x" + address.ToString("x") + Environment.NewLine + "module=" + owner.path + Environment.NewLine +
@@ -113,22 +159,21 @@ namespace Protodd.Runtime {
         }
         void Run(string injector, string arguments, string runtime, string diagnostics) {
             IntPtr desktop = IntPtr.Zero;
+            ProcessInfo created = new ProcessInfo();
             try {
                 Directory.CreateDirectory(diagnostics);
                 desktop = CreateDesktop(DesktopName, IntPtr.Zero, IntPtr.Zero, 0, 0x10000000, IntPtr.Zero);
                 if (desktop == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot create headless desktop");
                 var startup = new StartupInfo { cb = (uint)Marshal.SizeOf(typeof(StartupInfo)), desktop = DesktopName,
                                                flags = 1, show = 0 };
-                ProcessInfo process;
                 if (!CreateProcess(injector, new StringBuilder("\"" + injector + "\" " + arguments),
-                    IntPtr.Zero, IntPtr.Zero, false, 1 | 0x08000000, IntPtr.Zero, runtime, ref startup, out process))
+                    IntPtr.Zero, IntPtr.Zero, false, 1 | 0x08000000, IntPtr.Zero, runtime, ref startup, out created))
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot launch headless injector");
-                injectorId = process.pid;
+                injectorId = created.pid;
                 // The debugger records faults; it must not kill a run merely
                 // because a supervising PowerShell session stops unexpectedly.
                 if (!DebugSetProcessKillOnExit(false))
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot disable debugger exit termination");
-                CloseHandle(process.thread); CloseHandle(process.process);
                 ready.Set();
                 int live = 0;
                 while (true) {
@@ -150,34 +195,55 @@ namespace Protodd.Runtime {
                         throw new Win32Exception(error, "Native crash monitor failed");
                     }
                     uint status = 0x00010002;
-                    if (e.code == 3) {
-                        ++live;
-                        processes[e.pid] = new IntPtr((long)Pointer(e.data, 8));
-                        AddModule(e.pid, new IntPtr((long)Pointer(e.data, 0)), Pointer(e.data, 24), diagnostics);
-                        CloseHandle(new IntPtr((long)Pointer(e.data, 16)));
-                    } else if (e.code == 2) {
-                        CloseHandle(new IntPtr((long)Pointer(e.data, 0)));
-                    } else if (e.code == 6) {
-                        AddModule(e.pid, new IntPtr((long)Pointer(e.data, 0)), Pointer(e.data, 8), diagnostics);
-                    } else if (e.code == 1) {
-                        uint code = BitConverter.ToUInt32(e.data, 0);
-                        if (code != 0x80000003 && code != 0x4000001f) {
-                            RecordException(e, diagnostics); status = 0x80010001;
+                    try {
+                        if (e.code == 3) {
+                            ++live;
+                            processes[e.pid] = new IntPtr((long)Pointer(e.data, 8));
+                            if (e.pid == injectorId) {
+                                // Creator handles and debug-event handles have
+                                // different owners. Keep creator handles alive
+                                // until aliasing can be checked; Windows closes
+                                // debug process/thread handles on exit continuation.
+                                var debugThread = new IntPtr((long)Pointer(e.data, 16));
+                                if (created.process != IntPtr.Zero && created.process != processes[e.pid])
+                                    CloseHandle(created.process);
+                                if (created.thread != IntPtr.Zero && created.thread != debugThread)
+                                    CloseHandle(created.thread);
+                                created.process = created.thread = IntPtr.Zero;
+                            }
+                            AddModule(e.pid, new IntPtr((long)Pointer(e.data, 0)), Pointer(e.data, 24), diagnostics);
+                        } else if (e.code == 6) {
+                            AddModule(e.pid, new IntPtr((long)Pointer(e.data, 0)), Pointer(e.data, 8), diagnostics);
+                        } else if (e.code == 1) {
+                            uint code = BitConverter.ToUInt32(e.data, 0);
+                            if (code != 0x80000003 && code != 0x4000001f) {
+                                status = 0x80010001;
+                                RecordException(e, diagnostics);
+                            }
+                        } else if (e.code == 5) {
+                            processes.Remove(e.pid);
+                            --live;
+                            AppendDiagnostic(diagnostics, "native-exits.txt",
+                                e.pid + ",0x" + BitConverter.ToUInt32(e.data, 0).ToString("x8") + Environment.NewLine);
                         }
-                    } else if (e.code == 5) {
-                        File.AppendAllText(Path.Combine(diagnostics, "native-exits.txt"),
-                            e.pid + ",0x" + BitConverter.ToUInt32(e.data, 0).ToString("x8") + Environment.NewLine);
-                        if (processes.ContainsKey(e.pid)) { CloseHandle(processes[e.pid]); processes.Remove(e.pid); }
-                        --live;
+                    } finally {
+                        // Diagnostic failure cannot leave the debuggee suspended
+                        // at a received event or swallow a first-chance fault.
+                        if (!ContinueDebugEvent(e.pid, e.tid, status))
+                            throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot continue native debug event");
                     }
-                    ContinueDebugEvent(e.pid, e.tid, status);
                     if (live == 0) break;
                 }
             } catch (Exception error) {
                 launchError = error;
-                Directory.CreateDirectory(diagnostics);
-                File.WriteAllText(Path.Combine(diagnostics, "monitor-error.txt"), error.ToString());
-                ready.Set();
+                try {
+                    Directory.CreateDirectory(diagnostics);
+                    File.WriteAllText(Path.Combine(diagnostics, DesktopName + "-monitor-error.txt"), error.ToString());
+                } catch (Exception diagnosticError) {
+                    // Preserve attribution through the monitor API even when
+                    // the diagnostic directory itself cannot accept a report.
+                    launchError = new AggregateException(error, diagnosticError);
+                } finally { ready.Set(); }
             } finally {
                 lock (monitors) monitors.Remove(this);
                 if (desktop != IntPtr.Zero) CloseDesktop(desktop);
@@ -186,6 +252,10 @@ namespace Protodd.Runtime {
         }
         public static HeadlessStarCraft Launch(string injector, string arguments, string runtime, string diagnostics) {
             if (IntPtr.Size != 8) throw new InvalidOperationException("Headless crash monitor requires 64-bit PowerShell");
+            // A private game desktop does not hide a console belonging to its
+            // supervisor. Reject that launch before creating either process.
+            if (GetConsoleWindow() != IntPtr.Zero)
+                throw new InvalidOperationException("Headless supervisor has a console; launch it with Start-ConsoleFreeProcess before starting StarCraft");
             var launch = new HeadlessStarCraft { DesktopName = "Protodd-" + Guid.NewGuid().ToString("N") };
             lock (monitors) monitors.Add(launch);
             var thread = new Thread(() => launch.Run(injector, arguments, runtime, diagnostics));

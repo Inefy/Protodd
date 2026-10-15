@@ -1,5 +1,6 @@
 #include "ProtoddModule.hpp"
 #include "protodd/CommandEffectFeedback.hpp"
+#include "protodd/ActorMovementRouting.hpp"
 
 #include "protodd/FrameSchedule.hpp"
 #include "AtomicFile.hpp"
@@ -221,6 +222,7 @@ void ProtoddModule::onStart() {
 }
 
 void ProtoddModule::onStartImpl() {
+    const auto startupStarted = std::chrono::steady_clock::now();
     activePhase_ = "startup";
     if (log_.is_open()) log_.close();
     log_.clear();
@@ -243,10 +245,16 @@ void ProtoddModule::onStartImpl() {
     // Interactive commands and overlays are only present in a developer build.
     BWAPI::Broodwar->enableFlag(BWAPI::Flag::UserInput);
 #endif
+    bridge_.placementDiagnostic = [this](const std::string_view record) {
+        if (log_) log_ << record << '\n';
+    };
     bridge_.onStart();
+    const auto bridgeStartedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - startupStarted).count();
     wholeGame_.start();
     hybridProposals_.clear();
     urgentEvents_.clear();
+    influenceInvalidated_ = false;
     previousStorms_.clear();
     previousStorms_.reserve(16);
     previousWorkerLineThreats_.clear();
@@ -304,8 +312,17 @@ void ProtoddModule::onStartImpl() {
 #endif
              << '\n';
     }
+    const auto navigationStarted = std::chrono::steady_clock::now();
     navigation_ = bridge_.navigationGrid();
+    const auto navigationSampleUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - navigationStarted).count();
     bridge_.initializeNavigationObstacles(navigation_);
+    if (log_) log_ << "STARTUP_PROFILE,bridgeUs=" << bridgeStartedUs
+        << ",beforeNavigationUs=" << std::chrono::duration_cast<std::chrono::microseconds>(
+            navigationStarted - startupStarted).count()
+        << ",navigationUs=" << std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - navigationStarted).count()
+        << ",navigationSampleUs=" << navigationSampleUs << '\n';
     opponent_.reset(state_.enemy.race);
     strategy_.reset();
     strategicDirector_.reset();
@@ -339,6 +356,9 @@ void ProtoddModule::onStartImpl() {
     bridge_.buildRouteDiagnostic = [this](const BuildRouteDiagnostic& route) {
         logBuildRoute(route);
     };
+    bridge_.placementDiagnostic = [this](const std::string_view record) {
+        if (log_) log_ << record << '\n';
+    };
     supplyTightFrames_.reset();
     supplyHardBlockedFrames_.reset();
     supplyUnintendedBlockedFrames_.reset();
@@ -355,6 +375,7 @@ void ProtoddModule::onStartImpl() {
     influence_ = InfluenceMap(64);
     commands_.clear();
     engagements_.reset();
+    tactics_.reset();
     squads_.reset();
     transports_.reset();
     scouts_.reset();
@@ -445,6 +466,7 @@ void ProtoddModule::onStartImpl() {
     deferredOptionalPhases_.clear();
     const auto callbackMode = readFile("bwapi-data/read/CallbackAudit-mode.txt");
     callbackAudit_=production_.enabled() || callbackMode == "on";
+    harassmentTerrainCaptured_ = false;
     if (callbackAudit_) callbackTimes_.reserve(100000);
     bridge_.productionDiagnostic = [this](const BWAPI::UnitCommand& command, bool before, bool accepted) {
         try { return production_.command(command, before, accepted, log_); }
@@ -635,7 +657,12 @@ void ProtoddModule::onFrame() {
 }
 
 void ProtoddModule::onSendText(std::string text) {
-    callbackBoundary("onSendText", [this, text = std::move(text)] {
+    callbackBoundary("onSendText",
+#ifdef PROTODD_DEVELOPER_PROFILE
+        [this, text = std::move(text)] {
+#else
+        [text = std::move(text)] {
+#endif
 #ifdef PROTODD_DEVELOPER_PROFILE
         if (text == "/debug") debug_.level = (debug_.level + 1) % 3;
         else if (text == "/debug 0") debug_.level = 0;
@@ -714,6 +741,14 @@ void ProtoddModule::runFrame(
     const auto commandBudgetFrame = BWAPI::Broodwar->getFrameCount();
     bridge_.beginCommandBudget(
         commandBudgetFrame, frameBudget_.combatCommandLimit(commandBudgetFrame));
+    // Observation can request cancellation of an expired construction order.
+    // Attach arbitration first, and detach on every early return or exception.
+    commands_.beginFrame(commandBudgetFrame, BWAPI::Broodwar->getLatencyFrames());
+    bridge_.beginFrameCommands(commands_, commandBudgetFrame);
+    struct FrameCommandScope {
+        BwapiBridge& bridge;
+        ~FrameCommandScope() { bridge.endFrameCommands(); }
+    } frameCommandScope{bridge_};
     if (!measure("observe", [this] {
 #ifdef PROTODD_ENGINE_FAULT_INJECTION
         const auto slowObservationInjected = auditSlowObservationRemaining_ > 0 &&
@@ -795,6 +830,9 @@ void ProtoddModule::runFrame(
 #elif defined(PROTODD_WHOLE_GAME_CONTROL)
     if (state_.self.race == Race::protoss && wholeGame_.controlling() && wholeGameObserved &&
         urgentEventMask == 0) {
+        // Flush observation safety proposals before exclusive direct control.
+        // Bridge frame claims reject a second accepted order for that actor.
+        measure("whole-game-native-safety-dispatch", [this] { dispatchFrameCommands(); });
         if (!learnedCommands.empty()) measure("whole-game-control", [this, &learnedCommands] {
             for (const auto& candidate : learnedCommands) {
                 ++commandsAttempted_;
@@ -830,8 +868,19 @@ void ProtoddModule::runFrame(
         return;
     }
 
-    commands_.beginFrame(state_.frame, state_.latencyFrames);
-    bridge_.beginFrameCommands(commands_, state_.frame);
+    // Observed enemy destruction invalidates the cached weapon field. Refresh
+    // from this frame's observation before any construction safety decision;
+    // otherwise a short stale sample can impose a long unsafe-route retry.
+    auto influenceRefreshed = false;
+    if (influenceInvalidated_) {
+        if (!measure("influence", [this] { influence_.update(state_); })) return;
+        influenceInvalidated_ = false;
+        deferredOptionalPhases_.erase("influence");
+        influenceRefreshed = true;
+    }
+    measure("construction-route", [this] {
+        bridge_.advanceConstructionRoutes(state_.frame, navigation_);
+    });
 
     const auto cadence = frameBudget_.expensiveCadenceMultiplier(state_.frame);
     const auto combatCadence = std::max(1, state_.latencyFrames) *
@@ -851,8 +900,14 @@ void ProtoddModule::runFrame(
         });
     }
     // Work is staggered to keep frame time predictable under tournament load.
-    if (optionalDue("influence", protodd::frame_schedule::influenceDue(state_.frame, cadence)))
+    if (!influenceRefreshed &&
+        optionalDue("influence", protodd::frame_schedule::influenceDue(state_.frame, cadence)))
         optional("influence", [this] { influence_.update(state_); });
+    // Update negative route observations before strategy and macro consume
+    // them; changed context schedules inspection without spending permission.
+    measure("build-route-context", [this] {
+        bridge_.refreshBuildRouteContext(influence_, navigation_);
+    });
     if (optionalDue("inference", protodd::frame_schedule::inferenceDue(state_.frame, cadence)))
         optional("inference", [this] { opponent_.update(state_); });
     const auto strategyDue = protodd::frame_schedule::strategyDue(state_.frame, plan_.goals.empty());
@@ -867,11 +922,20 @@ void ProtoddModule::runFrame(
     // admit construction searches from the remaining callback allowance;
     // training and research retain their disjoint resource allocations.
     if (scheduledWork.updateMacro)
-        measure("macro", [this, callbackStarted] {
+        measure("macro", [this, callbackStarted, scheduledWork] {
             const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
                 CallbackBudget::Clock::now() - callbackStarted).count();
+            auto combatReserve = std::int64_t{0};
+            if (scheduledWork.updateCombat) {
+                const auto members = std::ranges::count_if(state_.self.units, [](const UnitSnapshot& unit) {
+                    return unit.completed && !isBuilding(unit.kind) && isCombatUnit(unit.kind);
+                });
+                const auto coldEstimate = std::min<std::int64_t>(24'000, 2'000 + members * 500);
+                const auto& timing = phases_["combat"];
+                combatReserve = timing.calls == 0 ? coldEstimate : timing.estimatedUs(2'000, 32'000);
+            }
             updateMacro(std::max<std::int64_t>(
-                0, CallbackBudget::optionalWorkLimitUs - elapsedUs));
+                0, CallbackBudget::optionalWorkLimitUs - elapsedUs - combatReserve));
         });
     // Model-controlled production runs after current macro obligations have
     // been reconciled and spends from the same ledger as native commands.
@@ -981,6 +1045,8 @@ void ProtoddModule::onUnitDestroy(const BWAPI::Unit unit) {
 }
 
 void ProtoddModule::onUnitDestroyImpl(const BWAPI::Unit unit) {
+    if (unit != nullptr && unit->getPlayer() == BWAPI::Broodwar->enemy())
+        influenceInvalidated_ = true;
     bridge_.removeNavigationObstacle(navigation_, unit);
     if (unit != nullptr && unit->getPlayer() == BWAPI::Broodwar->self()) {
         const auto kind = unit->getType();
@@ -1030,6 +1096,7 @@ void ProtoddModule::invalidateActorState(const UnitId id) {
     squads_.forgetUnit(id);
     transports_.forgetUnit(id);
     engagements_.forgetUnit(id);
+    tactics_.forgetUnit(id);
     std::erase(detectorEscorts_, id);
     std::erase(leasedScouts_, id);
     std::erase(previousWorkerLineThreats_, id);
@@ -1091,7 +1158,10 @@ void ProtoddModule::updateStrategy() {
     if (allIn_.active()) {
         trace("allin", "ALLIN,build=" + std::string(allInBuildName(allIn_.build())) +
             ",phase=" + std::string(allInPhaseName(allIn_.phase())) + ",launch=" +
-            std::to_string(allIn_.launchFrame()) + ",reason=" +
+            std::to_string(allIn_.launchFrame()) + ",departure=" +
+            std::to_string(allIn_.departureFrame()) + ",arrival=" +
+            std::to_string(allIn_.arrivalFrame()) + ",contact=" +
+            std::to_string(allIn_.contactFrame()) + ",reason=" +
             std::string(allIn_.transitionReason()), 240);
     }
     if (!allIn_.active() && policy_.enabled() && action == PolicyAction::defend &&
@@ -1104,7 +1174,9 @@ void ProtoddModule::updateStrategy() {
             candidate.posture = Posture::hold;
     }
     const auto proposed = candidate.posture;
+    const auto proposedBreakContainment = candidate.breakContainment;
     plan_ = strategicDirector_.stabilize(std::move(candidate), state_, opponent_.assessment());
+    const auto stabilizedBreakContainment = plan_.breakContainment;
     const auto containBreakCommitted = containBreak &&
         (plan_.posture == Posture::pressure || plan_.posture == Posture::attack);
     if (containBreakCommitted) plan_.breakContainment = true;
@@ -1116,7 +1188,35 @@ void ProtoddModule::updateStrategy() {
     }
 #endif
     const auto initialExpansionTarget = plan_.expansionTarget;
-    expansion_.update(plan_, state_, bridge_.expansionFeedback(plan_.expansionTarget));
+    const auto routeFeedback = bridge_.expansionFeedback(plan_.expansionTarget);
+    const auto reportExpansionDecision = [this](const Position requested,
+        const ExpansionFeedback& feedback, const std::size_t iteration) {
+        if (!log_) return;
+        log_ << "EXPANSION_DECISION," << state_.frame << ",iteration=" << iteration
+             << ",requestedX=" << requested.x << ",requestedY=" << requested.y
+             << ",desiredBases=" << plan_.desiredBases
+             << ",replacementMiningDemand=" << std::ranges::any_of(plan_.goals,
+                 [](const ProductionGoal& demand) { return demand.replacementMining; })
+             << ",feedbackTask=" << feedback.taskId
+             << ",feedbackX=" << feedback.site.x << ",feedbackY=" << feedback.site.y
+             << ",feedbackObserved=" << feedback.observedAt << ",leased=" << feedback.pending
+             << ",cancelling=" << feedback.cancelling
+             << ",readyAwaitingFunds=" << feedback.readyAwaitingFunds
+             << ",builder=" << feedback.builder
+             << ",stalledFrames=" << feedback.stalledFrames
+             << ",knowledgePending=" << feedback.routePending << ",unsafe=" << feedback.unsafeRoute
+             << ",rejectedFootprint=" << feedback.rejectedFootprint
+             << ",noPlacement=" << feedback.noPlacement << ",noBuilder=" << feedback.noSafeBuilder
+             << ",knowledgeWaitFrames=" << expansion_.routeKnowledgeWaitFrames()
+             << ",knowledgeTimedOut=" << expansion_.routeKnowledgeTimedOut()
+             << ",admissionWaitFrames=" << expansion_.routeAdmissionWaitFrames()
+             << ",admissionTimedOut=" << expansion_.routeAdmissionTimedOut()
+             << ",targetX=" << plan_.expansionTarget.x << ",targetY=" << plan_.expansionTarget.y
+             << ",deferred=" << plan_.deferExpansion << ",releaseBuilder=" << expansion_.releaseBuilder()
+             << ",reason=" << csvSafe(expansion_.reason()) << '\n';
+    };
+    expansion_.update(plan_, state_, routeFeedback);
+    reportExpansionDecision(initialExpansionTarget, routeFeedback, 0);
     auto releaseExpansionBuilder = expansion_.releaseBuilder();
     // A newly selected alternative can have its own active blocker. Process
     // the chain in this strategic update so failed sites do not become a
@@ -1128,13 +1228,20 @@ void ProtoddModule::updateStrategy() {
         const auto currentTarget = plan_.expansionTarget;
         const auto feedback = bridge_.expansionFeedback(currentTarget);
         if (!feedback.rejectedFootprint && !feedback.noSafeBuilder &&
-            !feedback.noPlacement && !feedback.unsafeRoute) break;
+            !feedback.noPlacement && !feedback.unsafeRoute && !feedback.routePending) break;
         expansion_.update(plan_, state_, feedback);
+        reportExpansionDecision(currentTarget, feedback, attempt + 1);
         releaseExpansionBuilder = releaseExpansionBuilder ||
                                   expansion_.releaseBuilder();
         if (!plan_.expansionTarget.valid() ||
             distanceSquared(plan_.expansionTarget, currentTarget) <= 0) break;
     }
+    if (log_ && routeFeedback.routePending)
+        log_ << "EXPANSION_ROUTE_STATE," << state_.frame << ",siteX=" << routeFeedback.site.x
+             << ",siteY=" << routeFeedback.site.y << ",knowledgePending=1,leased="
+             << routeFeedback.pending << ",stalledFrames=" << routeFeedback.stalledFrames
+             << ",targetX=" << plan_.expansionTarget.x << ",targetY=" << plan_.expansionTarget.y
+             << ",deferred=" << plan_.deferExpansion << ",reason=" << csvSafe(expansion_.reason()) << '\n';
     if (releaseExpansionBuilder && bridge_.cancelExpansion() &&
         plan_.expansionTarget.valid() &&
         plan_.name.find("[survival:") == std::string::npos)
@@ -1161,7 +1268,7 @@ void ProtoddModule::updateStrategy() {
     debug_.operation = expansion_.reason();
     trace("strategy", "STRATEGY," + csvSafe(plan_.name) + ',' +
         std::string(postureName(proposed)) + ',' + std::string(postureName(plan_.posture)) + ',' +
-        std::string(enemyPlanName(opponent_.assessment().mostLikely)) + ',' + debug_.operation + ',' +
+        std::string(enemyPlanName(opponent_.assessment().mostLikely)) + ',' + csvSafe(debug_.operation) + ',' +
         std::to_string(plan_.deferExpansion) + ",strategyPosture=" +
         std::string(postureName(strategyPosture)) + ",policyEnabled=" +
         std::to_string(policy_.enabled()) + ",policyAction=" +
@@ -1170,7 +1277,10 @@ void ProtoddModule::updateStrategy() {
         std::to_string(naturalRallyOverride) + ",coveredPressureRelease=" +
         std::to_string(coveredPressureReleased) + ",containBreak=" +
         std::to_string(containBreak) + ",containBreakCommit=" +
-        std::to_string(containBreakCommitted));
+        std::to_string(containBreakCommitted) + ",breakContainmentProposed=" +
+        std::to_string(proposedBreakContainment) + ",breakContainmentStabilized=" +
+        std::to_string(stabilizedBreakContainment) + ",breakContainmentEffective=" +
+        std::to_string(plan_.breakContainment));
 }
 
 void ProtoddModule::updateMacro(const std::int64_t planningBudgetUs) {
@@ -1181,8 +1291,9 @@ void ProtoddModule::updateMacro(const std::int64_t planningBudgetUs) {
     };
     ResourceLedger ledger{state_.self.minerals, state_.self.gas};
     const auto buildBlockers = bridge_.buildBlockerFeedback();
+    const auto leasedExpansionSites = bridge_.leasedExpansionSites();
     const auto reconcileStarted = std::chrono::steady_clock::now();
-    auto actions = macro_.reconcile(state_, plan_, ledger, buildBlockers);
+    auto actions = macro_.reconcile(state_, plan_, ledger, buildBlockers, leasedExpansionSites);
     const auto reconcileUs = elapsedUs(reconcileStarted);
     for (auto& action : actions) {
         if (!action.reserved || !bridge_.pendingBuildAlreadyPaid(action)) continue;
@@ -1192,7 +1303,12 @@ void ProtoddModule::updateMacro(const std::int64_t planningBudgetUs) {
     bridge_.setSpendingLedger(&spendingLedger_);
     lastMacroFrame_ = state_.frame;
     debug_.macro = actions;
-    bridge_.executeMacro(actions, plan_, influence_, leasedScouts_, 8, &navigation_, planningBudgetUs);
+    auto unavailableBuilders = workers_.constructionExclusions(state_);
+    unavailableBuilders.insert(unavailableBuilders.end(), leasedScouts_.begin(), leasedScouts_.end());
+    std::ranges::sort(unavailableBuilders);
+    unavailableBuilders.erase(std::unique(unavailableBuilders.begin(), unavailableBuilders.end()),
+                              unavailableBuilders.end());
+    bridge_.executeMacro(actions, plan_, influence_, unavailableBuilders, 8, &navigation_, planningBudgetUs);
     const auto executeUs = elapsedUs(reconcileStarted) - reconcileUs;
     const auto diagnosticStarted = std::chrono::steady_clock::now();
     for (const auto& execution : bridge_.macroExecutions()) {
@@ -1201,7 +1317,10 @@ void ProtoddModule::updateMacro(const std::int64_t planningBudgetUs) {
             log_ << "MACRO_ACTION_PROFILE," << state_.frame << ','
                  << unitStats(action.target).name << ',' << execution.elapsedUs << ','
                  << execution.navigationSearches << ',' << csvSafe(execution.outcome) << ','
-                 << csvSafe(action.reason) << '\n';
+                 << csvSafe(action.reason) << ",task=" << execution.taskId
+                 << ",siteId=" << action.constructionSite.id
+                 << ",siteX=" << action.constructionSite.anchor.x
+                 << ",siteY=" << action.constructionSite.anchor.y << '\n';
         }
         if (action.reserved && action.executable &&
             execution.outcome != "command-budget-deferred" &&
@@ -1211,12 +1330,19 @@ void ProtoddModule::updateMacro(const std::int64_t planningBudgetUs) {
         }
         const auto key = std::to_string(static_cast<int>(action.action)) + '/' +
             std::to_string(static_cast<int>(action.target)) + '/' +
-            std::to_string(static_cast<int>(action.technology)) + '/' + action.reason;
+            std::to_string(static_cast<int>(action.technology)) + '/' + action.reason + '/' +
+            std::to_string(execution.taskId);
         std::ostringstream entry;
         entry << "MACRO," << static_cast<int>(action.action) << ',' << unitStats(action.target).name
               << ',' << static_cast<int>(action.technology) << ',' << csvSafe(execution.outcome)
               << ',' << execution.accepted << ',' << csvSafe(action.reason) << ','
-              << action.minerals << ',' << action.gas << ',' << action.reserved << ',' << action.executable;
+              << action.minerals << ',' << action.gas << ',' << action.reserved << ',' << action.executable
+              << ",task=" << execution.taskId << ",siteId=" << action.constructionSite.id
+              << ",siteX=" << action.constructionSite.anchor.x
+              << ",siteY=" << action.constructionSite.anchor.y
+              << ",preparationFundingFrames=" << action.preparationFundingFrames
+              << ",pendingCriticalBankHoldFrames=" << action.pendingCriticalBankHoldFrames
+              << ",pendingCriticalMineralsProtected=" << action.pendingCriticalMineralsProtected;
         trace("macro/" + key, entry.str());
         if (action.timing.active()) {
             auto reason = std::string_view{"unknown"};
@@ -1239,6 +1365,7 @@ void ProtoddModule::updateMacro(const std::int64_t planningBudgetUs) {
     const auto diagnosticUs = elapsedUs(diagnosticStarted);
     const auto profileUs = elapsedUs(profileStarted);
     const auto& raidRouting = squads_.harassmentRoutingStats();
+
     if (raidRouting.deferredChecks > 0) {
         trace("harassment-route-budget", "HARASSMENT_ROUTE_BUDGET,pathSearches=" +
             std::to_string(raidRouting.pathSearches) + ",deferredChecks=" +
@@ -1269,19 +1396,21 @@ void ProtoddModule::updateWorkers() {
 #endif
     const auto assignments = workers_.assign(
         state_, plan_, influence_, reserved, evacuateAbandonedBase, stageExpansionWorkers,
-        &navigation_);
+        &navigation_, workerRoutingLimits(frameBudget_.load(state_.frame)));
     const auto& workerRouting = workers_.routingStats();
-    if (workerRouting.deferredChecks > 0) {
+    if (workerRouting.deferredChecks > 0 || workerRouting.totalPathQueries > 0) {
         trace("worker-route-budget", "WORKER_ROUTE_BUDGET,pathSearches=" +
-            std::to_string(workerRouting.economicPathSearches) + ",deferredChecks=" +
-            std::to_string(workerRouting.deferredChecks), 24);
+            std::to_string(workerRouting.totalPathQueries) + ",deferredChecks=" +
+            std::to_string(workerRouting.deferredChecks) + ",economic=" +
+            std::to_string(workerRouting.economicPathSearches) + ",defensive=" +
+            std::to_string(workerRouting.defensivePathSearches) + ",evacuation=" +
+            std::to_string(workerRouting.evacuationPathSearches) + ",reservedExpansions=" +
+            std::to_string(workerRouting.reservedExpansions) + ",expandedNodes=" +
+            std::to_string(workerRouting.expandedNodes) + ",load=" +
+            std::string(runtimeLoadName(frameBudget_.load(state_.frame))), 24);
     }
-    for (const auto& assignment : assignments) {
-        if (assignment.job != WorkerJob::evacuate && assignment.job != WorkerJob::defend)
-            continue;
-        releaseScoutLeaseForPreemption(assignment.worker, "worker",
-            assignment.job == WorkerJob::evacuate ? "worker-evacuate" : "worker-defend");
-    }
+    // Emergency worker proposals release a scout only after dispatch confirms
+    // API acceptance or its matching native order; a rejected proposal keeps it.
     if (std::ranges::any_of(assignments, [](const WorkerAssignment& assignment) {
             return assignment.job == WorkerJob::transfer && assignment.priority == 60;
         })) {
@@ -1289,6 +1418,12 @@ void ProtoddModule::updateWorkers() {
     }
     const auto gas = std::ranges::count(assignments, WorkerJob::gas, &WorkerAssignment::job);
     const auto minerals = std::ranges::count(assignments, WorkerJob::minerals, &WorkerAssignment::job);
+    const auto retainedMinerals = std::ranges::count(assignments, true,
+        &WorkerAssignment::preserveNativeOrder);
+    const auto fallbackEvacuations = std::ranges::count_if(assignments,
+        [](const WorkerAssignment& assignment) {
+            return assignment.job == WorkerJob::evacuate && assignment.priority == 80;
+        });
     const auto ids = [](const std::span<const UnitId> units) {
         std::string result;
         for (const auto unit : units) {
@@ -1300,7 +1435,10 @@ void ProtoddModule::updateWorkers() {
     trace("workers", "WORKERS,gas=" + std::to_string(gas) + ",minerals=" + std::to_string(minerals) +
         ",builders=" + std::to_string(builders.size()) + ",builderIds=" + ids(builders) +
         ",scouts=" + std::to_string(leasedScouts_.size()) + ",scoutIds=" + ids(leasedScouts_) +
-        ",leased=" + std::to_string(reserved.size()) + ",gasRequested=" + std::to_string(plan_.desiredGasWorkers));
+        ",leased=" + std::to_string(reserved.size()) + ",gasRequested=" + std::to_string(plan_.desiredGasWorkers) +
+        ",constructionExcludedIds=" + ids(workers_.constructionExclusions(state_)) +
+        ",retainedMinerals=" + std::to_string(retainedMinerals) +
+        ",fallbackEvacuations=" + std::to_string(fallbackEvacuations));
     static_cast<void>(bridge_.submitWorkerCommands(assignments, commands_));
 }
 
@@ -1311,9 +1449,11 @@ void ProtoddModule::releaseScoutLeaseForPreemption(
     const auto tracked = std::ranges::find(leasedScouts_, actor) != leasedScouts_.end() ||
         std::ranges::any_of(pendingScoutOrders_, [actor](const ScoutOrder& order) {
             return order.scout == actor;
-        }) || scouts_.openingScout() == actor || scouts_.returningScout() == actor;
+        }) || scouts_.openingScout() == actor || scouts_.returningScout() == actor ||
+        scouts_.hasRouteWork(actor);
     if (!tracked) return;
     const auto generation = scouts_.releaseLease(actor, state_.frame);
+    bridge_.invalidateCommandLease(actor, CommandOwner::scouting, generation);
     std::erase(leasedScouts_, actor);
     std::erase_if(pendingScoutOrders_, [actor](const ScoutOrder& order) {
         return order.scout == actor;
@@ -1353,6 +1493,35 @@ void ProtoddModule::updateScouting() {
     }
     const auto orders = scouts_.assign(state_, available, influence_,
                                        opponent_.assessment(), &navigation_);
+    const auto scoutRouting = scouts_.navigationDiagnostics();
+    if (scoutRouting.frameWork > 0 || scoutRouting.queued > 0)
+        trace("scout-route-work", "SCOUT_ROUTE_WORK,work=" + std::to_string(scoutRouting.frameWork) +
+            ",queued=" + std::to_string(scoutRouting.queued) +
+            ",completed=" + std::to_string(scoutRouting.completed) +
+            ",invalidated=" + std::to_string(scoutRouting.invalidated) +
+            ",searchStarts=" + std::to_string(scoutRouting.searchStarts) +
+            ",geometryRestarts=" + std::to_string(scoutRouting.geometryRestarts) +
+            ",failedCurrentJoins=" + std::to_string(scoutRouting.failedCurrentJoins) +
+            ",activeOwner=" + std::to_string(scoutRouting.activeOwner) +
+            ",activeAge=" + std::to_string(scoutRouting.activeAgeFrames) +
+            ",activeFromX=" + std::to_string(scoutRouting.activeFrom.x) +
+            ",activeFromY=" + std::to_string(scoutRouting.activeFrom.y) +
+            ",activeToX=" + std::to_string(scoutRouting.activeTo.x) +
+            ",activeToY=" + std::to_string(scoutRouting.activeTo.y), 120);
+    for (const auto& order : orders) {
+        const auto purpose = std::string(scoutPurposeName(order.purpose));
+        const auto comparison = std::to_string(order.leaseGeneration) + '/' + purpose + '/' +
+            std::to_string(order.informationTarget.x / 128) + '/' +
+            std::to_string(order.informationTarget.y / 128);
+        trace("scout-mission/" + std::to_string(order.scout),
+            "SCOUT_MISSION,actor=" + std::to_string(order.scout) + ",purpose=" + purpose +
+            ",informationX=" + std::to_string(order.informationTarget.x) +
+            ",informationY=" + std::to_string(order.informationTarget.y) +
+            ",targetX=" + std::to_string(order.target.x) + ",targetY=" + std::to_string(order.target.y) +
+            ",waypointX=" + std::to_string(order.routeWaypoint.x) +
+            ",waypointY=" + std::to_string(order.routeWaypoint.y) +
+            ",lease=" + std::to_string(order.leaseGeneration) + ",proved=1", 120, comparison);
+    }
     const auto& informationGap = scouts_.informationGap();
     if (informationGap.unresolved) {
         const auto reason = std::string(scoutGapReasonName(informationGap.reason));
@@ -1370,7 +1539,11 @@ void ProtoddModule::updateScouting() {
             ",risk=" + std::to_string(informationGap.risk) +
             ",reason=" + reason, 120, comparison);
     }
-    for (const auto& order : orders) leasedScouts_.push_back(order.scout);
+    leasedScouts_ = scouts_.activeMissionScouts();
+    for (auto hold : scouts_.pendingRouteHolds(state_)) {
+        hold.alreadyActive = bridge_.commandActive(hold);
+        commands_.submit(std::move(hold));
+    }
     // Keep the opening Probe leased while it evades or returns, even if the
     // strategic scout selector finds no safe new destination this pass.
     const auto openingScout = scouts_.openingScout();
@@ -1449,6 +1622,46 @@ void ProtoddModule::updateCombat(
 #endif
     const auto formed = squads_.form(state_, friendly, enemy, plan_, retreatPoint(),
                                      &navigation_, emergencyConsolidation);
+#ifdef PROTODD_NATIVE_ALLIN_OPENING
+    const auto& raidRouting = squads_.harassmentRoutingStats();
+    if (callbackAudit_ && raidRouting.probeActor >= 0) {
+        trace("harassment-objective-probe", "HARASSMENT_PROBE,actor=" + std::to_string(raidRouting.probeActor) +
+            ",origin=" + std::to_string(raidRouting.probeOrigin.x) + 'x' +
+                std::to_string(raidRouting.probeOrigin.y) +
+            ",target=" + std::to_string(raidRouting.probeTarget.x) + 'x' +
+                std::to_string(raidRouting.probeTarget.y) +
+            ",approach=" + std::to_string(raidRouting.probeApproach.x) + 'x' +
+                std::to_string(raidRouting.probeApproach.y) +
+            ",eligibility=" + std::to_string(raidRouting.probeEligibility) +
+            ",originWalkable=" + std::to_string(raidRouting.probeOriginWalkable) +
+            ",targetWalkable=" + std::to_string(raidRouting.probeTargetWalkable) +
+            ",routeStatus=" + std::string(navigationStatusName(raidRouting.probeRouteStatus)) +
+            ",searchBudgetExhausted=" + std::to_string(raidRouting.probeSearchBudgetExhausted) +
+            ",retainedWork=" + std::to_string(raidRouting.probeRetainedWork) +
+            ",dimLeft=" + std::to_string(raidRouting.probeFootprint.left) +
+            ",dimRight=" + std::to_string(raidRouting.probeFootprint.right) +
+            ",dimUp=" + std::to_string(raidRouting.probeFootprint.up) +
+            ",dimDown=" + std::to_string(raidRouting.probeFootprint.down) +
+            ",pathSearches=" + std::to_string(raidRouting.pathSearches) +
+            ",reason=" + raidRouting.probeReason, 24);
+        // Capture one effective collision grid for an offline reproduction.
+        // This diagnostic is excluded from the shipping profile and never
+        // changes navigation or bypasses a threat check.
+        if (!harassmentTerrainCaptured_ && raidRouting.probeEligibility == 255U && !navigation_.empty()) {
+            harassmentTerrainCaptured_ = true;
+            std::string cells;
+            cells.reserve(static_cast<std::size_t>(navigation_.width()) * navigation_.height());
+            const auto cell = navigation_.cellSize();
+            for (int y = 0; y < navigation_.height(); ++y)
+                for (int x = 0; x < navigation_.width(); ++x)
+                    cells.push_back(navigation_.walkable({x * cell + cell / 2,
+                        y * cell + cell / 2}) ? '1' : '0');
+            trace("harassment-terrain-capture", "HARASSMENT_TERRAIN,width=" + std::to_string(navigation_.width()) +
+                ",height=" + std::to_string(navigation_.height()) +
+                ",cellSize=" + std::to_string(cell) + ",cells=" + cells, 1);
+        }
+    }
+#endif
     const auto formationUs = elapsedUs(profileStageStarted);
     if (std::ranges::any_of(formed, [](const Squad& squad) {
             return squad.emergencyDefense;
@@ -1469,13 +1682,14 @@ void ProtoddModule::updateCombat(
     if (periodicNavigationRefresh) {
         navigationRefresh_ = state_.frame;
     }
-    const auto submit = [this](Command command) {
+    std::vector<Command> combatProposals;
+    const auto submit = [this, &combatProposals](Command command) {
         if (command.owner == CommandOwner::unspecified)
             command.owner = CommandOwner::combat;
         if (command.urgency == std::numeric_limits<int>::min())
             command.urgency = command.priority;
         command.alreadyActive = bridge_.commandActive(command);
-        commands_.submit(std::move(command));
+        combatProposals.push_back(std::move(command));
     };
     fight_ = {};
     auto debugSquadSize = std::size_t{0};
@@ -1509,6 +1723,8 @@ void ProtoddModule::updateCombat(
             std::to_string(plan_.expansionTarget.y), 120);
     }
 #endif
+    auto returnRouteBudget = std::min(4, TacticalController::maximumReturnRouteQueries);
+    auto actorRouteBudget = maximumActorRouteExpansionsPerUpdate;
     const auto squadLoopStarted = std::chrono::steady_clock::now();
     for (std::size_t squadIndex = 0; squadIndex < formed.size(); ++squadIndex) {
         const auto squadStarted = std::chrono::steady_clock::now();
@@ -1537,7 +1753,8 @@ void ProtoddModule::updateCombat(
                                     : (undersizedForce ? 1.18 : 1.05);
                 objective = coverExpansion
                     ? expansionAssemblyPoint(state_, plan_.expansionTarget, retreatPoint()) : plan_.rallyPoint;
-                defense = SquadPlanner::defensiveArea(state_, plan_.rallyPoint);
+                defense = SquadPlanner::assemblyDefense(
+                    state_, squad, plan_.rallyPoint, defense);
             } else if (travelMode == MainArmyTravelMode::joinVanguard) {
                 // Detached reinforcements join the strongest mobile component
                 // even when they encounter an enemy on the way. That local
@@ -1814,7 +2031,11 @@ void ProtoddModule::updateCombat(
             });
         }
 #endif
+        const auto supportStarted = std::chrono::steady_clock::now();
         const auto supportedArmy = SquadPlanner::combatSupport(squad, friendly, &navigation_);
+        if (log_ && elapsedUs(supportStarted) >= 8'000)
+            log_ << "SUPPORT_PROFILE," << state_.frame << ',' << elapsedUs(supportStarted) << '\n';
+
         const auto simulateSquad = runSimulation &&
             protodd::engagementSimulationWithinBudget(
                 supportedArmy.size(), squad.enemies.size());
@@ -1976,15 +2197,71 @@ void ProtoddModule::updateCombat(
             fight_ = estimate;
         }
         const auto targets = SquadPlanner::tacticalTargets(squad, state_.enemy.units);
+        std::vector<TacticalMovementEvidence> movementEvidence;
         const auto tacticalOrders = tactics_.control(
             squad.units, targets, estimate, objective,
             squad.retreat, influence_, squad.center, state_.latencyFrames,
             technologyLevel(state_.self, TechnologyKind::psionicStorm) > 0,
             defense, squad.withdrawing ? TacticalIntent::withdraw :
+                squad.objectiveRoutePending ? TacticalIntent::raidRoutePending :
                 squad.role == SquadRole::harassment ? TacticalIntent::raid : TacticalIntent::battle,
             supportedArmy, &navigation_, state_.self.units,
             tacticalTargetControl_ ? &tacticalTarget_ : nullptr,
-            true, stormReservations, travelGoal);
+            true, stormReservations, travelGoal, state_.frame, log_ ? &movementEvidence : nullptr,
+            &returnRouteBudget);
+        const auto tacticalCost=tactics_.lastControlCost();
+        if(log_ && tacticalCost.totalUs>=8000) {
+            log_ << "TACTICAL_COST," << state_.frame << ",role=" << squadRoleName(squad.role)
+                 << ",totalUs=" << tacticalCost.totalUs << ",targetUs=" << tacticalCost.targetSelectionUs
+                 << ",contactUs=" << tacticalCost.contactUs << ",supportUs=" << tacticalCost.supportUs
+                 << ",targetCalls=" << tacticalCost.targetSelections << ",contactCalls=" << tacticalCost.contactCalls
+                 << ",blockedOrigins=" << tacticalCost.blockedContactOrigins
+                 << ",supportCalls=" << tacticalCost.supportCalls << ",supportCacheHits=" << tacticalCost.supportCacheHits
+                 << ",pathSearches=" << tacticalCost.pathSearches << ",expandedNodes=" << tacticalCost.expandedNodes << '\n';
+        }
+
+        if (log_) for (const auto& move : movementEvidence) {
+            log_ << "TACTICAL_MOVE," << state_.frame << "," << move.actor << "," << move.source
+                 << ",phase=proposal,firstSeen=" << move.firstSeen << ",kind=" << static_cast<int>(move.kind)
+                 << ",originX=" << move.origin.x << ",originY=" << move.origin.y
+                 << ",destinationX=" << move.destination.x << ",destinationY=" << move.destination.y
+                 << ",fallbackX=" << move.fallback.x << ",fallbackY=" << move.fallback.y
+                 << ",strategicX=" << move.strategicRetreat.x << ",strategicY=" << move.strategicRetreat.y
+                 << ",defenseX=" << move.defenseCenter.x << ",defenseY=" << move.defenseCenter.y
+                 << ",decision=" << static_cast<int>(move.decision) << ",localThreat=" << move.localThreat
+                 << ",corridorRisk=" << move.corridorRisk << ",corridorRadius=" << move.corridorRadius
+                 << ",corridorSeparation=" << move.corridorSeparation << ",corridorThreat=" << move.corridorThreat
+                 << ",threatX=" << move.corridorThreatPosition.x << ",threatY=" << move.corridorThreatPosition.y
+                 << ",weaponRange=" << move.corridorWeaponRange << ",nearbyThreat=" << move.nearbyThreat
+                 << ",score=" << move.score << ",cooldown=" << move.weaponCooldown << ",health=" << move.healthFraction
+                 << ",steering=" << move.steering << ",returning=" << move.returningDefender
+                 << ",fragile=" << move.fragile << ",directWalkable=" << move.directWalkable
+                 << ",scoreGoalX=" << move.scoreGoal.x << ",scoreGoalY=" << move.scoreGoal.y
+                 << ",proposedCommand=" << static_cast<int>(move.proposedCommand)
+                 << ",defenseRadius=" << move.defenseRadius
+                 << ",economyX=" << move.economyCenter.x << ",economyY=" << move.economyCenter.y
+                 << ",frontX=" << move.defenseFront.x << ",frontY=" << move.defenseFront.y
+                 << ",objectiveX=" << move.tacticalObjective.x << ",objectiveY=" << move.tacticalObjective.y
+                 << ",stagingX=" << move.stagingGoal.x << ",stagingY=" << move.stagingGoal.y
+                 << ",screenAnchorX=" << move.screenAnchor.x << ",screenAnchorY=" << move.screenAnchor.y
+                 << ",assignedX=" << move.assignedScreen.x << ",assignedY=" << move.assignedScreen.y
+                 << ",insideDefense=" << move.insideDefensiveArea << ",screenInterior=" << move.screenSlotInterior
+                 << ",screenAssigned=" << move.screenSlotAssigned
+                 << ",screenClearance=" << move.screenClearance
+                 << ",dimLeft=" << move.dimensionLeft << ",dimRight=" << move.dimensionRight
+                 << ",dimUp=" << move.dimensionUp << ",dimDown=" << move.dimensionDown
+                 << ",selectedTarget=" << move.selectedTarget
+                 << ",selectedTargetFirstSeen=" << move.selectedTargetFirstSeen
+                 << ",selectedTargetX=" << move.selectedTargetPosition.x
+                 << ",selectedTargetY=" << move.selectedTargetPosition.y << "\n";
+        }
+        const auto actorRoutingStarted = std::chrono::steady_clock::now();
+        const auto routingBefore = NavigationGrid::diagnosticsForCurrentThread();
+        auto remainingGroundMoves = std::ranges::count_if(tacticalOrders, [&squad](const Command& order) {
+            if (order.type != CommandType::move && order.type != CommandType::attackMove) return false;
+            const auto actor = std::ranges::find(squad.units, order.actor, &UnitSnapshot::id);
+            return actor != squad.units.end() && !actor->flying && order.targetPosition.valid();
+        });
         for (const auto& order : tacticalOrders) {
             if (order.type == CommandType::useTech &&
                 order.technology == TechnologyKind::psionicStorm &&
@@ -1993,7 +2270,10 @@ void ProtoddModule::updateCombat(
                         psionicStormReservationDistance * psionicStormReservationDistance;
                 })) stormReservations.push_back(order.targetPosition);
             auto safeOrder = order;
-            if (navigationRouteBlocked && order.type != CommandType::hold &&
+            // Tactical movement needs each actor's checked straight prefix.
+            // Ordinary uncontested advances keep the full engine destination;
+            // restarting a short search per actor can trap an army at a wall.
+            if (order.type != CommandType::hold &&
                 order.type != CommandType::stop && order.type != CommandType::useTech) {
                 const auto actor = std::ranges::find(squad.units, order.actor,
                                                      &UnitSnapshot::id);
@@ -2005,28 +2285,31 @@ void ProtoddModule::updateCombat(
                 }
                 const auto isMovement = order.type == CommandType::move ||
                                          order.type == CommandType::attackMove;
-                if (isMovement && actor != squad.units.end() && !actor->flying &&
-                    target.valid() && !navigation_.lineWalkable(actor->position, target,
-                        MovementFootprint{actor->dimensionLeft, actor->dimensionRight,
-                                          actor->dimensionUp, actor->dimensionDown})) {
-                    const auto route = navigation_.nextWaypoint(
-                        actor->position, target, 4, 4000,
-                        MovementFootprint{actor->dimensionLeft, actor->dimensionRight,
-                                          actor->dimensionUp, actor->dimensionDown});
-                    if (route.hasUsableWaypoint() && route.waypoint != actor->position) {
-                        // Tactical movement (especially retreats) remains useful
-                        // when its direct line crosses terrain. Follow a safe
-                        // prefix instead of replacing the order with Hold every
-                        // combat tick and making the unit oscillate in place.
-                        safeOrder.targetPosition = route.waypoint;
-                    } else {
-                        safeOrder = {order.actor, CommandType::hold, -1, {-1, -1},
-                            UnitKind::unknown, order.priority, 0,
-                            "navigation-route-unavailable"};
-                    }
+                if (isMovement && actor != squad.units.end() && !actor->flying && target.valid()) {
+                    // Share actual expanded cells across the entire update. Small
+                    // groups keep their full allowance; crowded retreats still
+                    // give every actor a checked prefix instead of restarting
+                    // a full 4,000-cell search for each member in one callback.
+                    const auto allowance = std::min(4000, actorRouteBudget /
+                        static_cast<int>(std::max<std::ptrdiff_t>(1, remainingGroundMoves)));
+                    const auto before = NavigationGrid::diagnosticsForCurrentThread().totalExpansions;
+                    safeOrder = routeActorMovement(order, *actor, navigation_,
+                        nativeUncontestedGroundTravel(squad, estimate, defense, order), allowance).order;
+                    const auto used = NavigationGrid::diagnosticsForCurrentThread().totalExpansions - before;
+                    actorRouteBudget -= static_cast<int>(std::min<std::uint64_t>(
+                        used, static_cast<std::uint64_t>(actorRouteBudget)));
+                    --remainingGroundMoves;
                 }
             }
             submit(std::move(safeOrder));
+        }
+        const auto actorRoutingUs = elapsedUs(actorRoutingStarted);
+        if (log_ && actorRoutingUs >= 8'000) {
+            const auto routingAfter = NavigationGrid::diagnosticsForCurrentThread();
+            log_ << "ACTOR_ROUTING_PROFILE," << state_.frame << ',' << actorRoutingUs
+                 << ",searches=" << routingAfter.searches - routingBefore.searches
+                 << ",expanded=" << routingAfter.totalExpansions - routingBefore.totalExpansions
+                 << ",orders=" << tacticalOrders.size() << '\n';
         }
 #ifdef PROTODD_WHOLE_GAME_HYBRID
         for (const auto& pending : hybridProposals_) {
@@ -2108,6 +2391,8 @@ void ProtoddModule::updateCombat(
         transportCommand.urgency = transportCommand.priority;
         submit(std::move(transportCommand));
     }
+    bridge_.prepareConstructionTraffic(state_, combatProposals, influence_, navigation_);
+    for (auto& command : combatProposals) commands_.submit(std::move(command));
     const auto profileUs = elapsedUs(profileStarted);
     if (log_ && profileUs >= 8'000) {
         log_ << "COMBAT_PROFILE," << state_.frame << ',' << profileUs << ','
@@ -2136,31 +2421,62 @@ void ProtoddModule::dispatchFrameCommands() {
         }
         return "unknown";
     };
-    for (const auto& command : selectedCommands) {
-        selectedActors.insert(command.actor);
-        if (command.owner != CommandOwner::scouting)
-            releaseScoutLeaseForPreemption(command.actor, ownerName(command.owner), command.source);
-    }
-    for (const auto& command : commands_.authorityWinners()) {
-        if (selectedActors.contains(command.actor) || !command.alreadyActive ||
-            command.owner == CommandOwner::scouting) continue;
-        releaseScoutLeaseForPreemption(command.actor, ownerName(command.owner),
-                                       "active-command-lease");
-    }
     std::unordered_set<UnitId> releasedWorkerLeases;
-    for (const auto& displaced : commands_.displacedCommands()) {
-        const auto& proposal = displaced.proposal;
-        const auto& winner = displaced.winner;
-        if (proposal.owner != CommandOwner::worker || winner.owner == CommandOwner::worker ||
-            (!selectedActors.contains(winner.actor) && !winner.alreadyActive) ||
-            !releasedWorkerLeases.insert(proposal.actor).second) continue;
-        const auto generation = bridge_.releaseWorkerCommandLease(proposal.actor);
-        if (generation > 0) {
-            trace("actor-preemption", "AUTHORITY_PREEMPT,actor=" +
-                std::to_string(proposal.actor) + ",displaced=worker,newOwner=" +
-                std::string(ownerName(winner.owner)) + ",generation=" +
-                std::to_string(generation) + ",reason=" + csvSafe(proposal.source), 120);
+    const auto releaseConfirmedAuthority = [this, &ownerName, &releasedWorkerLeases](
+        const Command& command, const bool apiAccepted) {
+        if (!bridge_.claimConfirmedFrameAuthority(command, apiAccepted)) return;
+        if (const auto generation = bridge_.releaseLearnedCommandLease(command, apiAccepted);
+            generation > 0) {
+            trace("learned-preemption/" + std::to_string(command.actor),
+                "AUTHORITY_PREEMPT,actor=" + std::to_string(command.actor) +
+                ",displaced=learned,newOwner=" + std::string(ownerName(command.owner)) +
+                ",generation=" + std::to_string(generation) +
+                ",reason=" + csvSafe(command.source), 120);
         }
+        if (command.owner != CommandOwner::scouting &&
+            !scouts_.planningMayContinueUnder(state_, command))
+            releaseScoutLeaseForPreemption(command.actor, ownerName(command.owner), command.source);
+        // A mining/transfer lease can be active without proposing another
+        // command this frame. Release the state itself after confirmation.
+        if (command.owner != CommandOwner::worker &&
+            releasedWorkerLeases.insert(command.actor).second) {
+            const auto generation = bridge_.releaseWorkerCommandLease(command.actor);
+            bridge_.invalidateCommandLease(command.actor, CommandOwner::worker, generation);
+            if (generation > 0) {
+                trace("actor-preemption", "AUTHORITY_PREEMPT,actor=" +
+                    std::to_string(command.actor) + ",displaced=worker,newOwner=" +
+                    std::string(ownerName(command.owner)) + ",generation=" +
+                    std::to_string(generation) + ",reason=" + csvSafe(command.source), 120);
+            }
+        }
+        if (const auto generation = bridge_.releaseConstructionCommandLease(command, apiAccepted);
+            generation > 0) {
+            trace("construction-preemption/" + std::to_string(command.actor),
+                "AUTHORITY_PREEMPT,actor=" + std::to_string(command.actor) +
+                ",displaced=construction,newOwner=" + std::string(ownerName(command.owner)) +
+                ",generation=" + std::to_string(generation) +
+                ",awaitingNativeRelease=1,reason=" + csvSafe(command.source), 120);
+        }
+        const auto transportHandoff = transports_.preemptActor(
+            state_, command, true, retreatPoint());
+        if (transportHandoff.released()) {
+            bridge_.invalidateCommandLease(transportHandoff.shuttle, CommandOwner::transport,
+                                           transportHandoff.shuttleGeneration);
+            bridge_.invalidateCommandLease(transportHandoff.passenger, CommandOwner::transport,
+                                           transportHandoff.passengerGeneration);
+            trace("transport-preemption/" + std::to_string(command.actor),
+                "AUTHORITY_PREEMPT,actor=" + std::to_string(command.actor) +
+                ",displaced=transport,newOwner=" + std::string(ownerName(command.owner)) +
+                ",shuttle=" + std::to_string(transportHandoff.shuttle) +
+                ",passenger=" + std::to_string(transportHandoff.passenger) +
+                ",cargoRecovery=" + std::to_string(transportHandoff.cargoRecovery) +
+                ",reason=" + csvSafe(command.source), 120);
+        }
+    };
+    for (const auto& command : selectedCommands) selectedActors.insert(command.actor);
+    for (const auto& command : commands_.authorityWinners()) {
+        if (!selectedActors.contains(command.actor) && command.alreadyActive)
+            releaseConfirmedAuthority(command, false);
     }
     const auto& commandStats = commands_.stats();
     commandsProposed_ += commandStats.proposed;
@@ -2199,6 +2515,7 @@ void ProtoddModule::dispatchFrameCommands() {
                 command.leaseGeneration}, state_.frame);
         }
         if (accepted) {
+            releaseConfirmedAuthority(command, true);
             ++commandsAccepted_;
             if (command.source == "hybrid-trained") ++hybridAccepted_;
             commands_.markIssued(command);
@@ -2227,10 +2544,36 @@ void ProtoddModule::dispatchFrameCommands() {
             command.alreadyActive ? ScoutCommandStatus::alreadyActive : ScoutCommandStatus::deferred,
             command.leaseGeneration}, state_.frame);
     }
+    const auto routing = bridge_.constructionRoutingDiagnostics();
+    if (routing.frameWork > 0 || routing.queued > 0)
+        trace("construction-route", "CONSTRUCTION_ROUTE_WORK," + std::to_string(state_.frame) +
+            ",work=" + std::to_string(routing.frameWork) +
+            ",queued=" + std::to_string(routing.queued) +
+            ",admissionDeferred=" + std::to_string(routing.admissionDeferred) +
+            ",cachedBytes=" + std::to_string(routing.cachedRouteBytes) +
+            ",completed=" + std::to_string(routing.completed) +
+            ",invalidated=" + std::to_string(routing.invalidated) +
+            ",searchStarts=" + std::to_string(routing.searchStarts) +
+            ",geometryRestarts=" + std::to_string(routing.geometryRestarts) +
+            ",cacheEvictions=" + std::to_string(routing.cacheEvictions) +
+            ",expiredJobs=" + std::to_string(routing.expiredJobs) +
+            ",geometryInvalidations=" + std::to_string(routing.geometryInvalidations) +
+            ",blockedOrigins=" + std::to_string(routing.blockedOrigins) +
+            ",failedCurrentJoins=" + std::to_string(routing.failedCurrentJoins) +
+            ",activeJob=" + std::to_string(routing.activeJob) +
+            ",activeOwner=" + std::to_string(routing.activeOwner) +
+            ",activeExpansions=" + std::to_string(routing.activeExpansions) +
+            ",activeAgeFrames=" + std::to_string(routing.activeAgeFrames) +
+            ",activeFrom=" + std::to_string(routing.activeFrom.x) + 'x' +
+                std::to_string(routing.activeFrom.y) +
+            ",activeTo=" + std::to_string(routing.activeTo.x) + 'x' +
+                std::to_string(routing.activeTo.y), 1);
     bridge_.endFrameCommands();
 }
 
 void ProtoddModule::reconcileCommandEffects() {
+    for (const auto& unit : state_.self.units)
+        commands_.observePosition(unit.id, unit.position);
     for (const auto& pending : commands_.pendingEffectFeedback()) {
         const auto& command = pending.command;
         const auto actor = std::to_string(command.actor);
@@ -2649,7 +2992,10 @@ void ProtoddModule::logAction(const ActionDiagnostic& action) noexcept {
         const auto comparison = source + '/' + action.type + '/' + stage + '/' + outcome + '/' +
             std::to_string(action.target) + '/' + std::to_string(action.extra) + '/' +
             std::to_string(action.position.x / 64) + '/' + std::to_string(action.position.y / 64);
-        trace("action/" + std::to_string(action.actor), row.str(), 120, comparison, frame);
+        // Keep every API-accepted command available for exact issuer accounting.
+        // Only blocked/rejected diagnostic rows may use heartbeat suppression.
+        trace("action/" + std::to_string(action.actor), row.str(),
+              action.accepted ? 0 : 120, comparison, frame);
     } catch (...) { ++loggingErrors_; }
 }
 
@@ -2672,7 +3018,7 @@ void ProtoddModule::logBuildLease(const BuildLeaseDiagnostic& lease) noexcept {
              << ",buildTypeMatches=" << lease.buildTypeMatches
              << ",builderCanBuildHere=" << lease.builderCanBuildHere
              << ",mapCanBuildHere=" << lease.mapCanBuildHere
-             << ",hasPath=" << lease.hasPath << '\n';
+             << ",hasPath=" << lease.hasPath << ",task=" << lease.taskId << '\n';
     } catch (...) { ++loggingErrors_; }
 }
 
@@ -2703,7 +3049,17 @@ void ProtoddModule::logBuildRoute(const BuildRouteDiagnostic& route) noexcept {
              << ",peakThreat=" << route.peakThreat << ",anchorThreat=" << route.anchorThreat
              << ",fromWalkable=" << route.fromWalkable
              << ",destinationWalkable=" << route.destinationWalkable
-             << ",nativeHasPath=" << route.nativeHasPath << ",searches=" << route.searches << '\n';
+             << ",nativeHasPath=" << route.nativeHasPath << ",searches=" << route.searches
+             << ",fromTerrainWalkable=" << route.fromTerrainWalkable
+             << ",footprint=" << route.footprint.left << ':' << route.footprint.right
+             << ':' << route.footprint.up << ':' << route.footprint.down
+             << ",mineralTarget=" << route.mineralTarget
+             << ",mineralBounds=" << route.mineralBounds.left << ':' << route.mineralBounds.top
+             << ':' << route.mineralBounds.right << ':' << route.mineralBounds.bottom
+             << ",nativeOrder=" << csvSafe(route.nativeOrder)
+             << ",navigationStatus=" << navigationStatusName(route.navigationStatus)
+             << ",unresolvedAlternatives=" << route.unresolvedAlternatives
+             << ",searchBudgetExhausted=" << route.searchBudgetExhausted << '\n';
     } catch (...) { ++loggingErrors_; }
 }
 
@@ -3121,6 +3477,7 @@ void ProtoddModule::logDecision() {
         const auto& base = state_.bases[index];
         log_ << base.id << '@' << base.center.x << 'x' << base.center.y
              << ":route=" << base.groundDistanceFromMain
+             << ":routeKnown=" << base.groundReachabilityKnown
              << ":gas=" << base.geysers
              << ":min=" << base.mineralsRemaining
              << ":owner=" << base.ownerId

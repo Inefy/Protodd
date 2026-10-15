@@ -22,7 +22,7 @@ namespace {
 // explicit at strategy call sites instead of relying on a boolean flag.
 enum class UnitCountBasis : std::uint8_t { observed, completed };
 
-int effectiveUnitCount(
+inline int effectiveUnitCount(
     const GameState& state,
     const UnitKind kind,
     const UnitCountBasis basis) {
@@ -34,11 +34,11 @@ int effectiveUnitCount(
         }));
 }
 
-int observedRoleCount(const GameState& state, const UnitRole role) {
+inline int observedRoleCount(const GameState& state, const UnitRole role) {
     return static_cast<int>(std::ranges::count(state.self.units, role, &UnitSnapshot::role));
 }
 
-bool gatewayCombatUnit(const UnitKind kind) noexcept {
+inline bool gatewayCombatUnit(const UnitKind kind) noexcept {
     return kind == UnitKind::zealot || kind == UnitKind::dragoon ||
            kind == UnitKind::highTemplar || kind == UnitKind::darkTemplar;
 }
@@ -59,7 +59,7 @@ inline constexpr Frame framesPerMinute = 60 * framesPerSecond;
     return static_cast<Frame>(minutes) * framesPerMinute;
 }
 
-GatewayProductionCost gatewayProductionCost(const StrategicPlan& plan) noexcept {
+inline GatewayProductionCost gatewayProductionCost(const StrategicPlan& plan) noexcept {
     auto totalWeight = 0.0;
     GatewayProductionCost result;
     for (const auto& target : plan.composition) {
@@ -85,15 +85,15 @@ struct DisplayedSupply {
     int points{};
 };
 
-int minute(const GameState& state) {
+inline int minute(const GameState& state) {
     return state.frame / framesPerMinute;
 }
 
-bool supplyAtLeast(const GameState& state, const DisplayedSupply displayedSupply) {
+inline bool supplyAtLeast(const GameState& state, const DisplayedSupply displayedSupply) {
     return state.self.supplyUsed >= displayedSupply.points * 2;
 }
 
-bool activeApproach(const GameState& state, const ThreatAssessment& threat) noexcept {
+inline bool activeApproach(const GameState& state, const ThreatAssessment& threat) noexcept {
     // Early scouting should react to an army crossing the map. Once the game
     // is established, perimeter movement alone is not enough to keep the
     // economy and army permanently defensive; require a current breach or
@@ -101,7 +101,7 @@ bool activeApproach(const GameState& state, const ThreatAssessment& threat) noex
     return state.frame < framesForMinutes(10) && threat.approachingArmyValue >= 2.0;
 }
 
-bool approachingCombatAnchor(
+inline bool approachingCombatAnchor(
     const UnitSnapshot& unit,
     const Position anchor,
     const PixelRadius radius) noexcept {
@@ -112,7 +112,7 @@ bool approachingCombatAnchor(
                                 PixelDistance{2.0});
 }
 
-double approachingCombatValueAt(
+inline double approachingCombatValueAt(
     const GameState& state,
     const Position anchor,
     const PixelRadius radius,
@@ -136,7 +136,7 @@ double approachingCombatValueAt(
     return value;
 }
 
-bool openingPressureExpected(
+inline bool openingPressureExpected(
     const GameState& state,
     const ThreatAssessment& threat) noexcept {
     const auto supported = threat.uncertainty <= 0.75 ||
@@ -150,7 +150,7 @@ bool openingPressureExpected(
             threat.mostLikely == EnemyPlan::heavyPressure);
 }
 
-int recentEnemyCount(
+inline int recentEnemyCount(
     const GameState& state,
     const UnitKind kind,
     const Frame memory = framesForSeconds(90)) {
@@ -161,7 +161,7 @@ int recentEnemyCount(
         }));
 }
 
-bool recentEnemyEvidence(
+inline bool recentEnemyEvidence(
     const GameState& state,
     const UnitKind kind,
     const Frame memory = framesForSeconds(90)) {
@@ -174,7 +174,7 @@ bool recentEnemyEvidence(
         });
 }
 
-void setCompositionWeight(
+inline void setCompositionWeight(
     StrategicPlan& plan,
     const UnitKind kind,
     const double minimumWeight) {
@@ -187,7 +187,7 @@ void setCompositionWeight(
     }
 }
 
-void normalizeComposition(StrategicPlan& plan) {
+inline void normalizeComposition(StrategicPlan& plan) {
     const auto total = std::accumulate(
         plan.composition.begin(), plan.composition.end(), 0.0,
         [](const double sum, const CompositionTarget& target) {
@@ -197,7 +197,7 @@ void normalizeComposition(StrategicPlan& plan) {
     for (auto& target : plan.composition) target.weight /= total;
 }
 
-void goal(
+inline void goal(
     StrategicPlan& plan,
     const GoalKind kind,
     const UnitKind target,
@@ -209,7 +209,7 @@ void goal(
         plan, kind, target, desired, priority, reason, blocking));
 }
 
-void technologyGoal(
+inline void technologyGoal(
     StrategicPlan& plan,
     const TechnologyKind technology,
     const int desiredLevel,
@@ -220,7 +220,7 @@ void technologyGoal(
         plan, technology, desiredLevel, priority, reason, blocking));
 }
 
-Frame estimatedStructureReadyFrame(
+inline Frame estimatedStructureReadyFrame(
     const GameState& state,
     const UnitKind kind,
     std::vector<UnitKind>& visiting) {
@@ -264,7 +264,7 @@ Frame estimatedStructureReadyFrame(
     return prerequisiteReady + travel + std::max(0, stats.buildTime);
 }
 
-Frame estimatedProducerAvailableFrame(const GameState& state, const UnitKind producer) {
+inline Frame estimatedProducerAvailableFrame(const GameState& state, const UnitKind producer) {
     auto earliest = std::numeric_limits<Frame>::max();
     auto hasProducer = false;
     for (const auto& unit : state.self.units) {
@@ -314,7 +314,7 @@ UnitKind trainingProducerFor(const UnitKind target) {
     }
 }
 
-Frame estimatedGoalReadyFrame(const GameState& state, const ProductionGoal& goal) {
+inline Frame estimatedGoalReadyFrame(const GameState& state, const ProductionGoal& goal) {
     if (goal.technology != TechnologyKind::none) {
         const auto& technology = technologyStats(goal.technology);
         if (technology.producer == UnitKind::unknown || technology.durationFrames <= 0 ||
@@ -353,7 +353,7 @@ Frame estimatedGoalReadyFrame(const GameState& state, const ProductionGoal& goal
     return estimatedStructureReadyFrame(state, goal.target, visiting);
 }
 
-bool detectorCheckpoint(const StrategicPlan& plan, const ProductionGoal& goal) {
+inline bool detectorCheckpoint(const StrategicPlan& plan, const ProductionGoal& goal) {
     if (!plan.requireMobileDetection) return false;
     if (goal.target == UnitKind::observer || goal.target == UnitKind::observatory)
         return true;
@@ -362,12 +362,12 @@ bool detectorCheckpoint(const StrategicPlan& plan, const ProductionGoal& goal) {
            goal.reason.find("Dark Templar") != std::string::npos;
 }
 
-Position ourMain(const GameState& state) {
+inline Position ourMain(const GameState& state) {
     const auto nexus = std::ranges::find(state.self.units, UnitKind::nexus, &UnitSnapshot::kind);
     return nexus != state.self.units.end() ? nexus->position : Position{-1, -1};
 }
 
-Position enemyMain(const GameState& state) {
+inline Position enemyMain(const GameState& state) {
     const auto depot = std::ranges::find_if(state.enemy.units, [](const UnitSnapshot& unit) {
         // Liftable resource depots keep their identity after BWAPI confirms
         // the old footprint is empty, but their current position is cleared.
@@ -420,7 +420,7 @@ Position enemyMain(const GameState& state) {
     return candidate != nullptr ? candidate->center : Position{-1, -1};
 }
 
-Position nearestExpansionSite(const GameState& state) {
+inline Position nearestExpansionSite(const GameState& state) {
     const auto home = ourMain(state);
     if (!home.valid()) return {-1, -1};
 
@@ -464,7 +464,7 @@ Position nearestExpansionSite(const GameState& state) {
     return best != nullptr ? best->center : Position{-1, -1};
 }
 
-Position readyReplacementExpansionSite(const GameState& state) {
+inline Position readyReplacementExpansionSite(const GameState& state) {
     const BaseSnapshot* best = nullptr;
     auto bestRoute = std::numeric_limits<int>::max();
     for (const auto& base : state.bases) {
@@ -490,7 +490,7 @@ Position readyReplacementExpansionSite(const GameState& state) {
     return best != nullptr ? best->center : Position{-1, -1};
 }
 
-Frame estimateMiningRunwayFrames(const GameState& state,
+inline Frame estimateMiningRunwayFrames(const GameState& state,
                                  const int workerCount,
                                  const int ownedMinerals) {
     if (ownedMinerals <= 0) return 0;
@@ -510,7 +510,7 @@ Frame estimateMiningRunwayFrames(const GameState& state,
         frames, 0.0, static_cast<double>(std::numeric_limits<Frame>::max()))));
 }
 
-Position lastNexusRebuildSite(const GameState& state) {
+inline Position lastNexusRebuildSite(const GameState& state) {
     if (state.self.minerals < unitStats(UnitKind::nexus).minerals ||
         !std::ranges::any_of(state.self.units, [](const UnitSnapshot& unit) {
             return unit.kind == UnitKind::probe && unit.completed && !unit.loaded &&
@@ -561,7 +561,7 @@ Position lastNexusRebuildSite(const GameState& state) {
     return best != nullptr ? best->center : Position{-1, -1};
 }
 
-bool hardBreachAtMain(const GameState& state) noexcept {
+inline bool hardBreachAtMain(const GameState& state) noexcept {
     const auto home = ourMain(state);
     if (!home.valid()) return false;
     return std::ranges::any_of(
@@ -572,7 +572,7 @@ bool hardBreachAtMain(const GameState& state) noexcept {
         });
 }
 
-bool pvzEarlyPressureEligible(
+inline bool pvzEarlyPressureEligible(
     const GameState& state,
     const ThreatAssessment& threat) {
     return state.frame >= framesForMinutes(5) && state.frame < framesForMinutes(7) &&
@@ -584,7 +584,7 @@ bool pvzEarlyPressureEligible(
            recentEnemyCount(state, UnitKind::sunkenColony) == 0;
 }
 
-bool defensiveExpansionWindow(const GameState& state, const ThreatAssessment& threat) {
+inline bool defensiveExpansionWindow(const GameState& state, const ThreatAssessment& threat) {
     // Holding an army at home and growing the economy are separate decisions.
     // Keep the rush/contain/detection vetoes, but don't require an attack order
     // before spending a saturated mineral line's income on another base.
@@ -600,7 +600,7 @@ bool defensiveExpansionWindow(const GameState& state, const ThreatAssessment& th
     return mobileArmy >= 6;
 }
 
-bool coveredRangedNatural(const GameState& state, const ThreatAssessment& threat,
+inline bool coveredRangedNatural(const GameState& state, const ThreatAssessment& threat,
                           const double requiredScreenAdvantage = 1.50) {
     if (state.enemy.race != Race::protoss || state.frame < framesForMinutes(5) ||
         state.frame >= framesForMinutes(12) || effectiveUnitCount(state, UnitKind::nexus, UnitCountBasis::observed) != 1 ||

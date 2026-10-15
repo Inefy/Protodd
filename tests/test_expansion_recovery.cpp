@@ -1,6 +1,7 @@
 #include "protodd/Operations.hpp"
 #include "protodd/Squads.hpp"
 #include "protodd/Workers.hpp"
+#include "protodd/MacroPlanner.hpp"
 
 #include <algorithm>
 #include <iostream>
@@ -432,6 +433,58 @@ int main() {
           expand.name.find("alternate safe expansion") != std::string::npos,
           "blocked expansion did not switch to a reachable, safe alternative site");
 
+    // Losing vision of the army that destroyed a base does not clear the site.
+    // A replacement Probe can stand just outside that army's weapon range.
+    auto foggedSite = blocked;
+    foggedSite.enemy.units.front().visible = false;
+    foggedSite.enemy.units.front().lastSeen = foggedSite.frame - 15 * 24;
+    const auto foggedExpansion = [&](const GameState& observed) {
+        StrategicPlan attempt;
+        attempt.name = "replace lost natural";
+        attempt.desiredBases = 2;
+        attempt.expansionTarget = threatenedSite.center;
+        attempt.rallyPoint = threatenedSite.center;
+        ExpansionCoordinator freshCoordinator;
+        freshCoordinator.update(attempt, observed, {});
+        return attempt;
+    };
+    check(foggedExpansion(foggedSite).expansionTarget == alternative.center,
+          "a recently fogged attacker cannot make the lost Nexus site safe after five seconds");
+    auto guardedAlternative = foggedSite;
+    auto rememberedGuard = guardedAlternative.enemy.units.front();
+    rememberedGuard.id += 1;
+    rememberedGuard.position = alternative.center;
+    guardedAlternative.enemy.units.push_back(rememberedGuard);
+    check(foggedExpansion(guardedAlternative).deferExpansion,
+          "the alternative expansion search must also respect recent fogged attackers");
+    auto clearedSite = foggedSite;
+    clearedSite.enemy.units.front().position = {-1, -1};
+    check(foggedExpansion(clearedSite).expansionTarget == threatenedSite.center,
+          "a scouted-clear enemy location must no longer block the expansion");
+    auto staleMobile = foggedSite;
+    staleMobile.enemy.units.front().lastSeen = staleMobile.frame - 60 * 24;
+    check(foggedExpansion(staleMobile).expansionTarget == threatenedSite.center,
+          "stale mobile army locations must not permanently exclude an expansion");
+    auto rememberedBunker = staleMobile;
+    rememberedBunker.enemy.units.front().kind = UnitKind::bunker;
+    check(foggedExpansion(rememberedBunker).expansionTarget == alternative.center,
+          "an unscouted static defense remains a threat after mobile location confidence expires");
+    auto locallyCovered = foggedSite;
+    locallyCovered.enemy.units.front().hitPoints =
+        locallyCovered.enemy.units.front().maxHitPoints = 40;
+    locallyCovered.enemy.units.front().groundWeapon =
+        {6, 15, 0, 128, DamageType::normal, false, true};
+    for (int id = 0; id < 4; ++id) {
+        auto defender = unit(350 + id, UnitKind::dragoon, threatenedSite.center);
+        defender.hitPoints = defender.maxHitPoints = 100;
+        defender.shields = defender.maxShields = 80;
+        defender.groundWeapon = {20, 30, 0, 192, DamageType::normal, false, true};
+        locallyCovered.self.units.push_back(defender);
+    }
+    check(foggedExpansion(locallyCovered).expansionTarget == threatenedSite.center &&
+              !foggedExpansion(locallyCovered).deferExpansion,
+          "sufficient local cover still permits an expansion near a remembered scout");
+
     blocked.bases = {owned, threatenedSite};
     expand.name = "income replacement";
     expand.expansionTarget = threatenedSite.center;
@@ -582,6 +635,215 @@ int main() {
               lostExpansion.desiredBases == 1 && lostExpansion.desiredWorkers >= 12 &&
               !SquadPlanner::shouldCoverExpansion(lostSite, lostExpansion, false),
           "a lost unsafe site releases its stalled builder and army while protecting the last mining base");
+
+
+    // The last owned mineral line must retain a funded replacement obligation
+    // as it crosses the productive-base threshold and then exhausts.
+    GameState finalLine;
+    finalLine.frame = 1200;
+    finalLine.self.id = 1;
+    finalLine.self.race = Race::protoss;
+    finalLine.enemy.id = 2;
+    finalLine.enemy.race = Race::zerg;
+    finalLine.self.supplyUsed = 48;
+    finalLine.self.supplyTotal = 100;
+    finalLine.self.minerals = 450;
+    finalLine.self.units = {unit(1000, UnitKind::nexus, {320, 320}),
+                           unit(1001, UnitKind::pylon, {384, 384}),
+                           unit(1002, UnitKind::gateway, {480, 384})};
+    for (auto& own : finalLine.self.units) own.powered = true;
+    for (int id = 0; id < 16; ++id)
+        finalLine.self.units.push_back(unit(1010 + id, UnitKind::probe, {320 + id, 320}));
+    for (int id = 0; id < 5; ++id)
+        finalLine.self.units.push_back(unit(1100 + id, UnitKind::zealot, {480, 400}));
+    finalLine.bases = {base(100, 1, {320, 320}, 1125, 0),
+                      base(101, -1, {1280, 640}, 12000, 1100)};
+    const auto criticalReplacement = [](const StrategicPlan& plan) {
+        return std::ranges::any_of(plan.goals, [](const ProductionGoal& demand) {
+            return demand.goal == GoalKind::expand && demand.target == UnitKind::nexus &&
+                   demand.priority >= 114 && demand.blocking;
+        });
+    };
+    for (const int reserve : {1125, 999, 500, 1, 0}) {
+        finalLine.bases.front().mineralsRemaining = reserve;
+        const auto replacement = StrategyEngine{}.plan(finalLine, {});
+        check(criticalReplacement(replacement) && replacement.sustainEconomy &&
+                  replacement.expansionTarget == finalLine.bases.back().center,
+              "the final mining line lost its protected Nexus obligation below 1000 minerals");
+        ResourceLedger replacementBank{450, 0};
+        const auto replacementActions = MacroPlanner{}.reconcile(
+            finalLine, replacement, replacementBank);
+        check(std::ranges::any_of(replacementActions, [](const MacroAction& action) {
+                  return action.target == UnitKind::nexus && action.reserved &&
+                         action.priority >= 114 && action.blocksLowerPriority;
+              }),
+              "last-line replacement lost its Nexus funding to lower-priority infrastructure");
+    }
+    finalLine.bases.front().mineralsRemaining = 500;
+    finalLine.bases.back().depotFootprintAvailable = false;
+    const auto blockedLastLine = StrategyEngine{}.plan(finalLine, {});
+    check(blockedLastLine.deferExpansion && blockedLastLine.sustainEconomy &&
+              blockedLastLine.desiredGasWorkers == 0 &&
+              blockedLastLine.name.find("[survival:") != std::string::npos,
+          "a blocked final line below 1000 minerals lost its explicit survival decision");
+    finalLine.bases.back().depotFootprintAvailable = true;
+    finalLine.self.units.push_back(unit(1200, UnitKind::nexus, {1280, 640}, false));
+    check(!criticalReplacement(StrategyEngine{}.plan(finalLine, {})),
+          "a Nexus already warping requested another critical replacement");
+    finalLine.self.units.pop_back();
+    finalLine.self.units[3].underAttack = true;
+    check(!criticalReplacement(StrategyEngine{}.plan(finalLine, {})),
+          "worker breach was overridden by the replacement obligation");
+
+    // Actual pressure evidence: an arrived Probe was cancelled at394 minerals
+    // after208 stationary frames, just before the next mineral delivery.
+    const Position readySite{1280, 640};
+    const Position fartherSite{1280, 1632};
+    GameState fundingWaitState;
+    fundingWaitState.frame = 2134;
+    fundingWaitState.self.id = 1;
+    fundingWaitState.self.units = {unit(140, UnitKind::nexus, {320,320}),
+                                  unit(35, UnitKind::probe, {1204,644})};
+    fundingWaitState.bases = {base(1,1,{320,320},1000,0),
+                             base(2,-1,readySite,10500,1200),
+                             base(3,-1,fartherSite,10500,2200)};
+    const auto readyPlan = [&] {
+        StrategicPlan plan;
+        plan.name = "pre-depletion replacement";
+        plan.desiredBases = 2;
+        plan.expansionTarget = plan.rallyPoint = readySite;
+        plan.goals.push_back({GoalKind::expand,UnitKind::nexus,2,114,true,
+                              "replace the final mining line"});
+        return plan;
+    };
+    ExpansionFeedback readyFundingFeedback{readySite,true,208};
+    readyFundingFeedback.readyAwaitingFunds = true;
+    for (const int bank : {394,402}) {
+        fundingWaitState.self.minerals = bank;
+        auto plan = readyPlan();
+        ExpansionCoordinator readyFundingCoordinator;
+        readyFundingCoordinator.update(plan,fundingWaitState,readyFundingFeedback);
+        check(plan.expansionTarget == readySite && !readyFundingCoordinator.releaseBuilder() &&
+                  !plan.deferExpansion,
+              "an arrived funding-wait builder was cancelled before the bank handoff");
+    }
+    auto timedOutFunding = readyPlan();
+    auto exhaustedWait = readyFundingFeedback;
+    exhaustedWait.stalledFrames = 30 * 24;
+    ExpansionCoordinator fundingTimeoutCoordinator;
+    fundingTimeoutCoordinator.update(timedOutFunding,fundingWaitState,exhaustedWait);
+    check(timedOutFunding.expansionTarget == fartherSite &&
+              fundingTimeoutCoordinator.releaseBuilder(),
+          "an arrived unfunded builder kept its lease beyond the bounded funding wait");
+    auto stoppedTransit = readyPlan();
+    auto transitFeedback = readyFundingFeedback;
+    transitFeedback.readyAwaitingFunds = false;
+    ExpansionCoordinator transitCoordinator;
+    transitCoordinator.update(stoppedTransit,fundingWaitState,transitFeedback);
+    check(stoppedTransit.expansionTarget == fartherSite && transitCoordinator.releaseBuilder(),
+          "a stalled travelling builder inherited the arrived funding grace");
+
+    // Native pressure selects a farther fallback after unsafe admission.
+    // Keep that site during cooldown and while another task owns it, but an
+    // unleased fallback must not pin a nearer replacement after cooldown.
+    const Position replacementHome{3808,464};
+    const Position replacementNear{3680,1328};
+    const Position replacementFar{3680,2320};
+    const auto reconsiderState = [&] {
+        GameState state;
+        state.self.id = 0;
+        state.enemy.id = 1;
+        state.self.minerals = 475;
+        state.self.units = {unit(13,UnitKind::nexus,replacementHome)};
+        state.bases = {base(11,0,replacementHome,1125,11),
+                       base(9,-1,replacementNear,10500,1127),
+                       base(12,-1,replacementFar,6000,2119)};
+        for (auto& site : state.bases) site.groundReachabilityKnown = true;
+        return state;
+    };
+    const auto reconsiderPlan = [&] {
+        StrategicPlan plan;
+        plan.name = "depletion replacement";
+        plan.desiredBases = 2;
+        plan.expansionTarget = plan.rallyPoint = replacementNear;
+        plan.goals.push_back({GoalKind::expand,UnitKind::nexus,2,120,true,
+                              "replace mining capacity"});
+        plan.goals.back().replacementMining = true;
+        return plan;
+    };
+    const auto primeFallback = [&](ExpansionCoordinator& coordinator,GameState& state) {
+        state.frame = 94;
+        auto plan = reconsiderPlan();
+        coordinator.update(plan,state,{});
+        for (auto frame=118;frame<=1438;frame+=24) {
+            state.frame = frame;
+            plan = reconsiderPlan();
+            ExpansionFeedback feedback;
+            feedback.site = frame<=838 ? replacementNear : replacementFar;
+            feedback.unsafeRoute = true;
+            feedback.observedAt = frame;
+            coordinator.update(plan,state,feedback);
+        }
+    };
+    auto reconsiderMining = reconsiderState();
+    ExpansionCoordinator reconsiderCoordinator;
+    primeFallback(reconsiderCoordinator,reconsiderMining);
+    reconsiderMining.frame = 1654;
+    auto reconsiderRequest = reconsiderPlan();
+    reconsiderCoordinator.update(reconsiderRequest,reconsiderMining,{});
+    check(reconsiderRequest.expansionTarget==replacementFar,
+          "neutral feedback waived the nearer site's unsafe cooldown");
+    reconsiderMining.frame = 2302;
+    reconsiderRequest = reconsiderPlan();
+    reconsiderCoordinator.update(reconsiderRequest,reconsiderMining,{});
+    check(reconsiderRequest.expansionTarget==replacementNear &&
+              reconsiderRequest.rallyPoint==replacementNear &&
+              !reconsiderCoordinator.releaseBuilder(),
+          "an unleased farther fallback permanently pinned replacement mining after cooldown");
+    reconsiderMining.frame = 2326;
+    reconsiderRequest = reconsiderPlan();
+    reconsiderCoordinator.update(reconsiderRequest,reconsiderMining,{});
+    check(reconsiderRequest.expansionTarget==replacementNear,
+          "a reconsidered replacement switched back to the old fallback");
+    for (auto scenario=0;scenario<10;++scenario) {
+        auto state = reconsiderState();
+        ExpansionCoordinator coordinator;
+        primeFallback(coordinator,state);
+        state.frame = 2302;
+        auto plan = reconsiderPlan();
+        ExpansionFeedback feedback;
+        switch (scenario) {
+        case 0: plan.goals.back().blocking=false;break;
+        case 1: plan.goals.back().replacementMining=false;break;
+        case 2: state.bases[1].groundDistanceFromMain=2119;break;
+        case 3: state.bases[1].groundReachabilityKnown=false;break;
+        case 4: feedback.site=replacementFar;feedback.pending=true;feedback.builder=3;break;
+        case 5: feedback.site=replacementFar;feedback.pending=true;feedback.cancelling=true;break;
+        case 6: feedback.site=replacementFar;feedback.cancelling=true;break;
+        case 7: state.bases[1].mineralPatches=3;break;
+        case 8: feedback.site=replacementNear;feedback.rejectedFootprint=true;break;
+        case 9:
+            state.self.units.push_back(unit(188,UnitKind::nexus,replacementFar,false));
+            break;
+        }
+        coordinator.update(plan,state,feedback);
+        check(plan.expansionTarget==replacementFar && !coordinator.releaseBuilder(),
+              "replacement reconsideration displaced a lease, paid quota or ineligible mission");
+    }
+    for (const auto oldRally : {replacementFar,Position{-1,-1},Position{500,500}}) {
+        auto state = reconsiderState();
+        ExpansionCoordinator coordinator;
+        primeFallback(coordinator,state);
+        state.frame = 2302;
+        auto plan = reconsiderPlan();
+        plan.rallyPoint = oldRally;
+        coordinator.update(plan,state,{});
+        check(plan.expansionTarget==replacementNear &&
+                  plan.rallyPoint==(oldRally==Position{500,500} ? oldRally : replacementNear),
+              "reconsideration failed to update the expansion rally or changed an unrelated rally");
+    }
+
+    if (errors == 0) std::cout << "Expansion recovery scenarios passed\n";
 
     return errors == 0 ? 0 : 1;
 }

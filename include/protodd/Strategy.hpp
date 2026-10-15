@@ -63,6 +63,9 @@ struct ProductionGoal {
     bool harassmentOnly{};
     ConstructionTaskSite constructionSite{};
     CriticalGoalTiming timing{};
+    // A current depletion replacement is preparation, not optional greed.
+    // This demand grants no route, construction or spending permission.
+    bool replacementMining{};
 };
 
 [[nodiscard]] CriticalGoalTiming assessCriticalGoalTiming(
@@ -107,6 +110,15 @@ struct StrategicPlan {
     // Estimated frames of mining remaining across all currently owned mineral
     // sites, based on the live worker count. -1 means the estimate is unknown.
     Frame estimatedMiningRunwayFrames{-1};
+    // Paid-for opening defenders protected ahead of ordinary infrastructure.
+    // Matchup policy may lower this while its quiet tech opening is safe.
+    int openingScreenTarget{2};
+    // Temporary army staging must not move infrastructure placement. An unset
+    // construction rally preserves the ordinary rally-based build policy.
+    Position constructionRally{-1, -1};
+    [[nodiscard]] constexpr Position constructionRallyPoint() const noexcept {
+        return constructionRally.valid() ? constructionRally : rallyPoint;
+    }
 };
 
 class StrategyEngine {

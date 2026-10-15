@@ -45,3 +45,6 @@
 # Python helper caches
 __pycache__/
 *.py[cod]
+
+# Disposable test-run cache
+.pytest_cache/

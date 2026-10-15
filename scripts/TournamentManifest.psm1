@@ -25,6 +25,7 @@ $script:SourceScripts = @(
     'scripts/MatchResourceBudget.psm1',
     'scripts/HeadlessStarCraft.psm1',
     'scripts/HeadlessStarCraft.cs',
+    'scripts/ConsoleFreeOwnedStarCraft.cs',
     'scripts/run-headless-starcraft.ps1',
     'scripts/run-audit-load.ps1',
     'scripts/run-audit-scenarios.ps1',

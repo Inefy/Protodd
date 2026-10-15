@@ -70,7 +70,9 @@ def mpq_write(path, chk, archive):
 def make_map(name):
     terrain_template = ROOT / 'build/match-runtime-a/maps/aiide/(2)HeartbreakRidge.scx'
     footprint_starts = []
-    if name == 'footprint-native':
+    if name in ('builder-admission','scout-mining-planner','depletion-ready','depletion-blocked','depletion-organic','depletion-pressure','depletion-live-unsafe'):
+        archive, tags, source = chk_source(ROOT / 'build/match-runtime-a/maps/aiide/(2)Benzene.scx')
+    elif name == 'footprint-native':
         archive, tags, source = chk_source()
         footprint_starts = [(512,512,0),(3500,3500,1)]
     else:
@@ -82,10 +84,13 @@ def make_map(name):
         units.append(struct.pack('<IHHHHHHBBBBIHHII',len(units)+1,x,y,kind,0,
                                  valid_state,valid_relation,owner,hp,shields,energy,
                                  resources,0,flags,0,0))
-    if not name.startswith('racebot-') and name != 'footprint-native':
+    if not name.startswith('racebot-') and name not in ('footprint-native','builder-admission','scout-mining-planner','depletion-ready','depletion-blocked','depletion-organic','depletion-pressure','depletion-live-unsafe'):
         unit(214, 512, 512); unit(214, 3500, 3500, 1)
         unit(154, 512, 528); unit(131, 3504, 3504, 1)
-    if name.startswith('storm'):
+    if name=='fragile-defense-retreat':
+        unit(65,1024,1024,hp=20,shields=0)
+        unit(65,1536,1024)
+    elif name.startswith('storm'):
         unit(67,800,1000)
         for i in range(4): unit(43,1000+8*i,1000,1)
         if name=='storm-allies':
@@ -129,16 +134,96 @@ def make_map(name):
         unit(83,1008,800) # Reaver starts without Scarabs for maintenance.
         unit(72,1100,800) # Carrier starts without Interceptors for maintenance.
         unit(64,640,544) # Probe builder for the supply Pylon.
+    elif name=='builder-admission':
+        # Preserve Benzene's real neutral resources and terrain; these four
+        # stock-native Probe positions all need a ground detour to the natural.
+        for offset in range(0,len(tags[b'UNIT']),36):
+            record=bytes(tags[b'UNIT'][offset:offset+36])
+            kind=struct.unpack_from('<H',record,8)[0]
+            if kind in (176,177,178,188,214): units.append(record)
+        unit(154,3808,464); unit(131,512,3504,owner=1)
+        for x,y in [(3945,583),(3882,512),(3956,337),(3840,326)]: unit(64,x,y)
+        unit(84,3680,1328)
+    elif name in ('scout-mining-planner','depletion-ready','depletion-blocked','depletion-organic','depletion-pressure','depletion-live-unsafe'):
+        # Preserve stock Benzene terrain/resource clusters. Only the owned
+        # mineral line is shortened; alternate lines retain their native stock.
+        for offset in range(0,len(tags[b'UNIT']),36):
+            record=bytearray(tags[b'UNIT'][offset:offset+36])
+            kind=struct.unpack_from('<H',record,8)[0]
+            x,y=struct.unpack_from('<HH',record,4)
+            if kind in (176,177,178) and (x-3808)**2+(y-464)**2 <= 384**2:
+                struct.pack_into('<I',record,20,125 if name in ('depletion-organic','depletion-pressure') else 375)
+            if name=='scout-mining-planner' and kind==188 and (x,y)==(3808,288):
+                # Replace the actual home geyser with an owned native refinery.
+                struct.pack_into('<H',record,8,157)
+                record[16]=0
+            if kind in (176,177,178,188,214): units.append(bytes(record))
+        unit(154,3808,464); unit(131,288,3120,owner=1,flags=16 if name=='depletion-blocked' else 0)
+        for i in range(16): unit(64,3824+(i%4)*24,400+(i//4)*24)
+        for kind,x,y in [
+            (156,3744,576),(156,3680,320),(156,3648,672),
+            (156,4032,256),(156,4064,704),(156,3584,320),
+            (164,3648,464),(160,3936,688),(160,3776,688),
+            (155,3760,352),(171,3648,832),(159,3776,896),
+            (162,3520,512),(162,3552,608),(172,3536,704)]:
+            unit(kind,x,y)
+        for i in range(8): unit(66,3440+(i%4)*48,800+(i//4)*48)
+        for i in range(3): unit(65,3408+i*32,960)
+        unit(83,3600,832); unit(84,3680,1328)
+        if name=='scout-mining-planner':
+            # Static visible fixture anchor selects the real evacuation Gather
+            # branch without introducing an organic attack or forged command.
+            unit(156,3808,1408,owner=1,flags=16)
+            unit(42,3808,1312,flags=16)
+        if name in ('depletion-pressure','depletion-live-unsafe'):
+            # Actual enemy weapons threaten the natural approach; only the
+            # native elapsed-time trigger removes them, with no route injection.
+            unit(156,3664,1456,owner=1,flags=16)
+            for x,y in [(3504,1520),(3664,1520),(3808,1520),(3600,1616),(3760,1616)]:
+                unit(162,x,y,owner=1,flags=16)
+            # Passive native sight: Protodd does not assign Overlords to its
+            # Protoss scout/detector/transport/combat controllers.
+            unit(42,3656,1520,flags=16)
+        if name == 'depletion-blocked':
+            # Visible active-enemy invincible depots occupy every replacement
+            # cluster without moving its mineral centroid. Legal Observers
+            # provide the actual ownership evidence used by the full bot.
+            for x,y in [(288,3120),(320,240),(416,1264),(416,2288),
+                        (1472,3344),(1632,208),(2432,3344),(2624,208),
+                        (3680,1328),(3776,3312),(3680,2320)]:
+                if (x,y)!=(288,3120): unit(154,x,y,owner=1,flags=16)
+                unit(84,x,y)
+    elif name=='observation-cancel':
+        # UMS MoveUnit pins a travelling Probe without another BWAPI command.
+        # Keep it far from the Nexus-local Pylon footprint: a nearby Probe
+        # warped the Pylon before the trigger could prevent route progress.
+        # This forces bounded observation-time lease cancellation for arbitration.
+        unit(64,1600,544)
     elif name=='build-cancel':
-        # A visible remote mineral site makes the first Nexus command an
-        # engine Build order while the Probe is still travelling. The audit
-        # rejects the first Stop through the adapter seam, then observes the
-        # stock engine accept a retry and clear the old order.
-        unit(64,640,544)
+        # Start within the production direct-build threshold (256 pixels),
+        # but far enough from the footprint to cancel before warp-in.
+        # Distant Nexus builders now receive route-staging Move commands.
+        # The audit rejects Stop on the following frame, then observes retry.
+        unit(64,1776,2192)
         unit(84,2050,2000) # Reveal the remote Nexus footprint before issue.
         for x,y in [(1984,1952),(2024,1952),(2064,1952),(2104,1952),
                     (2004,2032),(2044,2032),(2084,2032)]:
             unit(176,x,y,owner=11,resources=1500)
+    elif name in ('owner-mixed-loaded', 'owner-mixed-pickup'):
+        # Distinct live builder, scout, worker, passenger and fighter leases.
+        unit(64,1776,2192); unit(84,2050,2000)
+        for x,y in [(1984,1952),(2024,1952),(2064,1952),(2104,1952),
+                    (2004,2032),(2044,2032),(2084,2032)]:
+            unit(176,x,y,owner=11,resources=1500)
+        unit(64,640,1200); unit(64,800,1500)
+        unit(69,1024,1024)
+        unit(83,1056 if name == 'owner-mixed-loaded' else 1600,1024)
+        unit(66,1280,1500); unit(156,640,640)
+    elif name in ('owner-loaded', 'owner-pickup'):
+        # Near cargo acknowledges Load immediately; distant cargo leaves a
+        # native pickup moving when its passenger receives an emergency Move.
+        unit(69,1024,1024)
+        unit(83,1056 if name == 'owner-loaded' else 1600,1024)
     elif name=='worker-issuer':
         # An idle Probe and visible nearby Zergling isolate worker defense.
         unit(64,640,544)
@@ -163,6 +248,13 @@ def make_map(name):
         unit(64,640,544)
         unit(176,704,576,owner=11,hp=100,shields=0,resources=1500,
              valid_state=16,valid_relation=18,energy=0)
+    elif name in ('racebot-construction-resume','racebot-construction-timeout'):
+        unit(106,512,512) # Completed Terran Command Center
+        # The far walking builder permits a native hold before construction starts.
+        unit(7,640 if name=='racebot-construction-resume' else 2048,544)
+        # Legal supply demand makes the first macro pass build with that SCV.
+        for i in range(4): unit(0,800+16*i,720)
+        unit(131,3504,3504,owner=1)
     elif name in ('racebot-worker-defense','racebot-combat'):
         # RaceBot fixtures select Terran for player 0 and place a visible
         # Zergling close enough to the home CC to exercise defense issuers.
@@ -171,13 +263,26 @@ def make_map(name):
         unit(131,3504,3504,owner=1) # Zerg Hatchery
         unit(37,704,576,owner=1) # Visible Zergling threat
         if name=='racebot-combat':
-            for i in range(4): unit(0,800+16*i,544) # Terran Marines
+            # Outside automatic acquisition range, inside the bot's 384px defense range.
+            for i in range(4): unit(0,1024+16*i,544) # Terran Marines
+    elif name in ('build-task-pylons','build-task-cannons'):
+        # Two bases, two legal builders, and an older same-kind structure at
+        # each site. The remote builder arrives later, exposing independent
+        # lease release when the first structure appears.
+        unit(154,2048,528)
+        unit(64,640,544); unit(64,3072,688)
+        unit(156,640,512); unit(156,2176,512)
+        if name=='build-task-cannons':
+            unit(166,800,544) # Completed Forge prerequisite.
+            unit(162,608,608); unit(162,2144,608)
     elif name=='command-suppression':
         unit(65,800,800) # Zealot pursues the visible low-health Marine.
         unit(0,960,800,owner=1,hp=1)
     elif name=='observer-safety':
         unit(84,800,800) # BWAPI unit-type enum value for Protoss_Observer.
         unit(8,864,800,owner=1) # Terran Wraith supplies real air-weapon pressure.
+        # Observers are permanently cloaked; weapon pressure requires detection.
+        unit(9,992,800,owner=1) # Terran Science Vessel supplies real detection.
     elif name=='pylon-loss':
         unit(160,1008,1056)
         unit(164,928,992)
@@ -317,10 +422,58 @@ def make_map(name):
         tags[tag]=bytes([3])*(12*count)+bytes(12*count)+bytes([3])*count+levels+bytes([1])*(12*count)
     trigger=bytearray(2400); trigger[15]=22 # Always
     struct.pack_into('<IIIIIIHBBB3x', trigger, 320, 0,0,0,0,0,5000,2,26,7,0)
+    if name in ('depletion-ready','depletion-blocked','depletion-organic','depletion-pressure','depletion-live-unsafe'):
+        struct.pack_into('<I',trigger,340,500)
+    if name=='scout-mining-planner':struct.pack_into('<I',trigger,340,100)
     trigger[2372]=1
     tags[b'TRIG']=trigger
+    if name == 'observation-cancel':
+        # Action IDs/layout verified against BWAPI's native BW/Triggers.h.
+        # Preserve the template's 64-slot location table and named Anywhere.
+        # Replacing it with unnamed 255 slots caused a stock-engine startup
+        # access violation before the scenario module loaded.
+        locations=bytearray(tags[b'MRGN'])
+        width,height=struct.unpack('<HH', tags[b'DIM '])
+        anywhere=struct.unpack_from('<IIIIHH', locations, 63*20)
+        if anywhere != (0,0,width*32,height*32,3,0):
+            raise ValueError('Unexpected template Anywhere location')
+        struct.pack_into('<IIIIHH', locations, 0, 0,0,width*32,height*32,3,0)
+        struct.pack_into('<IIIIHH', locations, 20, 1584,528,1616,560,3,0)
+        tags[b'MRGN']=locations
+        pin=bytearray(2400);pin[15]=22;pin[2372]=1
+        struct.pack_into('<IIIIIIHBBB3x', pin, 320, 1,0,0,0,0,2,64,39,1,0)
+        struct.pack_into('<IIIIIIHBBB3x', pin, 352, 0,0,0,0,0,0,0,3,0,0)
+        tags[b'TRIG'] += pin
+    if name in ('depletion-ready','depletion-blocked'):
+        # Native trigger definitions/layout are bound to BWAPI BW/Triggers.h
+        # and TriggerEngine.h. Remove only the original owned mineral line
+        # after a 250-second preparation window; alternate minerals survive.
+        locations=bytearray(tags[b'MRGN'])
+        struct.pack_into('<IIIIHH', locations,0,3424,80,4096,848,3,0)
+        tags[b'MRGN']=locations
+        exhaustion=bytearray(2400)
+        struct.pack_into('<IIIHBBBBH',exhaustion,0,0,0,250,0,0,12,0,0,0)
+        for index,kind in enumerate((176,177,178)):
+            struct.pack_into('<IIIIIIHBBB3x',exhaustion,320+index*32,1,0,0,0,11,0,kind,25,0,0)
+        exhaustion[2372]=1
+        tags[b'TRIG'] += exhaustion
+    if name in ('depletion-pressure','depletion-live-unsafe'):
+        locations=bytearray(tags[b'MRGN'])
+        struct.pack_into('<IIIIHH',locations,20,3400,1360,3904,1680,3,0)
+        tags[b'MRGN']=locations
+        release=bytearray(2400)
+        struct.pack_into('<IIIHBBBBH',release,0,0,0,180 if name=='depletion-live-unsafe' else 90,0,0,12,0,0,0)
+        for index,kind in enumerate((162,156)):
+            struct.pack_into('<IIIIIIHBBB3x',release,320+index*32,2,0,0,0,1,0,kind,25,0,0)
+        release[2372]=1
+        tags[b'TRIG'] += release
     data=b''.join(tag+struct.pack('<I',len(value))+value for tag,value in tags.items())
-    path=OUT/'maps'/f'{name}.scx'; path.parent.mkdir(parents=True,exist_ok=True)
+    # Keep names within the longest stock-native qualified fixture filename.
+    # The 32-character timeout name failed; identical bytes under this alias passed.
+    filename='racebot-build-timeout.scx' if name=='racebot-construction-timeout' else f'{name}.scx'
+    if len(filename) > 31:
+        raise ValueError(f'Audit map filename exceeds the qualified 31-character range: {filename}')
+    path=OUT/'maps'/filename; path.parent.mkdir(parents=True,exist_ok=True)
     mpq_write(path,data,archive)
     result = {'map':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'template':str(source),'template_sha256':hashlib.sha256(source.read_bytes()).hexdigest()}
     return result
@@ -332,7 +485,7 @@ def runtime():
             if not (target/path.name).exists(): shutil.copy2(path,target/path.name)
     with zipfile.ZipFile(ROOT/'build/pvz-available-composition-20260926/reference-a/server/required/Required_BWAPI_440.zip') as z:
         z.extractall(target)
-    for suffix in ('mpc','spc'): shutil.copy2(target/f'characters/default.{suffix}',target/f'characters/AstraBot.{suffix}')
+    for suffix in ('mpc','spc'): shutil.copy2(target/f'characters/default.{suffix}',target/f'characters/Protodd.{suffix}')
     shutil.copytree(OUT/'maps',target/'maps/audit',dirs_exist_ok=True)
     (target/'bwapi-data/logs').mkdir(exist_ok=True)
     return target
@@ -346,6 +499,6 @@ if __name__=='__main__':
         raise ValueError('audit fixture output must stay under build/')
     OUT = output
     OUT.mkdir(parents=True,exist_ok=True)
-    receipt=[make_map(name) for name in ['storm-allies','storm-clear','producer','producer-pair','cannon-blocker','resource-overlap','build-cancel','worker-issuer','worker-local-defense','worker-mining','racebot-worker-defense','racebot-combat','command-suppression','observer-safety','pylon-loss','prerequisite','power-recovery','combat','combat-corpus','combat-corpus-elevation','unit-memory','footprint-native','dynamic-navigation','load','load-t118']]
+    receipt=[make_map(name) for name in ['storm-allies','storm-clear','producer','producer-pair','cannon-blocker','resource-overlap','build-cancel','observation-cancel','owner-loaded','owner-pickup','owner-mixed-loaded','owner-mixed-pickup','worker-issuer','worker-local-defense','worker-mining','racebot-worker-defense','racebot-combat','racebot-construction-resume','racebot-construction-timeout','build-task-pylons','build-task-cannons','command-suppression','observer-safety','pylon-loss','prerequisite','power-recovery','combat','combat-corpus','combat-corpus-elevation','unit-memory','footprint-native','dynamic-navigation','builder-admission','fragile-defense-retreat','scout-mining-planner','depletion-ready','depletion-blocked','depletion-organic','depletion-pressure','depletion-live-unsafe','load','load-t118']]
     (OUT/'map-receipt.json').write_text(json.dumps(receipt,indent=2))
     print(runtime())

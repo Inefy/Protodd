@@ -34,6 +34,105 @@ double remainingValue(const UnitSnapshot& target, const int damage) {
         static_cast<double>(target.durability() - damage) /
         static_cast<double>(target.maxHitPoints + target.maxShields);
 }
+
+UnitSnapshot corridorActor(UnitId id,bool ours,Position p){UnitSnapshot u;u.id=id;u.kind=UnitKind::dragoon;u.ours=ours;u.position=p;u.visible=u.detected=u.completed=u.powered=true;u.hitPoints=u.maxHitPoints=100;u.shields=u.maxShields=80;u.topSpeed=4;u.weaponCooldown=20;u.groundWeapon={20,30,0,192,DamageType::explosive,false,true};u.airWeapon={20,30,0,192,DamageType::explosive,true,false};return u;}
+bool corridorCrossesWeapon(Position from,Position to,const UnitSnapshot& weapon){const double dx=to.x-from.x,dy=to.y-from.y;const double length=dx*dx+dy*dy;const double t=length>0?std::clamp(((weapon.position.x-from.x)*dx+(weapon.position.y-from.y)*dy)/length,0.0,1.0):0;return std::hypot(from.x+t*dx-weapon.position.x,from.y+t*dy-weapon.position.y)<=weapon.groundWeapon.maxRange;}
+void retreatCorridorSafety(){
+ TacticalController controller;InfluenceMap influence;auto ours=corridorActor(1,true,{1024,720});auto foe=corridorActor(2,false,{1024,1024});const Position rally{1024,1280};const DefenseArea defense{rally,96,{-1,-1},{-1,-1}};
+ CombatEstimate retreat;retreat.decision=FightDecision::retreat;retreat.ratio=.7;
+ auto run=[&](const UnitSnapshot& unit,const std::span<const UnitSnapshot> enemies,const CombatEstimate& estimate,DefenseArea area=DefenseArea{}){return controller.control(std::array{unit},enemies,estimate,rally,rally,influence,unit.position,0,false,area);};
+ auto near=run(ours,std::array{foe},retreat);
+ check(near.size()==1 && near[0].source=="combat-retreat" && near[0].targetPosition.y<ours.position.y,"nearby live weapon forces an escape away from a forward rally");
+ auto after=ours;if(near.size()==1)after.position=near[0].targetPosition;
+ auto outside=run(after,std::array{foe},retreat);
+ check(outside.size()==1 && !corridorCrossesWeapon(after.position,outside[0].targetPosition,foe),"crossing the nearby-threat buffer must not retreat through the same visible weapon");
+ CombatEstimate kite;kite.decision=FightDecision::kite;kite.ratio=1.1;
+ near=run(ours,std::array{foe},kite,defense);
+ check(near.size()==1 && near[0].source=="combat-retreat" && near[0].targetPosition.y<ours.position.y,"healthy out-of-leash defender respects nearby visible fire");
+ after=ours;if(near.size()==1)after.position=near[0].targetPosition;
+ outside=run(after,std::array{foe},kite,defense);
+ check(outside.size()==1 && !corridorCrossesWeapon(after.position,outside[0].targetPosition,foe),"crossing the nearby-threat buffer must not return through the same visible weapon");
+ auto clear=run(after,{},kite,defense);
+ check(clear.size()==1 && clear[0].source=="defense-return" && clear[0].targetPosition==rally,"removing the weapon permits an ordinary defense return");
+ clear=run(after,{},retreat);
+ check(clear.size()==1 && clear[0].targetPosition==rally,"clear retreat uses its strategic rally");
+ auto incapable=foe;incapable.groundWeapon={};
+ clear=run(after,std::array{incapable},kite,defense);
+ check(clear.size()==1 && clear[0].source=="defense-return" && clear[0].targetPosition==rally,"air-only fire does not block a ground defender return");
+ auto disabled=foe;disabled.disabled=true;
+ clear=run(after,std::array{disabled},kite,defense);
+ check(clear.size()==1 && clear[0].source=="defense-return" && clear[0].targetPosition==rally,"disabled weapons do not block a current defender return");
+ for (const bool defending : {false,true}) {
+  auto moving=ours;const auto estimate=defending?kite:retreat;bool safe=true;
+  for(int i=0;i<48 && distance(moving.position,rally)>32;++i){
+   auto orders=run(moving,std::array{foe},estimate,defending?defense:DefenseArea{});
+   if(orders.size()!=1 || corridorCrossesWeapon(moving.position,orders[0].targetPosition,foe)){safe=false;break;}
+   moving.position=orders[0].targetPosition;
+  }
+  check(safe,"bounded corridor steering avoids current visible weapon coverage throughout the detour");
+  check(distance(moving.position,rally)<=32,"corridor steering reaches the strategic rally through a clear side");
+ }
+ auto body=ours;auto bodyFoe=foe;
+ body.dimensionLeft=body.dimensionRight=body.dimensionUp=body.dimensionDown=16;
+ bodyFoe.dimensionLeft=bodyFoe.dimensionRight=bodyFoe.dimensionUp=bodyFoe.dimensionDown=16;
+ const Position bodyRally{1024,1408};bool bodySafe=true;
+ for(int i=0;i<48 && distance(body.position,bodyRally)>32;++i){
+  auto orders=controller.control(std::array{body},std::array{bodyFoe},retreat,bodyRally,bodyRally,influence,body.position);
+  if(orders.size()!=1){bodySafe=false;break;}
+  const auto destination=orders[0].targetPosition;const auto count=std::max(1,static_cast<int>(std::ceil(distance(body.position,destination)/4)));
+  for(int sample=0;sample<=count;++sample){auto along=body;const auto fraction=static_cast<double>(sample)/count;along.position={static_cast<int>(std::lround(body.position.x+fraction*(destination.x-body.position.x))),static_cast<int>(std::lround(body.position.y+fraction*(destination.y-body.position.y)))};if(weaponDistance(along,bodyFoe)<=bodyFoe.groundWeapon.maxRange)bodySafe=false;}
+  body.position=destination;
+ }
+ check(bodySafe,"body-aware detour keeps swept native weapon distance outside the visible firing range");
+ check(distance(body.position,bodyRally)<=32,"body-aware corridor detour completes its strategic destination");
+ std::vector<TacticalMovementEvidence> evidence;
+ auto plain=controller.control(std::array{ours},std::array{foe},retreat,rally,rally,influence,ours.position,0,false,{},TacticalIntent::battle,{},nullptr,{},nullptr,true,{}, {},24);
+ auto observed=controller.control(std::array{ours},std::array{foe},retreat,rally,rally,influence,ours.position,0,false,{},TacticalIntent::battle,{},nullptr,{},nullptr,true,{}, {},24,&evidence);
+ check(plain.size()==observed.size() && plain.size()==1 && plain[0].type==observed[0].type && plain[0].targetPosition==observed[0].targetPosition && plain[0].source==observed[0].source,"passive movement evidence does not change current commands");
+ check(evidence.size()==1 && evidence[0].actor==ours.id && evidence[0].origin==ours.position && evidence[0].destination==observed[0].targetPosition && evidence[0].steering && evidence[0].corridorThreat==foe.id,"movement evidence binds current origin, current weapon and proposed destination");
+}
+
+void defenderEscapePrecedence() {
+    TacticalController controller;
+    InfluenceMap influence;
+    const DefenseArea defense{{1024,1280},96,{-1,-1},{-1,-1}};
+    auto wounded=unit(1,UnitKind::zealot,true,{1024,1024});
+    wounded.hitPoints=20;wounded.maxHitPoints=100;
+    wounded.shields=0;wounded.maxShields=60;
+    const std::array decisions{FightDecision::engage,FightDecision::retreat,FightDecision::engage};
+    for (std::size_t i=0;i<decisions.size();++i) {
+        CombatEstimate estimate;estimate.decision=decisions[i];estimate.ratio=i==1?0.5:2;
+        wounded.position.y=1024-static_cast<int>(i)*48;
+        const auto orders=controller.control(std::array{wounded},{},estimate,
+            defense.center,{1024,768},influence,wounded.position,0,false,defense,
+            TacticalIntent::battle,{},nullptr,{},nullptr,true,{}, {},24+24*i);
+        check(orders.size()==1 && orders[0].source=="combat-retreat" &&
+              orders[0].targetPosition.y<wounded.position.y,
+              "critically wounded defenders keep escaping through engage/retreat/engage changes");
+    }
+    auto healthy=wounded;
+    healthy.hitPoints=healthy.maxHitPoints;healthy.shields=healthy.maxShields;
+    healthy.position={1024,1024};
+    CombatEstimate engage;engage.decision=FightDecision::engage;engage.ratio=2;
+    auto orders=controller.control(std::array{healthy},{},engage,
+        defense.center,{1024,768},influence,healthy.position,0,false,defense);
+    check(orders.size()==1 && orders[0].source=="defense-return" &&
+          orders[0].targetPosition==defense.center,
+          "healthy out-of-leash defenders retain ordinary return authority");
+    auto compromised=healthy;compromised.kind=UnitKind::darkTemplar;
+    compromised.cloaked=true;compromised.recentlyDamaged=true;
+    orders=controller.control(std::array{compromised},{},engage,
+        defense.center,{1024,768},influence,compromised.position,0,false,defense);
+    check(orders.size()==1 && orders[0].source=="combat-retreat" &&
+          orders[0].targetPosition.y<compromised.position.y,
+          "compromised cloak escapes are not redirected into a defense return");
+    wounded.position={1024,1024};wounded.underStorm=true;
+    orders=controller.control(std::array{wounded},{},engage,
+        defense.center,{1024,768},influence,wounded.position,0,false,defense);
+    check(orders.size()==1 && orders[0].source=="storm-escape" && orders[0].priority>=109,
+          "critical-wound escape precedence preserves immediate storm evacuation");
+}
+
 void cadence() {
     check(engagementSimulationWithinBudget(0, 0) &&
           engagementSimulationWithinBudget(16, 12) &&
@@ -787,6 +886,283 @@ void dragoonFiringCycle() {
           "a stuck Dragoon retries after bounded suppression instead of flooding attack orders");
 }
 
+
+
+
+
+void rangedSupportProofControls() {
+    NavigationGrid grid(64,64,16,std::vector<std::uint8_t>(64*64,1));
+    auto ally=unit(100,UnitKind::zealot,true,{600,480});
+    ally.dimensionLeft=ally.dimensionRight=11;ally.dimensionUp=5;ally.dimensionDown=13;
+    ally.groundWeapon={16,22,0,15,DamageType::normal,false,true};
+    auto actor=unit(200,UnitKind::dragoon,true,{400,480});
+    actor.dimensionLeft=actor.dimensionUp=15;actor.dimensionRight=actor.dimensionDown=16;
+    actor.groundWeapon={20,30,0,192,DamageType::explosive,false,true};
+    auto target=unit(50,UnitKind::hydralisk,false,{800,480});
+    target.dimensionLeft=target.dimensionRight=target.dimensionUp=target.dimensionDown=16;
+    CombatEstimate engage;engage.decision=FightDecision::engage;engage.ratio=100;
+    InfluenceMap influence;TacticalController controller;
+    const auto run=[&](const NavigationGrid& nav,Frame frame){
+        return controller.control(std::array{actor},std::array{target},engage,target.position,
+            {200,480},influence,actor.position,0,false,{},TacticalIntent::battle,
+            std::array{ally},&nav,{},nullptr,true,{},target.position,frame);
+    };
+    const auto before=NavigationGrid::diagnosticsForCurrentThread();
+    const auto direct=run(grid,100);
+    const auto after=NavigationGrid::diagnosticsForCurrentThread();
+    check(direct.size()==1 && direct[0].source=="melee-support-hold" &&
+              after.searches==before.searches,
+          "a body-clear supporting melee route uses a direct proof without A-star");
+    grid.updateDynamicObstacle(1,{696,0,712,1023});
+    const auto blocked=run(grid,112);
+    check(blocked.size()==1 && blocked[0].source=="focus-fire",
+          "a former support proof cannot survive a new blocking obstacle next pass");
+    grid.removeDynamicObstacle(1);
+    const auto reopened=run(grid,124);
+    check(reopened.size()==1 && reopened[0].source=="melee-support-hold",
+          "an unproved support route is rechecked when geometry opens next pass");
+    auto cells=std::vector<std::uint8_t>(64*64,1);
+    for(int y=0;y<64;++y)if(y!=30)cells[y*64+43]=0;
+    NavigationGrid narrow(64,64,16,cells);
+    const auto pointRoute=narrow.lineWalkable(ally.position,target.position);
+    const auto bodyBlocked=run(narrow,136);
+    check(pointRoute && bodyBlocked.size()==1 && bodyBlocked[0].source=="focus-fire",
+          "point clearance through a narrow opening cannot credit a supporting Zealot body");
+}
+
+void rangedSupportRoutingWorkload() {
+    constexpr int side=512, cell=8;
+    std::vector<std::uint8_t> cells(side*side,1);
+    for(int y=0;y<side;++y)cells[y*side+229]=0;
+    NavigationGrid grid(side,side,cell,cells);
+    auto den=unit(18,UnitKind::hydraliskDen,false,{1904,3808});
+    den.hitPoints=den.maxHitPoints=850;den.topSpeed=0;
+    den.dimensionLeft=49;den.dimensionRight=48;den.dimensionUp=32;den.dimensionDown=31;
+    grid.updateDynamicObstacle(18,{1855,3776,1952,3839});
+    const std::array positions{Position{1695,3710},Position{1637,3719},Position{1713,3791},
+                              Position{1665,3739},Position{1708,3752},Position{1702,3733}};
+    std::vector<UnitSnapshot> melee;
+    for(std::size_t i=0;i<positions.size();++i){
+        auto ally=unit(static_cast<UnitId>(100+i),UnitKind::zealot,true,positions[i]);
+        ally.dimensionLeft=ally.dimensionRight=11;ally.dimensionUp=5;ally.dimensionDown=13;
+        ally.groundWeapon={16,22,0,15,DamageType::normal,false,true};melee.push_back(ally);
+    }
+    std::vector<UnitSnapshot> ranged;
+    for(int i=0;i<24;++i){
+        auto actor=unit(200+i,UnitKind::dragoon,true,{1480+(i%4)*4,3730+(i/4)*4});
+        actor.dimensionLeft=actor.dimensionUp=15;actor.dimensionRight=actor.dimensionDown=16;
+        actor.groundWeapon={20,30,0,192,DamageType::explosive,false,true};ranged.push_back(actor);
+    }
+    CombatEstimate estimate;estimate.decision=FightDecision::engage;estimate.ratio=100;
+    InfluenceMap influence;const auto before=NavigationGrid::diagnosticsForCurrentThread();
+    const auto start=std::chrono::steady_clock::now();
+    TacticalController profiledController;
+    const auto commands=profiledController.control(ranged,std::array{den},estimate,den.position,
+        {1976,556},influence,{1312,3588},0,false,{},TacticalIntent::battle,melee,&grid,{},
+        nullptr,true,{},den.position,22188);
+    const auto after=NavigationGrid::diagnosticsForCurrentThread();
+    const auto costs=profiledController.lastControlCost();
+    check(costs.targetSelections==ranged.size() && costs.supportCalls==144 &&
+              costs.supportCacheHits==138 && costs.pathSearches==after.searches-before.searches &&
+              costs.expandedNodes==after.totalExpansions-before.totalExpansions,
+          "tactical cost telemetry counts real support reuse and navigation work");
+    check(costs.totalUs>=costs.targetSelectionUs+costs.contactUs+costs.supportUs,
+          "exclusive tactical cost regions fit inside the total measured control pass");
+    profiledController.reset();
+    check(profiledController.lastControlCost().totalUs==0 &&
+              profiledController.lastControlCost().supportCalls==0,
+          "reset clears prior tactical profiling state");
+    std::cout<<"SUPPORT_WORK,searches="<<after.searches-before.searches
+             <<",expanded="<<after.totalExpansions-before.totalExpansions
+             <<",ms="<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()
+             <<",orders="<<commands.size()<<'\n';
+    check(after.searches-before.searches<=melee.size() &&
+              after.totalExpansions-before.totalExpansions<=melee.size()*2048,
+          "ranged units reuse each bounded ally-target support query within a pass");
+    check(commands.size()==ranged.size() && std::ranges::all_of(commands,[](const Command& command){
+              return command.source=="focus-fire" && command.type==CommandType::attackUnit && command.targetUnit==18;
+          }),"inconclusive support queries preserve every ranged attack command");
+    std::cout<<"SUPPORT_COMMANDS,";
+    for(const auto& command:commands)std::cout<<command.actor<<':'<<command.source<<':'
+        <<static_cast<int>(command.type)<<':'<<command.targetUnit<<';';
+    std::cout<<'\n';
+}
+
+void sharedContactCandidateControls() {
+    constexpr int side=10, cell=16;
+    std::vector<std::uint8_t> cells(side*side,1);
+    for (int y=0;y<side-1;++y) cells[y*side+5]=0;
+    NavigationGrid detour(side,side,cell,cells);
+    const Position origin{40,24}, across{120,24}, sameSide{40,120};
+    std::array goals{NavigationCandidate{across,0},NavigationCandidate{sameSide,150}};
+    const auto before=NavigationGrid::diagnosticsForCurrentThread();
+    const auto selected=detour.bestReachableCandidate(origin,goals,4096);
+    const auto after=NavigationGrid::diagnosticsForCurrentThread();
+    check(selected.target==sameSide && selected.status==NavigationStatus::reached &&
+              !selected.searchBudgetExhausted && after.searches-before.searches==1,
+          "one shared tree respects detour distance and each candidate's crowding penalty");
+    goals[1].penalty=500;
+    const auto cheaperDetour=detour.bestReachableCandidate(origin,goals,4096);
+    check(cheaperDetour.target==across && !cheaperDetour.searchBudgetExhausted &&
+              detour.findPath(origin,cheaperDetour.target,4096).reached(),
+          "a reachable detour remains available when a direct slot is too crowded");
+    const auto denied=detour.bestReachableCandidate(origin,std::array{goals[0]},0);
+    const auto partial=detour.bestReachableCandidate(origin,std::array{goals[0]},1);
+    check(!denied.target.valid() && denied.searchBudgetExhausted && denied.expandedNodes==0 &&
+              !partial.target.valid() && partial.searchBudgetExhausted && partial.expandedNodes==1,
+          "denied and incomplete shared searches grant no candidate reachability");
+    const auto direct=detour.bestReachableCandidate(origin,std::array{NavigationCandidate{sameSide,0}},0);
+    check(direct.target==sameSide && direct.expandedNodes==0 && !direct.searchBudgetExhausted,
+          "body-clear straight contact routes need no search allowance");
+    const auto knownFallback=detour.bestReachableCandidate(origin,goals,0);
+    check(knownFallback.target==sameSide && knownFallback.searchBudgetExhausted,
+          "an already proved direct slot can survive an unresolved better alternative");
+    auto occupied=detour;
+    occupied.updateDynamicObstacle(1,{32,112,48,128});
+    const auto blocked=occupied.bestReachableCandidate(origin,goals,0);
+    check(!blocked.target.valid(),"dynamic slot occupancy cannot reuse a formerly clear candidate");
+    check(!detour.bestReachableCandidate(origin,std::array{NavigationCandidate{{88,24},0}},4096).target.valid(),
+          "a blocked endpoint cannot be credited through a nearby snapped goal");
+    NavigationGrid corners(2,2,16,{1,0,0,1});
+    const auto diagonal=corners.bestReachableCandidate({8,8},std::array{NavigationCandidate{{24,24},0}},4096);
+    check(!diagonal.target.valid() && diagonal.status==NavigationStatus::unreachable &&
+              !diagonal.searchBudgetExhausted,
+          "a fully exhausted shared search rejects a diagonal cut through blocked corners");
+    std::vector<std::uint8_t> gapCells(16*16,1);
+    for(int y=0;y<16;++y) if(y!=7)gapCells[y*16+8]=0;
+    NavigationGrid narrow(16,16,8,gapCells);
+    const std::array narrowGoal{NavigationCandidate{{100,60},0}};
+    const auto point=narrow.bestReachableCandidate({20,60},narrowGoal,4096);
+    const auto body=narrow.bestReachableCandidate({20,60},narrowGoal,4096,{11,11,5,13});
+    check(point.target.valid() && !body.target.valid() && !body.searchBudgetExhausted,
+          "a point-sized gap never proves an asymmetric Zealot body can pass");
+    NavigationGrid open(10,10,16,std::vector<std::uint8_t>(100,1));
+    const auto tied=open.bestReachableCandidate({24,24},std::array{
+        NavigationCandidate{{24,120},0},NavigationCandidate{{120,24},0}},4096);
+    check(tied.target==Position{120,24},"equal contact scores retain deterministic row-column tie breaking");
+    check(!open.bestReachableCandidate({24,24},std::array{
+              NavigationCandidate{{120,24},-1},
+              NavigationCandidate{{24,120},std::numeric_limits<double>::quiet_NaN()}},4096).target.valid(),
+          "invalid candidate costs cannot enter contact selection");
+}
+
+void candidateWorkspaceReuseControls() {
+    // Independent exhaustive Dijkstra oracle: no shared candidate heap/state.
+    // Alternate map sizes, footprints and dynamic revisions between queries.
+    std::uint32_t random = 0x322c0deU;
+    const auto next = [&random] { random = random * 1664525U + 1013904223U; return random; };
+    for (int trial = 0; trial < 48; ++trial) {
+        const auto side = 12 + trial % 5;
+        constexpr int cell = 8;
+        std::vector<std::uint8_t> terrain(side * side, 1);
+        for (auto& value : terrain) value = next() % 7U != 0U;
+        const Position origin{12,12};
+        terrain[side+1] = 1;
+        NavigationGrid grid(side,side,cell,terrain);
+        const MovementFootprint footprint = trial % 2 ? MovementFootprint{2,3,1,2} : MovementFootprint{};
+        std::array<NavigationCandidate,5> goals;
+        for (std::size_t i=0;i<goals.size();++i) goals[i] = {
+            {static_cast<int>(next() % (side-2) + 1)*cell+cell/2,
+             static_cast<int>(next() % (side-2) + 1)*cell+cell/2},
+            static_cast<double>(i*17 + next()%31U)};
+        for (int revision=0;revision<3;++revision) {
+            if (revision==1) grid.updateDynamicObstacle(99,{side*4,8,side*4+7,side*8-9});
+            if (revision==2) grid.removeDynamicObstacle(99);
+            std::vector<double> costs(side*side,std::numeric_limits<double>::infinity());
+            std::vector<bool> visited(side*side,false);
+            costs[side+1]=0;
+            for (int iteration=0;iteration<side*side;++iteration) {
+                int current=-1;
+                for (int n=0;n<side*side;++n) if (!visited[n] &&
+                    (current<0 || costs[n]<costs[current])) current=n;
+                if (current<0 || !std::isfinite(costs[current])) break;
+                visited[current]=true;
+                const auto x=current%side,y=current/side;
+                for(int dy=-1;dy<=1;++dy) for(int dx=-1;dx<=1;++dx) {
+                    if(dx==0 && dy==0) continue;
+                    const auto nx=x+dx,ny=y+dy;
+                    if(nx<0 || ny<0 || nx>=side || ny>=side ||
+                        !grid.walkable({nx*cell+cell/2,ny*cell+cell/2},footprint)) continue;
+                    if(dx!=0 && dy!=0 && (!grid.walkable({nx*cell+cell/2,y*cell+cell/2},footprint) ||
+                        !grid.walkable({x*cell+cell/2,ny*cell+cell/2},footprint))) continue;
+                    const auto step=(dx!=0 && dy!=0 ? std::sqrt(2.0) : 1.0)*cell;
+                    costs[ny*side+nx]=std::min(costs[ny*side+nx],costs[current]+step);
+                }
+            }
+            Position expected{-1,-1}; double score=std::numeric_limits<double>::infinity();
+            for(const auto& goal:goals) {
+                if(!grid.walkable(goal.position,footprint)) continue;
+                const auto route=grid.lineWalkable(origin,goal.position,footprint)
+                    ? distance(origin,goal.position)
+                    : costs[(goal.position.y/cell)*side+goal.position.x/cell];
+                const auto candidateScore=route+goal.penalty;
+                if(!std::isfinite(candidateScore)) continue;
+                if(candidateScore<score || (candidateScore==score &&
+                    (goal.position.y<expected.y || (goal.position.y==expected.y && goal.position.x<expected.x)))) {
+                    expected=goal.position;score=candidateScore;
+                }
+            }
+            const auto actual=grid.bestReachableCandidate(origin,goals,4096,footprint);
+            check(actual.target==expected && !actual.searchBudgetExhausted &&
+                  (!expected.valid() || std::abs(actual.score-score)<1e-8),
+                  "reused indexed candidate search matches exhaustive weighted route oracle");
+            // Interleave a normal search, which shares the generation and heap.
+            (void)grid.findPath(origin,{(side-2)*cell+4,(side-2)*cell+4},24,footprint);
+            check(NavigationGrid::diagnosticsForCurrentThread().searchWorkspaceBytes <=
+                  NavigationGrid::maximumSearchWorkspaceBytes,
+                  "candidate scratch storage stays within the documented per-thread cap");
+        }
+    }
+}
+
+void contactRoutingWorkload() {
+    constexpr int side = 512, cell = 8;
+    std::vector<std::uint8_t> cells(side * side, 1);
+    for (int y = 0; y < side; ++y) cells[y * side + 229] = 0;
+    NavigationGrid grid(side, side, cell, cells);
+    auto den = unit(18, UnitKind::hydraliskDen, false, {1904,3808});
+    den.hitPoints = den.maxHitPoints = 850;
+    den.firstSeen = 28388;
+    den.dimensionLeft = 49; den.dimensionRight = 48;
+    den.dimensionUp = 32; den.dimensionDown = 31;
+    den.topSpeed = 0;
+    grid.updateDynamicObstacle(18, {1855,3776,1952,3839});
+    const std::array positions{Position{1695,3710},Position{1637,3719},Position{1713,3791},
+                               Position{1665,3739},Position{1708,3752},Position{1702,3733}};
+    const std::array<UnitId,6> actorIds{357,362,381,389,401,402};
+    std::vector<UnitSnapshot> actors;
+    for (std::size_t i = 0; i < positions.size(); ++i) {
+        auto actor = unit(actorIds[i], UnitKind::zealot, true, positions[i]);
+        actor.dimensionLeft = actor.dimensionRight = 11;
+        actor.dimensionUp = 5; actor.dimensionDown = 13;
+        actor.groundWeapon = {16,22,0,15,DamageType::normal,false,true};
+        actor.topSpeed = 3.15;
+        actors.push_back(actor);
+    }
+    CombatEstimate estimate; estimate.decision = FightDecision::engage; estimate.ratio = 100;
+    InfluenceMap influence;
+    const auto before = NavigationGrid::diagnosticsForCurrentThread();
+    const auto started = std::chrono::steady_clock::now();
+    const auto orders = TacticalController{}.control(actors,std::array{den},estimate,den.position,
+        {1976,556},influence,{1312,3588},0,false,{},TacticalIntent::battle,{},&grid,{},
+        nullptr,true,{},den.position,28560);
+    const auto after = NavigationGrid::diagnosticsForCurrentThread();
+    const auto elapsed = std::chrono::duration<double,std::milli>(
+        std::chrono::steady_clock::now()-started).count();
+    std::cout << "CONTACT_WORK,searches=" << after.searches-before.searches
+              << ",expanded=" << after.totalExpansions-before.totalExpansions
+              << ",ms=" << elapsed << ",orders=" << orders.size() << '\n';
+    check(after.searches-before.searches <= actors.size() &&
+              after.totalExpansions-before.totalExpansions <= actors.size()*4096,
+          "each contact actor shares one bounded search across its legal slots");
+    check(orders.size()==actors.size() && std::ranges::all_of(orders, [](const Command& order) {
+              return order.type==CommandType::hold && order.source=="melee-contact-wait";
+          }), "unproved contacts across a closed wall remain waiting");
+    for (const auto& order : orders)
+        std::cout << "CONTACT_ORDER," << order.actor << ',' << order.source << ','
+                  << order.targetPosition.x << ',' << order.targetPosition.y << '\n';
+}
+
 void zealotContactCoordination() {
     constexpr int width = 40;
     constexpr int height = 30;
@@ -1094,6 +1470,360 @@ void differentialEngineCaseSweeps() {
         baseline = slowerEnemy;
     }
 }
+UnitSnapshot screenActor(UnitId id,Position p){UnitSnapshot u;u.id=id;u.kind=UnitKind::dragoon;u.ours=u.visible=u.detected=u.completed=u.powered=true;u.firstSeen=0;u.position=p;u.hitPoints=u.maxHitPoints=100;u.shields=u.maxShields=80;u.topSpeed=4;u.weaponCooldown=20;u.groundWeapon={20,30,0,192,DamageType::explosive,false,true};u.airWeapon={20,30,0,192,DamageType::explosive,true,false};u.dimensionLeft=u.dimensionRight=u.dimensionUp=u.dimensionDown=16;return u;}
+
+void defenseScreenInteriorControls() {
+
+ const Position center{1024,1024},rally{1280,1280};const DefenseArea defense{center,192,{-1,-1},{-1,-1}};CombatEstimate engage;engage.decision=FightDecision::engage;engage.ratio=2;InfluenceMap influence;TacticalController controller;
+ std::vector<UnitSnapshot> group;for(int id=1;id<=32;++id)group.push_back(screenActor(id,center));
+ auto run=[&](Frame f){return controller.control(group,{},engage,center,rally,influence,center,0,false,defense,TacticalIntent::battle,{},nullptr,{},nullptr,true,{},center,f);};
+ auto commands=run(0);Command selected;bool found=false;double radius=-1;
+ for(const auto& c:commands)if(c.source=="defense-screen"){const auto r=distanceSquared(c.targetPosition,center);if(r>radius){radius=r;selected=c;found=true;}}
+ check(found,"dense screen assigns at least one forward staging destination");
+ check(!found || defense.contains(selected.targetPosition),"the nominal staging destination remains in the defensive area");
+ int nearReturn=0,nearStable=0;
+ if(found){auto& unit=group[selected.actor-1];const auto goal=selected.targetPosition;const auto dx=goal.x-center.x,dy=goal.y-center.y;const auto length=std::hypot(double(dx),double(dy));
+  for(int cycle=0;cycle<3;++cycle){unit.position={goal.x+int(std::lround(dx/length*5)),goal.y+int(std::lround(dy/length*5))};auto next=run(6+cycle*12);
+   for(const auto& c:next)if(c.actor==selected.actor){nearReturn+=c.source=="defense-return";nearStable+=c.source=="defense-hold" || (c.source=="defense-screen" && c.targetPosition==goal);}
+   unit.position=center;run(12+cycle*12);
+  }
+ }
+ check(!found || (nearReturn==0 && nearStable==3),"small native staging overshoot must not alternate the defender back to the center");
+ check(!found || radius<=160.0*160.0,"assigned staging destination leaves at least32pixels of boundary clearance");
+ TacticalController lone;auto outside=screenActor(100,{1024,600});auto result=lone.control(std::array{outside},{},engage,center,rally,influence,center,0,false,defense);
+ check(result.size()==1 && result[0].source=="defense-return" && result[0].targetPosition==center,"a genuinely escaped healthy defender still returns to the defensive area");
+ outside.hitPoints=25;outside.shields=0;result=lone.control(std::array{outside},{},engage,center,rally,influence,center,0,false,defense);
+ check(result.size()==1 && result[0].source!="defense-return","a critical wound retains its escape obligation before ordinary return");
+ }
+
+void blockedExpansionScreenAnchor() {
+    const Position assembly{3708,1138}, expansion{3680,1328};
+    const DefenseArea defense{assembly,448,expansion};
+    NavigationGrid navigation(512,448,8,std::vector<std::uint8_t>(512*448,1));
+    navigation.updateDynamicObstacle(48,{3616,1120,3743,1183});
+    navigation.updateDynamicObstacle(232,{3616,1280,3743,1375});
+    std::vector<UnitSnapshot> army;
+    for(int id=1;id<=9;++id) army.push_back(screenActor(id,{3808+(id%3)*16,892-(id/3)*16}));
+    CombatEstimate engage;engage.decision=FightDecision::engage;engage.ratio=2;
+    InfluenceMap influence;TacticalController controller;
+    std::vector<TacticalMovementEvidence> evidence;
+    auto run=[&](Frame frame,const NavigationGrid* nav) {
+        evidence.clear();
+        return controller.control(army,{},engage,assembly,{3731,586},influence,assembly,0,false,
+            defense,TacticalIntent::battle,{},nav,{},nullptr,true,{},assembly,frame,&evidence);
+    };
+    const auto commands=run(9696,&navigation);
+    check(!navigation.walkable(assembly),"fixture expansion assembly lies inside the neutral geyser");
+    check(evidence.size()==army.size() && std::ranges::all_of(evidence,[](const auto& e){return e.screenSlotAssigned;}),
+          "blocked expansion assembly still assigns each defender a usable screen slot");
+    check(std::ranges::any_of(commands,[](const Command& c){return c.type==CommandType::move && c.targetPosition.y>950;}),
+          "uncontested expansion cover advances instead of holding behind its blocked anchor");
+    check(std::ranges::all_of(evidence,[&](const auto& e){return !e.screenSlotAssigned ||
+        (e.screenSlotInterior && defense.contains(e.assignedScreen) &&
+         navigation.walkable(e.assignedScreen,{16,16,16,16}));}),
+          "relocated screen retains unit clearance and the current defensive boundary");
+    const auto first=evidence;run(9708,&navigation);
+    check(first.size()==evidence.size() && std::equal(first.begin(),first.end(),evidence.begin(),
+        [](const auto& a,const auto& b){return a.actor==b.actor && a.assignedScreen==b.assignedScreen;}),
+          "repeated blocked-anchor observations keep stable screen assignments");
+    NavigationGrid sealed(512,448,8,std::vector<std::uint8_t>(512*448,0));
+    const auto unavailable=run(9720,&sealed);
+    check(std::ranges::all_of(evidence,[](const auto& e){return !e.screenSlotAssigned;}) &&
+          std::ranges::all_of(unavailable,[](const Command& c){return c.type==CommandType::hold;}),
+          "an entirely blocked screen does not invent an unsafe movement destination");
+}
+
+void defenseScreenBoundaryGuards() {
+ const Position center{1024,1024}, rally{1280,1280};
+ const DefenseArea ring{center,192,{-1,-1},{-1,-1}};
+ CombatEstimate engage;engage.decision=FightDecision::engage;engage.ratio=2;
+ InfluenceMap influence;std::vector<UnitSnapshot> group;for(int id=1;id<=32;++id)group.push_back(screenActor(id,center));
+ TacticalController controller;
+ auto run=[&](TacticalController& c, const DefenseArea area, Frame f, std::vector<TacticalMovementEvidence>* evidence=nullptr,
+              std::span<const UnitSnapshot> obstacles={}) {
+  return c.control(group,{},engage,center,rally,influence,center,0,false,area,TacticalIntent::battle,{},nullptr,obstacles,nullptr,true,{},center,f,evidence);
+ };
+ auto plain=controller;auto recorded=controller;std::vector<TacticalMovementEvidence> evidence;
+ const auto a=run(plain,ring,0);const auto b=run(recorded,ring,0,&evidence);
+ check(a.size()==b.size() && std::equal(a.begin(),a.end(),b.begin(),[](const Command& x,const Command& y){return x.actor==y.actor && x.type==y.type && x.targetPosition==y.targetPosition && x.source==y.source;}),
+       "boundary telemetry preserves the complete tactical command vector");
+ check(evidence.size()==group.size(),"screen and hold proposals are logged independently of acceptance");
+ check(std::ranges::all_of(evidence,[](const auto& x){return x.defenseRadius==192 && x.economyCenter==Position{-1,-1} && x.defenseFront==Position{-1,-1} && x.dimensionLeft==16 && x.dimensionRight==16 && x.dimensionUp==16 && x.dimensionDown==16 && std::abs(x.screenClearance-(32+std::hypot(16.0,16.0)))<1e-9;}),
+       "boundary proposal retains current ring and body inputs");
+ check(std::ranges::all_of(evidence,[](const auto& x){return x.source!="defense-hold" || x.proposedCommand==CommandType::hold;}),
+       "hold proposal evidence records its actual command kind");
+ check(std::ranges::any_of(evidence,[](const auto& x){return !x.screenSlotAssigned && x.source=="defense-hold";}),
+       "a full interior screen records an unassigned hold without inventing a reserved slot");
+ controller=recorded;
+ auto smaller=ring;smaller.pursuitRadius=112;evidence.clear();run(controller,smaller,24,&evidence);
+ check(std::ranges::all_of(evidence,[center](const auto& x){return !x.screenSlotAssigned || distance(center,x.assignedScreen)+32+std::hypot(16.0,16.0)<=112;}),
+       "shrinking the current ring releases old exterior screen preferences");
+ auto plane=ring;plane.pursuitRadius=320;plane.front={1024,960};evidence.clear();run(controller,plane,48,&evidence);
+ check(std::ranges::all_of(evidence,[](const auto& x){return !x.screenSlotAssigned || x.assignedScreen.y-960>=32+std::hypot(16.0,16.0);}),
+       "forward terrain plane keeps unit-body and arrival clearance");
+ plane.front={1024,1020};evidence.clear();run(controller,plane,72,&evidence);
+ check(std::ranges::all_of(evidence,[](const auto& x){return !x.screenSlotAssigned || x.assignedScreen.y-1020>=32+std::hypot(16.0,16.0);}),
+       "a moved forward plane invalidates the prior nominally contained slot");
+ group[0].dimensionLeft=group[0].dimensionRight=group[0].dimensionUp=group[0].dimensionDown=80;evidence.clear();run(controller,ring,96,&evidence);
+ const auto large=std::ranges::find(evidence,1,&TacticalMovementEvidence::actor);
+ check(large!=evidence.end() && (!large->screenSlotAssigned || distance(center,large->assignedScreen)+32+std::hypot(80.0,80.0)<=192),
+       "large current bodies revalidate retained screen clearance");
+ group[0].dimensionLeft=group[0].dimensionRight=group[0].dimensionUp=group[0].dimensionDown=16;
+ TacticalController blocked;std::vector<TacticalMovementEvidence> old;evidence.clear();run(blocked,ring,0,&old);
+ const auto far=std::ranges::find_if(old,[](const auto& x){return x.screenSlotAssigned && distanceSquared(x.assignedScreen,Position{1024,1024})>=128*128;});
+ auto building=screenActor(1000,far==old.end()?Position{1152,1024}:far->assignedScreen);building.kind=UnitKind::pylon;
+ run(blocked,ring,6,&evidence,std::array{building});
+ check(std::ranges::all_of(evidence,[building](const auto& x){return !x.screenSlotAssigned || std::abs(x.assignedScreen.x-building.position.x)>48 || std::abs(x.assignedScreen.y-building.position.y)>48;}),
+       "current building obstruction releases a retained screen slot");
+ TacticalController frameless;evidence.clear();run(frameless,ring,-1,&evidence);
+ check(std::ranges::all_of(evidence,[center](const auto& x){return !x.screenSlotAssigned || distance(center,x.assignedScreen)+32+std::hypot(16.0,16.0)<=192;}),
+       "frameless controller callers also keep interior screen destinations");
+ group.clear();for(int id=1;id<=600;++id)group.push_back(screenActor(id,center));TacticalController bounded;evidence.clear();run(bounded,ring,0,&evidence);
+ check(evidence.size()==512,"screen proposal evidence remains bounded at512 rows per call");
+ check(bounded.screenPreferenceCount()<=TacticalController::maximumScreenPreferences,"dense screen preference storage remains bounded");
+ bounded.forgetUnit(1);group={screenActor(1,center)};group[0].firstSeen=100;evidence.clear();run(bounded,ring,100,&evidence);
+ check(evidence.size()==1 && evidence[0].firstSeen==100,"forgotten actor proposal evidence uses the new observed lifetime");
+}
+
+
+void defensiveMeleeContactBodyControls() {
+    auto makeZealot = [](UnitId id, bool ours, Position p) {
+        UnitSnapshot u;
+        u.id=id; u.kind=UnitKind::zealot; u.role=UnitRole::groundArmy;
+        u.ours=ours; u.position=p; u.completed=u.powered=u.visible=u.detected=true;
+        u.hitPoints=u.maxHitPoints=100; u.shields=u.maxShields=60;
+        u.firstSeen=id==258?10915:1; u.lastSeen=12396; u.topSpeed=4;
+        u.dimensionLeft=u.dimensionRight=11; u.dimensionUp=5; u.dimensionDown=13;
+        u.groundWeapon={8,22,0,15,DamageType::normal,false,true}; return u;
+    };
+    auto bodyInside = [](const UnitSnapshot& u, const DefenseArea& d, Position p) {
+        for(auto x:{p.x-u.dimensionLeft,p.x+u.dimensionRight})
+            for(auto y:{p.y-u.dimensionUp,p.y+u.dimensionDown})
+                if(!d.contains({x,y})) return false;
+        return true;
+    };
+    // This dependent check also lets the unchanged supplement run against the frozen header.
+    auto targetMatches = []<class E>(const E& e, const UnitSnapshot& target) {
+        if constexpr(requires { e.selectedTarget; e.selectedTargetFirstSeen; e.selectedTargetPosition; })
+            return e.selectedTarget==target.id && e.selectedTargetFirstSeen==target.firstSeen &&
+                   e.selectedTargetPosition==target.position;
+        else return false;
+    };
+    NavigationGrid nav(512,512,8,std::vector<std::uint8_t>(512*512,1)); InfluenceMap influence;
+    auto actor=makeZealot(258,true,{3485,745}); auto target=makeZealot(165,false,{3470,849});
+    std::vector<UnitSnapshot> support{actor,makeZealot(150,true,{3470,816})};
+    DefenseArea defense{{3552,608},256,{3808,464},{-1,-1}};
+    std::vector<UnitSnapshot> obstacles;
+    auto run = [&](TacticalController& controller, std::vector<TacticalMovementEvidence>* evidence) {
+        CombatEstimate estimate; estimate.decision=FightDecision::engage; estimate.ratio=1.6;
+        estimate.holdScreen=defense.active();
+        return controller.control(std::array{actor},std::array{target},estimate,{3402,962},{3731,586},
+            influence,{3485,679},0,false,defense,TacticalIntent::battle,support,&nav,obstacles,nullptr,true,
+            {},{3402,962},12396,evidence);
+    };
+    auto examine = [&](std::string_view label) {
+        TacticalController recorded, silent; std::vector<TacticalMovementEvidence> evidence;
+        auto commands=run(recorded,&evidence); const auto without=run(silent,nullptr);
+        check(commands==without,"melee proposal telemetry preserves the complete command vector");
+        check(commands.size()==1 && (commands[0].source=="melee-contact" || commands[0].source=="melee-contact-wait"),label);
+        check(commands.size()==1 && (commands[0].type==CommandType::hold || bodyInside(actor,defense,commands[0].targetPosition)),
+              "defensive melee contact keeps every current body corner within radius and front");
+        check(evidence.size()==1,"contact move or wait emits one raw movement proposal");
+        check(evidence.size()==1 && commands.size()==1 && evidence[0].source==commands[0].source &&
+              evidence[0].proposedCommand==commands[0].type && evidence[0].actor==actor.id &&
+              evidence[0].firstSeen==actor.firstSeen && evidence[0].frame==12396 &&
+              evidence[0].origin==actor.position && evidence[0].destination==
+                  (commands[0].type==CommandType::hold?actor.position:commands[0].targetPosition),
+              "contact telemetry binds actual command, actor lifetime, origin, and destination");
+        check(evidence.size()==1 && targetMatches(evidence[0],target),
+              "contact telemetry binds the selected target lifetime and current position");
+        check(evidence.size()==1 && evidence[0].defenseCenter==defense.center &&
+              evidence[0].defenseRadius==defense.pursuitRadius && evidence[0].defenseFront==defense.front &&
+              evidence[0].economyCenter==defense.economyCenter && evidence[0].dimensionLeft==11 &&
+              evidence[0].dimensionRight==11 && evidence[0].dimensionUp==5 && evidence[0].dimensionDown==13,
+              "contact proposal preserves exact defensive area and asymmetric body dimensions");
+    };
+    examine("radial boundary uses the real melee contact branch");
+    actor.position={3504,740}; target.position={3504,797};
+    support={actor,makeZealot(150,true,{3504,764})}; defense.front={3552,800};
+    examine("forward plane uses the real melee contact branch");
+    // Occupied slots must hold rather than manufacture a clipped, unreachable contact.
+    auto blocker=makeZealot(1000,true,target.position); blocker.kind=UnitKind::pylon;
+    blocker.dimensionLeft=blocker.dimensionRight=blocker.dimensionUp=blocker.dimensionDown=80;
+    blocker.groundWeapon={}; obstacles={blocker}; support={actor}; TacticalController blocked;
+    std::vector<TacticalMovementEvidence> waiting; auto held=run(blocked,&waiting);
+    check(held.size()==1 && held[0].type==CommandType::hold && held[0].source=="melee-contact-wait",
+          "blocked defensive contacts retain the legal wait fallback");
+    check(waiting.size()==1 && targetMatches(waiting[0],target) && waiting[0].destination==actor.position,
+          "blocked contact wait records the actual selected target without a fictitious move");
+    std::vector<TacticalMovementEvidence> capped(512); TacticalController capT, capSilent;
+    check(run(capT,&capped)==run(capSilent,nullptr) && capped.size()==512,
+          "full proposal evidence remains bounded and cannot change contact commands");
+    blocked.forgetUnit(actor.id); actor.firstSeen=20000; target.firstSeen=20001;
+    waiting.clear(); run(blocked,&waiting);
+    check(waiting.size()==1 && waiting[0].firstSeen==20000 && targetMatches(waiting[0],target),
+          "recycled actor and target IDs use their newly observed lifetimes");
+    obstacles.clear(); support={actor}; target.position={actor.position.x+20,actor.position.y};
+    TacticalController ready; std::vector<TacticalMovementEvidence> readyEvidence; auto attack=run(ready,&readyEvidence);
+    check(attack.size()==1 && attack[0].type==CommandType::attackUnit && readyEvidence.empty(),
+          "a ready melee attack is not mislabeled as a movement proposal");
+    target.position={3470,849}; actor.position={3485,745}; support={actor,makeZealot(150,true,{3470,816})};
+    defense={}; TacticalController released; std::vector<TacticalMovementEvidence> freeEvidence;
+    auto free=run(released,&freeEvidence);
+    check(free.size()==1 && free[0].type==CommandType::move && free[0].source=="melee-contact",
+          "unbounded army contact pursuit is preserved");
+    check(freeEvidence.size()==1 && targetMatches(freeEvidence[0],target),
+          "unbounded contact records its actual selected target too");
+    defense={{3552,608},256,{3808,464},{-1,-1}};
+    actor.kind=UnitKind::darkTemplar; actor.cloaked=true; TacticalController covert;
+    auto covertCommands=run(covert,nullptr);
+    check(covertCommands.size()==1 && covertCommands[0].type==CommandType::move &&
+          covertCommands[0].source=="melee-contact",
+          "undetected covert advance preserves existing pursuit authority");
+}
+
+
+void healthyReturnTerrainPrefixControls() {
+    const Position origin{1024,1056}, rally{1024,2048}, home{1024,512};
+    const DefenseArea area{rally,192,{2048,256},{-1,-1}};
+    const MovementFootprint body{11,11,5,13};
+    auto actor=unit(150,UnitKind::zealot,true,origin);
+    actor.firstSeen=1; actor.lastSeen=100; actor.weaponCooldown=0;
+    actor.hitPoints=actor.maxHitPoints=100; actor.shields=actor.maxShields=60;
+    actor.dimensionLeft=actor.dimensionRight=11; actor.dimensionUp=5; actor.dimensionDown=13;
+    actor.detected=true; actor.groundWeapon={8,22,0,15,DamageType::normal,false,true};
+    auto foe=unit(190,UnitKind::dragoon,false,{1024,1664});
+    foe.detected=true; foe.hitPoints=foe.maxHitPoints=100; foe.shields=foe.maxShields=80;
+    foe.dimensionLeft=foe.dimensionUp=15; foe.dimensionRight=foe.dimensionDown=16;
+    foe.groundWeapon={20,30,0,192,DamageType::explosive,false,true};
+    const auto terrain=[] {
+        std::vector<std::uint8_t> cells(512*512,1);
+        const auto wall=[&](int l,int t,int r,int b){
+            for(int y=t/8;y<=b/8;++y)for(int x=l/8;x<=r/8;++x)cells[y*512+x]=0;
+        };
+        wall(896,768,928,1152); wall(1120,768,1152,1152); wall(896,1120,1152,1152);
+        return NavigationGrid{512,512,8,std::move(cells)};
+    };
+    auto nav=terrain(); InfluenceMap influence; influence.resize(4096,4096);
+    GameState state; state.frame=100;state.self.units={actor};state.enemy.units={foe};influence.update(state);
+    CombatEstimate estimate;estimate.decision=FightDecision::kite;estimate.ratio=1.2;
+    const auto run=[&](TacticalController& controller,const UnitSnapshot& current,
+                       const NavigationGrid* grid,DefenseArea defense,Frame frame,int& budget,
+                       std::span<const UnitSnapshot> enemies=std::span<const UnitSnapshot>{}) {
+        return controller.control(std::array{current},enemies,estimate,rally,home,influence,
+            current.position,0,false,defense,TacticalIntent::battle,{},grid,{},nullptr,true,{},
+            rally,frame,nullptr,&budget);
+    };
+    TacticalController controller;int budget=8;
+    auto orders=run(controller,actor,&nav,area,100,budget,std::array{foe});
+    check(orders.size()==1 && orders[0].source=="defense-return" && orders[0].targetPosition.y<origin.y &&
+        nav.lineWalkable(origin,orders[0].targetPosition,body),"blocked healthy return uses a checked full-body terrain prefix");
+    check(budget==7 && controller.returnRouteCount()==1,"one return prefix spends one shared search grant");
+    const auto waypoint=orders.size()==1?orders[0].targetPosition:Position{-1,-1};
+    budget=0; orders=run(controller,actor,&nav,area,112,budget,std::array{foe});
+    check(orders.size()==1 && orders[0].targetPosition==waypoint && budget==0,
+        "same current context reuses a checked prefix without refilling the search budget");
+    auto approaching = actor;
+    approaching.position = {waypoint.x, waypoint.y + 32};
+    check(nav.lineWalkable(approaching.position, waypoint, body),
+          "near-waypoint fixture preserves full-body clearance");
+    budget = 0;
+    orders = run(controller, approaching, &nav, area, 118, budget, std::array{foe});
+    check(orders.size() == 1 && orders[0].targetPosition == waypoint &&
+          controller.returnRouteCount() == 1 && budget == 0,
+          "a clear waypoint 32 pixels away is retained until reached instead of replanning");
+    const auto invalidates=[&](UnitSnapshot current,DefenseArea defense,const NavigationGrid* grid,
+                              const char* message) {
+        TacticalController fresh;int grant=1;run(fresh,actor,&nav,area,100,grant,std::array{foe});
+        grant=0;run(fresh,current,grid,defense,112,grant,std::array{foe});
+        check(fresh.returnRouteCount()==0 && grant==0,message);
+    };
+    auto changed=actor;changed.firstSeen=2;
+    invalidates(changed,area,&nav,"a reused unit ID cannot inherit a prior lifetime return prefix");
+    changed=actor;changed.kind=UnitKind::dragoon;
+    invalidates(changed,area,&nav,"changed unit kind revokes the return prefix");
+    for(int side=0;side<4;++side){changed=actor;
+        if(side==0)++changed.dimensionLeft;if(side==1)++changed.dimensionRight;
+        if(side==2)++changed.dimensionUp;if(side==3)++changed.dimensionDown;
+        invalidates(changed,area,&nav,"each asymmetric body dimension invalidates cached clearance");
+    }
+    for(int field=0;field<4;++field){auto defense=area;
+        if(field==0)++defense.center.x;if(field==1)++defense.pursuitRadius;
+        if(field==2)++defense.economyCenter.x;if(field==3)defense.front={1024,2300};
+        invalidates(actor,defense,&nav,"changed defensive authority cannot reuse an old return prefix");
+    }
+    auto replaced=terrain();invalidates(actor,area,&replaced,"fresh terrain identity revokes an otherwise identical prefix");
+    auto collision=nav;collision.updateDynamicObstacle(91,{1010,980,1040,1008});
+    invalidates(actor,area,&collision,"changed collision geometry revokes blocked cached clearance");
+    invalidates(actor,area,nullptr,"missing navigation does not authorize an old terrain prefix");
+    changed=actor;changed.position=waypoint;
+    invalidates(changed,area,&nav,"arrival at a cached waypoint requires fresh route analysis");
+    changed=actor;changed.position={1000,800};
+    invalidates(changed,area,&nav,"a large observed displacement cannot inherit the old origin route");
+    budget=0;run(controller,actor,&nav,area,149,budget,std::array{foe});
+    check(controller.returnRouteCount()==0,"return route preferences expire after their bounded observation window");
+    budget=1;run(controller,actor,&nav,area,200,budget,std::array{foe});
+    budget=0;run(controller,actor,&nav,area,199,budget,std::array{foe});
+    check(controller.returnRouteCount()==0,"frame rollback clears return route preferences");
+    budget=1;run(controller,actor,&nav,area,210,budget,std::array{foe});controller.forgetUnit(actor.id);
+    check(controller.returnRouteCount()==0,"forgotten actor leaves no return route preference");
+    budget=1;run(controller,actor,&nav,area,220,budget,std::array{foe});controller.reset();
+    check(controller.returnRouteCount()==0,"match reset clears return route preferences");
+    budget=1;run(controller,actor,&nav,area,230,budget,std::array{foe});
+    auto newWeapon=foe;newWeapon.position=waypoint;budget=0;
+    orders=run(controller,actor,&nav,area,242,budget,std::array{newWeapon});
+    check(controller.returnRouteCount()==0 && orders.size()==1 && orders[0].source=="combat-retreat" &&
+        distance(orders[0].targetPosition,newWeapon.position)>distance(actor.position,newWeapon.position),
+        "new current weapon pressure overrides cached safe travel and escapes away");
+    TacticalController remote;budget=1;
+    run(remote,actor,&nav,area,260,budget,std::array{foe});
+    auto remoteWeapon=foe;remoteWeapon.position={1024,700};budget=0;
+    orders=run(remote,actor,&nav,area,272,budget,std::array{remoteWeapon});
+    bool remoteSafe=orders.size()==1 && orders[0].source=="combat-retreat";
+    if(orders.size()==1){const auto target=orders[0].targetPosition;
+        const auto count=std::max(1,static_cast<int>(std::ceil(distance(origin,target)/4)));
+        for(int i=0;i<=count;++i){auto along=actor;const auto fraction=static_cast<double>(i)/count;
+            along.position={origin.x+static_cast<int>(std::lround((target.x-origin.x)*fraction)),
+                            origin.y+static_cast<int>(std::lround((target.y-origin.y)*fraction))};
+            remoteSafe &= weaponDistance(along,remoteWeapon)>remoteWeapon.groundWeapon.maxRange+32;
+        }
+    }
+    check(remoteSafe && budget==0,
+        "a new remote weapon crossing a cached prefix is rechecked without a nearby-threat trigger");
+    TacticalController groups;std::vector<UnitSnapshot> actors(12,actor);
+    for(std::size_t i=0;i<actors.size();++i)actors[i].id=300+static_cast<int>(i);
+    budget=8;
+    const auto group=[&](std::span<const UnitSnapshot> members){
+        return groups.control(members,std::array{foe},estimate,rally,home,influence,
+            origin,0,false,area,TacticalIntent::battle,{},&nav,{},nullptr,true,{},rally,300,nullptr,&budget);
+    };
+    group(std::span{actors}.first(5));group(std::span{actors}.subspan(5));
+    check(budget==0 && groups.returnRouteCount()==8,"multiple squads share eight return queries without a per-squad refill");
+    groups.reset();budget=999;group(actors);
+    check(budget==0 && groups.returnRouteCount()==8,"oversized external return grants are capped to the callback maximum");
+    groups.reset();budget=-7;group(actors);
+    check(budget==0 && groups.returnRouteCount()==0,"negative search grants admit no return prefix");
+    TacticalController negative;auto outside=area;outside.center={9000,9000};
+    budget=1;run(negative,actor,&nav,outside,400,budget);
+    check(budget==0 && negative.returnRouteCount()==1,"unusable route analysis is remembered without granting a waypoint");
+    budget=1;run(negative,actor,&nav,outside,412,budget);
+    check(budget==1,"unchanged failed analysis suppresses repeated route work");
+    run(negative,actor,&collision,outside,424,budget);
+    check(budget==0,"changed collision context reopens failed analysis using a fresh grant");
+    TacticalController bounded;
+    for(int i=0;i<520;++i){changed=actor;changed.id=1000+i;budget=1;
+        run(bounded,changed,&nav,outside,500,budget);
+    }
+    check(bounded.returnRouteCount()==TacticalController::maximumReturnRoutes,
+        "return preference storage remains bounded under many observed actor lifetimes");
+    changed=actor;changed.id=1000;budget=1;run(bounded,changed,&nav,outside,512,budget);
+    check(budget==0,"bounded return preferences evict the oldest actor deterministically");
+    changed.id=1519;budget=1;run(bounded,changed,&nav,outside,524,budget);
+    check(budget==1,"recent return analysis survives bounded preference eviction");
+    check(TacticalController::maximumReturnRouteQueries==8 && TacticalController::maximumReturnRouteExpansions==2000,
+        "return route work retains its explicit query and expansion bounds");
+}
+
 void benchmark() {
     std::vector<UnitSnapshot> friendly, enemy;
     for (int i = 0; i < 96; ++i) {
@@ -1124,10 +1854,23 @@ void benchmark() {
 } // namespace
 
 int main(const int argc, char**) {
+    if (argc > 3) { rangedSupportRoutingWorkload(); return failures == 0 ? 0 : 1; }
+    if (argc > 2) { contactRoutingWorkload(); return failures == 0 ? 0 : 1; }
     if (argc > 1) { benchmark(); return 0; }
     cadence(); boundedApproach(); combatStatusAdmissibility(); splashAndSpellCalibration(); outcomeMetrics(); truncationCoverage(); confidencePolicy(); consumableAttackers(); workerDefense(); unavailableThreats(); terrainSpacing();
     deterministicScheduling(); dragoonFiringCycle(); zealotContactCoordination();
+    contactRoutingWorkload();
+    sharedContactCandidateControls(); candidateWorkspaceReuseControls();
+    rangedSupportRoutingWorkload();
+    rangedSupportProofControls();
     stormReservationCoordination();
+    defensiveMeleeContactBodyControls();
+    defenderEscapePrecedence();
+    retreatCorridorSafety();
+    healthyReturnTerrainPrefixControls();
+    defenseScreenInteriorControls();
+    defenseScreenBoundaryGuards();
+    blockedExpansionScreenAnchor();
     differentialEngineCaseSweeps();
     if (failures) std::cerr << failures << " combat accuracy checks failed\n";
     else std::cout << checks << " combat accuracy checks passed\n";
